@@ -26,6 +26,7 @@ from typing import (
 import msgspec
 
 from lib import download_processing, transitions
+from lib.current_library_evidence import HaveEnrichment, HavePreparation
 from lib.dispatch import _build_download_info
 from lib.download_processing import (
     CompletionDeferred,
@@ -302,14 +303,21 @@ def _prepare_have_evidence_before_failure_log(
     mb_release_id: str,
     ctx: CratediggerContext,
     *,
-    prepare_fn: Callable[..., str] | None = None,
-) -> str:
-    """Prepare canonical HAVE before the failure row establishes history."""
+    prepare_fn: Callable[..., HavePreparation] | None = None,
+) -> HavePreparation | None:
+    """Prepare canonical HAVE before the failure row establishes history.
+
+    Returns ``None`` when the cycle's enrichment budget is already spent, so
+    nothing was attempted — distinct from every outcome the preparation
+    itself can reach.
+    """
     if ctx.evidence_enrichment_budget <= 0:
-        return "budget_exhausted"
+        return None
     try:
         if prepare_fn is None:
-            from lib.import_preview import prepare_current_evidence_for_failure
+            from lib.current_library_evidence import (
+                prepare_current_evidence_for_failure,
+            )
             prepare_fn = prepare_current_evidence_for_failure
         db = ctx.pipeline_db_source._get_db()
         outcome = prepare_fn(
@@ -320,23 +328,19 @@ def _prepare_have_evidence_before_failure_log(
             beets_library_root=ctx.cfg.beets_directory,
         )
     except Exception:
-        outcome = "failed"
+        outcome = HavePreparation.FAILED
         logger.warning(
             "HAVE evidence preparation crashed for request %s",
             request_id,
             exc_info=True,
         )
-    if outcome == "failed":
-        ctx.evidence_enrichment_budget -= 1
-        logger.warning("HAVE evidence preparation failed for request %s", request_id)
-    elif outcome not in ("ready", "no_current_evidence"):
+    if outcome.charges_budget:
         ctx.evidence_enrichment_budget -= 1
         logger.warning(
-            "HAVE evidence preparation returned %r for request %s",
-            outcome,
+            "HAVE evidence preparation for request %s: %s",
             request_id,
+            outcome.value,
         )
-        return "failed"
     return outcome
 
 
@@ -345,8 +349,8 @@ def _enrich_have_evidence_after_failure(
     mb_release_id: str,
     ctx: CratediggerContext,
     *,
-    prepared_outcome: str,
-    enrich_fn: Callable[..., str] | None = None,
+    prepared_outcome: HavePreparation | None,
+    enrich_fn: Callable[..., HaveEnrichment] | None = None,
 ) -> None:
     """Fill missing HAVE evidence after failure bookkeeping completes.
 
@@ -356,11 +360,14 @@ def _enrich_have_evidence_after_failure(
     balloon the loop; a complete row costs nothing and is not budgeted.
     Never lets an enrichment error disturb failure bookkeeping.
     """
-    if prepared_outcome != "ready" or ctx.evidence_enrichment_budget <= 0:
+    if (
+        prepared_outcome is not HavePreparation.READY
+        or ctx.evidence_enrichment_budget <= 0
+    ):
         return
     try:
         if enrich_fn is None:
-            from lib.import_preview import (
+            from lib.current_library_evidence import (
                 enrich_incomplete_current_evidence_for_request,
             )
             enrich_fn = enrich_incomplete_current_evidence_for_request
@@ -380,12 +387,12 @@ def _enrich_have_evidence_after_failure(
             exc_info=True,
         )
         return
-    if outcome not in ("complete", "no_current_evidence", "stale"):
+    if outcome.charges_budget:
         ctx.evidence_enrichment_budget -= 1
         logger.info(
             "HAVE evidence enrichment for request %s: %s",
             request_id,
-            outcome,
+            outcome.value,
         )
 
 
@@ -425,8 +432,8 @@ def _timeout_album(
     ctx: CratediggerContext,
     *,
     expected_enqueued_at: str,
-    prepare_fn: Callable[..., str] | None = None,
-    enrich_fn: Callable[..., str] | None = None,
+    prepare_fn: Callable[..., HavePreparation] | None = None,
+    enrich_fn: Callable[..., HaveEnrichment] | None = None,
 ) -> bool:
     """Cancel and reset only while the exact download incarnation is current."""
     db = ctx.pipeline_db_source._get_db()

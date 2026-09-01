@@ -25,10 +25,10 @@ from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from harness.import_one import V0_SPEC, convert_lossless
-from lib.import_preview import (
-    _STDERR_DIAGNOSTIC_MAX_CHARS,
-    _diagnostic_from_stderr,
-    _measurement_failed_result,
+from lib.import_preview import _measurement_failed_result
+from lib.measurement import (
+    STDERR_DIAGNOSTIC_MAX_CHARS,
+    diagnostic_from_stderr,
 )
 from lib.quality import (
     AudioToolDiagnostic,
@@ -292,7 +292,7 @@ class TestMeasurementFailedObservability(unittest.TestCase):
 
 
 # ===========================================================================
-# Generated property — _diagnostic_from_stderr over generated stderr worlds
+# Generated property — diagnostic_from_stderr over generated stderr worlds
 # ===========================================================================
 
 @dataclass(frozen=True)
@@ -330,7 +330,7 @@ def stderr_worlds(draw) -> StderrWorld:
 
 
 def assert_diagnostic_extraction_invariants(world: StderrWorld, diag: str) -> None:
-    """Invariant checker for ``_diagnostic_from_stderr``'s contract — a
+    """Invariant checker for ``diagnostic_from_stderr``'s contract — a
     module-level function (not inlined in the property test) so the
     known-bad self-test below can call it directly with a planted
     violation and prove it actually trips.
@@ -338,9 +338,9 @@ def assert_diagnostic_extraction_invariants(world: StderrWorld, diag: str) -> No
     * bounded — never longer than the persisted/logged char budget
     * non-empty iff the source stderr had real (non-whitespace) content
     """
-    if len(diag) > _STDERR_DIAGNOSTIC_MAX_CHARS:
+    if len(diag) > STDERR_DIAGNOSTIC_MAX_CHARS:
         raise AssertionError(
-            f"diagnostic exceeds the {_STDERR_DIAGNOSTIC_MAX_CHARS}-char "
+            f"diagnostic exceeds the {STDERR_DIAGNOSTIC_MAX_CHARS}-char "
             f"bound: {len(diag)} chars")
     if bool(diag) != world.expect_nonempty:
         raise AssertionError(
@@ -351,18 +351,18 @@ def assert_diagnostic_extraction_invariants(world: StderrWorld, diag: str) -> No
 class TestDiagnosticFromStderrGenerated(unittest.TestCase):
     """Property: over arbitrary stderr blobs (empty, whitespace-only, wild
     unicode, and huge repeated content),
-    ``_diagnostic_from_stderr`` never throws, is bounded in size, is
+    ``diagnostic_from_stderr`` never throws, is bounded in size, is
     non-empty exactly when the input has real content.
     """
 
     @given(world=stderr_worlds())
     def test_diagnostic_extraction_invariants(self, world: StderrWorld):
-        diag = _diagnostic_from_stderr(world.blob)  # must never throw
+        diag = diagnostic_from_stderr(world.blob)  # must never throw
         assert_diagnostic_extraction_invariants(world, diag)
 
     def test_known_bad_checker_trips_on_planted_violations(self):
         """Known-bad self-test: feed the checker planted-bad diagnostics
-        directly (bypassing ``_diagnostic_from_stderr`` entirely) and prove
+        directly (bypassing ``diagnostic_from_stderr`` entirely) and prove
         each invariant actually trips rather than passing vacuously."""
         content_world = StderrWorld(
             blob="harness crashed",
@@ -378,7 +378,7 @@ class TestDiagnosticFromStderrGenerated(unittest.TestCase):
             # Bound violation: planted diagnostic exceeds the char budget.
             assert_diagnostic_extraction_invariants(
                 content_world,
-                "x" * (_STDERR_DIAGNOSTIC_MAX_CHARS + 1),
+                "x" * (STDERR_DIAGNOSTIC_MAX_CHARS + 1),
             )
         # Sanity: a genuinely correct diagnostic does NOT trip the checker.
         assert_diagnostic_extraction_invariants(

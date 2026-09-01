@@ -1732,7 +1732,8 @@ Recents IN/HAVE strip) stays absent or partial forever. Download-phase
 failure finalizers (`_timeout_album` and the materialize-grace reset in
 `lib/download.py`) therefore perform two fail-soft steps. Before recording
 the failed attempt, `prepare_current_evidence_for_failure`
-(`lib/import_preview.py`) loads or backfills only the exact release's
+(`lib/current_library_evidence.py` — the one module that owns HAVE
+evidence since issue #1313) loads or backfills only the exact release's
 canonical current snapshot. Even an already-linked complete row is freshly
 reauthorized against the exact Beets identity and current fingerprint; when
 both still match, the immutable evidence row is reused without rewriting it.
@@ -1748,7 +1749,10 @@ fresh-audit-wins policy below.)
 Adapter
 or backfill failures and actual measurement work consume the per-cycle
 `CratediggerContext.evidence_enrichment_budget`; complete or authoritatively
-absent library copies cost nothing. Over time the failed-download cohort's
+absent library copies cost nothing. Both helpers return a typed outcome
+(`HavePreparation` / `HaveEnrichment`) whose `charges_budget` property IS
+that policy, so the two vocabularies and the budget rule live in one place
+rather than being re-derived by tuple membership at each call site. Over time the failed-download cohort's
 evidence converges without delaying or bypassing download cleanup. Automation
 failure finalizers also reset the request to `wanted`. Terminal persistence
 checks the operator search stop under its request-row lock for every `wanted`

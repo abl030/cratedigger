@@ -11,19 +11,19 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 from lib.config import CratediggerConfig
+from lib.current_library_evidence import (
+    current_spectral_evidence_reusable,
+    enrich_current_v0_research_for_preview,
+    load_persisted_existing_spectral,
+    persist_exact_current_spectral_from_attempt,
+)
 from lib.dispatch.types import ImportOneRun
 from lib.import_preview import (
     ImportPreviewValues,
     _lossless_candidate_spectral_failure,
     _prefer_successful_spectral_detail,
     compose_attempt_spectral_audit,
-    current_spectral_evidence_reusable,
-    enrich_current_v0_research_for_preview,
-    enrich_incomplete_current_evidence_for_request,
-    load_persisted_existing_spectral,
     measure_and_persist_candidate_evidence,
-    persist_exact_current_spectral_from_attempt,
-    prepare_current_evidence_for_failure,
     preview_import_from_path,
     preview_import_from_values,
 )
@@ -255,7 +255,7 @@ class TestSpectralAuditMerge(unittest.TestCase):
 
     def test_wav_conversion_preserves_source_spectral(self):
         """WAV→Opus is a lossless-source derivative, just like FLAC→Opus."""
-        from lib.import_preview import preserve_existing_source_spectral
+        from lib.current_library_evidence import preserve_existing_source_spectral
         from lib.quality import (
             EVIDENCE_SUBJECT_SOURCE,
             AlbumQualityEvidenceFile,
@@ -290,7 +290,7 @@ class TestSpectralAuditMerge(unittest.TestCase):
 
     def test_native_alac_m4a_remeasures_instead_of_preserving_source(self):
         """An .m4a snapshot needs its ALAC codec fact, not its extension."""
-        from lib.import_preview import preserve_existing_source_spectral
+        from lib.current_library_evidence import preserve_existing_source_spectral
         from lib.quality import EVIDENCE_SUBJECT_SOURCE, AlbumQualityEvidenceFile
 
         evidence = make_album_quality_evidence(
@@ -326,7 +326,7 @@ class TestSpectralAuditMerge(unittest.TestCase):
 
     def test_source_anchor_alone_does_not_preserve_source_spectral(self):
         """An anchor identifies provenance, not an irreplaceable derivative."""
-        from lib.import_preview import preserve_existing_source_spectral
+        from lib.current_library_evidence import preserve_existing_source_spectral
         from lib.quality import EVIDENCE_SUBJECT_SOURCE, AlbumQualityV0Metric
 
         evidence = make_album_quality_evidence(
@@ -352,7 +352,7 @@ class TestSpectralAuditMerge(unittest.TestCase):
 
     def test_proof_alone_does_not_preserve_source_spectral(self):
         """A proof alone does not prove the installed bytes are derivative."""
-        from lib.import_preview import preserve_existing_source_spectral
+        from lib.current_library_evidence import preserve_existing_source_spectral
         from lib.quality import VerifiedLosslessProof
 
         evidence = make_album_quality_evidence(
@@ -376,7 +376,7 @@ class TestSpectralAuditMerge(unittest.TestCase):
 
     def test_native_row_without_lineage_is_not_preserved(self):
         """A native copy with no lossless lineage is scanned normally."""
-        from lib.import_preview import preserve_existing_source_spectral
+        from lib.current_library_evidence import preserve_existing_source_spectral
 
         evidence = make_album_quality_evidence(
             mb_release_id="native-mp3",
@@ -984,7 +984,7 @@ class TestImportPreviewPath(unittest.TestCase):
         the same preview's enrichment can complete them.
         """
         from lib.beets_db import AlbumInfo
-        from lib.import_preview import load_current_evidence_for_preview
+        from lib.current_library_evidence import load_current_evidence_for_preview
         from tests.fakes import FakeBeetsDB
 
         db = self._db()
@@ -1048,7 +1048,7 @@ class TestImportPreviewPath(unittest.TestCase):
     def test_preview_loader_rebuilds_v1_current_evidence_for_import_attempt(self):
         """An actual import attempt must decide from a fresh v4 HAVE row."""
         from lib.beets_db import AlbumInfo
-        from lib.import_preview import load_current_evidence_for_preview
+        from lib.current_library_evidence import load_current_evidence_for_preview
         from tests.fakes import FakeBeetsDB
 
         db = self._db()
@@ -1855,7 +1855,7 @@ class TestImportPreviewPath(unittest.TestCase):
 
     def test_preview_loader_rejects_have_when_v0_probe_changes_files(self):
         """A stale enrichment result must invalidate the whole preview HAVE."""
-        from lib.import_preview import load_current_evidence_for_preview
+        from lib.current_library_evidence import load_current_evidence_for_preview
 
         db = self._db()
         source = self._source_dir()
@@ -3794,7 +3794,7 @@ class TestLanePolicySeam(unittest.TestCase):
     def test_classify_lane_skips_enrichment_but_refreshes_have(self):
         """The loader split, pinned in both directions: classify never runs
         V0 enrichment, yet still refreshes exact-current HAVE spectral."""
-        from lib.import_preview import load_current_evidence_for_preview
+        from lib.current_library_evidence import load_current_evidence_for_preview
         from lib.quality import SpectralMeasurement
 
         fresh_existing = SpectralAnalysisDetail(
@@ -3988,424 +3988,6 @@ class TestOwnedProcessingNormalization(unittest.TestCase):
         finally:
             shutil.rmtree(album, ignore_errors=True)
 
-
-class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
-    """Failure-point HAVE enrichment fills only what's missing, once."""
-
-    def _db(self) -> FakePipelineDB:
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="wanted"))
-        return db
-
-    def _source_dir(self) -> str:
-        source = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, source, ignore_errors=True)
-        with open(os.path.join(source, "01.mp3"), "wb") as handle:
-            handle.write(b"not real audio but never inspected in this test")
-        return source
-
-    def _seed_current(
-        self,
-        db: FakePipelineDB,
-        source: str,
-        *,
-        spectral_present: bool,
-        v0_attempted: bool = False,
-    ):
-        evidence = make_album_quality_evidence(
-            mb_release_id="mbid-42",
-            source_path=source,
-            files=snapshot_audio_files(source),
-            measurement=AudioQualityMeasurement(
-                min_bitrate_kbps=320,
-                avg_bitrate_kbps=320,
-                median_bitrate_kbps=320,
-                format="MP3",
-                spectral_grade="genuine" if spectral_present else None,
-                spectral_bitrate_kbps=96 if spectral_present else None,
-                spectral_measurement_version=(
-                    SPECTRAL_MEASUREMENT_VERSION
-                    if spectral_present
-                    else None
-                ),
-            ),
-            v0_metric=None,
-            on_disk_v0_research_attempted=v0_attempted,
-        )
-        db.upsert_album_quality_evidence(evidence)
-        stored = db.find_album_quality_evidence(
-            mb_release_id=evidence.mb_release_id,
-            snapshot_fingerprint=evidence.snapshot_fingerprint,
-        )
-        assert stored is not None and stored.id is not None
-        db.set_request_current_evidence(42, stored.id)
-        return stored
-
-    def _spectral_recorder(self, detail: SpectralAnalysisDetail):
-        calls: list[str] = []
-
-        def analyzer(path: str) -> SpectralAnalysisDetail:
-            calls.append(path)
-            return detail
-
-        return analyzer, calls
-
-    def _probe_recorder(self):
-        calls: list[str] = []
-
-        def probe(path: str) -> V0ProbeEvidence:
-            calls.append(path)
-            return V0ProbeEvidence(
-                kind="on_disk_research_v0",
-                min_bitrate_kbps=201,
-                avg_bitrate_kbps=259,
-                median_bitrate_kbps=255,
-            )
-
-        return probe, calls
-
-    def _good_scan(self) -> SpectralAnalysisDetail:
-        return SpectralAnalysisDetail(
-            attempted=True, grade="genuine", bitrate_kbps=96,
-            spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
-        )
-
-    def _enrich(self, db, analyzer, probe):
-        def load_current(db_arg, **_kwargs):
-            evidence_id = db_arg.get_request_current_evidence_id(42)
-            evidence = db_arg.load_album_quality_evidence_by_id(evidence_id)
-            if evidence is None:
-                return EvidenceBuildResult(
-                    None,
-                    "empty_current",
-                    "exact album not in beets",
-                )
-            return EvidenceBuildResult(
-                evidence,
-                "ready",
-                current_album_path=evidence.source_path,
-            )
-
-        return enrich_incomplete_current_evidence_for_request(
-            db,
-            request_id=42,
-            mb_release_id="mbid-42",
-            quality_ranks=QualityRankConfig.defaults(),
-            beets_library_root="",
-            spectral_analyzer=analyzer,
-            probe_fn=probe,
-            load_fn=load_current,
-        )
-
-    def test_complete_row_skips_all_measurement(self):
-        db = self._db()
-        source = self._source_dir()
-        self._seed_current(db, source, spectral_present=True, v0_attempted=True)
-        analyzer, spectral_calls = self._spectral_recorder(self._good_scan())
-        probe, probe_calls = self._probe_recorder()
-
-        outcome = self._enrich(db, analyzer, probe)
-
-        self.assertEqual(outcome, "complete")
-        self.assertEqual(spectral_calls, [])
-        self.assertEqual(probe_calls, [])
-
-    def test_preparation_preserves_an_existing_complete_current_row(self):
-        db = self._db()
-        source = self._source_dir()
-        before = self._seed_current(
-            db,
-            source,
-            spectral_present=True,
-            v0_attempted=True,
-        )
-
-        calls: list[object] = []
-
-        def load_current(*_args, **_kwargs):
-            calls.append(_kwargs.get("preloaded_evidence"))
-            return EvidenceBuildResult(before, "ready")
-
-        outcome = prepare_current_evidence_for_failure(
-            db,
-            request_id=42,
-            mb_release_id="mbid-42",
-            quality_ranks=QualityRankConfig.defaults(),
-            beets_library_root=source,
-            load_fn=load_current,
-        )
-
-        current_id = db.get_request_current_evidence_id(42)
-        self.assertEqual(outcome, "ready")
-        self.assertEqual(calls, [before])
-        self.assertEqual(current_id, before.id)
-        self.assertEqual(
-            db.load_album_quality_evidence_by_id(current_id),
-            before,
-        )
-
-    def test_failure_refreshes_complete_v1_through_current_beets(self):
-        from lib.beets_db import AlbumInfo
-        from tests.fakes import FakeBeetsDB
-
-        db = self._db()
-        source = self._source_dir()
-        evidence = make_album_quality_evidence(
-            mb_release_id="mbid-42",
-            source_path=source,
-            files=snapshot_audio_files(source),
-            measurement=AudioQualityMeasurement(
-                min_bitrate_kbps=256,
-                avg_bitrate_kbps=256,
-                median_bitrate_kbps=256,
-                format="AAC",
-                is_cbr=True,
-                spectral_grade="genuine",
-            ),
-            lineage_version=1,
-            on_disk_v0_research_attempted=True,
-        )
-        db.upsert_album_quality_evidence(evidence)
-        before = db.find_album_quality_evidence(
-            mb_release_id=evidence.mb_release_id,
-            snapshot_fingerprint=evidence.snapshot_fingerprint,
-        )
-        assert before is not None and before.id is not None
-        db.set_request_current_evidence(42, before.id)
-        fake_beets = FakeBeetsDB()
-        fake_beets.set_album_info("mbid-42", AlbumInfo(
-            album_id=1,
-            track_count=1,
-            min_bitrate_kbps=256,
-            avg_bitrate_kbps=256,
-            median_bitrate_kbps=256,
-            is_cbr=True,
-            album_path=source,
-            format="AAC",
-        ))
-
-        db.update_status(42, "downloading", expected_status="wanted")
-        with patch("lib.beets_db.BeetsDB", lambda **_kwargs: fake_beets):
-            prepared = prepare_current_evidence_for_failure(
-                db,
-                request_id=42,
-                mb_release_id="mbid-42",
-                quality_ranks=QualityRankConfig.defaults(),
-                beets_library_root=source,
-            )
-
-        self.assertEqual(prepared, "ready")
-        current_id = db.get_request_current_evidence_id(42)
-        self.assertEqual(current_id, before.id)
-        current = db.load_album_quality_evidence_by_id(current_id)
-        assert current is not None
-        self.assertEqual(current.lineage_version, CURRENT_EVIDENCE_LINEAGE_VERSION)
-        self.assertEqual(db.request(42)["status"], "downloading")
-
-        db.update_status(42, "wanted", expected_status="downloading")
-        with patch("lib.beets_db.BeetsDB", lambda **_kwargs: fake_beets):
-            enriched = enrich_incomplete_current_evidence_for_request(
-                db,
-                request_id=42,
-                mb_release_id="mbid-42",
-                quality_ranks=QualityRankConfig.defaults(),
-                beets_library_root=source,
-                spectral_analyzer=lambda _path: self._good_scan(),
-                probe_fn=lambda _path: None,
-            )
-
-        self.assertEqual(enriched, "enriched")
-        self.assertEqual(db.request(42)["status"], "wanted")
-        current = db.load_album_quality_evidence_by_id(current_id)
-        assert current is not None
-        self.assertEqual(current.lineage_version, CURRENT_EVIDENCE_LINEAGE_VERSION)
-        self.assertEqual(current.measurement.format, "AAC")
-        self.assertEqual(current.measurement.avg_bitrate_kbps, 256)
-
-    def test_fills_both_missing_pieces(self):
-        db = self._db()
-        source = self._source_dir()
-        stored = self._seed_current(db, source, spectral_present=False)
-        assert stored.id is not None
-        analyzer, spectral_calls = self._spectral_recorder(self._good_scan())
-        probe, probe_calls = self._probe_recorder()
-
-        outcome = self._enrich(db, analyzer, probe)
-
-        self.assertEqual(outcome, "enriched")
-        self.assertEqual(spectral_calls, [source])
-        self.assertEqual(probe_calls, [source])
-        persisted = db.load_album_quality_evidence_by_id(stored.id)
-        assert persisted is not None
-        self.assertEqual(persisted.measurement.spectral_grade, "genuine")
-        self.assertEqual(persisted.measurement.spectral_bitrate_kbps, 96)
-        self.assertTrue(persisted.on_disk_v0_research_attempted)
-        assert persisted.v0_metric is not None
-        self.assertEqual(persisted.v0_metric.avg_bitrate_kbps, 259)
-
-    def test_fills_v0_only_when_spectral_present(self):
-        db = self._db()
-        source = self._source_dir()
-        self._seed_current(db, source, spectral_present=True)
-        analyzer, spectral_calls = self._spectral_recorder(self._good_scan())
-        probe, probe_calls = self._probe_recorder()
-
-        outcome = self._enrich(db, analyzer, probe)
-
-        self.assertEqual(outcome, "enriched")
-        self.assertEqual(spectral_calls, [])
-        self.assertEqual(probe_calls, [source])
-
-    def test_fills_spectral_only_when_v0_already_attempted(self):
-        db = self._db()
-        source = self._source_dir()
-        self._seed_current(
-            db, source, spectral_present=False, v0_attempted=True,
-        )
-        analyzer, spectral_calls = self._spectral_recorder(self._good_scan())
-        probe, probe_calls = self._probe_recorder()
-
-        outcome = self._enrich(db, analyzer, probe)
-
-        self.assertEqual(outcome, "enriched")
-        self.assertEqual(spectral_calls, [source])
-        self.assertEqual(probe_calls, [])
-
-    def test_stale_snapshot_measures_nothing(self):
-        db = self._db()
-        source = self._source_dir()
-        self._seed_current(db, source, spectral_present=False)
-        with open(os.path.join(source, "01.mp3"), "ab") as handle:
-            handle.write(b"changed after snapshot")
-        analyzer, spectral_calls = self._spectral_recorder(self._good_scan())
-        probe, probe_calls = self._probe_recorder()
-
-        outcome = self._enrich(db, analyzer, probe)
-
-        self.assertEqual(outcome, "stale")
-        self.assertEqual(spectral_calls, [])
-        self.assertEqual(probe_calls, [])
-
-    def test_without_current_evidence_returns_no_current_evidence(self):
-        db = self._db()
-        analyzer, spectral_calls = self._spectral_recorder(self._good_scan())
-        probe, probe_calls = self._probe_recorder()
-
-        outcome = self._enrich(db, analyzer, probe)
-
-        self.assertEqual(outcome, "no_current_evidence")
-        self.assertEqual(spectral_calls, [])
-        self.assertEqual(probe_calls, [])
-
-    def test_failed_backfill_is_not_classified_as_absent_library_copy(self):
-        db = self._db()
-
-        outcome = prepare_current_evidence_for_failure(
-            db,
-            request_id=42,
-            mb_release_id="mbid-42",
-            quality_ranks=QualityRankConfig.defaults(),
-            beets_library_root="",
-            load_fn=lambda *_args, **_kwargs: EvidenceBuildResult(
-                None,
-                "failed",
-                "beets library unreadable",
-            ),
-        )
-
-        self.assertEqual(outcome, "failed")
-
-    def test_backfill_exception_is_not_classified_as_absent_library_copy(self):
-        db = self._db()
-
-        def broken_loader(*_args, **_kwargs):
-            raise RuntimeError("beets adapter crashed")
-
-        outcome = prepare_current_evidence_for_failure(
-            db,
-            request_id=42,
-            mb_release_id="mbid-42",
-            quality_ranks=QualityRankConfig.defaults(),
-            beets_library_root="",
-            load_fn=broken_loader,
-        )
-
-        self.assertEqual(outcome, "failed")
-
-    def test_failed_download_backfills_unlinked_seabear_have(self):
-        """We Built a Fire: an installed album cannot stay HAVE-less."""
-        from lib.beets_db import AlbumInfo
-        from tests.fakes import FakeBeetsDB
-
-        db = self._db()
-        source = self._source_dir()
-        fake_beets = FakeBeetsDB()
-        fake_beets.set_album_info("mbid-42", AlbumInfo(
-            album_id=1,
-            track_count=17,
-            min_bitrate_kbps=183,
-            avg_bitrate_kbps=190,
-            median_bitrate_kbps=191,
-            is_cbr=False,
-            album_path=source,
-            format="MP3",
-        ))
-        analyzer, spectral_calls = self._spectral_recorder(self._good_scan())
-        probe, probe_calls = self._probe_recorder()
-
-        with patch("lib.beets_db.BeetsDB", lambda **_kwargs: fake_beets):
-            prepared = prepare_current_evidence_for_failure(
-                db,
-                request_id=42,
-                mb_release_id="mbid-42",
-                quality_ranks=QualityRankConfig.defaults(),
-                beets_library_root=source,
-            )
-            outcome = enrich_incomplete_current_evidence_for_request(
-                db,
-                request_id=42,
-                mb_release_id="mbid-42",
-                quality_ranks=QualityRankConfig.defaults(),
-                beets_library_root=source,
-                spectral_analyzer=analyzer,
-                probe_fn=probe,
-            )
-
-        self.assertEqual(prepared, "ready")
-        self.assertEqual(outcome, "enriched")
-        self.assertEqual(spectral_calls, [source])
-        self.assertEqual(probe_calls, [source])
-        evidence_id = db.get_request_current_evidence_id(42)
-        self.assertIsNotNone(evidence_id)
-        persisted = db.load_album_quality_evidence_by_id(evidence_id)
-        assert persisted is not None
-        self.assertEqual(persisted.measurement.format, "MP3")
-        self.assertEqual(persisted.measurement.avg_bitrate_kbps, 190)
-        self.assertEqual(persisted.measurement.spectral_grade, "genuine")
-        assert persisted.v0_metric is not None
-        self.assertEqual(persisted.v0_metric.avg_bitrate_kbps, 259)
-
-    def test_failed_spectral_scan_reports_partial(self):
-        db = self._db()
-        source = self._source_dir()
-        stored = self._seed_current(
-            db, source, spectral_present=False, v0_attempted=True,
-        )
-        assert stored.id is not None
-        analyzer, spectral_calls = self._spectral_recorder(
-            SpectralAnalysisDetail(attempted=True, error="sox exploded"),
-        )
-        probe, probe_calls = self._probe_recorder()
-
-        outcome = self._enrich(db, analyzer, probe)
-
-        self.assertEqual(outcome, "partial")
-        self.assertEqual(spectral_calls, [source])
-        self.assertEqual(probe_calls, [])
-        persisted = db.load_album_quality_evidence_by_id(stored.id)
-        assert persisted is not None
-        self.assertIsNone(persisted.measurement.spectral_grade)
-        self.assertIsNone(persisted.measurement.spectral_bitrate_kbps)
 
 
 class TestPreviewDBProtocolParity(unittest.TestCase):

@@ -30,6 +30,17 @@ from lib.config import (
     read_runtime_config,
     resolve_startup_config_paths,
 )
+from lib.current_library_evidence import (
+    CurrentLibraryAuthorityUnavailable,
+    CurrentLibraryEvidence,
+    HaveEnrichment,
+    HavePreparation,
+    enrich_incomplete_current_evidence_for_request,
+    load_current_evidence_for_preview,
+    persist_measured_have_spectral,
+    prepare_current_evidence_for_failure,
+    resolve_current_library_evidence,
+)
 from lib.dispatch import _record_preview_measurement_failed
 from lib.dispatch.types import DispatchOutcome, PostCommitCleanup
 from lib.import_evidence import (
@@ -53,15 +64,8 @@ from lib.import_preview import (
     PREVIEW_VERDICT_MEASUREMENT_FAILED,
     ImportPreviewResult,
     cleanup_force_action_copy_for_job,
-    current_spectral_evidence_reusable,
-    enrich_incomplete_current_evidence_for_request,
     force_action_copy_path,
-    load_current_evidence_for_preview,
-    load_persisted_existing_spectral,
     measure_and_persist_candidate_evidence,
-    persist_exact_current_spectral_from_attempt,
-    prepare_current_evidence_for_failure,
-    preserve_existing_source_spectral,
     remove_preview_snapshot,
     retain_preview_snapshot_for_force_action,
     snapshot_configured_local_import_directory,
@@ -128,8 +132,8 @@ PREVIEW_SYSTEMD_UNIT = "cratedigger-import-preview-worker.service"
 PREVIEW_CANDIDATE_SCAN_LIMIT = 32
 
 
-FailureHavePrepareFn = Callable[..., str]
-FailureHaveEnrichFn = Callable[..., str]
+FailureHavePrepareFn = Callable[..., HavePreparation]
+FailureHaveEnrichFn = Callable[..., HaveEnrichment]
 
 
 def _noop_header_repair(_path: str) -> None:
@@ -1022,7 +1026,7 @@ def _handle_measurement_failed(
 
     mb_release_id = request.get("mb_release_id")
     configured_runtime = runtime_config
-    prepared_outcome: str | None = None
+    prepared_outcome: HavePreparation | None = None
     if isinstance(mb_release_id, str) and mb_release_id:
         try:
             configured_runtime = _resolve_runtime_config(configured_runtime)
@@ -1100,7 +1104,10 @@ def _handle_measurement_failed(
         automation_terminal_authority=automation_terminal_authority,
     )
 
-    if prepared_outcome == "ready" and configured_runtime is not None:
+    if (
+        prepared_outcome is HavePreparation.READY
+        and configured_runtime is not None
+    ):
         enrich_fn = (
             enrich_failure_have_fn
             or enrich_incomplete_current_evidence_for_request
@@ -1309,11 +1316,13 @@ def process_claimed_preview_job(
             if front_gate_audit_source is not None
             else front_gate_source
         )
-        persisted_existing = SpectralAnalysisDetail(attempted=False)
-        preserve_have_source = False
-        reuse_have_evidence = False
+        resolved_have = CurrentLibraryEvidence(
+            evidence=None,
+            existing_spectral_evidence=SpectralAnalysisDetail(attempted=False),
+            reuse_have_evidence=False,
+            preserve_have_source=False,
+        )
         mb_release_id = ""
-        current_evidence = None
         if job.request_id is not None:
             try:
                 # ``db`` is the worker's untyped handle, so
@@ -1322,18 +1331,12 @@ def process_claimed_preview_job(
                 # without touching ``db``'s parameter type.
                 req: dict[str, object] = db.get_request(job.request_id) or {}
                 mb_release_id = str(req.get("mb_release_id") or "")
-                current_evidence, persisted_existing, _authoritative = (
-                    load_persisted_existing_spectral(
-                        db,
-                        job.request_id,
-                    )
-                )
                 preview_cfg = _resolve_runtime_config(runtime_config)
-                load_current = (
-                    current_evidence_loader
-                    or load_current_evidence_for_preview
-                )
-                current_result = load_current(
+                # The same HAVE resolution both preview lanes run — the
+                # sequence lives in lib/current_library_evidence.py so the
+                # reuse path here and lib/import_preview.py's lanes cannot
+                # drift (issue #1313; it was copy-pasted before).
+                outcome = resolve_current_library_evidence(
                     db,
                     request_id=job.request_id,
                     mb_release_id=mb_release_id,
@@ -1341,47 +1344,17 @@ def process_claimed_preview_job(
                     beets_library_root=getattr(
                         preview_cfg, "beets_directory", ""
                     ),
-                    preloaded_evidence=current_evidence,
+                    loader=(
+                        current_evidence_loader
+                        or load_current_evidence_for_preview
+                    ),
                 )
-                if current_result.status == "empty_current":
-                    current_evidence = None
-                    persisted_existing = SpectralAnalysisDetail(
-                        attempted=False,
-                    )
-                elif (
-                    current_result.status != "ready"
-                    or current_result.evidence is None
-                ):
-                    detail = (
-                        f"{current_result.status}: "
-                        f"{current_result.reason or 'current authority unavailable'}"
-                    )
+                if isinstance(outcome, CurrentLibraryAuthorityUnavailable):
                     return handle_current_authority_failed(
-                        detail,
+                        outcome.detail,
                         source_path=narrowed_audit_source,
                     )
-                else:
-                    current_evidence = current_result.evidence
-                    persisted_existing = spectral_detail_from_persisted_source(
-                        current_evidence.measurement.spectral_grade,
-                        current_evidence.measurement.spectral_bitrate_kbps,
-                        cliff_hz=current_evidence.measurement.cliff_hz,
-                        codec_family=current_evidence.measurement.codec_family,
-                        ultrasonic_deficit_db=(
-                            current_evidence.measurement.ultrasonic_deficit_db
-                        ),
-                        spectral_measurement_version=(
-                            current_evidence.measurement.spectral_measurement_version
-                        ),
-                    )
-                    reuse_have_evidence = (
-                        current_spectral_evidence_reusable(
-                            current_evidence,
-                        )
-                    )
-                preserve_have_source = preserve_existing_source_spectral(
-                    current_evidence,
-                )
+                resolved_have = outcome
             except (ExecutionCancelled, OwnerSessionLost):
                 raise
             except Exception as exc:
@@ -1416,8 +1389,8 @@ def process_claimed_preview_job(
         audit, have_lookup = collect_release_attempt_spectral_audit(
             front_gate_action or front_gate_source,
             mb_release_id,
-            existing_spectral_evidence=persisted_existing,
-            preserve_existing_source_spectral=preserve_have_source,
+            existing_spectral_evidence=resolved_have.existing_spectral_evidence,
+            preserve_existing_source_spectral=resolved_have.preserve_have_source,
             analyzer=(
                 spectral_detail_analyzer or analyze_spectral_audit_path
             ),
@@ -1440,27 +1413,25 @@ def process_claimed_preview_job(
                 ),
             ),
             existing_detail=(
-                persisted_existing if reuse_have_evidence else None
+                resolved_have.existing_spectral_evidence
+                if resolved_have.reuse_have_evidence
+                else None
             ),
         )
         if cancellation_token is not None:
             cancellation_token.raise_if_cancelled()
-        # A newly measured HAVE fact must become durable BEFORE the importer
-        # decides — an audit-only scan left the decision spectrally blind
-        # (download_log 37206). Reused evidence has no lookup path and needs
-        # no write. The persist helper's own exact-path/exact-snapshot guards
-        # keep fresh failures fail-soft like the audit itself.
-        if (
-            job.request_id is not None
-            and current_evidence is not None
-            and not preserve_have_source
-            and have_lookup.path is not None
-        ):
+        # A newly measured HAVE fact must become durable BEFORE this job is
+        # marked importable — an audit-only scan left the decision spectrally
+        # blind (download_log 37206). Reused evidence has no lookup path and
+        # needs no write; the shared guard declines those cases, and the
+        # persist helper's own exact-path/exact-snapshot guards keep fresh
+        # failures fail-soft like the audit itself.
+        if job.request_id is not None:
             try:
-                persist_exact_current_spectral_from_attempt(
+                persist_measured_have_spectral(
                     db,
                     request_id=job.request_id,
-                    current_evidence=current_evidence,
+                    resolved=resolved_have,
                     measured_existing=audit.existing,
                     measured_existing_path=have_lookup.path,
                 )

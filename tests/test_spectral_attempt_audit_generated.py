@@ -152,8 +152,8 @@ def _run_have_boundary_through_both_adapters(
     """Drive normal measurement and reused front-gate through one boundary."""
     from lib.beets_db import AlbumInfo
     from lib.config import CratediggerConfig
-    from lib.import_preview import (
-        _authorize_current_evidence_for_preview,
+    from lib.current_library_evidence import (
+        authorize_current_evidence_for_preview,
         current_spectral_evidence_reusable,
         preserve_existing_source_spectral,
     )
@@ -284,7 +284,7 @@ def _run_have_boundary_through_both_adapters(
             "lib.beets_db.BeetsDB",
             lambda *_args, **_kwargs: fake_beets,
         ):
-            authorized = _authorize_current_evidence_for_preview(
+            authorized = authorize_current_evidence_for_preview(
                 db,
                 request_id=request_id,
                 mb_release_id=mbid,
@@ -1585,7 +1585,7 @@ class TestAttemptAuditGenerated(unittest.TestCase):
     ) -> None:
         """Proof/V0 provenance cannot suppress a native HAVE remeasurement."""
 
-        from lib.import_preview import current_spectral_evidence_reusable
+        from lib.current_library_evidence import current_spectral_evidence_reusable
         from lib.quality import (
             AlbumQualityEvidenceFile,
             AlbumQualityV0Metric,
@@ -1666,7 +1666,7 @@ class TestAttemptAuditGenerated(unittest.TestCase):
     ):
         """The generation exception admits recognised grades only."""
 
-        from lib.import_preview import current_spectral_evidence_reusable
+        from lib.current_library_evidence import current_spectral_evidence_reusable
         from lib.quality import AudioQualityMeasurement
         from lib.quality_evidence import current_evidence_for_policy
         from tests.evidence_helpers import make_album_quality_evidence
@@ -1851,7 +1851,7 @@ class TestAttemptAuditGenerated(unittest.TestCase):
         stale_grade,
         stale_bitrate,
     ):
-        from lib.import_preview import load_persisted_existing_spectral
+        from lib.current_library_evidence import load_persisted_existing_spectral
         from lib.quality import AudioQualityMeasurement
         from tests.evidence_helpers import make_album_quality_evidence
         from tests.fakes import FakePipelineDB
