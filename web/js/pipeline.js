@@ -446,7 +446,7 @@ export function renderPipeline() {
   void loadPipelineDashboard();
 }
 
-function renderPipelineNav() {
+export function renderPipelineNav() {
   const refreshAction = state.pipelineView === 'dashboard'
     ? 'window.loadPipelineDashboard()'
     : state.pipelineView === 'long-tail'
@@ -469,7 +469,7 @@ function renderPipelineNav() {
  * @param {unknown} processingOwner
  * @returns {string}
  */
-function renderPipelineStatusButtons(requestId, status, processingOwner = null) {
+export function renderPipelineStatusButtons(requestId, status, processingOwner = null) {
   const processing = processingOwnerPresentation(status, processingOwner);
   if (processing) {
     return renderProcessingLockedControl(processing, Number(requestId), {
@@ -496,7 +496,7 @@ function renderPipelineStatusButtons(requestId, status, processingOwner = null) 
  * @param {Object|null|undefined} current
  * @returns {string}
  */
-function renderCurrentLibraryRow(current) {
+export function renderCurrentLibraryRow(current) {
   if (current?.state === 'unique') {
     return renderDetailRow('Imported to', esc(current.path || ''), {
       valueStyle: 'font-size:0.9em;',
@@ -615,7 +615,7 @@ export async function toggleDetail(elId, requestId) {
  * @param {Array<Object>} beetsTracks
  * @returns {string}
  */
-function renderCurrentQualityRow(req, beetsTracks) {
+export function renderCurrentQualityRow(req, beetsTracks) {
   if (beetsTracks.length === 0) return '';
   const positiveBitrates = beetsTracks
     .map(t => Number(t.bitrate))
@@ -725,10 +725,3 @@ export async function updateStatus(id, newStatus) {
   } catch (e) { toast('Update failed', true); }
 }
 
-export const __test__ = {
-  renderPipelineNav,
-  renderPipelineStatusButtons,
-  renderCurrentLibraryRow,
-  renderCurrentQualityRow,
-  renderRequestEvidenceSections,
-};

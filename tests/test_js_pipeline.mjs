@@ -3,7 +3,16 @@
  * Run with: node tests/test_js_pipeline.mjs
  */
 
-import { __test__, mergeRekeyRequest, recheckRetagDivergenceAlbum, syncRetagDivergenceAlbum } from '../web/js/pipeline.js';
+import {
+  mergeRekeyRequest,
+  recheckRetagDivergenceAlbum,
+  renderCurrentLibraryRow,
+  renderCurrentQualityRow,
+  renderPipelineNav,
+  renderPipelineStatusButtons,
+  renderRequestEvidenceSections,
+  syncRetagDivergenceAlbum,
+} from '../web/js/pipeline.js';
 import { state } from '../web/js/state.js';
 
 import { suite } from './js_harness.mjs';
@@ -74,7 +83,7 @@ function installDriftDom(requestId) {
 t.section('renderPipelineNav() has operational views only');
 {
   state.pipelineView = 'dashboard';
-  const html = __test__.renderPipelineNav();
+  const html = renderPipelineNav();
   t.excludes(html, 'window.setPipelineView(\'queue\')', 'request queue tab removed');
   t.contains(html, 'window.setPipelineView(\'dashboard\')', 'dashboard tab rendered');
   t.contains(html, 'window.setPipelineView(\'long-tail\')', 'long-tail tab rendered');
@@ -84,23 +93,23 @@ t.section('renderPipelineNav() has operational views only');
 t.section('renderPipelineNav() refreshes the dashboard subtab');
 {
   state.pipelineView = 'dashboard';
-  const html = __test__.renderPipelineNav();
+  const html = renderPipelineNav();
   t.contains(html, 'window.loadPipelineDashboard()', 'dashboard refresh reloads dashboard metrics');
   t.contains(html, 'subtab-refresh', 'refresh uses shared subtab layout');
 }
 t.section('pipeline status controls disable invalid unsearchable transitions');
 {
-  const imported = __test__.renderPipelineStatusButtons(42, 'imported');
+  const imported = renderPipelineStatusButtons(42, 'imported');
   t.contains(imported, "class=\"p-btn active-status\" data-pipeline-request-id=\"42\" onclick=\"event.stopPropagation(); window.updateStatus(42, 'imported')\">imported</button>", 'imported remains visibly current and conflict-addressable');
   t.excludes(imported, "window.updateStatus(42, 'unsearchable')", 'imported cannot invoke unsearchable');
   t.contains(imported, 'disabled aria-disabled="true">unsearchable</button>', 'invalid imported stop is disabled');
 
-  const downloading = __test__.renderPipelineStatusButtons(42, 'downloading');
+  const downloading = renderPipelineStatusButtons(42, 'downloading');
   t.contains(downloading, 'disabled aria-disabled="true">downloading</button>', 'downloading remains visibly current');
   t.excludes(downloading, "window.updateStatus(42, 'unsearchable')", 'downloading cannot invoke unsearchable');
   t.contains(downloading, 'disabled aria-disabled="true">unsearchable</button>', 'invalid downloading stop is disabled');
 
-  const processing = __test__.renderPipelineStatusButtons(42, 'processing', {
+  const processing = renderPipelineStatusButtons(42, 'processing', {
     job_id: 420,
     status: 'recovery_required',
     preview_status: 'running',
@@ -112,10 +121,10 @@ t.section('pipeline status controls disable invalid unsearchable transitions');
   t.excludes(processing, ' disabled', 'processing controls remain focusable');
   t.excludes(processing, 'window.updateStatus', 'processing controls cannot mutate lifecycle');
 
-  const wanted = __test__.renderPipelineStatusButtons(42, 'wanted');
+  const wanted = renderPipelineStatusButtons(42, 'wanted');
   t.contains(wanted, "window.updateStatus(42, 'unsearchable')", 'wanted may become unsearchable');
 
-  const stopped = __test__.renderPipelineStatusButtons(42, 'unsearchable');
+  const stopped = renderPipelineStatusButtons(42, 'unsearchable');
   t.contains(stopped, "window.updateStatus(42, 'unsearchable')", 'current unsearchable state remains an active control');
   t.contains(stopped, 'class="p-btn active-status"', 'unsearchable remains visibly current');
 }
@@ -125,7 +134,7 @@ t.section('request detail caps history and collapses tracks');
     id, created_at: '2026-07-13T00:00:00+00:00',
   }));
   const tracks = Array.from({ length: 18 }, (_, id) => ({ id, title: `Track ${id}` }));
-  const html = __test__.renderRequestEvidenceSections(history, tracks, []);
+  const html = renderRequestEvidenceSections(history, tracks, []);
   t.contains(html, 'Download History (12)', 'full history count remains visible');
   t.contains(html, 'Show 2 older attempts', 'only older attempts move behind disclosure');
   t.contains(html, '<details class="p-tracks"', 'library tracks are collapsed by default');
@@ -137,7 +146,7 @@ for (let count = 0; count <= 30; count++) {
   const history = Array.from({ length: count }, (_, id) => ({
     id, created_at: '2026-07-13T00:00:00+00:00',
   }));
-  const html = __test__.renderRequestEvidenceSections(history, [], []);
+  const html = renderRequestEvidenceSections(history, [], []);
   const expectedOlder = Math.max(0, count - 10);
   if (expectedOlder === 0) {
     t.excludes(html, 'older attempt', `${count} histories need no older disclosure`);
@@ -148,17 +157,17 @@ for (let count = 0; count <= 30; count++) {
 
 t.section('current library display uses typed authority states only');
 {
-  const unique = __test__.renderCurrentLibraryRow({
+  const unique = renderCurrentLibraryRow({
     state: 'unique', path: '/library/Moved/current',
   });
   t.contains(unique, 'Imported to', 'unique state labels the fresh path');
   t.contains(unique, '/library/Moved/current', 'unique state renders the resolver path');
 
-  const missing = __test__.renderCurrentLibraryRow({state: 'missing'});
+  const missing = renderCurrentLibraryRow({state: 'missing'});
   t.contains(missing, 'Beets library', 'missing state namespaces the live authority');
   t.contains(missing, 'Not installed', 'missing state stays explicit');
 
-  const ambiguous = __test__.renderCurrentLibraryRow({
+  const ambiguous = renderCurrentLibraryRow({
     state: 'ambiguous', reason: 'multiple_matches', album_ids: [7, 8],
   });
   t.contains(ambiguous, 'Manual review', 'ambiguous state fails closed visibly');
@@ -166,7 +175,7 @@ t.section('current library display uses typed authority states only');
   t.contains(ambiguous, 'multiple_matches', 'ambiguity reason is visible');
   t.contains(ambiguous, 'album IDs 7, 8', 'ambiguous album ids are visible');
 
-  const unavailable = __test__.renderCurrentLibraryRow({
+  const unavailable = renderCurrentLibraryRow({
     state: 'unavailable', reason: 'conflicting_request_identity',
   });
   t.contains(unavailable, 'Unavailable', 'unavailable state stays explicit');
@@ -176,7 +185,7 @@ t.section('current library display uses typed authority states only');
 
 t.section('request 6039 current Quality uses average positive track bitrate');
 {
-  const html = __test__.renderCurrentQualityRow(
+  const html = renderCurrentQualityRow(
     {
       current_spectral_bitrate: null,
       last_download_spectral_bitrate: null,
@@ -201,7 +210,7 @@ for (const [grade, tone] of [
   ['marginal', 'good'],
   ['genuine', 'lossless'],
 ]) {
-  const html = __test__.renderCurrentQualityRow(
+  const html = renderCurrentQualityRow(
     {
       current_spectral_bitrate: 128,
       last_download_spectral_bitrate: null,
@@ -227,7 +236,7 @@ const BEETS_MP3 = [{ format: 'MP3', bitrate: 256000 }];
 
 t.section('current Quality withholds an audit-only HAVE accusation');
 {
-  const html = __test__.renderCurrentQualityRow(
+  const html = renderCurrentQualityRow(
     {
       current_spectral_bitrate: 128,
       current_spectral_grade: 'likely_transcode',
@@ -247,7 +256,7 @@ t.section('current Quality withholds an audit-only HAVE accusation');
 
 t.section('current Quality keeps the accusation for a real codec');
 {
-  const html = __test__.renderCurrentQualityRow(
+  const html = renderCurrentQualityRow(
     {
       current_spectral_bitrate: 128,
       current_spectral_grade: 'likely_transcode',
@@ -264,7 +273,7 @@ t.section('current Quality keeps the accusation for a real codec');
 
 t.section('current Quality falls back to accusing when the flags are absent');
 {
-  const html = __test__.renderCurrentQualityRow(
+  const html = renderCurrentQualityRow(
     {
       current_spectral_bitrate: 128,
       current_spectral_grade: 'likely_transcode',
@@ -282,7 +291,7 @@ t.section('current Quality applies the pair belonging to the chosen grade');
 {
   // The chain fell through to the last download, so the HAVE pair must
   // NOT be read — it describes a different album.
-  const html = __test__.renderCurrentQualityRow(
+  const html = renderCurrentQualityRow(
     {
       current_spectral_grade: null,
       current_spectral_accusation_admissible: true,
@@ -301,7 +310,7 @@ t.section('current Quality applies the pair belonging to the chosen grade');
     'the HAVE pair never overrides the grade the chain selected');
 
   // ...and the converse: a HAVE grade must not read the candidate pair.
-  const haveHtml = __test__.renderCurrentQualityRow(
+  const haveHtml = renderCurrentQualityRow(
     {
       current_spectral_bitrate: 128,
       current_spectral_grade: 'likely_transcode',
@@ -322,7 +331,7 @@ t.section('current Quality applies the pair belonging to the chosen grade');
 
 t.section('current Quality never claims encoder facts for an unresolved codec');
 {
-  const html = __test__.renderCurrentQualityRow(
+  const html = renderCurrentQualityRow(
     {
       current_spectral_bitrate: 192,
       current_spectral_grade: 'suspect',
