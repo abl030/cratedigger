@@ -19,7 +19,7 @@ import {
 } from '../web/js/release_actions.js';
 import { openReplacePicker } from '../web/js/replace_picker.js';
 
-import { stubGlobals, suite } from './js_harness.mjs';
+import { element, stubGlobals, suite } from './js_harness.mjs';
 
 const t = suite(import.meta.url);
 
@@ -43,35 +43,18 @@ function fakeDomElement(
   inserted = [],
   isConnected = true,
 ) {
-  const attributes = new Map();
-  if (requestId != null) {
-    attributes.set('data-pipeline-request-id', String(requestId));
-  }
-  return {
-    attributes,
-    children: [],
-    dataset: {},
-    focused: 0,
-    isConnected,
-    removed: false,
+  const node = element({
     textContent,
-    setAttribute(name, value) { attributes.set(name, value); },
-    removeAttribute(name) { attributes.delete(name); },
-    getAttribute(name) { return attributes.get(name) || null; },
-    appendChild(child) {
+    isConnected,
+    insertAdjacentElement(_position, child) {
       child.isConnected = true;
-      this.children.push(child);
+      inserted.push(child);
     },
-    insertAdjacentElement(_position, element) {
-      element.isConnected = true;
-      inserted.push(element);
-    },
-    focus() { this.focused++; },
-    remove() {
-      this.isConnected = false;
-      this.removed = true;
-    },
-  };
+  });
+  if (requestId != null) {
+    node.setAttribute('data-pipeline-request-id', String(requestId));
+  }
+  return node;
 }
 
 t.section('Acquire button — fresh row → Add request enabled');
@@ -275,9 +258,9 @@ t.section('Processing conflict handler — immediate lock and row refetch preser
     removeAttribute(name) { attributes.delete(name); },
     getAttribute(name) { return attributes.get(name) || null; },
     focus() { focused++; },
-    insertAdjacentElement(_position, element) {
-      element.isConnected = true;
-      inserted.push(element);
+    insertAdjacentElement(_position, child) {
+      child.isConnected = true;
+      inserted.push(child);
     },
   };
   const live = { textContent: '', setAttribute() {} };
@@ -301,7 +284,7 @@ t.section('Processing conflict handler — immediate lock and row refetch preser
       },
       getElementById(id) {
         if (id === 'processing-lock-live-region') return live;
-        return inserted.find(element => element.id === id) || null;
+        return inserted.find(node => node.id === id) || null;
       },
       querySelectorAll() { return [control]; },
     },
@@ -356,9 +339,9 @@ t.section('Processing conflict handler — authoritative owner refresh repaints 
     removeAttribute(name) { attributes.delete(name); },
     getAttribute(name) { return attributes.get(name) || null; },
     focus() {},
-    insertAdjacentElement(_position, element) {
-      element.isConnected = true;
-      inserted.push(element);
+    insertAdjacentElement(_position, child) {
+      child.isConnected = true;
+      inserted.push(child);
     },
   };
   const live = { textContent: '', setAttribute() {} };
@@ -381,7 +364,7 @@ t.section('Processing conflict handler — authoritative owner refresh repaints 
       },
       getElementById(id) {
         if (id === 'processing-lock-live-region') return live;
-        return inserted.find(element => element.id === id && element.isConnected) || null;
+        return inserted.find(node => node.id === id && node.isConnected) || null;
       },
       querySelectorAll() { return [control]; },
     },
@@ -437,7 +420,7 @@ t.section('Processing conflict handler — authoritative owner refresh repaints 
     'fresh owner replaces conflict owner in central store',
   );
   t.equal(
-    inserted.some(element => element.isConnected && element.textContent.includes('job #76')),
+    inserted.some(node => node.isConnected && node.textContent.includes('job #76')),
     true,
     'visible explanation is repainted from the authoritative owner',
   );
@@ -507,7 +490,7 @@ t.section('Processing conflict handler — newest same-request refresh wins');
       },
       getElementById(id) {
         if (id === 'processing-lock-live-region') return live;
-        return inserted.find(element => element.id === id && element.isConnected) || null;
+        return inserted.find(node => node.id === id && node.isConnected) || null;
       },
       querySelectorAll() { return [control]; },
     },
@@ -655,16 +638,16 @@ t.section('Processing conflict handler — newest same-request refresh wins');
   });
   await currentSuccessHandling;
   const retryCountBeforeStaleFailure = inserted.filter(
-    element => element.isConnected
-      && element.className === 'p-btn processing-refresh-retry',
+    node => node.isConnected
+      && node.className === 'p-btn processing-refresh-retry',
   ).length;
   const announcementBeforeStaleFailure = live.textContent;
   staleFailure.reject(new Error('obsolete row refresh failed'));
   await staleFailureHandling;
   t.equal(
     inserted.filter(
-      element => element.isConnected
-        && element.className === 'p-btn processing-refresh-retry',
+      node => node.isConnected
+        && node.className === 'p-btn processing-refresh-retry',
     ).length,
     retryCountBeforeStaleFailure,
     'older failed response cannot expose obsolete retry UI',
@@ -716,7 +699,7 @@ t.section('Processing conflict handler — stale select becomes a focusable iner
     setAttribute(name, value) { this.attributes.set(name, value); }
     removeAttribute(name) { this.attributes.delete(name); }
     getAttribute(name) { return this.attributes.get(name) || null; }
-    insertAdjacentElement(_position, element) { element.isConnected = true; }
+    insertAdjacentElement(_position, child) { child.isConnected = true; }
     focus() { this.focused++; }
   }
   const select = new FakeSelect();
@@ -789,9 +772,9 @@ t.section('Processing conflict handler — failed refetch stays locked with work
     removeAttribute(name) { attributes.delete(name); },
     getAttribute(name) { return attributes.get(name) || null; },
     focus() { focused++; },
-    insertAdjacentElement(_position, element) {
-      element.isConnected = true;
-      inserted.push(element);
+    insertAdjacentElement(_position, child) {
+      child.isConnected = true;
+      inserted.push(child);
     },
   };
   const live = { textContent: '', setAttribute() {} };
@@ -814,7 +797,7 @@ t.section('Processing conflict handler — failed refetch stays locked with work
       },
       getElementById(id) {
         if (id === 'processing-lock-live-region') return live;
-        return inserted.find(element => element.id === id) || null;
+        return inserted.find(node => node.id === id) || null;
       },
       querySelectorAll() { return [control]; },
     },
@@ -867,7 +850,7 @@ t.section('Processing conflict handler — closed Replace modal cannot lock docu
       },
       getElementById(id) {
         if (id === 'processing-lock-live-region') return live;
-        return inserted.find(element => element.id === id && element.isConnected) || null;
+        return inserted.find(node => node.id === id && node.isConnected) || null;
       },
       querySelectorAll() { return [requestControl]; },
     },
@@ -890,12 +873,12 @@ t.section('Processing conflict handler — closed Replace modal cannot lock docu
   });
   t.equal(body.textContent, 'application shell', 'document.body content is preserved');
   t.equal(
-    body.attributes.has('data-processing-locked'),
+    body.hasAttribute('data-processing-locked'),
     false,
     'document.body is never treated as the mutation control',
   );
   t.equal(
-    requestControl.attributes.get('aria-disabled'),
+    requestControl.getAttribute('aria-disabled'),
     'true',
     'request-scoped controls still lock after modal teardown',
   );
@@ -919,7 +902,7 @@ t.section('Processing conflict handler — focus moved during mutation locks onl
       },
       getElementById(id) {
         if (id === 'processing-lock-live-region') return live;
-        return inserted.find(element => element.id === id && element.isConnected) || null;
+        return inserted.find(node => node.id === id && node.isConnected) || null;
       },
       querySelectorAll() { return []; },
     },
@@ -940,12 +923,12 @@ t.section('Processing conflict handler — focus moved during mutation locks onl
     refetch: async () => {},
   });
   t.equal(
-    originatingControl.attributes.get('aria-disabled'),
+    originatingControl.getAttribute('aria-disabled'),
     'true',
     'explicit pre-request control receives the lock',
   );
   t.equal(
-    unrelatedControl.attributes.has('data-processing-locked'),
+    unrelatedControl.hasAttribute('data-processing-locked'),
     false,
     'newly focused unrelated control is untouched',
   );
@@ -953,6 +936,66 @@ t.section('Processing conflict handler — focus moved during mutation locks onl
     globalThis.document.activeElement,
     unrelatedControl,
     'focus moved during the mutation stays on the operator-selected target',
+  );
+  globals.restore();
+}
+
+t.section('Processing conflict handler — a control detached before the 409 is never locked');
+{
+  // `processingOriginControl` refuses a control with `isConnected === false`:
+  // a re-render between the click and the 409 replaces the node, and locking
+  // the detached one writes the operator's explanation where nothing shows it.
+  // Nothing drove that guard until the shared `element()` gave every fake an
+  // `isConnected` field to seed (issue #1313, found by PR #1339's review).
+  const inserted = [];
+  const detachedControl = fakeDomElement('Add request', 912, inserted, false);
+  const live = fakeDomElement('', null, inserted);
+  const globals = stubGlobals({
+    document: {
+      activeElement: null,
+      body: fakeDomElement('application shell', null, inserted),
+      documentElement: fakeDomElement('document root', null, inserted),
+      createElement() {
+        return fakeDomElement('', null, inserted, false);
+      },
+      getElementById(id) {
+        if (id === 'processing-lock-live-region') return live;
+        return inserted.find(node => node.id === id && node.isConnected) || null;
+      },
+      // Empty on purpose: a re-render already replaced the row, so the
+      // request-scoped scan finds the live node, not this one.
+      querySelectorAll() { return []; },
+    },
+    window: { scrollX: 0, scrollY: 0, scrollTo() {} },
+  });
+  await handleProcessingLockedConflict({
+    httpStatus: 409,
+    payload: {
+      error: 'processing_locked',
+      request_id: 912,
+      processing_owner: {
+        job_id: 80,
+        status: 'queued',
+        preview_status: 'running',
+      },
+    },
+    control: detachedControl,
+    refetch: async () => {},
+  });
+  t.equal(
+    detachedControl.hasAttribute('data-processing-locked'),
+    false,
+    'a control detached before the conflict landed is never locked',
+  );
+  t.equal(
+    detachedControl.getAttribute('aria-disabled'),
+    null,
+    'and it is never marked aria-disabled either',
+  );
+  t.contains(
+    live.textContent,
+    'job #80',
+    'the lock is still announced with the exact owner',
   );
   globals.restore();
 }
@@ -975,7 +1018,7 @@ t.section('Processing conflict handler — focus moved during refetch is not sto
       },
       getElementById(id) {
         if (id === 'processing-lock-live-region') return live;
-        return inserted.find(element => element.id === id && element.isConnected) || null;
+        return inserted.find(node => node.id === id && node.isConnected) || null;
       },
       querySelectorAll() { return [originatingControl]; },
     },
@@ -1029,7 +1072,7 @@ t.section('Processing conflict handler — scrolling during refetch stays operat
       },
       getElementById(id) {
         if (id === 'processing-lock-live-region') return live;
-        return inserted.find(element => element.id === id && element.isConnected) || null;
+        return inserted.find(node => node.id === id && node.isConnected) || null;
       },
       querySelectorAll() { return [control]; },
     },
@@ -1080,7 +1123,7 @@ t.section('Processing conflict retry — focus moved during retry is not stolen 
       },
       getElementById(id) {
         if (id === 'processing-lock-live-region') return live;
-        return inserted.find(element => element.id === id && element.isConnected) || null;
+        return inserted.find(node => node.id === id && node.isConnected) || null;
       },
       querySelectorAll() { return [originatingControl]; },
     },
@@ -1105,7 +1148,7 @@ t.section('Processing conflict retry — focus moved during retry is not stolen 
     },
   });
   const retry = inserted.find(
-    element => element.className === 'p-btn processing-refresh-retry',
+    node => node.className === 'p-btn processing-refresh-retry',
   );
   t.equal(!!retry, true, 'failed refresh exposes retry control');
   globalThis.document.activeElement = retry;

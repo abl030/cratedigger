@@ -16,7 +16,7 @@ import {
 } from '../web/js/discography.js';
 import { renderYoutubeRescueControl } from '../web/js/youtube_rescue_control.js';
 
-import { stubGlobals, suite } from './js_harness.mjs';
+import { element, stubGlobals, suite } from './js_harness.mjs';
 
 const t = suite(import.meta.url);
 
@@ -173,42 +173,23 @@ t.section('addRelease() — processing exists response exposes exact owner recov
 {
   const created = [];
   const mounted = [];
-  function element(tag = '') {
-    const attributes = new Map();
-    const node = {
-      attributes,
-      children: [],
-      className: '',
-      dataset: {},
-      disabled: false,
-      focused: 0,
-      id: '',
-      isConnected: tag === 'button',
-      style: {},
+  function node(tag = '') {
+    const made = element({
       tag,
-      textContent: '',
-      setAttribute(name, value) { attributes.set(name, value); },
-      removeAttribute(name) { attributes.delete(name); },
-      getAttribute(name) { return attributes.get(name) || null; },
-      appendChild(child) {
-        child.isConnected = true;
-        this.children.push(child);
-      },
+      isConnected: tag === 'button',
       insertAdjacentElement(_position, child) {
         child.isConnected = true;
         mounted.push(child);
       },
-      focus() { this.focused++; },
-      remove() { this.isConnected = false; },
-    };
-    created.push(node);
-    return node;
+    });
+    created.push(made);
+    return made;
   }
-  const button = element('button');
+  const button = node('button');
   button.textContent = 'Add request';
-  const body = element('body');
+  const body = node('body');
   body.isConnected = true;
-  const documentElement = element('html');
+  const documentElement = node('html');
   documentElement.isConnected = true;
   const calls = [];
   const globals = stubGlobals({
@@ -216,7 +197,7 @@ t.section('addRelease() — processing exists response exposes exact owner recov
       activeElement: button,
       body,
       documentElement,
-      createElement(tag) { return element(tag); },
+      createElement(tag) { return node(tag); },
       getElementById(id) {
         return created.find(node => node.id === id && node.isConnected) || null;
       },
@@ -270,7 +251,7 @@ t.section('addRelease() — processing exists response exposes exact owner recov
     'Add exists lock label comes from the exact processing owner',
   );
   t.equal(
-    button.attributes.get('data-pipeline-request-id'),
+    button.getAttribute('data-pipeline-request-id'),
     '321',
     'Add exists lock binds the authoritative request id',
   );

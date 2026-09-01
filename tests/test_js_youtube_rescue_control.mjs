@@ -13,16 +13,20 @@ t.section('renderYoutubeRescueControl()');
 const failedHtml = renderYoutubeRescueControl('release-1', 1, identifier, { outcome: 'transient', error_message: 'mirror down' });
 t.contains(failedHtml, 'mirror down', 'resolver failures remain visible');
 t.contains(failedHtml, 'Paste a YouTube video or playlist URL, then click Check URL.', 'control explains how a pasted URL is submitted');
-t.ok(failedHtml.includes('Search YouTube') && failedHtml.includes('Check URL'), 'search and manual URL actions are explicit separate buttons');
+t.contains(failedHtml, 'Search YouTube', 'the search action is its own button');
+t.contains(failedHtml, 'Check URL', 'the manual URL action is a separate button');
 const matrixHtml = renderYoutubeRescueControl('release-1', 1, identifier, { outcome: 'ok', youtube_releases: [{ yt_browse_id: 'MPREb_kb5fohQCJ6d', year: 2026, track_count: 1, distances: [{ mbid: identifier, outcome: 'ok', distance: 0, total_mb_tracks: 1 }] }] });
 t.contains(matrixHtml, 'window.pickYoutubeRescue(1,', 'matrix choice remains confirm-routed');
 t.excludes(matrixHtml, '"window.checkYoutubeRescue("release-1"', 'inline handler quoting remains safe');
 t.contains(matrixHtml, 'event.stopPropagation()', 'all inline control interactions stop parent propagation');
-t.ok(matrixHtml.includes('https://music.youtube.com/browse/MPREb_kb5fohQCJ6d') && matrixHtml.includes('2026 · 1t · exact dist 0.000'), 'choices retain exact pressing evidence');
+t.contains(matrixHtml, 'https://music.youtube.com/browse/MPREb_kb5fohQCJ6d', 'a choice links its exact browse id');
+t.contains(matrixHtml, '2026 · 1t · exact dist 0.000', 'a choice carries its exact pressing evidence');
 const duplicateHtml = renderYoutubeRescueControl('release-dup', 1, identifier, { outcome: 'ok', youtube_releases: [{ yt_browse_id: 'MPREb_dup', distances: [{ mbid: identifier, outcome: 'ok', distance: 0, total_mb_tracks: 1 }, { mbid: identifier, outcome: 'ok', distance: 0, total_mb_tracks: 1 }] }] });
-t.ok(duplicateHtml.includes('disabled') && duplicateHtml.includes('Exact evidence required'), 'duplicate exact evidence disables rescue');
+t.contains(duplicateHtml, 'disabled', 'duplicate exact evidence disables rescue');
+t.contains(duplicateHtml, 'Exact evidence required', 'duplicate exact evidence says why it is disabled');
 const mixedDuplicateHtml = renderYoutubeRescueControl('release-mixed', 1, identifier, { outcome: 'ok', youtube_releases: [{ yt_browse_id: 'MPREb_mixed', distances: [{ mbid: identifier, outcome: 'ok', distance: 0, total_mb_tracks: 1 }, { mbid: identifier, outcome: 'distance_failed', distance: null, total_mb_tracks: null }] }] });
-t.ok(mixedDuplicateHtml.includes('disabled') && mixedDuplicateHtml.includes('Exact evidence required'), 'one valid plus one invalid exact entry stays disabled');
+t.contains(mixedDuplicateHtml, 'disabled', 'one valid plus one invalid exact entry stays disabled');
+t.contains(mixedDuplicateHtml, 'Exact evidence required', 'the mixed pair says why it is disabled');
 
 function fakeHost(watchUrl = '') {
   const buttons = [];
@@ -45,7 +49,9 @@ t.section('checkYoutubeRescue() — busy guard and manual URL submission');
   t.equal(resolverBodies[0], JSON.stringify({ identifier }), 'Search YouTube ignores a populated manual URL field');
   t.contains(host.result.innerHTML, 'No YouTube album found', 'successful result replaces result region');
   await checkYoutubeRescue('release-1', 1, identifier, true);
-  t.ok(calls === 2 && !host.result.innerHTML.includes('No YouTube album foundNo YouTube album found'), 'repeated resolver check replaces rather than appends');
+  t.equal(calls, 2, 'a repeated resolver check calls the resolver again');
+  t.excludes(host.result.innerHTML, 'No YouTube album foundNo YouTube album found',
+    'a repeated resolver check replaces the result region rather than appending');
   t.equal(resolverBodies[1], JSON.stringify({ identifier, watch_url: 'https://music.youtube.com/watch?v=dGYXkhMAvLk' }), 'Check URL submits the pasted URL');
   globals.restore();
 }
@@ -66,7 +72,8 @@ t.section('renderYoutubeRescueControl() — candidate link safety');
 const playlistHtml = renderYoutubeRescueControl('release-playlist', 1, identifier, { outcome: 'ok', youtube_releases: [{ yt_browse_id: 'PLC0playlist', yt_url: 'https://music.youtube.com/playlist?list=PLC0playlist', distances: [{ mbid: identifier, outcome: 'ok', distance: 0, total_mb_tracks: 10 }] }] });
 t.contains(playlistHtml, 'href="https://music.youtube.com/playlist?list=PLC0playlist"', 'playlist candidate links to its validated playlist URL');
 const unsafeLinkHtml = renderYoutubeRescueControl('release-unsafe', 1, identifier, { outcome: 'ok', youtube_releases: [{ yt_browse_id: 'MPREb_safe', yt_url: 'javascript:alert(1)', distances: [{ mbid: identifier, outcome: 'ok', distance: 0, total_mb_tracks: 1 }] }] });
-t.ok(unsafeLinkHtml.includes('href="https://music.youtube.com/browse/MPREb_safe"') && !unsafeLinkHtml.includes('href="javascript:'), 'untrusted candidate URL falls back to the safe browse-id URL');
+t.contains(unsafeLinkHtml, 'href="https://music.youtube.com/browse/MPREb_safe"', 'untrusted candidate URL falls back to the safe browse-id URL');
+t.excludes(unsafeLinkHtml, 'href="javascript:', 'the untrusted javascript: URL never reaches the href');
 
 t.section('checkYoutubeRescue() — a network rejection is visible');
 {
@@ -140,7 +147,10 @@ t.section('pickYoutubeRescue() — a rejected submit toasts and clears its guard
   });
   await checkYoutubeRescue('release-reject', 1, identifier);
   await rejectButton.listener({ stopPropagation() {} });
-  t.ok(toastNode.textContent.includes('network unavailable') && rejectHost.dataset.submitting === 'false', 'rescue rejection toasts visibly and clears submit guard for retry');
+  t.contains(toastNode.textContent, 'network unavailable',
+    'a rescue rejection toasts the network failure visibly');
+  t.equal(rejectHost.dataset.submitting, 'false',
+    'a rescue rejection clears the submit guard for a retry');
   globals.restore();
 }
 

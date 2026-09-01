@@ -100,14 +100,14 @@ for (const [rank, foreground] of Object.entries({
   transparent: '#6d6',
   lossless: '#8f8',
 })) {
-  t.ok(css.includes(`--quality-${rank}-fg: ${foreground};`),
+  t.contains(css, `--quality-${rank}-fg: ${foreground};`,
     `${rank} foreground is declared once as ${foreground}`);
-  t.ok(css.includes(`.quality-tone-${rank} { color: var(--quality-${rank}-fg); }`),
+  t.contains(css, `.quality-tone-${rank} { color: var(--quality-${rank}-fg); }`,
     `${rank} inline text consumes its shared foreground token`);
-  t.ok(css.includes(`.badge-rank-${rank} { background: var(--quality-${rank}-bg); color: var(--quality-${rank}-fg); }`),
+  t.contains(css, `.badge-rank-${rank} { background: var(--quality-${rank}-bg); color: var(--quality-${rank}-fg); }`,
     `${rank} badges consume both shared palette tokens`);
 }
-t.ok(css.includes('.badge-quality-outline { border: 1px solid currentColor; }'),
+t.contains(css, '.badge-quality-outline { border: 1px solid currentColor; }',
   'quality badge outlines preserve their canonical rank background');
 
 // --- issue #829 Phase 5 PR4/N3: the shared audit-only render rule ---
@@ -137,11 +137,11 @@ t.section('spectralWithheldPresentation() never conflates the two worlds');
 
   t.equal(auditOnly.suffix, ' · audit-only', 'audit-only suffix');
   t.equal(unresolved.suffix, ' · codec unresolved', 'unresolved suffix');
-  t.ok(auditOnly.title.includes('native encoder behaviour'),
+  t.contains(auditOnly.title, 'native encoder behaviour',
     'a resolved audit-only codec states the encoder fact');
-  t.ok(!unresolved.title.includes('native encoder behaviour'),
+  t.excludes(unresolved.title, 'native encoder behaviour',
     'an unresolved codec never claims a fact about an encoder');
-  t.ok(unresolved.title.includes('could not be identified'),
+  t.contains(unresolved.title, 'could not be identified',
     'the unresolved copy says what is actually unknown');
 
   for (const presentation of [auditOnly, unresolved]) {
@@ -150,7 +150,7 @@ t.section('spectralWithheldPresentation() never conflates the two worlds');
     t.equal(presentation.badgeClass,
       `badge spectral-grade ${qualityRankBadgeClass('unknown')}`,
       'a withheld badge always drops to the neutral rank badge');
-    t.ok(!presentation.className.includes('quality-tone-poor'),
+    t.excludes(presentation.className, 'quality-tone-poor',
       'a withheld grade never carries the accusing class');
   }
 
