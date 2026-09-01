@@ -359,7 +359,8 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   cannot occur for catalog mutants — but each DISMISSAL is a claim the
   review reader audits. The committed tooling is `nix/mutmut-shell.nix`
   alone; the per-run config and `mutants/` are never committed, and the
-  aimed-mutant driver above stays an uncommitted one-shot (`scope.md`). Catalog breadth does not discharge any aimed obligation:
+  aimed-mutant driver above stays an uncommitted one-shot (`scope.md`).
+  Catalog breadth does not discharge any aimed obligation:
   the evaluation's replay found real gaps 40 aimed mutants missed AND
   could not express the one real survivor those aimed mutants found
   (`to_json_dict() → {}` is outside the catalog). Full runbook, scoping

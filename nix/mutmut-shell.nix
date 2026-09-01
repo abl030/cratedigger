@@ -85,9 +85,9 @@ pkgs.mkShell {
     # Same private RAM-backed TMPDIR as the canonical dev shell. Without it
     # TMPDIR sits under world-writable /tmp and lib/fs_authority.py's
     # _assert_private_parent refuses every ancestor-mode check — measured:
-    # tests/test_path_authority.py fails 16/83 under a bare /tmp TMPDIR and
-    # passes 83/83 with the private tmpfs, which would abort mutmut's clean
-    # -test pass for the processing/import/preview selections.
+    # tests/test_path_authority.py fails 16/83 under a bare /tmp TMPDIR
+    # and passes 83/83 with the private tmpfs, which would abort mutmut's
+    # clean-test pass for the processing/import/preview selections.
     source ${../scripts/test_tmpfs.sh}
     setup_cratedigger_test_tmpfs || exit 1
 

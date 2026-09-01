@@ -68,9 +68,9 @@ ephemeral PostgreSQL and applies migrations at import, and pytest collects
   (`copy_src_dir`) and the `also_copy` entries FIRST and generates mutants
   LAST, so a duplicate entry cannot neutralize mutants (measured end-to-end
   with a deliberately overlapping config: mutants intact both runs). Note
-  mutmut auto-appends `tests/`, `test/`, `setup.cfg`, `pyproject.toml`, and
-  lockfiles to `also_copy` (`configuration.py`) — the template above relies
-  on that for `tests/`.
+  mutmut auto-appends `tests/`, `test/`, `setup.cfg`, `pyproject.toml`,
+  lockfiles, and any root-level `test*.py` to `also_copy` (mutmut's
+  `configuration.py`) — the template above relies on that for `tests/`.
 - **Real-PG test selections need `--max-children 1`** (`mutmut run
   --max-children 1`): mutmut forks parallel children that all inherit the
   ONE ephemeral PostgreSQL from `tests/conftest.py`, and the fixtures
@@ -82,7 +82,7 @@ ephemeral PostgreSQL and applies migrations at import, and pytest collects
   the committed tooling is `nix/mutmut-shell.nix` alone. Run the breadth
   pass BEFORE the `check` receipt: a leftover `pyproject.toml` or
   `mutants/` dirties the tree and the final gate refuses untracked files
-  (loudly — a wasted gate run, not a silent hazard). `ruff.toml` and both
+  (loudly and immediately, before running anything — not a silent hazard). `ruff.toml` and both
   pyright configs exclude `mutants/` as defense-in-depth against the
   #1208 shape (a root-planted tree making whole-repo passes crawl a
   foreign corpus), but deletion is the rule, not the excludes. One more
