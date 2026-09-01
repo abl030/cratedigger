@@ -4,8 +4,10 @@ Re-exports the names something outside the package actually asks for by
 name, so ``from lib.quality import X`` keeps working for every caller
 that has one. It carried the whole historical monolith surface until
 issue #1313 measured it: 75 of 288 entries had no caller through the
-package at all, and each of those 75 was already imported straight from
-its submodule somewhere else. Nothing reached them here.
+package at all. Of those 75, eight are imported straight from their
+submodule by a caller outside the package, six are named only in a
+comment or a docstring, and the remaining 61 nothing outside the package
+mentions in any form.
 
 Adding an entry back is fine the moment a caller wants it. Adding one
 speculatively is what ``tests/test_quality_reexport_audit.py`` refuses —
