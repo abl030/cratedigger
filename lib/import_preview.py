@@ -65,8 +65,8 @@ from lib.measurement import (
     measure_aac_lattice,
     measure_preimport_state,
 )
+from lib.media_readiness import normalize_media_metadata
 from lib.preview_snapshot import (
-    prepare_preview_media,
     remove_preview_snapshot,
     snapshot_authorized_directory,
     snapshot_configured_quarantine_directory,
@@ -119,6 +119,11 @@ logger = logging.getLogger("cratedigger")
 
 HeaderRepairFn = Callable[[str], None]
 """Repair one file's container header in place before it is measured."""
+
+
+def prepare_preview_media(path: str) -> None:
+    """Normalize only a ready private view; measurement owns invalid evidence."""
+    normalize_media_metadata(path, fail_closed=False)
 
 
 def _existing_spectral_interpretation(

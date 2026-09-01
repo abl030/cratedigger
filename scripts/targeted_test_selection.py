@@ -207,18 +207,36 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         # action-copy lifecycles out of lib/import_preview.py. There is no
         # tests.test_preview_snapshot: this code has always been covered by
         # modules named for the boundary it guards rather than for the file
-        # it lived in. Path authority owns the bounded-copy limits and the
-        # refusals; processing cancellation owns the fail-stop checkpoints;
-        # the import-queue and local-import lanes own action-copy naming and
-        # terminal cleanup. Zero-neighbour without this entry, so deleting
-        # it fails closed on the lib/ root rule rather than silently
-        # under-selecting — no MASKABLE_ENTRY_PINS pin needed.
+        # it lived in, so it is zero-neighbour without this entry and
+        # deleting the entry fails closed on the lib/ root rule rather than
+        # silently under-selecting — no MASKABLE_ENTRY_PINS pin needed.
+        #
+        # The list is DERIVED, not curated: every test module that imports a
+        # name from lib.preview_snapshot, measured by AST over tests/ at the
+        # time of the split. Re-derive it the same way rather than adding
+        # what looks related — the first draft of this entry named
+        # tests.test_processing_cancellation_generated, which drives only
+        # lib/staged_album.py and references nothing here, while omitting
+        # five modules whose imports this same commit rewrote.
+        #
+        # Two deliberate omissions. tests/world_model/support.py imports
+        # force_action_copy_path, but its only drivers are the world-model
+        # state machine and mirror harness, whose target is the world-model
+        # burst rather than an ordinary selection. And
+        # tests/test_automation_startup_recovery.py reads as coverage and is
+        # not: it stubs the force_action_copy_path_fn DI seam and never
+        # imports the production function.
         "tests.test_path_authority",
         "tests.test_path_authority_generated",
         "tests.test_processing_cancellation",
-        "tests.test_processing_cancellation_generated",
         "tests.test_import_queue",
+        "tests.test_import_queue_generated",
+        "tests.test_import_operation_fence",
+        "tests.test_import_operation_fence_generated",
+        "tests.test_importer_job_kinds",
+        "tests.test_integration_slices",
         "tests.test_local_import_lane",
+        "tests.test_pipeline_db",
     ),
     "lib/startup_reconciliation.py": (
         # Was an admitted zero-neighbour gap (issue #1199, measured

@@ -395,7 +395,7 @@ def _sync_file_tags_after_merge_rekey(
     reconciliation loop for whatever it could not fix. It must never raise
     into the importer; note the blanket except also swallows a
     cancellation raised inside the sync's own DB-lock I/O, which the
-    caller's immediately-following ``_checkpoint`` re-raises (#1260 review
+    caller's immediately-following ``checkpoint`` re-raises (#1260 review
     F8). The other two ready rekey worlds need no assertion here: the
     service re-derives them from Beets — ``not_held`` resolves to
     ``not_found``; ``already_current`` typically to
@@ -1047,7 +1047,7 @@ def _process_beets_validation(
         # F2, re-review C2).
         # Outcome-inert by contract: the helper never raises and nothing
         # reads its result. It swallows even a cancellation raised inside
-        # its DB-lock I/O — benign ONLY because ``_checkpoint`` on the
+        # its DB-lock I/O — benign ONLY because ``checkpoint`` on the
         # next line re-raises; keep that pairing if this call ever moves
         # (review F8). The checkpoint ABOVE keeps an already-cancelled job
         # from spending the write budget first.

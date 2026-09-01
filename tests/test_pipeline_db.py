@@ -2369,7 +2369,7 @@ class TestImportJobQueueAPI(unittest.TestCase):
     ) -> None:
         """Issue #1089 review MAJOR-1: ``recover_running_import_jobs``'s
         production default for ``force_action_copy_path_fn`` must derive
-        the SAME path ``lib.import_preview.force_action_copy_path`` itself
+        the SAME path ``lib.preview_snapshot.force_action_copy_path`` itself
         computes from the currently configured runtime — not a hand-typed
         approximation the two could silently drift from. Limit (review
         round 3 item 6): ``read_runtime_config`` is patched away here, so

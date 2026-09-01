@@ -3,18 +3,21 @@
 Two lifecycles inside Cratedigger's private processing tree, joined at one
 hinge. A foreign directory — an operator's local-import folder, a quarantined
 wrong match — is boundedly descriptor-copied into ``processing/preview/``
-before any media tool touches it, so the inventory evidence is built from
-comes off the private copy rather than a second walk of a pathname anything
-outside this service can still move. When a force or local-import job decides
-to keep what it measured, ``retain_preview_snapshot_for_force_action`` renames
-that snapshot into ``processing/albums/`` under a deterministic job-scoped
-name, and the importer consumes those exact bytes.
+before any media tool touches it, so the inventory evidence is built from is
+taken off the private copy rather than off a second walk of a pathname
+anything outside this service can still move. When a force or local-import
+job decides to keep what it measured,
+``retain_preview_snapshot_for_force_action`` renames that snapshot into
+``processing/albums/`` under a deterministic job-scoped name, and the
+importer consumes those exact bytes.
 
 Both halves refuse anything they do not own: a path that is not a direct
 child of the private root, a name without the lane's prefix, an action copy
 whose name does not belong to the job asking to remove it. Each refusal is
-raised before the removal opens anything, so a mismatch leaks a directory
-rather than deleting a stranger's.
+raised before the function opens anything, so a mismatch leaks a directory
+rather than deleting a stranger's — pinned by
+``tests/test_path_authority.py::TestPrivateRemovalRefusesWhatItDoesNotOwn``,
+which exists because deleting all six refusals used to leave the suite green.
 
 Split out of ``lib.import_preview`` in issue #1313. Nothing here decides
 anything about quality; the preview lane calls in for storage.
@@ -49,7 +52,6 @@ from lib.import_execution import (
     checkpoint,
 )
 from lib.import_queue import IMPORT_JOB_FORCE, IMPORT_JOB_LOCAL
-from lib.media_readiness import normalize_media_metadata
 from lib.processing_paths import processing_albums_dir, processing_preview_dir
 
 if TYPE_CHECKING:
@@ -81,11 +83,6 @@ class PreviewSnapshotLimits:
 
 PreviewCopyFn = Callable[..., int]
 PreviewAvailableBytesFn = Callable[[int], int]
-
-
-def prepare_preview_media(path: str) -> None:
-    """Normalize only a ready private view; measurement owns invalid evidence."""
-    normalize_media_metadata(path, fail_closed=False)
 
 
 def _preview_available_bytes(preview_fd: int) -> int:
@@ -357,9 +354,10 @@ def remove_preview_snapshot(
     """Remove only a direct, service-owned private snapshot directory.
 
     Before issue #1313 this was two functions: a private ``_remove_preview_tree``
-    and a public wrapper that forwarded every argument to it unchanged. In-module
-    callers took the private one and out-of-module callers the public one, which
-    made them look like different guarantees. They were the same function.
+    and a public wrapper whose whole body forwarded every argument to it
+    unchanged. Two names over one function, which read as two guarantees —
+    and the private one was not even private, since a test module imported
+    it from outside as well.
     """
     name = os.path.basename(path)
     if name == path or not name.startswith("preview-"):

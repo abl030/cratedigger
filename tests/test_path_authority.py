@@ -46,8 +46,14 @@ from lib.fs_authority import (
 )
 from lib.grab_list import DownloadFile
 from lib.preview_snapshot import (
+    FORCE_ACTION_PREFIX,
+    LOCAL_IMPORT_ACTION_PREFIX,
     PreviewSnapshotLimits,
+    cleanup_force_action_copy_for_job,
+    force_action_copy_path,
+    remove_force_action_copy,
     remove_preview_snapshot,
+    retain_preview_snapshot_for_force_action,
     snapshot_authorized_directory,
 )
 from lib.processing_paths import (
@@ -1512,6 +1518,204 @@ class TestPrivatePreviewCopyBounds(unittest.TestCase):
             self.assertTrue(os.path.isfile(lock))
             self.assertEqual(os.stat(lock).st_ino, lock_inode)
             self.assertEqual(os.listdir(os.path.join(processing, "preview")), [])
+
+
+class TestPrivateRemovalRefusesWhatItDoesNotOwn(unittest.TestCase):
+    """Every removal in ``lib/preview_snapshot.py`` refuses a foreign path.
+
+    These four functions delete and rename directories, and each guards
+    itself with a name-prefix check and a parent-directory check before it
+    opens anything. Deleting all six refusals used to leave the entire
+    relevant suite green (issue #1313, mutant runner): nothing anywhere
+    asserted a single one of these messages, so the module's own claim that
+    a mismatch leaks a directory rather than deleting a stranger's was
+    unproven legislation. Each test below names one guard and pairs it with
+    the world that must still work, because a guard that refuses everything
+    passes an adversarial test just as well as a correct one.
+    """
+
+    def _world(self) -> tuple[tempfile.TemporaryDirectory[str], str, MagicMock]:
+        parent = tempfile.TemporaryDirectory()
+        source = os.path.join(parent.name, "source")
+        processing = os.path.join(parent.name, "processing")
+        os.mkdir(source)
+        os.mkdir(processing, 0o700)
+        os.mkdir(os.path.join(processing, "albums"), 0o700)
+        os.mkdir(os.path.join(processing, "preview"), 0o700)
+        cfg = MagicMock()
+        cfg.slskd_download_dir = source
+        cfg.processing_dir = processing
+        return parent, processing, cfg
+
+    def _snapshot(self, processing: str, name: str) -> str:
+        path = os.path.join(processing_preview_dir(processing), name)
+        os.mkdir(path, 0o700)
+        with open(os.path.join(path, "01.flac"), "wb") as handle:
+            handle.write(b"audio")
+        return path
+
+    def _action_copy(self, processing: str, name: str) -> str:
+        path = os.path.join(processing_albums_dir(processing), name)
+        os.mkdir(path, 0o700)
+        with open(os.path.join(path, "01.flac"), "wb") as handle:
+            handle.write(b"audio")
+        return path
+
+    def test_removal_refuses_a_directory_not_named_like_a_snapshot(self) -> None:
+        parent, processing, cfg = self._world()
+        with parent:
+            impostor = self._snapshot(processing, "someone-elses-album")
+            with self.assertRaisesRegex(
+                FilesystemAuthorityError, "not a private preview snapshot",
+            ):
+                remove_preview_snapshot(impostor, cfg)
+            self.assertTrue(os.path.isdir(impostor))
+
+    def test_removal_refuses_a_snapshot_name_from_another_directory(self) -> None:
+        parent, _processing, cfg = self._world()
+        with parent:
+            elsewhere = os.path.join(parent.name, "preview-decoy")
+            os.mkdir(elsewhere)
+            with self.assertRaisesRegex(
+                FilesystemAuthorityError,
+                "preview snapshot is outside private root",
+            ):
+                remove_preview_snapshot(elsewhere, cfg)
+            self.assertTrue(os.path.isdir(elsewhere))
+
+    def test_removal_still_removes_its_own_snapshot(self) -> None:
+        parent, processing, cfg = self._world()
+        with parent:
+            mine = self._snapshot(processing, "preview-deadbeef")
+            remove_preview_snapshot(mine, cfg)
+            self.assertFalse(os.path.exists(mine))
+
+    def test_retain_refuses_a_directory_not_named_like_a_snapshot(self) -> None:
+        parent, processing, cfg = self._world()
+        with parent:
+            impostor = self._snapshot(processing, "someone-elses-album")
+            with self.assertRaisesRegex(
+                FilesystemAuthorityError, "not a private preview snapshot",
+            ):
+                retain_preview_snapshot_for_force_action(
+                    impostor, cfg, import_job_id=7,
+                    prefix=FORCE_ACTION_PREFIX,
+                )
+            self.assertTrue(os.path.isdir(impostor))
+            self.assertEqual(
+                os.listdir(processing_albums_dir(processing)), [])
+
+    def test_retain_refuses_a_snapshot_name_from_another_directory(self) -> None:
+        parent, _processing, cfg = self._world()
+        with parent:
+            elsewhere = os.path.join(parent.name, "preview-decoy")
+            os.mkdir(elsewhere)
+            with self.assertRaisesRegex(
+                FilesystemAuthorityError,
+                "preview snapshot is outside private root",
+            ):
+                retain_preview_snapshot_for_force_action(
+                    elsewhere, cfg, import_job_id=7,
+                    prefix=FORCE_ACTION_PREFIX,
+                )
+            self.assertTrue(os.path.isdir(elsewhere))
+
+    def test_retain_still_promotes_its_own_snapshot(self) -> None:
+        parent, processing, cfg = self._world()
+        with parent:
+            mine = self._snapshot(processing, "preview-deadbeef")
+            promoted = retain_preview_snapshot_for_force_action(
+                mine, cfg, import_job_id=7, prefix=FORCE_ACTION_PREFIX,
+            )
+            self.assertEqual(
+                promoted, force_action_copy_path(cfg, 7,
+                                                 prefix=FORCE_ACTION_PREFIX))
+            self.assertTrue(os.path.isfile(os.path.join(promoted, "01.flac")))
+            self.assertFalse(os.path.exists(mine))
+
+    def test_action_removal_refuses_a_name_without_the_lane_prefix(self) -> None:
+        parent, processing, cfg = self._world()
+        with parent:
+            impostor = self._action_copy(processing, "an-imported-album")
+            with self.assertRaisesRegex(
+                FilesystemAuthorityError, "not a private force action copy",
+            ):
+                remove_force_action_copy(
+                    impostor, cfg, prefix=FORCE_ACTION_PREFIX)
+            self.assertTrue(os.path.isdir(impostor))
+
+    def test_action_removal_refuses_the_other_lane_s_prefix(self) -> None:
+        """The prefix IS the lane signal, so force must not eat local-import."""
+        parent, processing, cfg = self._world()
+        with parent:
+            local = self._action_copy(
+                processing, f"{LOCAL_IMPORT_ACTION_PREFIX}7")
+            with self.assertRaisesRegex(
+                FilesystemAuthorityError, "not a private force action copy",
+            ):
+                remove_force_action_copy(local, cfg, prefix=FORCE_ACTION_PREFIX)
+            self.assertTrue(os.path.isdir(local))
+
+    def test_action_removal_refuses_a_prefixed_name_from_elsewhere(self) -> None:
+        parent, _processing, cfg = self._world()
+        with parent:
+            elsewhere = os.path.join(
+                parent.name, f"{FORCE_ACTION_PREFIX}7")
+            os.mkdir(elsewhere)
+            with self.assertRaisesRegex(
+                FilesystemAuthorityError,
+                "force action copy is outside private root",
+            ):
+                remove_force_action_copy(
+                    elsewhere, cfg, prefix=FORCE_ACTION_PREFIX)
+            self.assertTrue(os.path.isdir(elsewhere))
+
+    def test_action_removal_names_the_lane_it_refused_for(self) -> None:
+        """The refusal text is the operator's only clue in a cleanup receipt."""
+        parent, processing, cfg = self._world()
+        with parent:
+            impostor = self._action_copy(processing, "an-imported-album")
+            with self.assertRaisesRegex(
+                FilesystemAuthorityError,
+                "not a private local-import action copy",
+            ):
+                remove_force_action_copy(
+                    impostor, cfg, prefix=LOCAL_IMPORT_ACTION_PREFIX)
+
+    def test_action_removal_still_removes_its_own_copy(self) -> None:
+        parent, processing, cfg = self._world()
+        with parent:
+            mine = self._action_copy(processing, f"{FORCE_ACTION_PREFIX}7")
+            remove_force_action_copy(mine, cfg, prefix=FORCE_ACTION_PREFIX)
+            self.assertFalse(os.path.exists(mine))
+
+    def test_job_scoped_cleanup_refuses_another_job_s_copy(self) -> None:
+        """The one guard that is load-bearing in production composition.
+
+        ``cleanup_force_action_copy_for_job`` is the sole caller of
+        ``remove_force_action_copy``, so this comparison is what stops a
+        terminal cleanup deleting a DIFFERENT live job's action copy.
+        """
+        parent, processing, cfg = self._world()
+        with parent:
+            other = self._action_copy(processing, f"{FORCE_ACTION_PREFIX}8")
+            with self.assertRaisesRegex(
+                FilesystemAuthorityError,
+                "force action copy does not belong to job",
+            ):
+                cleanup_force_action_copy_for_job(
+                    other, cfg, import_job_id=7, prefix=FORCE_ACTION_PREFIX,
+                )
+            self.assertTrue(os.path.isdir(other))
+
+    def test_job_scoped_cleanup_still_removes_its_own_copy(self) -> None:
+        parent, processing, cfg = self._world()
+        with parent:
+            mine = self._action_copy(processing, f"{FORCE_ACTION_PREFIX}7")
+            cleanup_force_action_copy_for_job(
+                mine, cfg, import_job_id=7, prefix=FORCE_ACTION_PREFIX,
+            )
+            self.assertFalse(os.path.exists(mine))
 
 
 class TestAtomicPrivateMaterialization(unittest.TestCase):

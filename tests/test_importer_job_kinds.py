@@ -239,7 +239,7 @@ class TestActionCopyLanes(unittest.TestCase):
                 self.assertIs(kind_lane.distance_threshold_fn, threshold_fn)
 
     def test_the_lanes_are_exactly_the_prefix_tables_own_job_types(self) -> None:
-        # The prefix table in lib/import_preview.py stays the single source
+        # The prefix table in lib/preview_snapshot.py stays the single source
         # for job_type -> action-copy prefix; this proves the kind registry
         # agrees with it in both directions rather than restating it.
         with_lane = {

@@ -349,11 +349,12 @@ def load_linked_current_evidence(
     instead of proceeding on a row nothing could read.
 
     Until issue #1313 this returned a 3-tuple, and two thirds of it were dead.
-    The second element projected the row's spectral detail; the resolver
-    reassigned that name in every one of its three branches before reading it.
-    The third said whether a link had existed at all, and the resolver
-    discarded it into an underscore. Only two tests ever read either, which is
-    how both survived.
+    The second element projected the row's spectral detail, and no branch of
+    the resolver ever read it: two reassign that name before use and the third
+    returns ``CurrentLibraryAuthorityUnavailable`` without touching it. The
+    third element said whether a link had existed at all, and the resolver
+    discarded it into an underscore. Three test functions across two modules
+    read one or the other, which is how both survived.
     """
     try:
         evidence_id = db.get_request_current_evidence_id(request_id)

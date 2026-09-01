@@ -60,6 +60,7 @@ from lib.import_execution import (
     ExecutionLivenessDecision,
     ExecutionLivenessProbe,
     OwnerSessionIdentity,
+    checkpoint,
     checkpoint_automation_owner,
     probe_execution_liveness,
 )
@@ -973,8 +974,7 @@ def _execute_action_copy_dispatch(
         raise ValueError(
             f"{lane_label} job cancellation and pinned session must be paired"
         )
-    if cancellation_token is not None:
-        cancellation_token.raise_if_cancelled()
+    checkpoint(cancellation_token)
     runtime_config = (
         force_runtime_config
         or getattr(ctx, "cfg", None)

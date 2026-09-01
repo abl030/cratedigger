@@ -351,31 +351,58 @@ class TestResolveCurrentLibraryEvidence(unittest.TestCase):
                 self.assertIsNone(resolved.evidence)
                 self.assertFalse(resolved.existing_spectral_evidence.attempted)
 
-    def test_a_link_naming_a_vanished_row_says_which_row_vanished(self):
-        """The one world here whose only trace is a log line.
+    def test_every_broken_link_says_which_link_broke(self):
+        """The three worlds whose only trace is a log line.
 
-        A link pointing at a row that is gone returns None exactly like the
-        three other absences, so nothing about the resolved bundle can tell
-        an operator a link was broken. The warning is the whole signal, and
-        it is useless without the id it could not load: this is the only
-        assertion that stops that branch inverting, or losing its arguments,
-        without a single test noticing (issue #1313 mutmut pass).
+        A vanished row, an unreadable id and an unreadable row all return
+        None exactly like a request with no link at all, so nothing about
+        the resolved bundle tells an operator that a HAVE link is broken.
+        The warning is the entire signal in each case, and it is useless
+        without the ids it names. These are the only assertions stopping any
+        of the three branches from inverting or losing its arguments
+        (issue #1313 mutmut pass, and its review round, which pointed out
+        that the two raising branches earn the pin for the same reason the
+        vanished-row branch does).
         """
-        db = self._db()
-        db.set_request_current_evidence(42, 999)
-
-        with self.assertLogs("cratedigger", level="WARNING") as captured:
-            resolved = self._resolve(
-                db, lambda *_a, **_k: EvidenceBuildResult(None, "empty_current"),
-            )
-
-        assert isinstance(resolved, CurrentLibraryEvidence)
-        self.assertIsNone(resolved.evidence)
-        self.assertEqual(len(captured.records), 1)
-        self.assertEqual(
-            captured.records[0].getMessage(),
-            "Current spectral evidence 999 is missing for request 42",
+        boom = RuntimeError("evidence unavailable")
+        cases = (
+            (
+                "the row vanished",
+                nullcontext(),
+                "Current spectral evidence 999 is missing for request 42",
+            ),
+            (
+                "the id read raised",
+                lambda db: patch.object(
+                    db, "get_request_current_evidence_id", side_effect=boom),
+                "Unable to resolve current spectral evidence for request 42",
+            ),
+            (
+                "the row read raised",
+                lambda db: patch.object(
+                    db, "load_album_quality_evidence_by_id", side_effect=boom),
+                "Unable to load current spectral evidence 999 for request 42",
+            ),
         )
+        for label, failure, expected in cases:
+            with self.subTest(world=label):
+                db = self._db()
+                db.set_request_current_evidence(42, 999)
+                failing = failure(db) if callable(failure) else failure
+
+                with self.assertLogs(
+                    "cratedigger", level="WARNING",
+                ) as captured, failing:
+                    resolved = self._resolve(
+                        db,
+                        lambda *_a, **_k: EvidenceBuildResult(
+                            None, "empty_current"),
+                    )
+
+                assert isinstance(resolved, CurrentLibraryEvidence)
+                self.assertIsNone(resolved.evidence)
+                self.assertEqual(len(captured.records), 1)
+                self.assertEqual(captured.records[0].getMessage(), expected)
 
     def test_a_resolvable_link_warns_about_nothing(self):
         """Must-still-work: the healthy world must not accuse itself."""

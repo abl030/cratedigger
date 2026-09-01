@@ -54,6 +54,7 @@ from lib.import_execution import (
     ExecutionLeaseSnapshot,
     ExecutionLivenessProbe,
     OwnerSessionIdentity,
+    checkpoint,
     probe_execution_liveness,
 )
 from lib.import_preview import (
@@ -832,8 +833,7 @@ def _front_gate_check(
             candidate_evidence_loader=candidate_evidence_loader,
         )
 
-    if cancellation_token is not None:
-        cancellation_token.raise_if_cancelled()
+    checkpoint(cancellation_token)
     source_path = _front_gate_source_path(
         db,
         job,
@@ -858,8 +858,7 @@ def _front_gate_check(
             exc_info=True,
         )
         return None, source_path, None
-    if cancellation_token is not None:
-        cancellation_token.raise_if_cancelled()
+    checkpoint(cancellation_token)
     return result, source_path, None
 
 
@@ -1390,8 +1389,7 @@ def process_claimed_preview_job(
                 audit_resolver = lambda _release_id: failed_lookup
             else:
                 audit_resolver = existing_spectral_resolver_for_config(audit_cfg)
-        if cancellation_token is not None:
-            cancellation_token.raise_if_cancelled()
+        checkpoint(cancellation_token)
         audit, have_lookup = collect_release_attempt_spectral_audit(
             front_gate_action or front_gate_source,
             mb_release_id,
@@ -1424,8 +1422,7 @@ def process_claimed_preview_job(
                 else None
             ),
         )
-        if cancellation_token is not None:
-            cancellation_token.raise_if_cancelled()
+        checkpoint(cancellation_token)
         # A newly measured HAVE fact must become durable BEFORE this job is
         # marked importable — an audit-only scan left the decision spectrally
         # blind (download_log 37206). Reused evidence has no lookup path and
@@ -1464,8 +1461,7 @@ def process_claimed_preview_job(
             job.id,
             front_gate_result.evidence.id,
         )
-        if cancellation_token is not None:
-            cancellation_token.raise_if_cancelled()
+        checkpoint(cancellation_token)
         return db.mark_import_job_preview_importable(
             job.id,
             preview_result=reused_payload,
@@ -1529,8 +1525,7 @@ def process_claimed_preview_job(
             result,
         )
         if evidence_ready:
-            if cancellation_token is not None:
-                cancellation_token.raise_if_cancelled()
+            checkpoint(cancellation_token)
             return db.mark_import_job_preview_importable(
                 job.id,
                 preview_result=preview_payload,
