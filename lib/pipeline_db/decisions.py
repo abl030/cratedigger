@@ -2,7 +2,7 @@
 
 Every function here is the ONE spelling of a rule that used to be written
 twice: once by production (inside a SQL statement, or in the Python tail of
-one) and once by hand in ``tests/fakes/pipeline_db.py``. Extracting the
+one) and once by hand in ``tests/fakes/pipeline_db/``. Extracting the
 DECISION does not move the transaction — the ``FOR UPDATE`` re-read, the
 compare-and-set, and the aggregate all stay exactly where they were. The
 production adapter calls a function here between its reads and its writes;

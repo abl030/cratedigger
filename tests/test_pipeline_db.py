@@ -18450,8 +18450,9 @@ class TestReadProjectionParity(unittest.TestCase):
     """#481 item 2 — fake<->production READ-projection parity gate.
 
     ``FakePipelineDB`` hand-mirrors production SELECT projections as
-    literal key tuples (``_long_tail_projection`` and the
-    ``list_triage_page`` projection in ``tests/fakes/pipeline_db.py``)
+    literal key tuples (``_long_tail_projection`` in
+    ``tests/fakes/pipeline_db/requests.py``, the ``list_triage_page``
+    projection in ``tests/fakes/pipeline_db/misc.py``)
     across dozens of ``get_*`` methods. Nothing failed if the two
     drifted — PR #480 had to update the SQL projection and the fake's
     key tuple in lockstep by hand. This is the read-side mirror of
