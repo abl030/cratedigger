@@ -126,7 +126,7 @@ t.section('every marker is exactly three tab-separated fields on one line');
 
 t.section('a marker survives every character PYTHON calls a line break');
 {
-  // The reader is `scripts/run_test_suite.py::_parse_failures` iterating
+  // The reader is `scripts/phase_parsers/js_checks.py` iterating
   // `str.splitlines()`, which breaks on more than CR/LF. An assertion
   // message never passes through `show()`, so one of these reaches the
   // marker verbatim and yields a two-field line -- which the reader
