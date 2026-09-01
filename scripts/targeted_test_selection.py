@@ -1606,9 +1606,11 @@ ROOT_COVERAGE_RULES: tuple[RootCoverageRule, ...] = (
 class SelectionRule:
     """One path-matched neighbour contribution, as data (issue #1313).
 
-    The basename conventions and the directory rules used to be fifteen
-    hand-written ``if`` branches — six in ``_direct_test_candidates``, nine
-    in ``_resolve_neighbours`` — so the modules they name were invisible to
+    The basename conventions and the directory rules used to be hand-written
+    ``if`` branches: all six in ``_direct_test_candidates``, and nine of the
+    twelve in ``_resolve_neighbours`` (the other three are the self-selector
+    and two existence checks, none of which is a rule) — so the modules they
+    name were invisible to
     `tests/test_selection_coverage_audit.py`'s contract A — that audit's
     own docstring recorded the inline literals as out of reach. As rows
     they are ordinary data, audited like `EXACT_PATH_NEIGHBOURS` and
@@ -1765,16 +1767,21 @@ BASENAME_RULES: tuple[SelectionRule, ...] = (
         top_level=True,
         suffixes=(".py",),
         derived=("tests.test_{stem}",),
-        # cratedigger.py is the one real instance and has no
+        # Two top-level .py files exist. album_source.py is the one this row
+        # actually serves -- tests/test_album_source.py exists, so the row
+        # resolves it with no entry. cratedigger.py is the other, and has no
         # tests.test_cratedigger, which is why it carries a hand-written
         # EXACT_PATH_NEIGHBOURS entry instead.
     ),
 )
 
 #: Directory rules: "anything under here also regresses these modules".
-#: Unlike the basename rules these accumulate — several can match one path,
-#: and they run in this order after the basename stage, which is the order
-#: their modules appear in the resolved tuple.
+#: Unlike the basename stage, which takes THE one matching row, this loop
+#: accumulates every row that matches. No two of today's rows can both match
+#: (no row's prefix or exact path is a prefix of another's), so that
+#: difference is currently unobservable and the row order below is not
+#: pinned by anything — what IS pinned is the stage order: table entry, then
+#: self-selector, then basename, then these.
 PREFIX_RULES: tuple[SelectionRule, ...] = (
     SelectionRule(
         name="prefix:lib/pipeline_db/",
@@ -1888,20 +1895,34 @@ class NeighbourSource:
 def _assert_selection_rules_well_formed(
     rules: Sequence[SelectionRule],
 ) -> None:
-    """Every row names itself uniquely, matches something, and adds something.
+    """Every row names and describes itself uniquely, matches something, and
+    adds something.
 
-    Three ways a row can be silently wrong. A row with no matcher matches
+    Four ways a row can be silently wrong. A row with no matcher matches
     EVERY path, so its modules would join every selection in the repository.
     A row with neither ``neighbours`` nor ``derived`` matches paths and
     contributes nothing, which reads as coverage and is not. A duplicate
     ``name`` makes `explain`'s attribution ambiguous and lets one row's pin
     silently stand in for another's.
+
+    A duplicate ``description`` is the subtlest, and it is why this clause
+    exists rather than leaving descriptions to review: `explain` prints one
+    beside every attributed module, so a row wearing a neighbour's sentence
+    tells an operator that a route file matched a rule for non-route files.
+    The review round's mutant did exactly that and nothing failed.
     """
     seen: set[str] = set()
+    described: set[str] = set()
     for rule in rules:
         if rule.name in seen:
             raise ValueError(f"duplicate SelectionRule name: {rule.name}")
         seen.add(rule.name)
+        if rule.description in described:
+            raise ValueError(
+                f"duplicate SelectionRule description on {rule.name}: "
+                f"{rule.description}"
+            )
+        described.add(rule.description)
         if not (
             rule.prefixes
             or rule.exact_paths
@@ -2329,10 +2350,14 @@ def _root_coverage_lines(
     """How the fail-closed contract treats this path, and what it selects.
 
     Reads `ROOT_COVERAGE_RULES` as data and calls the REAL
-    `_changed_path_neighbours` for the verdict, so an explanation can never
-    disagree with what a run would do. That call writes the admitted-gap
-    note to stderr; it is swallowed here because this report already states
-    the gap and its rationale in full.
+    `_changed_path_neighbours` for the verdict, then applies the REAL
+    `_paired_module` on top, which is the other half of what
+    `expand_test_selection` does per path. Neither is reimplemented here, so
+    the reported selection cannot disagree with a run — except for the
+    ambient audits, which are named rather than listed because they are the
+    same on every path. That resolver call writes the admitted-gap note to
+    stderr; it is swallowed because this report already states the gap and
+    its rationale in full.
     """
     lines: list[str] = []
     covering = [rule for rule in ROOT_COVERAGE_RULES if rule.covers(path)]
@@ -2348,9 +2373,13 @@ def _root_coverage_lines(
                 f"  policed by: the {rule.root}/ row — zero neighbours here "
                 f"raises unless {rule.registry_name} admits the path"
             )
-        else:
+            continue
+        lines.append(f"  admitted gap in {rule.registry_name}: {rationale}")
+        if rule.admitted_selects_nothing:
             lines.append(
-                f"  admitted gap in {rule.registry_name}: {rationale}"
+                "      this registry selects NOTHING at all: every module "
+                "above is discarded before resolution, so a registration "
+                "cannot be a lookalike neighbour set (issue #1081)"
             )
     buffer = io.StringIO()
     try:
@@ -2359,14 +2388,39 @@ def _root_coverage_lines(
     except ValueError as exc:
         lines.append(f"  selects: NOTHING — this path fails closed: {exc}")
         return tuple(lines)
+    # expand_test_selection adds a deterministic/generated sibling for every
+    # module it selects, which no rule contributes and no source above can
+    # name. Reporting the neighbours alone under-stated what really runs on
+    # 254 of 1,619 tracked paths (measured: tests 149, migrations 82,
+    # scripts 13, web 5, lib 4, top level 1) -- migrations/*.sql pull in
+    # tests.test_migrator_generated, and a lib/ module whose only coverage is
+    # a generated sibling gets it from here, not from a rule. It never
+    # under-stated in the dangerous direction: of those 254, zero resolve no
+    # neighbours at all, so the report never said "nothing" while something
+    # ran.
+    paired = [
+        sibling
+        for module in _ordered_unique(selected)
+        if (sibling := _paired_module(module, repo_root)) is not None
+    ]
+    if paired:
+        lines.append(
+            "  paired siblings — added by expand_test_selection, not by any "
+            "rule:"
+        )
+        lines.extend(f"      {module}" for module in paired)
     # De-duplicated because that is what actually runs: expand_test_selection
-    # collapses repeats across every changed path before the runner sees them,
-    # so a module two mechanisms both name is one target. The per-source
-    # breakdown above still shows both mechanisms naming it.
-    unique = _ordered_unique(selected)
+    # collapses repeats before the runner sees them, so a module two
+    # mechanisms both name is one target. The per-source breakdown above
+    # still shows both mechanisms naming it.
+    unique = _ordered_unique((*selected, *paired))
     lines.append(
         "  selects: "
         + (", ".join(unique) if unique else "nothing beyond the ambient gates")
+    )
+    lines.append(
+        "      plus every ambient audit and ratchet, which run on every "
+        "selection regardless of the path"
     )
     return tuple(lines)
 

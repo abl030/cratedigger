@@ -168,7 +168,7 @@ def shared_neighbour_sets() -> dict[str, tuple[str, ...]]:
 #: alone cannot distinguish the real `path.parts[:1] == (root,)` guard from
 #: a narrower `len(path.parts) == 2` mutant (issue #1199 review F2), so each
 #: probe goes one level deeper. Each directory is chosen to dodge every
-#: prefix rule in `_resolve_neighbours` (`tests/fakes/`,
+#: `PREFIX_RULES` row (`tests/fakes/`,
 #: `tests/structural_audits/`, `tests/world_model/`, `lib/pipeline_db/`,
 #: `lib/quality/` all resolve neighbours unconditionally and would make the
 #: probe resolve rather than raise). Keyed by root, so a new rule with no
@@ -580,8 +580,9 @@ class TestRootCoverageRegistriesAreExact(unittest.TestCase):
         without stopping the walk.
 
         The second half is what the deleted twins lacked (review M48): they
-        threw the resolved tuple away, so deleting `_resolve_neighbours`'
-        `module.startswith("tests.")` self-selector guard — which makes
+        threw the resolved tuple away, so deleting the
+        `module.startswith("tests.")` self-selector guard (in
+        `resolve_attributed_neighbours` since #1313) — which makes
         `scripts/test_substrate.py` emit the bogus selector
         `scripts.test_substrate`, the exact #1081 founding defect of an
         unrunnable selector reaching the runner — left every test green.

@@ -38,7 +38,9 @@ from scripts.targeted_test_selection import (
     SelectionRule,
     _assert_no_double_registration,
     _assert_selection_rules_well_formed,
+    _basename_rule,
     _changed_path_neighbours,
+    _direct_test_candidates,
     ambient_test_modules,
     assert_selection_complete,
     expand_test_selection,
@@ -613,16 +615,19 @@ class TestTargetedTestSelection(unittest.TestCase):
 class TestSelectionRuleTable(unittest.TestCase):
     """`SELECTION_RULES` and the `explain` seam (issue #1313).
 
-    The basename conventions and directory rules used to be eighteen
-    hand-written `if` branches. As data they are auditable and attributable;
-    these are the contracts that keeps them honest. Selection machinery, so
+    The basename conventions and directory rules used to be hand-written
+    `if` branches. As data they are auditable and attributable; these are
+    the contracts that keep them honest. Selection machinery, so
     deterministic tests only.
     """
 
-    #: Path shapes the repository does not currently contain, so the
-    #: disjointness pin below covers more than today's tree: a shell script
-    #: outside scripts/, a top-level shell script, a route module, and a
-    #: top-level Python file.
+    #: Extra shapes for the disjointness pin. Only `probe.sh` genuinely
+    #: extends it beyond `_repository_paths()` — the tree holds no top-level
+    #: shell script. The rest (a `.sh` outside scripts/, a route module, a
+    #: top-level `.py`) all exist under the walked roots already; they are
+    #: kept because they are the shapes a reader checks first, and because a
+    #: rule edit that breaks them should fail on a named probe rather than on
+    #: whichever real file happens to match.
     SYNTHETIC_PROBES = (
         "lib/probe.sh",
         "scripts/probe.sh",
@@ -731,12 +736,53 @@ class TestSelectionRuleTable(unittest.TestCase):
                 )
             )
 
-    def test_the_real_table_passes_its_own_checker(self) -> None:
-        """Must-still-work control for the three clauses above, and the
-        reason the import-time call is not merely decorative.
+    def test_a_duplicate_rule_description_is_refused_at_import_time(
+        self,
+    ) -> None:
+        """Known-bad self-test. `explain` prints a description beside every
+        attributed module, so a row wearing a neighbour's sentence tells an
+        operator that a route file matched the rule for non-route files.
+        The review round planted exactly that and nothing failed.
         """
+        shared = "the same sentence on two different rules"
+        with self.assertRaisesRegex(
+            ValueError, r"duplicate SelectionRule description on second"
+        ):
+            _assert_selection_rules_well_formed(
+                (
+                    SelectionRule(
+                        name="first",
+                        description=shared,
+                        root="lib",
+                        derived=("tests.test_{stem}",),
+                    ),
+                    SelectionRule(
+                        name="second",
+                        description=shared,
+                        root="web",
+                        derived=("tests.test_{stem}",),
+                    ),
+                )
+            )
+
+    def test_the_real_table_passes_its_own_checker(self) -> None:
+        """Must-still-work control for the four clauses above."""
         _assert_selection_rules_well_formed(SELECTION_RULES)
         self.assertEqual(SELECTION_RULES, (*BASENAME_RULES, *PREFIX_RULES))
+
+    def test_the_module_runs_its_own_checker_at_import(self) -> None:
+        """The four clauses above call the checker directly, so none of them
+        notices if the module stops calling it — deleting the import-time
+        call left all of them green. Pinned as source because that call is a
+        module-level statement no in-process test can re-trigger.
+        """
+        source = pinned_source(
+            REPO_ROOT / "scripts" / "targeted_test_selection.py"
+        )
+
+        self.assertIn(
+            "_assert_selection_rules_well_formed(SELECTION_RULES)", source
+        )
 
     def test_attribution_names_the_mechanism_behind_every_module(self) -> None:
         """Three mechanisms fire for one path, and each names what it added.
@@ -763,13 +809,24 @@ class TestSelectionRuleTable(unittest.TestCase):
         # two that belong to no rule are spelled here because nothing else
         # holds them; the rule-owned two come from the table, so a row whose
         # description drifts from what it does is caught at its own site.
-        by_name = {rule.name: rule for rule in SELECTION_RULES}
+        # Spelled out, not read back from the table: `explain` prints these
+        # beside every attributed module, and comparing a row against itself
+        # passes for any sentence at all. The review round proved that by
+        # giving one row a neighbour's description and watching every test
+        # stay green. Changing a description is now a deliberate two-place
+        # edit, the same boundary MASKABLE_ENTRY_PINS has.
         self.assertEqual(
             [source.description for source in sources],
             [
                 "hand-authored entry for this exact path",
-                by_name["basename:lib/*.py"].description,
-                by_name["prefix:lib/pipeline_db/"].description,
+                (
+                    "a lib module is covered by tests/test_<stem>.py and its "
+                    "generated sibling"
+                ),
+                (
+                    "a production DB cluster regresses the shared boundary "
+                    "contracts and its own mirrored fake's self-tests"
+                ),
             ],
         )
         self.assertEqual(
@@ -820,12 +877,21 @@ class TestSelectionRuleTable(unittest.TestCase):
         )
 
     def test_explain_names_the_rule_that_selected_each_module(self) -> None:
-        report = explain_path("web/routes/youtube.py", REPO_ROOT)
-        joined = "\n".join(report)
+        """Asserted as LINES, not as substrings of the joined report.
 
-        self.assertIn("prefix:web/routes/", joined)
-        self.assertIn("tests.web.test_routes_youtube", joined)
-        self.assertIn("tests.web.test_route_audit", joined)
+        A substring assertion here is satisfied by the flat `selects:`
+        summary at the bottom, so deleting the per-source module breakdown
+        entirely left this test green — it was not constraining the
+        attribution it is named for (review round, mutant M18).
+        """
+        report = explain_path("web/routes/youtube.py", REPO_ROOT)
+
+        rule_line = next(
+            line for line in report if line.startswith("  prefix:web/routes/")
+        )
+        self.assertIn("a route regresses the route audits", rule_line)
+        self.assertIn("      tests.web.test_routes_youtube", report)
+        self.assertIn("      tests.web.test_route_audit", report)
         # The whole sentence, as a line: `web/` is policed by no root rule,
         # and a reader who only sees "policed by: nothing" does not learn
         # that zero neighbours here would be silent rather than fatal.
@@ -833,6 +899,26 @@ class TestSelectionRuleTable(unittest.TestCase):
             "  policed by: nothing — no ROOT_COVERAGE_RULES row covers this "
             "root and suffix, so resolving zero neighbours here is silent",
             report,
+        )
+
+    def test_a_route_module_never_matches_the_web_basename_rule(self) -> None:
+        """`excluded_prefixes` was the one `matches` clause with no test.
+
+        Neutralising it changes no selection today, only because no route
+        stem has a `tests/test_web_<stem>.py` or `tests/web/test_<stem>.py`
+        to resolve — so the loss is silent until one appears. What it does
+        change immediately is what `explain` says: a route file attributed
+        to the rule for NON-route modules, with two phantom missing names
+        under it.
+        """
+        route = PurePosixPath("web/routes/youtube.py")
+
+        self.assertIsNone(_basename_rule(route))
+        self.assertEqual(_direct_test_candidates(route), ())
+
+        report = explain_path("web/routes/youtube.py", REPO_ROOT)
+        self.assertEqual(
+            [line for line in report if line.startswith("  basename:")], []
         )
 
     def test_explain_says_so_when_no_mechanism_matches_at_all(self) -> None:
@@ -881,6 +967,69 @@ class TestSelectionRuleTable(unittest.TestCase):
         self.assertIn("SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE", report)
         self.assertIn(rationale, report)
         self.assertIn("selects: nothing beyond the ambient gates", report)
+
+    def test_explain_reports_the_paired_sibling_no_rule_contributes(
+        self,
+    ) -> None:
+        """`expand_test_selection` adds a deterministic/generated sibling on
+        top of the neighbours, and no rule contributes it.
+
+        Reporting only the neighbours under-stated what really runs on 254
+        of 1,619 tracked paths. `migrations/*.sql` is the clearest case: the
+        prefix rule names `tests.test_migrator`, and `tests.test_migrator_
+        generated` runs too.
+        """
+        report = explain_path("migrations/001_initial.sql", REPO_ROOT)
+        selects = next(line for line in report if "  selects: " in line)
+
+        self.assertIn(
+            "  paired siblings — added by expand_test_selection, not by any "
+            "rule:",
+            report,
+        )
+        self.assertIn("      tests.test_migrator_generated", report)
+        self.assertIn("tests.test_migrator_generated", selects)
+        # The third thing that runs and no rule names. Asserted as a line
+        # because it is the sentence that stops a reader treating `selects:`
+        # as the complete list.
+        self.assertIn(
+            "      plus every ambient audit and ratchet, which run on every "
+            "selection regardless of the path",
+            report,
+        )
+        # And a path with no sibling to add says nothing about pairing.
+        self.assertEqual(
+            [
+                line
+                for line in explain_path("web/routes/youtube.py", REPO_ROOT)
+                if "paired siblings" in line
+            ],
+            [],
+        )
+
+    def test_explain_says_an_early_returning_gap_discards_everything(
+        self,
+    ) -> None:
+        """The `tests/` registry returns before resolution, so a registered
+        path selects nothing even though a prefix rule would have named six
+        modules. Showing that discarded set with no explanation is the one
+        place the report can read as self-contradictory.
+        """
+        registered = "tests/world_model/mirror_harness.py"
+        self.assertIn(registered, SHARED_MODULES_WITHOUT_COVERAGE)
+
+        report = explain_path(registered, REPO_ROOT)
+
+        self.assertIn("      tests.test_world_model_burst", report)
+        self.assertIn(
+            "      this registry selects NOTHING at all: every module above "
+            "is discarded before resolution, so a registration cannot be a "
+            "lookalike neighbour set (issue #1081)",
+            report,
+        )
+        self.assertIn(
+            "  selects: nothing beyond the ambient gates", report
+        )
 
     def test_explain_swallows_the_resolver_stderr_note_it_duplicates(
         self,
@@ -945,21 +1094,32 @@ class TestSelectionRuleTable(unittest.TestCase):
         self.assertIn("basename:lib/*.py", completed.stdout)
         self.assertIn("(no mechanism matched this path)", completed.stdout)
 
-    def test_the_explain_entry_point_refuses_an_unknown_subcommand(self) -> None:
-        completed = subprocess.run(
-            [
-                sys.executable,
-                str(REPO_ROOT / "scripts" / "targeted_test_selection.py"),
-                "resolve",
-                "lib/download.py",
-            ],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+    def test_the_explain_entry_point_refuses_a_bad_invocation(self) -> None:
+        """Both refusals, because they are enforced by different things.
 
-        self.assertEqual(completed.returncode, 2, completed.stdout)
+        An unknown subcommand is rejected by argparse's `choices` whatever
+        `required=` says; NO subcommand is rejected only by `required=True`.
+        Covering the first alone left flipping that flag green, and the
+        no-argv run then died with an uncaught `AttributeError` instead of a
+        usage message (review round, mutant M35).
+        """
+        script = str(REPO_ROOT / "scripts" / "targeted_test_selection.py")
+        for argv, case in (
+            (["resolve", "lib/download.py"], "unknown subcommand"),
+            ([], "no subcommand at all"),
+        ):
+            with self.subTest(case=case):
+                completed = subprocess.run(
+                    [sys.executable, script, *argv],
+                    cwd=REPO_ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+                self.assertEqual(completed.returncode, 2, completed.stdout)
+                self.assertIn("usage:", completed.stderr)
+                self.assertNotIn("Traceback", completed.stderr)
 
 
 class TestTargetedSuiteWiring(unittest.TestCase):
