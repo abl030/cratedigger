@@ -1265,10 +1265,12 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
 
         Only an EXPLICIT label ("opus 128", "mp3 v0") may project into
         ``target_format`` from a lineage-1 row; a bare codec name is
-        beets-item vocabulary, not a quality contract. 5,555 live
-        lineage-1 evidence rows carry bare-codec storage_format
-        (measured 2026-09-01), so a guard slip here mislabels them all
-        (#1317 mutmut survivor: the and→or precedence mutant).
+        beets-item vocabulary, not a quality contract. The world is
+        mass-produced: 5,555 live lineage-1 evidence rows carry
+        bare-codec storage_format (measured 2026-09-01) — an upper
+        bound on the blast radius, since only rows joined into a
+        visible wrong-match entry render here (#1317 mutmut survivor:
+        the and→or precedence mutant).
         """
         self._seed_entry_evidence(
             self.default_log_id,

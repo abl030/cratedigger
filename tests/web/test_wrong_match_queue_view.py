@@ -18,6 +18,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row, seed_visible_wrong_match
+
+# Module-qualified on purpose: importing the class itself would make
+# unittest's loader (and pytest's collector) collect its tests a second
+# time from this module's namespace.
+from tests.web import test_routes_imports as _routes_contract
 from web.wrong_match_queue_view import (
     _entry_sort_key,
     _latest_import_summary,
@@ -28,25 +33,11 @@ from web.wrong_match_queue_view import (
 
 _MBID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 _RG_MBID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
-# Second pressing for two-request worlds: the fake mirrors production's
-# unique-active-mb_release_id constraint, so sibling requests need their
-# own release identity.
+# Second pressing for two-request worlds: the fake mirrors migration
+# 001's plain UNIQUE on album_requests.mb_release_id (no status carve-out
+# — even a replaced sibling may not reuse an MBID), so sibling requests
+# need their own release identity.
 _MBID_B = "cccccccc-cccc-cccc-cccc-cccccccccccc"
-
-# Every key a group dict carries: the header fields built inline in
-# build_wrong_match_groups plus the _quality_summary block. The browser
-# consumes several of these by name (pending_count drives the visibility
-# filter in web/js/wrong-matches.js), so a renamed or dropped key ships
-# green unless the SET itself is pinned (#1317 mutmut survivors).
-_GROUP_KEYS = frozenset({
-    "request_id", "artist", "album", "mb_release_id", "mb_release_group_id",
-    "in_library", "pending_count", "entries", "import_jobs", "latest_import",
-    "status", "min_bitrate", "avg_bitrate", "format", "verified_lossless",
-    "current_spectral_grade", "current_spectral_bitrate",
-    "current_spectral_accusation_admissible",
-    "current_spectral_accusation_withheld",
-    "quality_label", "quality_rank",
-})
 
 
 class _RankRecorder:
@@ -209,11 +200,15 @@ class TestBuildWrongMatchGroupsInterface(unittest.TestCase):
         self.assertEqual(self._build(), [])
 
     def test_group_payload_key_set_and_identity_fields(self) -> None:
-        """The group dict carries exactly the declared keys, values intact.
+        """The group dict carries exactly the contract keys, values intact.
 
         pending_count is the browser's visibility filter and mb ids feed
-        the release links; a renamed key leaves a stray sibling behind
-        while the real reader goes blank (#1317 mutmut survivors).
+        the release links (web/js/wrong-matches.js); a renamed key leaves
+        a stray sibling behind while the real reader goes blank (#1317
+        mutmut survivors). Exact equality against the route contract's
+        GROUP_REQUIRED_FIELDS — one hand-maintained key list, two
+        strictness levels (the contract test checks presence, this pins
+        the whole set).
         """
         self.db.seed_request(make_request_row(
             id=7, status="wanted",
@@ -221,17 +216,23 @@ class TestBuildWrongMatchGroupsInterface(unittest.TestCase):
         ))
         seed_visible_wrong_match(self.db, self.root, request_id=7)
         group = self._build()[0]
-        self.assertEqual(set(group.keys()), set(_GROUP_KEYS))
+        self.assertEqual(
+            set(group.keys()),
+            set(_routes_contract.TestWrongMatchesContract
+                .GROUP_REQUIRED_FIELDS))
         self.assertEqual(group["mb_release_id"], _MBID)
         self.assertEqual(group["mb_release_group_id"], _RG_MBID)
         self.assertEqual(group["pending_count"], 1)
         self.assertIsNone(group["latest_import"])
 
     def test_skipped_replaced_row_does_not_stop_later_rows(self) -> None:
-        """One filtered row must not end the scan — and the production
+        """One filtered row must not end the scan — and the SIGNATURE
         default (replaced hidden) is exercised by OMITTING the kwarg,
-        which no other test does (#1317 mutmut survivors: the
-        include_replaced default flip and continue→break)."""
+        which no other caller in the repo does: the route always passes
+        the query-derived value explicitly, and the route's own default
+        is pinned separately in test_routes_imports (#1317 mutmut
+        survivors: the include_replaced default flip and
+        continue→break)."""
         self.db.seed_request(make_request_row(
             id=6, status="replaced", mb_release_id=_MBID_B,
         ))
@@ -248,8 +249,9 @@ class TestBuildWrongMatchGroupsInterface(unittest.TestCase):
         self.db.seed_request(make_request_row(
             id=6, status="wanted", mb_release_id=_MBID_B,
         ))
-        # Distinct folder name: the seeder's default path is shared, and
-        # seeding request 7 would silently recreate a just-deleted one.
+        # Distinct folder name: the seeder's default path is SHARED, so
+        # with the default both rows would point at one directory and
+        # deleting request 6's folder would prove request 7's absent too.
         gone = seed_visible_wrong_match(
             self.db, self.root, request_id=6,
             name="Gone - Album (2024) [dead1234]",
@@ -262,31 +264,23 @@ class TestBuildWrongMatchGroupsInterface(unittest.TestCase):
     def test_entry_username_prefers_row_then_validation_result(self) -> None:
         """download_log.soulseek_username wins; the envelope is fallback.
 
-        Both worlds are needed: the row-set world distinguishes a
-        wrong-key read (which silently falls through to the envelope),
-        the row-null world distinguishes or→and on the fallback chain
-        (#1317 mutmut survivors).
+        Both worlds are needed, for different mutants: the row-set world
+        kills a wrong-key read (which silently falls through to the
+        envelope) AND or→and on the chain (row-and-envelope yields the
+        envelope); the row-null world proves the envelope fallback is
+        consulted at all — a mutant deleting the ``or`` arm is invisible
+        to the first world (#1317 mutmut survivors).
         """
-        parent = os.path.join(self.root, "wrong_matches")
-        os.makedirs(parent, exist_ok=True)
-        path = os.path.join(parent, "Artist - Album (2024) [cafe1234]")
-        os.makedirs(path)
-        with open(os.path.join(path, "01 Track.mp3"), "wb") as handle:
-            handle.write(b"audio")
         self.db.seed_request(make_request_row(
             id=6, status="wanted", mb_release_id=_MBID_B,
         ))
-        self.db.log_download(
-            6, outcome="rejected", soulseek_username="rowpeer",
-            validation_result={
-                "scenario": "wrong_match", "detail": "wrong album",
-                "distance": 0.6, "failed_path": path,
-                "soulseek_username": "vrpeer",
-                "candidates": [], "items": [],
-            },
+        seed_visible_wrong_match(
+            self.db, self.root, request_id=6,
+            name="Row - Peer (2024) [beef1234]",
+            soulseek_username="rowpeer",
         )
-        # World 2: the shared seeder leaves the row-level username unset,
-        # so its entry must surface the envelope's "peer".
+        # World 2: the seeder leaves the row-level username unset, so its
+        # entry must surface the envelope's "peer".
         seed_visible_wrong_match(self.db, self.root, request_id=7)
         by_request = {
             g["request_id"]: g["entries"] for g in self._build()
@@ -400,7 +394,8 @@ class TestQualitySummary(unittest.TestCase):
     had no assertion at all (#1317 mutmut survivors).
     """
 
-    def test_exact_presence_without_beets_detail_full_payload(self) -> None:
+    def test_exact_presence_with_unmeasured_beets_detail_full_payload(
+            self) -> None:
         rank = _RankRecorder(result="lossless")
         row = {
             "request_status": "wanted",
@@ -410,7 +405,19 @@ class TestQualitySummary(unittest.TestCase):
             "request_current_spectral_grade": "genuine",
             "request_current_spectral_bitrate": 999,
         }
-        summary = _quality_summary(row, {_MBID: {}}, "exact", rank)
+        # The producer (BeetsDB.check_mbids_detail) always returns all
+        # six keys — a bare {} is a shape it never emits and would
+        # short-circuit the guarded reads this pin exists to exercise.
+        unmeasured_detail: dict[str, object] = {
+            "beets_tracks": 10,
+            "beets_format": None,
+            "beets_bitrate": None,
+            "beets_avg_bitrate": None,
+            "beets_samplerate": None,
+            "beets_bitdepth": None,
+        }
+        summary = _quality_summary(
+            row, {_MBID: unmeasured_detail}, "exact", rank)
         self.assertEqual(summary, {
             "status": "wanted",
             "min_bitrate": 320,
