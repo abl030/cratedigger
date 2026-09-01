@@ -662,21 +662,29 @@ class _FakeImportJobsMixin(_FakePipelineDBBase):
         identical rule, and the two lanes' real differences — which preview
         statuses are eligible, the preview lane's requeue backoff, and the
         sort key — stay at their own call sites where they belong.
+
+        A live Beets child refuses EVERY type, which production spells as an
+        early ``return []`` in each peek rather than inside the fragment. Per
+        row here instead of once per scan: same answer, since a true guard
+        refuses every row, and it keeps the rule in the one place both lanes
+        already read.
         """
+        if execution_lease is not None and execution_lease.beets is not None:
+            return False
         job_type = row.get("job_type")
         if job_type == IMPORT_JOB_YOUTUBE:
             return True
         if job_type == IMPORT_JOB_AUTOMATION:
             return (
                 execution_lease is not None
-                and execution_lease.beets is None
                 and self._automation_job_has_authority(row)
             )
         if job_type in (IMPORT_JOB_FORCE, IMPORT_JOB_LOCAL):
             # `isinstance` rather than the `int(...)` the two copies used:
-            # production joins on the column, so a row with no usable
-            # request_id is refused there too, and narrowing here keeps this
-            # method free of a typing escape hatch.
+            # production LEFT JOINs the request, so a row with no usable
+            # request_id compares its status against NULL and is refused
+            # there too, and narrowing here keeps this method free of a
+            # typing escape hatch.
             request_id = row.get("request_id")
             return isinstance(request_id, int) and (
                 self._force_job_request_is_current(row, request_id=request_id)

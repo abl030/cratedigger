@@ -5,6 +5,7 @@ fake has its sibling tests beside it.
 """
 import unittest
 
+from lib.import_execution import ExecutionLeaseSnapshot, ProcessIdentity
 from tests.dispatch_helpers import (
     claim_next_import_job,
     handoff_automation_owner,
@@ -112,11 +113,6 @@ class TestFakeClaimMirrorsProductionsLaneGuards(unittest.TestCase):
         state, so without the caller-supplied ``request_id`` in the row
         guard the fake would claim here while production's SQL refuses.
         """
-        from lib.import_execution import (
-            ExecutionLeaseSnapshot,
-            ProcessIdentity,
-        )
-
         db = FakePipelineDB()
         job = self._owner(db, 4401)
         bystander = self._owner(db, 4402)
@@ -203,12 +199,12 @@ class TestFakeClaimMirrorsProductionsLaneGuards(unittest.TestCase):
         Production's ``_CANDIDATE_JOB_TYPE_ROUTING`` requires the request to
         still be sitting at the job's ``expected_request_status``, and the
         fake's ``_candidate_job_type_routes`` says the same thing. Nothing
-        drove it: replacing the whole force/local arm with ``return True``
-        left tests.test_import_queue, tests.test_importer_job_kinds,
+        drove it: with the whole force/local arm replaced by ``return True``,
+        every module that reaches a candidate scan stayed green —
+        tests.test_import_queue, tests.test_importer_job_kinds,
         tests.test_fakes, tests.test_fakes_import_jobs,
-        tests.test_force_import_gates, tests.test_local_import_lane,
-        tests.test_import_operation_fence and
-        tests.test_import_job_lane_generated all green.
+        tests.test_local_import_lane, tests.test_import_operation_fence and
+        tests.test_import_job_lane_generated.
         """
         from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
 
@@ -253,6 +249,103 @@ class TestFakeClaimMirrorsProductionsLaneGuards(unittest.TestCase):
         self.assertTrue(import_offers())
         db.update_status(4404, "imported")
         self.assertFalse(import_offers())
+
+    def _lease(self, beets: bool = False) -> ExecutionLeaseSnapshot:
+        return ExecutionLeaseSnapshot(
+            host_boot_id="boot-lane-scan",
+            invocation_id="invocation-lane-scan",
+            systemd_unit="cratedigger-import-preview-worker.service",
+            worker=ProcessIdentity(pid=611, start_ticks=6011),
+            beets=ProcessIdentity(pid=612, start_ticks=6012) if beets else None,
+        )
+
+    def test_an_automation_candidate_needs_a_lease(self) -> None:
+        """The routing rule's other guarded arm, in both lanes.
+
+        Production gates automation candidates on the caller having an
+        execution lease at all (``%s IS NOT NULL`` in the fragment). The
+        force/local arm above was pinned while this one was not: replacing
+        the whole automation arm with ``True`` left every module that
+        reaches a candidate scan green.
+        """
+        from lib.pipeline_db._shared import ADVISORY_LOCK_NAMESPACE_IMPORT
+
+        db = FakePipelineDB()
+        job = self._owner(db, 4406)
+        lease = self._lease()
+
+        def preview_offers(execution_lease: ExecutionLeaseSnapshot | None) -> bool:
+            return any(
+                row.id == job.id
+                for row in db.peek_import_preview_job_candidates(
+                    limit=10, execution_lease=execution_lease,
+                )
+            )
+
+        def import_offers(execution_lease: ExecutionLeaseSnapshot | None) -> bool:
+            return any(
+                row.id == job.id
+                for row in db.peek_import_job_candidates(
+                    limit=10, execution_lease=execution_lease,
+                )
+            )
+
+        # Must still work first, so the refusal is a refusal.
+        self.assertTrue(preview_offers(lease))
+        self.assertFalse(preview_offers(None))
+
+        # The import lane reaches this row only through the real preview
+        # claim: an automation job cannot be marked importable without one.
+        with db.advisory_lock(ADVISORY_LOCK_NAMESPACE_IMPORT, 4406) as held:
+            self.assertTrue(held)
+            self.assertIsNotNone(db.claim_automation_import_preview_job_under_lock(
+                job.id, request_id=4406, worker_id="preview",
+                execution_lease=lease,
+            ))
+        self.assertIsNotNone(db.mark_import_job_preview_importable(
+            job.id, expected_execution_lease=lease,
+        ))
+        self.assertTrue(import_offers(lease))
+        self.assertFalse(import_offers(None))
+
+    def test_a_live_beets_child_refuses_every_candidate_type(self) -> None:
+        """Production's scan-level refusal, which the fake used to skip.
+
+        ``peek_import_job_candidates`` and its preview twin both return
+        ``[]`` outright while the caller's lease holds a Beets child. The
+        fake folded that rule into the automation arm alone, so a force,
+        local or YouTube row stayed on offer mid-Beets-mutation — the same
+        fake-more-permissive shape as the guards above, in the two scans
+        #1313 rewrote.
+        """
+        from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
+
+        db = FakePipelineDB()
+        automation = self._owner(db, 4407)
+        db.seed_request(make_request_row(
+            id=4408, mb_release_id="fake-lane-beets", status="wanted",
+        ))
+        force = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=4408,
+            payload=force_import_payload(
+                download_log_id=4408, failed_path="/failed/beets",
+            ),
+        )
+
+        def offered(execution_lease: ExecutionLeaseSnapshot | None) -> set[int]:
+            return {
+                row.id
+                for row in db.peek_import_preview_job_candidates(
+                    limit=10, execution_lease=execution_lease,
+                )
+            }
+
+        # Must still work: a free lease offers both types.
+        self.assertEqual(offered(self._lease()), {automation.id, force.id})
+        # A live Beets child takes the force row away too, not just the
+        # automation one its own arm names.
+        self.assertEqual(offered(self._lease(beets=True)), set())
 
 
 class TestFakeMergeRekeyForceClaimFence(unittest.TestCase):
