@@ -343,18 +343,19 @@ class TestTargetedTestSelection(unittest.TestCase):
     ) -> None:
         """Regression pin for issue #1081 / PR #1075's exact failure.
 
-        ``tests/fakes/pipeline_db.py`` is not a discoverable test module — it
-        must never yield itself (``tests.fakes.pipeline_db``) as a selector.
-        The existing ``tests/fakes/`` prefix rule still rescues the change
-        with the real consumer, ``tests.test_fakes``.
+        ``tests/fakes/pipeline_db/import_jobs.py`` is not a discoverable test
+        module, so it must never yield itself
+        (``tests.fakes.pipeline_db.import_jobs``) as a selector. The
+        ``tests/fakes/`` prefix rule still rescues the change with the real
+        consumer, ``tests.test_fakes``.
         """
         selected = expand_test_selection(
             (),
-            changed_paths=("tests/fakes/pipeline_db.py",),
+            changed_paths=("tests/fakes/pipeline_db/import_jobs.py",),
             repo_root=REPO_ROOT,
         )
 
-        self.assertNotIn("tests.fakes.pipeline_db", selected)
+        self.assertNotIn("tests.fakes.pipeline_db.import_jobs", selected)
         self.assertIn("tests.test_fakes", selected)
 
     def test_every_shared_tests_module_yields_an_accepted_selector(self) -> None:
@@ -455,6 +456,64 @@ class TestTargetedTestSelection(unittest.TestCase):
         self.assertIn("tests.test_fakes", selected)
         self.assertIn("tests.test_deploy_hold", selected)
         self.assertIn("tests.test_deploy_hold_generated", selected)
+
+    def test_a_fake_selects_its_own_cluster_test_module(self) -> None:
+        """The #1313 split moved TestFakeBeetsDB out of tests/test_fakes.py.
+
+        tests/test_fakes.py no longer names FakeBeetsDB anywhere, so the
+        tests/fakes/ prefix rule alone would select a module that never
+        loads the fake being edited: the same shape as the deploy_hold pin
+        above. The derived tests.test_fakes_<stem> row is what still
+        reaches the real consumer.
+        """
+        source = (REPO_ROOT / "tests" / "test_fakes.py").read_text()
+        self.assertNotIn("FakeBeetsDB", source)
+
+        selected = expand_test_selection(
+            (),
+            changed_paths=("tests/fakes/beets.py",),
+            repo_root=REPO_ROOT,
+        )
+
+        self.assertIn("tests.test_fakes_beets", selected)
+
+    def test_a_pipeline_db_cluster_selects_its_mirrored_fake_tests(self) -> None:
+        """One derived name serves both sides of the mirror (#1313).
+
+        tests/fakes/pipeline_db/ mirrors lib/pipeline_db/ module for module,
+        so editing either the production cluster or its fake selects that
+        cluster's own fake self-tests.
+        """
+        for changed in (
+            "lib/pipeline_db/transfer_ledger.py",
+            "tests/fakes/pipeline_db/transfer_ledger.py",
+        ):
+            with self.subTest(changed=changed):
+                selected = expand_test_selection(
+                    (), changed_paths=(changed,), repo_root=REPO_ROOT,
+                )
+                self.assertIn("tests.test_fakes_transfer_ledger", selected)
+
+    def test_a_cluster_without_sibling_tests_still_reaches_test_fakes(
+        self,
+    ) -> None:
+        """The derived row adds precision; it is not the fail-closed floor.
+
+        tests/fakes/pipeline_db/evidence.py has no tests/test_fakes_evidence.py,
+        so the derived name resolves nothing and the change must still land on
+        tests.test_fakes rather than on a module that does not exist.
+        """
+        self.assertFalse(
+            (REPO_ROOT / "tests" / "test_fakes_evidence.py").exists())
+
+        selected = expand_test_selection(
+            (),
+            changed_paths=("tests/fakes/pipeline_db/evidence.py",),
+            repo_root=REPO_ROOT,
+        )
+
+        self.assertIn("tests.test_fakes", selected)
+        self.assertNotIn("tests.test_fakes_evidence", selected)
 
     def test_the_two_registries_are_disjoint(self) -> None:
         """No path claims both a real mapping and an admitted coverage gap.
@@ -689,7 +748,7 @@ class TestTargetedSuiteWiring(unittest.TestCase):
         """
         selectors = expand_test_selection(
             (),
-            changed_paths=("tests/fakes/pipeline_db.py",),
+            changed_paths=("tests/fakes/pipeline_db/import_jobs.py",),
             repo_root=REPO_ROOT,
         )
         python_phase = targeted_phases(selectors)[-1]

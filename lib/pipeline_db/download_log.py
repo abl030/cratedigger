@@ -198,7 +198,7 @@ _LOG_QUERY_TEMPLATE = """
 
 #: The ``download_log.outcome`` values ``get_log``'s two Recents filters
 #: admit. One spelling: the SQL fragments below are rendered from these
-#: tuples, and ``tests/fakes/pipeline_db.py`` imports the same tuples rather
+#: tuples, and ``tests/fakes/pipeline_db/download_log.py`` imports the same tuples rather
 #: than hand-copying the vocabulary into a Python set.
 LOG_FILTER_IMPORTED_OUTCOMES: tuple[DownloadLogOutcome, ...] = (
     "success", "force_import", "local_import",
@@ -345,7 +345,7 @@ def overlay_evidence_onto_download_log_row(
     ``_request_mb_release_id`` gate input, and (for ``get_log``) the
     ``_current_evidence_*`` aliases. Mutates and returns ``row``.
 
-    ``tests/fakes/pipeline_db.py`` builds that same raw shape and calls
+    ``tests/fakes/pipeline_db/download_log.py`` builds that same raw shape and calls
     this function, so the fake cannot be more permissive than production
     about the GATING this function owns — which evidence facts survive
     the identity and lineage predicates (issue #1278 item 7). It is not a
