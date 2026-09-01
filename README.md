@@ -218,6 +218,20 @@ both directions and checks every registry's entries for a rationale and a
 path that still exists. The `tests/` registry's own exactness lives in
 `tests/test_targeted_test_selection.py` and
 `tests/test_negative_coverage_audit.py` instead.
+
+To see why a path selects what it selects, ask it:
+
+```bash
+nix-shell --run "python3 scripts/targeted_test_selection.py explain lib/download.py"
+```
+
+It names the mechanism behind every selected module: the hand-authored
+`EXACT_PATH_NEIGHBOURS` entry, the self-selector, or one of the
+`SELECTION_RULES` rows (five basename conventions, nine directory rules).
+It also reports any module a rule looked for and did not find on disk, and
+whether the fail-closed contract is watching the path at all. The path need
+not exist yet, so a file can be explained before it is written.
+
 `run_tests.sh` remains the one canonical complete suite.
 `run_final_gate.sh` runs that exact suite on a clean commit and adds a receipt;
 it does not select different checks. CI does not enforce this local workflow.
