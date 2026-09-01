@@ -85,11 +85,14 @@ class TestFakeActiveImportJobsForWrongMatch(unittest.TestCase):
 
 
 class TestFakeClaimMirrorsProductionsLaneGuards(unittest.TestCase):
-    """Two guards the fake used to be more permissive about than production.
+    """Guards the fake used to be more permissive about than production.
 
-    Issue #1313's mutant round found both: production's claim SQL binds the
-    caller's ``request_id`` in the job guard and NULLs the preview lane's
-    ``cleared_columns``, and no fake-driven test observed either.
+    Issue #1313's mutant rounds found each of these the same way: a
+    condition production's SQL spells, the fake spells too, and no
+    fake-driven test observed. Production's claim SQL binds the caller's
+    ``request_id`` in the job guard and NULLs the preview lane's
+    ``cleared_columns``; its candidate scan refuses a force or local job
+    whose request has moved out from under it.
     """
 
     def _owner(self, db: FakePipelineDB, request_id: int):
@@ -191,6 +194,65 @@ class TestFakeClaimMirrorsProductionsLaneGuards(unittest.TestCase):
         # already NULLs ``preview_error``, so asserting it here would pin a
         # bystander.
         self.assertIsNone(reclaimed.preview_message)
+
+    def test_a_force_candidate_whose_request_drifted_is_not_offered(
+        self,
+    ) -> None:
+        """Both lanes' candidate scans read one routing rule, so pin both.
+
+        Production's ``_CANDIDATE_JOB_TYPE_ROUTING`` requires the request to
+        still be sitting at the job's ``expected_request_status``, and the
+        fake's ``_candidate_job_type_routes`` says the same thing. Nothing
+        drove it: replacing the whole force/local arm with ``return True``
+        left tests.test_import_queue, tests.test_importer_job_kinds,
+        tests.test_fakes, tests.test_fakes_import_jobs,
+        tests.test_force_import_gates, tests.test_local_import_lane,
+        tests.test_import_operation_fence and
+        tests.test_import_job_lane_generated all green.
+        """
+        from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=4404,
+            mb_release_id="fake-lane-drift",
+            status="wanted",
+        ))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=4404,
+            payload=force_import_payload(
+                download_log_id=4404, failed_path="/failed/drift",
+            ),
+        )
+
+        def preview_offers() -> bool:
+            return any(
+                row.id == job.id
+                for row in db.peek_import_preview_job_candidates(limit=10)
+            )
+
+        def import_offers() -> bool:
+            return any(
+                row.id == job.id
+                for row in db.peek_import_job_candidates(limit=10)
+            )
+
+        # Must still work: at the expected status the fresh job is a preview
+        # candidate, so the refusal below is a refusal and not a fixture that
+        # never qualified.
+        self.assertTrue(preview_offers())
+        db.update_status(4404, "imported")
+        self.assertFalse(preview_offers())
+
+        # Same rule, other lane. The import scan needs an importable preview
+        # status first, which is the one thing that differs between the two
+        # call sites.
+        db.update_status(4404, "wanted")
+        db.mark_import_job_preview_importable(job.id)
+        self.assertTrue(import_offers())
+        db.update_status(4404, "imported")
+        self.assertFalse(import_offers())
 
 
 class TestFakeMergeRekeyForceClaimFence(unittest.TestCase):

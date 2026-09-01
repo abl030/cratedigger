@@ -644,6 +644,45 @@ class _FakeImportJobsMixin(_FakePipelineDBBase):
         ))
         return [ImportJob.from_row(copy.deepcopy(row)) for row in rows]
 
+    def _candidate_job_type_routes(
+        self,
+        row: Mapping[str, object],
+        *,
+        execution_lease: ExecutionLeaseSnapshot | None,
+    ) -> bool:
+        """Positive routing, the fake's copy of ``_CANDIDATE_JOB_TYPE_ROUTING``.
+
+        ``youtube_import`` is the sole unguarded type; ``automation_import``
+        and ``force_import``/``local_import`` each carry their own guard.
+
+        One method for the same reason production is one SQL fragment
+        (issue #1176 PR3 had to land its fix in two byte-identical copies,
+        and #1314 collapsed the production pair while leaving the fake's):
+        both import-lane and preview-lane candidate scans route by the
+        identical rule, and the two lanes' real differences — which preview
+        statuses are eligible, the preview lane's requeue backoff, and the
+        sort key — stay at their own call sites where they belong.
+        """
+        job_type = row.get("job_type")
+        if job_type == IMPORT_JOB_YOUTUBE:
+            return True
+        if job_type == IMPORT_JOB_AUTOMATION:
+            return (
+                execution_lease is not None
+                and execution_lease.beets is None
+                and self._automation_job_has_authority(row)
+            )
+        if job_type in (IMPORT_JOB_FORCE, IMPORT_JOB_LOCAL):
+            # `isinstance` rather than the `int(...)` the two copies used:
+            # production joins on the column, so a row with no usable
+            # request_id is refused there too, and narrowing here keeps this
+            # method free of a typing escape hatch.
+            request_id = row.get("request_id")
+            return isinstance(request_id, int) and (
+                self._force_job_request_is_current(row, request_id=request_id)
+            )
+        return False
+
     def _import_job_candidate_rows(
         self,
         *,
@@ -653,25 +692,8 @@ class _FakeImportJobsMixin(_FakePipelineDBBase):
             row for row in self._import_jobs
             if row.get("status") == "queued"
             and row.get("preview_status") in IMPORT_JOB_IMPORTABLE_PREVIEW_STATUSES
-            and (
-                # Positive routing (issue #1176 PR3): youtube_import is the
-                # sole unguarded type; automation_import and
-                # force_import/local_import each get their own guard below.
-                row.get("job_type") == IMPORT_JOB_YOUTUBE
-                or (
-                    row.get("job_type") == IMPORT_JOB_AUTOMATION
-                    and execution_lease is not None
-                    and execution_lease.beets is None
-                    and self._automation_job_has_authority(row)
-                )
-                or (
-                    row.get("job_type") in (IMPORT_JOB_FORCE, IMPORT_JOB_LOCAL)
-                    and row.get("request_id") is not None
-                    and self._force_job_request_is_current(
-                        row,
-                        request_id=int(row["request_id"]),
-                    )
-                )
+            and self._candidate_job_type_routes(
+                row, execution_lease=execution_lease,
             )
         ]
         queued.sort(key=lambda row: (
@@ -1496,24 +1518,8 @@ class _FakeImportJobsMixin(_FakePipelineDBBase):
             and _as_datetime(row.get("updated_at")) <= (
                 now - import_preview_requeue_delay(int(row.get("attempts") or 0))
             )
-            and (
-                # Positive routing (issue #1176 PR3) — mirrors
-                # _import_job_candidate_rows.
-                row.get("job_type") == IMPORT_JOB_YOUTUBE
-                or (
-                    row.get("job_type") == IMPORT_JOB_AUTOMATION
-                    and execution_lease is not None
-                    and execution_lease.beets is None
-                    and self._automation_job_has_authority(row)
-                )
-                or (
-                    row.get("job_type") in (IMPORT_JOB_FORCE, IMPORT_JOB_LOCAL)
-                    and row.get("request_id") is not None
-                    and self._force_job_request_is_current(
-                        row,
-                        request_id=int(row["request_id"]),
-                    )
-                )
+            and self._candidate_job_type_routes(
+                row, execution_lease=execution_lease,
             )
         ]
         queued.sort(key=lambda row: (_as_datetime(row.get("created_at")), row["id"]))
