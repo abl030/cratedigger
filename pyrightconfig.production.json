@@ -33,6 +33,7 @@
   "reportUnusedClass": "none",
   "exclude": [
     "build",
+    "mutants",
     "tools/vulture",
     "**/.*",
     "**/node_modules",

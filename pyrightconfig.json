@@ -9,6 +9,7 @@
   "reportUnnecessaryTypeIgnoreComment": "error",
   "exclude": [
     "build",
+    "mutants",
     "tools/vulture",
     "**/.*",
     "**/node_modules",

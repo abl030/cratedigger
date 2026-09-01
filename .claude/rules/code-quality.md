@@ -357,9 +357,9 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   machine tally plus the dismissal list in the PR's Fault injection
   section. The tally is machine evidence — the #1209 confabulation shape
   cannot occur for catalog mutants — but each DISMISSAL is a claim the
-  review reader audits. The per-run config and `mutants/` are never
-  committed; the aimed-mutant driver above stays an uncommitted one-shot
-  (`scope.md`). Catalog breadth does not discharge any aimed obligation:
+  review reader audits. The committed tooling is `nix/mutmut-shell.nix`
+  alone; the per-run config and `mutants/` are never committed, and the
+  aimed-mutant driver above stays an uncommitted one-shot (`scope.md`). Catalog breadth does not discharge any aimed obligation:
   the evaluation's replay found real gaps 40 aimed mutants missed AND
   could not express the one real survivor those aimed mutants found
   (`to_json_dict() → {}` is outside the catalog). Full runbook, scoping
@@ -1218,4 +1218,4 @@ rationale; never allowlist a pure decision.
 - Non-trivial work goes on a feature branch with a PR (e.g. `feat/cooldowns`, `fix/spectral-race`)
 - PRs are merged via GitHub **Create a merge commit** (not Rebase-and-merge, not Squash-and-merge). This keeps the PR attached to mainline history while preserving the individual commits, so write them well.
 - Deploy and verify live after merging
-- PR body follows `.github/pull_request_template.md`. The Fault injection section is a short account (one sentence, or a short list for per-clause proof against a many-clause checker) naming what you tried and what happened, not an exhaustive table; whether to run fault injection at all is the "when in doubt" judgment call in § "Testing — Red/Green TDD", not something every PR owes — but three obligations in that same section stay unconditional regardless: the regression-pin rule, the adapter mutant rule, and Standing scope (a PR adding or changing a checker clause records per-clause evidence there, not "N/A"). The mutant RUNNER's two-mutants-per-changed-test obligation (§ "Pre-Commit Review Gate", the two-reviewer split) is separate and always applies. A diff with mutable Python production surface also reports its mutmut breadth-pass tally and survivor dismissals in the same section (§ "Testing — Red/Green TDD"; runbook in `docs/mutation-testing.md`).
+- PR body follows `.github/pull_request_template.md`. The Fault injection section is a short account (one sentence, or a short list for per-clause proof against a many-clause checker) naming what you tried and what happened, not an exhaustive table; whether to run fault injection at all is the "when in doubt" judgment call in § "Testing — Red/Green TDD", not something every PR owes — but the obligations in that same section stay unconditional regardless: the regression-pin rule, the adapter mutant rule, and Standing scope (a PR adding or changing a checker clause records per-clause evidence there, not "N/A"). The mutant RUNNER's two-mutants-per-changed-test obligation (§ "Pre-Commit Review Gate", the two-reviewer split) is separate and always applies. A diff with mutable Python production surface also reports its mutmut breadth-pass tally and survivor dismissals in the same section (§ "Testing — Red/Green TDD"; runbook in `docs/mutation-testing.md`).

@@ -3,6 +3,11 @@ required-version = ">=0.16.0"
 # shell may exercise a newer interpreter.
 target-version = "py313"
 
+# mutmut's per-run output tree (docs/mutation-testing.md). Deleted after
+# every run by rule; excluded here as defense-in-depth so a leftover copy
+# of the whole source tree cannot balloon a whole-repo pass (#1208 shape).
+extend-exclude = ["mutants"]
+
 [lint]
 extend-select = [
   "B905",

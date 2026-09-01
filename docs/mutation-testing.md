@@ -17,9 +17,10 @@ mutmut copies the source tree into a `mutants/` directory with every function
 rewritten to carry catalog mutants (operator swaps, literal changes, argument
 `None`-ing, string mutations) behind an env-var trampoline, then runs pytest
 per mutant, selecting only the tests whose call stacks reach the mutated
-function. It never touches the working tree, so the `__pycache__` same-second
-trap and the `git checkout` restore trap of hand-planted mutants do not
-apply. Results are cached in `mutants/` and re-runs are incremental.
+function. It never rewrites your source files (all writes land under
+`mutants/`), so the `__pycache__` same-second trap and the `git checkout`
+restore trap of hand-planted mutants do not apply. Results are cached in
+`mutants/` and re-runs are incremental.
 
 ## Running it
 
@@ -62,10 +63,14 @@ ephemeral PostgreSQL and applies migrations at import, and pytest collects
 
 ## Hard rules
 
-- **Never list a `source_paths` member in `also_copy`.** `also_copy` runs
-  after mutant generation and copies verbatim — it silently overwrites the
-  mutated file, neutralizing every mutant. (mutmut's forced-fail check
-  catches total neutralization loudly, but do not lean on it.)
+- **Don't list a `source_paths` member in `also_copy` — it's redundant, not
+  a trap.** In the pinned 3.7.0, `_run` copies the source roots
+  (`copy_src_dir`) and the `also_copy` entries FIRST and generates mutants
+  LAST, so a duplicate entry cannot neutralize mutants (measured end-to-end
+  with a deliberately overlapping config: mutants intact both runs). Note
+  mutmut auto-appends `tests/`, `test/`, `setup.cfg`, `pyproject.toml`, and
+  lockfiles to `also_copy` (`configuration.py`) — the template above relies
+  on that for `tests/`.
 - **Real-PG test selections need `--max-children 1`** (`mutmut run
   --max-children 1`): mutmut forks parallel children that all inherit the
   ONE ephemeral PostgreSQL from `tests/conftest.py`, and the fixtures
@@ -73,14 +78,18 @@ ephemeral PostgreSQL and applies migrations at import, and pytest collects
   at full parallelism.
 - **mutmut runs outside the suite admission lock** (#1111). Do not run it
   concurrently with a canonical suite or targeted run on the same host.
-- **Per-run artifacts are never committed, and the `pyproject.toml` must
-  not outlive the run**: the committed tooling is `nix/mutmut-shell.nix`
-  alone. A stray root `pyproject.toml` is NOT inert:
-  `tests/ruff_lsp_worker.py` passes a root `pyproject.toml` to
-  `ruff server --config` whenever one exists, displacing `ruff.toml` for
-  the LSP-backed tests — so a leftover file changes suite behavior, not
-  just mutmut's next run. Materialize it, run mutmut, delete it (and
-  `mutants/`) before running anything else.
+- **Per-run artifacts are never committed, and must not outlive the run**:
+  the committed tooling is `nix/mutmut-shell.nix` alone. Run the breadth
+  pass BEFORE the `check` receipt: a leftover `pyproject.toml` or
+  `mutants/` dirties the tree and the final gate refuses untracked files
+  (loudly — a wasted gate run, not a silent hazard). `ruff.toml` and both
+  pyright configs exclude `mutants/` as defense-in-depth against the
+  #1208 shape (a root-planted tree making whole-repo passes crawl a
+  foreign corpus), but deletion is the rule, not the excludes. One more
+  reason not to leave the config behind: `tests/ruff_lsp_worker.py`
+  hands a root `pyproject.toml` to `ruff server --config` whenever one
+  exists — measured inert for that worker's temp-workspace documents on
+  ruff 0.16, but a future ruff need not keep it so.
 - **debug = true** in `[tool.mutmut]` surfaces the real pytest error when
   the stats pass dies with `BadTestExecutionCommandsException` — usually a
   missing `also_copy` entry (the founding example: `migrations/` missing,
@@ -109,12 +118,17 @@ aimed mutants (revert a real past fix, break a specific adapter
 derivation, swap two arguments of one call), anything in JavaScript, and
 the runner's two-aimed-mutants-per-new-test obligation — which covers the
 tests you just added to kill survivors, because no round certifies its
-own pins.
+own pins. The aimed procedure is `docs/generated-testing.md`
+§ "Qualifying the harness — fault injection"; its driver stays an
+uncommitted one-shot.
 
 ## Maintenance
 
 `nix/mutmut-shell.nix` derives nixpkgs from `flake.lock`, so ordinary lock
-refreshes need no edits here. The mutmut version is pinned by source hash
-in that file; bump deliberately. nixpkgs' own `mutmut` package (3.2.0 at
-adoption time) is NOT usable for this repo — it hard-guesses `lib/` as the
-mutate root and has no test-selection config.
+refreshes need no edits here — but nothing CI-builds this shell (no flake
+check, no daily gate), so a nixpkgs bump that moves `uv-build`, `libcst`,
+or the interpreter surfaces only when someone next runs mutmut. The mutmut
+version is pinned by source hash in that file; bump deliberately. nixpkgs'
+own `mutmut` package (3.2.0 at adoption time) is NOT usable for this repo
+— it hard-guesses `lib/` as the mutate root and has no test-selection
+config.
