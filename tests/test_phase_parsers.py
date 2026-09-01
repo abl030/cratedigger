@@ -76,6 +76,25 @@ class TestJavaScriptSyntaxDialect(unittest.TestCase):
 
         self.assertEqual(parsed, PhaseFailures())
 
+    def test_a_non_marker_line_is_skipped_not_treated_as_the_end(self) -> None:
+        """The wrapper interleaves `node --check` chatter with its markers.
+
+        Only a log where an ignored line comes BEFORE a real marker tells
+        `continue` apart from `break`; the mutmut catalog found the
+        earlier version of the test above could not (survivor
+        `js_checks.x__records__mutmut_4`).
+        """
+        parsed = js_checks.parse_syntax_failures(
+            _log(
+                "checking web/js/a.js\n"
+                "CRATEDIGGER_JS_FAILURE\tweb/js/b.js\tSyntaxError"
+            )
+        )
+
+        self.assertEqual(
+            [failure.identity for failure in parsed.failures], ["web/js/b.js"]
+        )
+
 
 class TestJavaScriptUnitDialect(unittest.TestCase):
     """A per-assertion identity still yields a runnable per-FILE rerun.
@@ -238,21 +257,46 @@ class TestRuffDialect(unittest.TestCase):
         )
 
     def test_concise_format_is_one_entry_per_line(self) -> None:
-        (failure,) = ruff.parse_failures(
-            _log("lib/lint.py:9:2: F821 Undefined name `missing`")
+        """Every field, and two lines, because one line hides a `break`.
+
+        The mutmut catalog found three survivors here at once: `owner` and
+        `log` were unasserted, and a single-line log cannot tell the
+        loop's `continue` from a `break`.
+        """
+        first, second = ruff.parse_failures(
+            _log(
+                "lib/lint.py:9:2: F821 Undefined name `missing`\n"
+                "lib/other.py:3:1: E501 Line too long"
+            )
         ).failures
 
-        self.assertEqual(failure.identity, "lib/lint.py:9:2")
-        self.assertEqual(failure.detail, "F821 Undefined name `missing`")
+        self.assertEqual(first.identity, "lib/lint.py:9:2")
+        self.assertEqual(first.owner, "lib/lint.py")
+        self.assertEqual(first.detail, "F821 Undefined name `missing`")
+        self.assertEqual(first.log, "phase.log")
         self.assertEqual(
-            failure.rerun_command, "bash scripts/run_ruff.sh lib/lint.py"
+            first.rerun_command, "bash scripts/run_ruff.sh lib/lint.py"
         )
+        self.assertEqual(second.identity, "lib/other.py:3:1")
+        self.assertEqual(second.owner, "lib/other.py")
 
     def test_a_header_with_no_location_contributes_nothing(self) -> None:
         """`full` prints help text and source between violations."""
         parsed = ruff.parse_failures(
             _log("F821 Undefined name `missing`\nhelp: define it")
         )
+
+        self.assertEqual(parsed.failures, ())
+
+    def test_a_location_with_no_header_contributes_nothing(self) -> None:
+        """Nothing is pending, so there is no code to attach it to.
+
+        The state has to start at `None` for that: the catalog's
+        `pending = ""` mutant survived because no log reached a location
+        line before a header, and an empty-string sentinel would crash
+        unpacking it rather than skip it.
+        """
+        parsed = ruff.parse_failures(_log(" --> lib/orphan.py:1:1"))
 
         self.assertEqual(parsed.failures, ())
 
