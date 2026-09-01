@@ -14,7 +14,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, rmdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -34,15 +34,34 @@ const TESTS_DIR = path.dirname(fileURLToPath(import.meta.url));
 const HARNESS = path.join(TESTS_DIR, 'js_harness.mjs');
 
 /**
+ * Where an in-repo fixture goes: a subdirectory, not `tests/` itself.
+ *
+ * A fixture has to live inside the repository for the repo-relative identity
+ * assertions to mean anything, and it is removed in a `finally` — but a
+ * SIGKILL in that window leaks the file, and nothing reaps it. Under
+ * `tests/` directly that leak is an untracked `.mjs` sitting among the real
+ * suites (#1319's residual 6); in its own subdirectory it is one line of
+ * `git status` naming a directory whose whole purpose is scratch.
+ */
+const FIXTURE_DIR = path.join(TESTS_DIR, '_harness_fixtures');
+
+/**
  * Run `body` as a suite in a child process and return its result.
  *
- * `inRepo` places the fixture beside the harness so the repo-relative
+ * `inRepo` places the fixture inside the repository so the repo-relative
  * identity is exercised; otherwise it goes to a scratch directory.
  */
 function runFixture(body, { inRepo = false } = {}) {
-  const dir = inRepo ? TESTS_DIR : mkdtempSync(path.join(tmpdir(), 'js-harness-'));
-  // `_`-prefixed: `run_js_checks.sh` globs `test_js_*.mjs`, so an in-repo
-  // fixture must not look like a suite even for the instant it exists.
+  let dir;
+  if (inRepo) {
+    dir = FIXTURE_DIR;
+    mkdirSync(dir, { recursive: true });
+  } else {
+    dir = mkdtempSync(path.join(tmpdir(), 'js-harness-'));
+  }
+  // `_`-prefixed as well: `run_js_checks.sh` globs `test_js_*.mjs`
+  // non-recursively, so an in-repo fixture is already out of its reach on
+  // two counts, and stays so if the glob is ever widened to one of them.
   const file = path.join(dir, `_js_harness_fixture_${process.pid}_${Math.random().toString(36).slice(2)}.mjs`);
   const source = `import { suite, stubGlobals, domStub, element } from ${JSON.stringify(HARNESS)};\n`
     + `const t = suite(import.meta.url);\n${body}\n`;
@@ -59,7 +78,14 @@ function runFixture(body, { inRepo = false } = {}) {
     };
   } finally {
     rmSync(file, { force: true });
-    if (!inRepo) rmSync(dir, { force: true, recursive: true });
+    if (inRepo) {
+      // Non-recursive on purpose: it succeeds once this run's last fixture
+      // is gone and fails harmlessly (ENOTEMPTY) while a leaked one remains,
+      // so the leak stays visible instead of being swept up by its own test.
+      try { rmdirSync(dir); } catch { /* another fixture is still there */ }
+    } else {
+      rmSync(dir, { force: true, recursive: true });
+    }
   }
 }
 
