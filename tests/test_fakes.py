@@ -1,4 +1,15 @@
-"""Tests for lightweight fakes and shared builders."""
+"""Cross-cluster tests for the shared fakes and builders.
+
+Since the #1313 split this module keeps what does not belong to one
+cluster: the fake-to-production signature contract
+(``TestPipelineDBFakeContract`` and its module-level diff helpers), the
+two broad ``FakePipelineDB`` classes whose tests span several clusters,
+the shared builders, and the ``FakePipelineDBSource`` gating tests.
+A cluster's own self-tests live beside it in ``tests/test_fakes_<cluster>.py``,
+which is also what ``scripts/targeted_test_selection.py`` derives from a
+changed ``tests/fakes/pipeline_db/<cluster>.py`` or
+``lib/pipeline_db/<cluster>.py``.
+"""
 
 import copy
 import inspect
@@ -1860,34 +1871,14 @@ class TestFakePipelineDB(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-
-
 # ---------------------------------------------------------------------------
 # Triage cohort fakes (U15)
 # ---------------------------------------------------------------------------
 
 
-
-
 # ---------------------------------------------------------------------------
 # Persisted search plans (U1) — fake parity
 # ---------------------------------------------------------------------------
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 class TestBuilders(unittest.TestCase):
@@ -1931,16 +1922,14 @@ class TestBuilders(unittest.TestCase):
         self.assertEqual(vr.failed_path, "/tmp/failed")
 
 
-
-
-
 class TestFakePipelineDBNewStubs(unittest.TestCase):
     """Self-tests for fake methods retroactively added under issue #140.
 
     These cover behaviour that tests relying on the fake may start
-    exercising. Matches the rule in ``.claude/rules/code-quality.md``:
-    "every new PipelineDB method needs an equivalent stub on
-    FakePipelineDB with a self-test in its cluster test module."
+    exercising. Matches the New Work Checklist row in
+    ``.claude/rules/code-quality.md``, which asks a new ``PipelineDB``
+    method for an equivalent stub on ``FakePipelineDB`` plus a self-test
+    in that cluster's own test module.
     """
 
     def test_close_marks_flag(self):
@@ -3469,20 +3458,22 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual(by_date["2026-05-08"]["total_peers"], 1)
 
 
-
-
-
-
-
-
 def _public_methods(cls: type) -> set[str]:
     """Return the set of non-underscore method names provided by ``cls``,
     including those contributed by base classes / mixins.
 
-    ``PipelineDB`` is composed from cluster mixins under ``lib/pipeline_db/``
-    (#379), so its public API lives on the mixins, not in ``vars(PipelineDB)``.
-    Walk the MRO (skipping ``object``) to recover the full surface — for a
-    flat class like ``FakePipelineDB`` this is identical to ``vars(cls)``."""
+    BOTH classes are composed from cluster mixins now: ``PipelineDB`` from
+    ``lib/pipeline_db/`` since #379, ``FakePipelineDB`` from
+    ``tests/fakes/pipeline_db/`` since #1313. Neither keeps its public API
+    in ``vars(cls)``: measured on the fake, ``vars`` yields 0 public
+    callables where this MRO walk (skipping ``object``) yields 203.
+
+    Degrading this to ``vars(cls)`` does NOT make the contract test below
+    report the fake as missing, which is the intuitive but wrong
+    prediction. It empties BOTH sides, so ``real - fake`` stays empty and
+    the comparison passes vacuously. Measured: that mutant survived every
+    test in ``TestPipelineDBFakeContract`` until
+    ``test_recovered_surfaces_are_not_empty`` was added to catch it."""
     names: set[str] = set()
     for klass in cls.__mro__:
         if klass is object:
@@ -3496,15 +3487,33 @@ def _public_methods(cls: type) -> set[str]:
 class TestPipelineDBFakeContract(unittest.TestCase):
     """Enforce FakePipelineDB stays in lockstep with PipelineDB.
 
-    Models ``TestRouteContractAudit`` (tests/web/test_route_audit.py): the
-    convention in ``.claude/rules/code-quality.md`` — "every new
-    PipelineDB method must have a matching stub on FakePipelineDB with
-    a self-test in its cluster test module" — is enforced at test time, not
-    at review time.
+    Models ``TestRouteContractAudit`` (tests/web/test_route_audit.py). The
+    New Work Checklist row in ``.claude/rules/code-quality.md`` asks a new
+    ``PipelineDB`` method for a matching stub on ``FakePipelineDB`` and a
+    self-test in that cluster's test module; the stub half is enforced
+    here at test time, not at review time.
 
     A new kwarg on a real method can otherwise be silently swallowed if the
     fake accepts ``**kwargs``.
     """
+
+    def test_recovered_surfaces_are_not_empty(self) -> None:
+        """``real - fake`` is empty when BOTH sides are empty.
+
+        Both classes are mixin-composed now (``PipelineDB`` since #379,
+        ``FakePipelineDB`` since #1313), so neither keeps a public method
+        in ``vars(cls)``. Degrading ``_public_methods`` to a plain
+        ``vars(cls)`` scan therefore leaves every other test in this class
+        green while it compares two empty sets. Measured: that mutant
+        survived all three tests here before this one existed.
+        """
+        for cls in (PipelineDB, FakePipelineDB):
+            with self.subTest(cls=cls.__name__):
+                self.assertGreater(
+                    len(_public_methods(cls)), 100,
+                    f"{cls.__name__} recovered a near-empty public surface, "
+                    "so every comparison in this class is vacuous",
+                )
 
     def test_fake_exposes_every_public_method_of_real(self) -> None:
         """Every non-underscore method on ``PipelineDB`` must exist on
@@ -3943,44 +3952,6 @@ class TestPipelineDBFakeContractInternals(unittest.TestCase):
                   test_only: bool = False) -> None:
                 ...
         self.assertEqual(_diff_signatures(Real, Fake), [])
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 class TestFakePipelineDBSourceRejectAndRequeueGating(unittest.TestCase):

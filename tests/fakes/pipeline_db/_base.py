@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 import copy
-import json
 from collections.abc import (
     Callable,
     Mapping,
     Sequence,
 )
 from contextlib import AbstractContextManager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -54,10 +53,6 @@ from lib.validation_envelope import (
 )
 from tests.fakes._shared import _utcnow
 from tests.fakes.cursors import FakeCursor
-from tests.fakes.pipeline_db._shared import (
-    _SEARCH_SUMMARY_WINDOW,
-    _jsonb_column,
-)
 from tests.fakes.rows import (
     DenylistEntry,
     DownloadLogRow,
@@ -75,15 +70,24 @@ if TYPE_CHECKING:
     )
 
 
+#: The ``request_search_summary`` view's own window
+#: (``migrations/031_request_search_summary_view.sql``). Every consumer of
+#: that view — the triage rollup and the ``search_not_converting`` page
+#: join — sees only search_log rows this recent, so the mirror must too.
+_SEARCH_SUMMARY_WINDOW = timedelta(days=14)
+
+
 class _FakePipelineDBBase:
     """State every FakePipelineDB cluster mixin shares.
 
-    Mirrors ``lib/pipeline_db/_core.py::_PipelineDBBase``: ``__init__``
-    owns every in-memory table, and the stub block at the bottom
-    declares the methods one cluster calls on a SIBLING cluster so
-    the caller type-checks without importing the composed class.
-    Those stub bodies never execute — the composed ``FakePipelineDB``
-    MRO resolves each call to the owning mixin.
+    Mirrors ``lib/pipeline_db/_core.py::_PipelineDBBase``. ``__init__``
+    owns every in-memory table; the helpers below it are the private ones
+    two or more clusters call; and the stub block at the bottom declares
+    the cross-cluster surface a mixin needs to type-check without
+    importing the composed class. Those stub bodies never execute, since
+    the composed ``FakePipelineDB`` MRO resolves each call to the owning
+    mixin. The stub block's own comment states which of the two shapes
+    each stub is there for.
     """
 
     def __init__(self, *, dsn: str = "postgresql://fake") -> None:
@@ -291,8 +295,10 @@ class _FakePipelineDBBase:
                              f"download_log[{index}].{field_name}: "
                              f"expected {value!r}, got {actual!r}")
 
-    # Shared private helpers: more than one cluster calls each, so one
-    # definition lives here instead of a copy or a stub.
+    # Shared private helpers: two or more clusters call each, or the base
+    # itself does (``_assert_mb_release_id_unique``, from ``seed_request``),
+    # so one definition lives here instead of a copy or a stub. A helper
+    # with a single consumer belongs in that consumer's module, not here.
 
     @staticmethod
     def _accusation_alias_projection(
@@ -360,40 +366,6 @@ class _FakePipelineDBBase:
                     f"{mb_release_id!r} is already on request {rid}"
                 )
 
-
-    @staticmethod
-    def _attempt_fingerprint_from_state(
-        request: Mapping[str, object],
-    ) -> str | None:
-        """Mirror ``active_download_state ->> 'attempt_fingerprint'``
-        (#1196 item 1) for the two shapes production ever writes: the
-        top-level state is SQL NULL (or a non-object value -- ``->>``
-        returns NULL for a NULL or non-object jsonb regardless of key,
-        matching ``None`` here), or the key is absent/JSON-null
-        (``->>`` also returns NULL, matching the ``dict.get`` miss
-        here). Does NOT distinguish a missing key from an explicit JSON
-        ``null`` -- ``->>`` does not either.
-
-        Known, deliberately UNRECONCILED divergence: if the
-        ``attempt_fingerprint`` JSON value were ever a non-string
-        scalar (a number, bool), real ``->>`` stringifies it (e.g.
-        ``42`` -> ``'42'``) rather than returning NULL, but this helper
-        returns ``None`` for that case. Unreachable in practice --
-        ``lib.download.build_active_download_state`` (the only
-        production writer) emits either a Python ``str`` or omits the
-        key entirely (``omit_defaults=True``), never a bare number or
-        bool -- so this divergence has no real-world state to exercise
-        it against."""
-        raw = request.get("active_download_state")
-        if isinstance(raw, str):
-            try:
-                raw = json.loads(raw)
-            except (TypeError, ValueError):
-                return None
-        if not isinstance(raw, dict):
-            return None
-        value = raw.get("attempt_fingerprint")
-        return value if isinstance(value, str) else None
 
     def _automation_job_has_authority(self, row) -> bool:
         request_id = row.get("request_id")
@@ -528,18 +500,6 @@ class _FakePipelineDBBase:
             == (child.start_ticks if child is not None else None)
         )
 
-    def _has_youtube_running(self, request_id: int) -> bool:
-        """Mirror of the ``_LONG_TAIL_SELECT`` ``youtube_running`` EXISTS.
-
-        A request has an in-flight rescue iff a ``download_log`` row with
-        ``source='youtube' AND outcome='youtube_running'`` exists for it.
-        """
-        return any(
-            entry.source == "youtube"
-            and entry.outcome == "youtube_running"
-            and entry.request_id == request_id
-            for entry in self.download_logs
-        )
 
     def _mint_download_log_id(self) -> int:
         """Advance the download_log id counter, mirroring a PG sequence.
@@ -612,65 +572,26 @@ class _FakePipelineDBBase:
             )
 
 
-    @staticmethod
-    def _search_log_to_dict(entry: SearchLogRow) -> dict[str, object]:
-        # Match production JSONB read behaviour: psycopg2 deserializes
-        # ``search_log.candidates`` (JSONB) into a Python list/dict on
-        # ``SELECT *``. The fake stores the encoded JSON string, so decode
-        # here so consumers (e.g. the U7 web route + CLI) see the same
-        # parsed-list shape they get from the real DB. Same job, same
-        # column class, one helper (issue #1278 item 7, reader F4).
-        candidates = _jsonb_column(entry.candidates)
-        return {
-            "id": entry.id,
-            "request_id": entry.request_id,
-            "query": entry.query,
-            "result_count": entry.result_count,
-            "elapsed_s": entry.elapsed_s,
-            "outcome": entry.outcome,
-            "created_at": entry.created_at,
-            "candidates": candidates,
-            "variant": entry.variant,
-            "final_state": entry.final_state,
-            "browse_time_s": entry.browse_time_s,
-            "match_time_s": entry.match_time_s,
-            "peers_browsed": entry.peers_browsed,
-            "peers_browsed_lazy": entry.peers_browsed_lazy,
-            "fanout_waves": entry.fanout_waves,
-            # U1 plan-context fields. Mirror the real DB SELECT shape -- a
-            # historical row writes through ``log_search`` keeps these as
-            # None so legacy tests stay green.
-            "plan_id": entry.plan_id,
-            "plan_item_id": entry.plan_item_id,
-            "plan_ordinal": entry.plan_ordinal,
-            "plan_strategy": entry.plan_strategy,
-            "plan_canonical_query_key": entry.plan_canonical_query_key,
-            "plan_repeat_group": entry.plan_repeat_group,
-            "plan_generator_id": entry.plan_generator_id,
-            "execution_stage": entry.execution_stage,
-            "attempt_consumed": entry.attempt_consumed,
-            "cursor_update_status": entry.cursor_update_status,
-            "stale_reason": entry.stale_reason,
-            "plan_cycle_snapshot": entry.plan_cycle_snapshot,
-            "pre_filter_skip_count": entry.pre_filter_skip_count,
-            # U11 forensics columns. Same NULL semantics as production.
-            "rejection_reason": entry.rejection_reason,
-            "result_count_uncapped": entry.result_count_uncapped,
-            "query_token_count": entry.query_token_count,
-            "query_distinct_token_count": entry.query_distinct_token_count,
-            "expected_track_count": entry.expected_track_count,
-            "matcher_score_top1": entry.matcher_score_top1,
-            "query_template": entry.query_template,
-            "cross_request_conflict_request_ids": (
-                entry.cross_request_conflict_request_ids),
-        }
 
-
-    # Cross-cluster calls: declared here so the CALLING mixin type-checks
-    # without importing the composed class. Each stub repeats the owning
-    # mixin's real signature, so Pyright reports an incompatible override
-    # the moment the two drift. The bodies never execute — the composed
-    # FakePipelineDB MRO resolves every call to the owning sibling mixin.
+    # Cross-cluster surface: declared here so the CALLING mixin type-checks
+    # without importing the composed class. Two shapes need it, and both
+    # are load-bearing (measured: deleting the nine stubs of the second
+    # shape produces six Pyright errors).
+    #
+    #   1. A mixin calls a sibling's public method on ``self``: 16 stubs.
+    #   2. A mixin hands ``self`` to something typed against the shared
+    #      base or against a production Protocol: 9 stubs. The five
+    #      request-lane names reach ``_FakeTerminalTransitionsDB``, whose
+    #      ``db`` is a ``_FakePipelineDBBase``; the four cleanup-journal
+    #      names satisfy ``lib.processing_cleanup.OwnerProcessingCleanupDB``
+    #      where ``_FakeImportJobsMixin`` passes ``self``.
+    #
+    # Each stub repeats the owning mixin's real signature (``advisory_lock``
+    # is the one exception: its owner is a ``@contextmanager``, so the stub
+    # declares the context-manager type the callers actually receive), which
+    # is what makes Pyright report an incompatible override the moment the
+    # two drift. The bodies never execute; the composed FakePipelineDB MRO
+    # resolves every call to the owning sibling mixin.
 
     def add_cooldown(self, username: str, cooldown_until: datetime,
                      reason: str | None = None) -> None: ...

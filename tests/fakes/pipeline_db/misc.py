@@ -163,7 +163,8 @@ class _FakeMiscMixin(_FakePipelineDBBase):
             "attempts": row.attempts,
         }
 
-    # Mirrors the four new ``PipelineDB`` triage methods so the service
+    # Triage cohort (U15).
+    # Mirrors the four ``PipelineDB`` triage methods so the service
     # layer can be exercised without a real Postgres. Each method bumps
     # ``self.query_counts`` exactly once per invocation so the N+1 guard
     # test can assert ``sum(query_counts.values()) <= 5`` across the

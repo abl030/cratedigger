@@ -69,6 +69,7 @@ from lib.search_scheduler import (
 )
 from tests.fakes._shared import _as_datetime, _utcnow
 from tests.fakes.pipeline_db._base import _FakePipelineDBBase
+from tests.fakes.pipeline_db._shared import _jsonb_column
 from tests.fakes.rows import (
     SearchLogRow,
 )
@@ -124,6 +125,60 @@ class _FakeSearchPlanMixin(_FakePipelineDBBase):
         "cursor_update_status", "stale_reason", "plan_cycle_snapshot",
         "created_at",
     )
+
+
+    @staticmethod
+    def _search_log_to_dict(entry: SearchLogRow) -> dict[str, object]:
+        # Match production JSONB read behaviour: psycopg2 deserializes
+        # ``search_log.candidates`` (JSONB) into a Python list/dict on
+        # ``SELECT *``. The fake stores the encoded JSON string, so decode
+        # here so consumers (e.g. the U7 web route + CLI) see the same
+        # parsed-list shape they get from the real DB. Same job, same
+        # column class, one helper (issue #1278 item 7, reader F4).
+        candidates = _jsonb_column(entry.candidates)
+        return {
+            "id": entry.id,
+            "request_id": entry.request_id,
+            "query": entry.query,
+            "result_count": entry.result_count,
+            "elapsed_s": entry.elapsed_s,
+            "outcome": entry.outcome,
+            "created_at": entry.created_at,
+            "candidates": candidates,
+            "variant": entry.variant,
+            "final_state": entry.final_state,
+            "browse_time_s": entry.browse_time_s,
+            "match_time_s": entry.match_time_s,
+            "peers_browsed": entry.peers_browsed,
+            "peers_browsed_lazy": entry.peers_browsed_lazy,
+            "fanout_waves": entry.fanout_waves,
+            # U1 plan-context fields. Mirror the real DB SELECT shape -- a
+            # historical row writes through ``log_search`` keeps these as
+            # None so legacy tests stay green.
+            "plan_id": entry.plan_id,
+            "plan_item_id": entry.plan_item_id,
+            "plan_ordinal": entry.plan_ordinal,
+            "plan_strategy": entry.plan_strategy,
+            "plan_canonical_query_key": entry.plan_canonical_query_key,
+            "plan_repeat_group": entry.plan_repeat_group,
+            "plan_generator_id": entry.plan_generator_id,
+            "execution_stage": entry.execution_stage,
+            "attempt_consumed": entry.attempt_consumed,
+            "cursor_update_status": entry.cursor_update_status,
+            "stale_reason": entry.stale_reason,
+            "plan_cycle_snapshot": entry.plan_cycle_snapshot,
+            "pre_filter_skip_count": entry.pre_filter_skip_count,
+            # U11 forensics columns. Same NULL semantics as production.
+            "rejection_reason": entry.rejection_reason,
+            "result_count_uncapped": entry.result_count_uncapped,
+            "query_token_count": entry.query_token_count,
+            "query_distinct_token_count": entry.query_distinct_token_count,
+            "expected_track_count": entry.expected_track_count,
+            "matcher_score_top1": entry.matcher_score_top1,
+            "query_template": entry.query_template,
+            "cross_request_conflict_request_ids": (
+                entry.cross_request_conflict_request_ids),
+        }
 
     def get_search_summaries_for_requests(
         self,

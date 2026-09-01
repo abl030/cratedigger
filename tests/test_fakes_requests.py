@@ -364,10 +364,11 @@ class TestFakeSupersedeRequestMbid(unittest.TestCase):
 class TestFakePipelineDBUnfindable(unittest.TestCase):
     """Self-tests for U13 ``FakePipelineDB`` unfindable-detection writers.
 
-    Mirrors ``.claude/rules/code-quality.md`` § "Every new PipelineDB
-    method needs an equivalent stub on ``FakePipelineDB`` with a self-
-    test in its cluster test module." Each test exercises a single
-    fake method's contract — call recording + persisted row state.
+    Follows the New Work Checklist row in
+    ``.claude/rules/code-quality.md``, which asks a new ``PipelineDB``
+    method for an equivalent stub on ``FakePipelineDB`` plus a self-test
+    in that cluster's test module. Each test exercises a single fake
+    method's contract: call recording and persisted row state.
     """
 
     def test_record_artist_probe_writes_and_records(self) -> None:

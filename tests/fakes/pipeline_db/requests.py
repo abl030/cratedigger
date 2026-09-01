@@ -58,6 +58,19 @@ class _FakeRequestsMixin(_FakePipelineDBBase):
     """``album_requests`` writes, projections, and queries."""
 
 
+    def _has_youtube_running(self, request_id: int) -> bool:
+        """Mirror of the ``_LONG_TAIL_SELECT`` ``youtube_running`` EXISTS.
+
+        A request has an in-flight rescue iff a ``download_log`` row with
+        ``source='youtube' AND outcome='youtube_running'`` exists for it.
+        """
+        return any(
+            entry.source == "youtube"
+            and entry.outcome == "youtube_running"
+            and entry.request_id == request_id
+            for entry in self.download_logs
+        )
+
     def _processing_owner_join_aliases(
         self, row: Mapping[str, object],
     ) -> dict[str, object]:
@@ -815,7 +828,8 @@ class _FakeRequestsMixin(_FakePipelineDBBase):
         row["updated_at"] = _utcnow()
         return True
 
-    # Each fake mirrors the production PipelineDB writer's contract:
+    # Unfindable detection (U13).
+    # Each fake below mirrors the production PipelineDB writer's contract:
     # one statement, no cursor mutation, autocommit-safe. Tests assert
     # against the persisted row state (and per-method call recorders
     # for the R20 cursor-isolation runtime guard).

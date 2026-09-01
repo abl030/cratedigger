@@ -4,7 +4,9 @@ The slskd transfer ownership ledger (migration 045).
 """
 from __future__ import annotations
 
+import json
 from collections.abc import (
+    Mapping,
     Sequence,
 )
 from datetime import datetime
@@ -21,6 +23,41 @@ from tests.fakes.rows import (
 
 class _FakeTransferLedgerMixin(_FakePipelineDBBase):
     """The slskd transfer ownership ledger (migration 045)."""
+
+
+    @staticmethod
+    def _attempt_fingerprint_from_state(
+        request: Mapping[str, object],
+    ) -> str | None:
+        """Mirror ``active_download_state ->> 'attempt_fingerprint'``
+        (#1196 item 1) for the two shapes production ever writes: the
+        top-level state is SQL NULL (or a non-object value -- ``->>``
+        returns NULL for a NULL or non-object jsonb regardless of key,
+        matching ``None`` here), or the key is absent/JSON-null
+        (``->>`` also returns NULL, matching the ``dict.get`` miss
+        here). Does NOT distinguish a missing key from an explicit JSON
+        ``null`` -- ``->>`` does not either.
+
+        Known, deliberately UNRECONCILED divergence: if the
+        ``attempt_fingerprint`` JSON value were ever a non-string
+        scalar (a number, bool), real ``->>`` stringifies it (e.g.
+        ``42`` -> ``'42'``) rather than returning NULL, but this helper
+        returns ``None`` for that case. Unreachable in practice --
+        ``lib.download.build_active_download_state`` (the only
+        production writer) emits either a Python ``str`` or omits the
+        key entirely (``omit_defaults=True``), never a bare number or
+        bool -- so this divergence has no real-world state to exercise
+        it against."""
+        raw = request.get("active_download_state")
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (TypeError, ValueError):
+                return None
+        if not isinstance(raw, dict):
+            return None
+        value = raw.get("attempt_fingerprint")
+        return value if isinstance(value, str) else None
 
     def record_transfer_enqueue(self, rows: list[TransferLedgerRow]) -> None:
         """Write-ahead batch insert -- mirrors the real INSERT's "one row

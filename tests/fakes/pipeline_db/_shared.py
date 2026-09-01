@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-from datetime import timedelta
 
 
 def _jsonb_column(value: object) -> object:
@@ -33,10 +32,3 @@ def _jsonb_column(value: object) -> object:
 
 def _reject_nonstandard_json_constant(value: str) -> None:
     raise ValueError(f"nonstandard JSON constant: {value}")
-
-
-#: The ``request_search_summary`` view's own window
-#: (``migrations/031_request_search_summary_view.sql``). Every consumer of
-#: that view — the triage rollup and the ``search_not_converting`` page
-#: join — sees only search_log rows this recent, so the mirror must too.
-_SEARCH_SUMMARY_WINDOW = timedelta(days=14)
