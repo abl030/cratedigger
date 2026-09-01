@@ -11,7 +11,7 @@ from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.beets_db import AlbumInfo
-from lib.import_preview import persist_exact_current_spectral_from_attempt
+from lib.current_library_evidence import persist_exact_current_spectral_from_attempt
 from lib.quality import (
     AlbumQualityEvidence,
     AlbumQualityEvidenceFile,

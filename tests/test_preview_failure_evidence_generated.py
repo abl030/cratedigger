@@ -31,6 +31,12 @@ from hypothesis import strategies as st
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.beets_db import AlbumInfo
 from lib.config import CratediggerConfig
+from lib.current_library_evidence import (
+    HaveEnrichment,
+    HavePreparation,
+    enrich_incomplete_current_evidence_for_request,
+    prepare_current_evidence_for_failure,
+)
 from lib.import_execution import (
     CancellationToken,
     ExecutionLeaseSnapshot,
@@ -38,8 +44,6 @@ from lib.import_execution import (
 )
 from lib.import_preview import (
     ImportPreviewResult,
-    enrich_incomplete_current_evidence_for_request,
-    prepare_current_evidence_for_failure,
 )
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
@@ -653,12 +657,12 @@ def _run_world(world: PreviewFailureWorld) -> PreviewFailureObservation:
             if front_gate_result is not None:
                 assert front_gate_path == authoritative_failure_path
 
-        def prepare_have(db_arg: Any, **kwargs: Any) -> str:
+        def prepare_have(db_arg: Any, **kwargs: Any) -> HavePreparation:
             if world.hook_fault == "prepare":
                 raise RuntimeError("generated prepare failure")
             return prepare_current_evidence_for_failure(db_arg, **kwargs)
 
-        def enrich_have(db_arg: Any, **kwargs: Any) -> str:
+        def enrich_have(db_arg: Any, **kwargs: Any) -> HaveEnrichment:
             if world.hook_fault == "enrich":
                 raise RuntimeError("generated enrich failure")
             return enrich_incomplete_current_evidence_for_request(

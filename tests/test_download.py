@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 from unittest.mock import MagicMock, patch
 
+from lib.current_library_evidence import HaveEnrichment, HavePreparation
 from lib.download_materialization import (
     Materialized,
     MaterializeFailed,
@@ -8699,10 +8700,16 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
             **overrides,
         ))
 
-    def _recorder(self, outcome: str = "enriched", error: Exception | None = None):
+    def _recorder(
+        self,
+        outcome: HaveEnrichment = HaveEnrichment.ENRICHED,
+        error: Exception | None = None,
+    ):
         calls: list[int] = []
 
-        def enrich(db: Any, *, request_id: int, **_kwargs: Any) -> str:
+        def enrich(
+            db: Any, *, request_id: int, **_kwargs: Any,
+        ) -> HaveEnrichment:
             calls.append(request_id)
             if error is not None:
                 raise error
@@ -8726,13 +8733,13 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
     def test_work_outcome_consumes_budget(self):
         from lib.download import _enrich_have_evidence_after_failure
         ctx = make_ctx_with_fake_db(FakePipelineDB())
-        enrich, calls = self._recorder("enriched")
+        enrich, calls = self._recorder(HaveEnrichment.ENRICHED)
 
         _enrich_have_evidence_after_failure(
             42,
             "mb-uuid",
             ctx,
-            prepared_outcome="ready",
+            prepared_outcome=HavePreparation.READY,
             enrich_fn=enrich,
         )
 
@@ -8747,9 +8754,9 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
         ctx = make_ctx_with_fake_db(FakePipelineDB(), cfg=cfg)
         received: dict[str, Any] = {}
 
-        def prepare(db: Any, **kwargs: Any) -> str:
+        def prepare(db: Any, **kwargs: Any) -> HavePreparation:
             received.update(kwargs)
-            return "ready"
+            return HavePreparation.READY
 
         outcome = _prepare_have_evidence_before_failure_log(
             42,
@@ -8758,7 +8765,7 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
             prepare_fn=prepare,
         )
 
-        self.assertEqual(outcome, "ready")
+        self.assertEqual(outcome, HavePreparation.READY)
         self.assertEqual(received["request_id"], 42)
         self.assertEqual(received["mb_release_id"], "mb-exact-release")
         self.assertIs(received["quality_ranks"], cfg.quality_ranks)
@@ -8772,15 +8779,15 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
         ctx = make_ctx_with_fake_db(FakePipelineDB(), cfg=cfg)
         received: dict[str, Any] = {}
 
-        def enrich(db: Any, **kwargs: Any) -> str:
+        def enrich(db: Any, **kwargs: Any) -> HaveEnrichment:
             received.update(kwargs)
-            return "enriched"
+            return HaveEnrichment.ENRICHED
 
         _enrich_have_evidence_after_failure(
             42,
             "mb-exact-release",
             ctx,
-            prepared_outcome="ready",
+            prepared_outcome=HavePreparation.READY,
             enrich_fn=enrich,
         )
 
@@ -8791,7 +8798,11 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
 
     def test_free_outcomes_do_not_consume_budget(self):
         from lib.download import _enrich_have_evidence_after_failure
-        for outcome in ("complete", "no_current_evidence", "stale"):
+        for outcome in (
+            HaveEnrichment.COMPLETE,
+            HaveEnrichment.NO_CURRENT_EVIDENCE,
+            HaveEnrichment.STALE,
+        ):
             with self.subTest(outcome=outcome):
                 ctx = make_ctx_with_fake_db(FakePipelineDB())
                 enrich, calls = self._recorder(outcome)
@@ -8800,7 +8811,7 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
                     42,
                     "mb-uuid",
                     ctx,
-                    prepared_outcome="ready",
+                    prepared_outcome=HavePreparation.READY,
                     enrich_fn=enrich,
                 )
 
@@ -8811,13 +8822,13 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
         from lib.download import _enrich_have_evidence_after_failure
         ctx = make_ctx_with_fake_db(FakePipelineDB())
         ctx.evidence_enrichment_budget = 0
-        enrich, calls = self._recorder("enriched")
+        enrich, calls = self._recorder(HaveEnrichment.ENRICHED)
 
         _enrich_have_evidence_after_failure(
             42,
             "mb-uuid",
             ctx,
-            prepared_outcome="ready",
+            prepared_outcome=HavePreparation.READY,
             enrich_fn=enrich,
         )
 
@@ -8832,7 +8843,7 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
             42,
             "mb-uuid",
             ctx,
-            prepared_outcome="ready",
+            prepared_outcome=HavePreparation.READY,
             enrich_fn=enrich,
         )
 
@@ -8846,16 +8857,18 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
         ctx = make_ctx_with_fake_db(db)
         calls: list[int] = []
 
-        def prepare(db: Any, **_kwargs: Any) -> str:
+        def prepare(db: Any, **_kwargs: Any) -> HavePreparation:
             self.assertEqual(db.get_log(limit=1), [])
             self.assertEqual(db.request(42)["status"], "downloading")
-            return "ready"
+            return HavePreparation.READY
 
-        def enrich(db: Any, *, request_id: int, **_kwargs: Any) -> str:
+        def enrich(
+            db: Any, *, request_id: int, **_kwargs: Any,
+        ) -> HaveEnrichment:
             db.assert_log(self, 0, outcome="timeout")
             self.assertEqual(db.request(request_id)["status"], "wanted")
             calls.append(request_id)
-            return "enriched"
+            return HaveEnrichment.ENRICHED
 
         with patch("lib.download.cancel_and_delete"):
             _timeout_album(
@@ -8882,10 +8895,10 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
             42,
             "mb-uuid",
             ctx,
-            prepare_fn=lambda *_args, **_kwargs: "failed",
+            prepare_fn=lambda *_args, **_kwargs: HavePreparation.FAILED,
         )
 
-        self.assertEqual(outcome, "failed")
+        self.assertEqual(outcome, HavePreparation.FAILED)
         self.assertEqual(ctx.evidence_enrichment_budget, 1)
 
     def test_absent_have_preparation_does_not_consume_budget(self):
@@ -8897,11 +8910,50 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
             42,
             "mb-uuid",
             ctx,
-            prepare_fn=lambda *_args, **_kwargs: "no_current_evidence",
+            prepare_fn=lambda *_args, **_kwargs: HavePreparation.NO_CURRENT_EVIDENCE,
         )
 
-        self.assertEqual(outcome, "no_current_evidence")
+        self.assertEqual(outcome, HavePreparation.NO_CURRENT_EVIDENCE)
         self.assertEqual(ctx.evidence_enrichment_budget, 2)
+
+    def test_exhausted_budget_attempts_no_have_preparation(self):
+        """An exhausted budget returns None — no outcome, nothing attempted.
+
+        ``None`` is distinct from every member ``HavePreparation`` can carry,
+        and it must NOT satisfy the downstream ``== READY`` gate. Nothing
+        covered the equivalent early return before issue #1313 (it used to
+        return the caller-invented token ``"budget_exhausted"``).
+        """
+        from lib.download import (
+            _enrich_have_evidence_after_failure,
+            _prepare_have_evidence_before_failure_log,
+        )
+
+        ctx = make_ctx_with_fake_db(FakePipelineDB())
+        ctx.evidence_enrichment_budget = 0
+        prepare_calls: list[int] = []
+        enrich, enrich_calls = self._recorder(HaveEnrichment.ENRICHED)
+
+        def prepare(
+            _db: object, *, request_id: int, **_kwargs: object,
+        ) -> HavePreparation:
+            prepare_calls.append(request_id)
+            return HavePreparation.READY
+
+        outcome = _prepare_have_evidence_before_failure_log(
+            42, "mb-uuid", ctx, prepare_fn=prepare,
+        )
+
+        self.assertIsNone(outcome)
+        self.assertEqual(prepare_calls, [])
+        self.assertEqual(ctx.evidence_enrichment_budget, 0)
+
+        # The None must fall through the enrichment gate exactly as a
+        # non-READY outcome does, rather than being treated as prepared.
+        _enrich_have_evidence_after_failure(
+            42, "mb-uuid", ctx, prepared_outcome=outcome, enrich_fn=enrich,
+        )
+        self.assertEqual(enrich_calls, [])
 
     def test_timeout_album_default_enrichment_marks_v0_attempted(self):
         """Default wiring, no injection: a real (failing) probe still lands

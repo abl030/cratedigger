@@ -756,7 +756,7 @@ def measure_preimport_state(
     all: its only DB access is the read-only bad-hash gate through
     ``bad_hash_db``. From the measurement lanes, HAVE spectral state
     persists exclusively through the content-addressed evidence row
-    (``lib.import_preview.persist_exact_current_spectral_from_attempt``),
+    (``lib.current_library_evidence.persist_exact_current_spectral_from_attempt``),
     which writes ONLY a real measured existing spectral — the candidate
     download's spectral is never adopted as HAVE state (issue #815 bail).
     (Dispatch separately stamps ``album_requests.current_spectral_*`` at
@@ -1119,3 +1119,36 @@ def measure_preimport_state(
         aac_lattice=aac_lattice,
         cd_rip_verification=cd_rip_verification,
     )
+
+
+# Bound on the legacy subprocess-stderr fallback used when the harness fails
+# before returning a typed result. Conversion failures use ConversionInfo's
+# bounded diagnostics instead; this fallback remains a breadcrumb, not a log.
+STDERR_DIAGNOSTIC_MAX_CHARS = 2000
+
+
+def diagnostic_from_stderr(stderr: str, max_chars: int = STDERR_DIAGNOSTIC_MAX_CHARS) -> str:
+    """Return a bounded recent-line breadcrumb from arbitrary stderr."""
+    if not stderr or not stderr.strip():
+        return ""
+
+    lines = [ln.strip() for ln in stderr.splitlines() if ln.strip()]
+
+    # Keep recent whole lines within the budget. A single oversized line is
+    # hard-truncated below so arbitrary subprocess output stays bounded.
+    kept: list[str] = []
+    total = 0
+    for line in reversed(lines):
+        joiner_cost = 3 if kept else 0  # " / "
+        added = len(line) + joiner_cost
+        if total + added > max_chars and kept:
+            break
+        kept.append(line)
+        total += added
+    kept.reverse()
+
+    result = " / ".join(kept)
+    if len(result) > max_chars:
+        # Pathological single oversized line — hard ceiling wins.
+        result = result[:max_chars]
+    return result

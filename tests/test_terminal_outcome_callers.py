@@ -10,6 +10,7 @@ from unittest import mock
 
 from lib import transitions
 from lib.config import CratediggerConfig
+from lib.current_library_evidence import HavePreparation
 from lib.dispatch import DispatchOutcome
 from lib.dispatch.post_import import _run_or_stage_quality_gate
 from lib.dispatch.quality_gate import QualityGatePlan
@@ -226,8 +227,10 @@ class TestTerminalOutcomeCallers(unittest.TestCase):
                     ),
                 )
 
-            def no_current_evidence(*_args: object, **_kwargs: object) -> str:
-                return "no_current_evidence"
+            def no_current_evidence(
+                *_args: object, **_kwargs: object,
+            ) -> HavePreparation:
+                return HavePreparation.NO_CURRENT_EVIDENCE
 
             with mock.patch(
                 "lib.media_readiness._ffprobe_readiness",

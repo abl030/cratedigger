@@ -1728,11 +1728,13 @@ acquisition.
 current-evidence row's spectral scan and on-disk V0 research normally
 complete during import preview — but a request whose downloads always
 fail never reaches preview, so its HAVE snapshot (and therefore the
-Recents IN/HAVE strip) stays absent or partial forever. Download-phase
-failure finalizers (`_timeout_album` and the materialize-grace reset in
-`lib/download.py`) therefore perform two fail-soft steps. Before recording
-the failed attempt, `prepare_current_evidence_for_failure`
-(`lib/import_preview.py`) loads or backfills only the exact release's
+Recents IN/HAVE strip) stays absent or partial forever. The download-phase
+failure finalizer (`lib/download.py::_timeout_album`, reached from every
+`PollCycleDecision` branch that abandons an incarnation, including the
+vanished/materialize one) therefore performs two fail-soft steps. Before
+recording the failed attempt, `prepare_current_evidence_for_failure`
+(`lib/current_library_evidence.py` — the one module that owns HAVE
+evidence since issue #1313) loads or backfills only the exact release's
 canonical current snapshot. Even an already-linked complete row is freshly
 reauthorized against the exact Beets identity and current fingerprint; when
 both still match, the immutable evidence row is reused without rewriting it.
@@ -1745,11 +1747,14 @@ never re-probing an already-attempted V0 snapshot (the V0 research marker is
 once-only), and refusing stale on-disk state. (The HAVE spectral helper is
 *not* once-only — a fresh audit overwrites a disagreeing grade; see the
 fresh-audit-wins policy below.)
-Adapter
-or backfill failures and actual measurement work consume the per-cycle
-`CratediggerContext.evidence_enrichment_budget`; complete or authoritatively
-absent library copies cost nothing. Over time the failed-download cohort's
-evidence converges without delaying or bypassing download cleanup. Automation
+Adapter or backfill failures and actual measurement work consume the
+per-cycle `CratediggerContext.evidence_enrichment_budget`; complete or
+authoritatively absent library copies cost nothing. Both helpers return a
+typed outcome (`HavePreparation` / `HaveEnrichment`) whose `charges_budget`
+property IS that policy, so the two vocabularies and the budget rule live in
+one place rather than being re-derived by tuple membership at each call
+site. Over time the failed-download cohort's evidence converges without
+delaying or bypassing download cleanup. Automation
 failure finalizers also reset the request to `wanted`. Terminal persistence
 checks the operator search stop under its request-row lock for every `wanted`
 transition, including rejection, HAVE-abort, and local-completion bundles. It

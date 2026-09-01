@@ -33,6 +33,7 @@ from hypothesis.stateful import (
     rule,
 )
 
+from lib.current_library_evidence import HaveEnrichment
 from lib.quality import CURRENT_EVIDENCE_LINEAGE_VERSION
 
 # Start a throwaway PostgreSQL and apply the real migration stack before the
@@ -813,7 +814,7 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
 
                 self.assertEqual(
                     world.enrich_current_evidence(request_id),
-                    "enriched",
+                    HaveEnrichment.ENRICHED,
                 )
                 self.assertTrue(action(
                     world,
