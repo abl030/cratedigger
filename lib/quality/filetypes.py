@@ -183,18 +183,6 @@ _CONFIG_NAME_TO_CODEC: dict[str, tuple[str, str]] = {
     "m4a": ("aac", "m4a"),
 }
 
-# Codec → canonical extension (for filename construction)
-CODEC_TO_EXT: dict[str, str] = {
-    "mp3": "mp3",
-    "flac": "flac",
-    "ogg": "ogg",
-    "opus": "opus",
-    "aac": "aac",
-    "alac": "m4a",
-    "wma": "wma",
-    "wav": "wav",
-}
-
 # Canonical set of audio extensions (bare: "mp3", "flac", "m4a", ...)
 AUDIO_EXTENSIONS: frozenset[str] = frozenset(_EXT_TO_CODEC.keys())
 
