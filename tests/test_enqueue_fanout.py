@@ -1098,40 +1098,6 @@ class TestAttemptReportsItsForensics(unittest.TestCase):
         self.assertGreater(len(consumed), 2)
         self._assert_reports_every_visit(attempt, consumed)
 
-    def test_conflicts_accumulate_across_candidates_in_one_call(self):
-        """The union is the point: two candidates, two different conflicts.
-
-        Every other assertion on ``conflicting_request_ids`` in this file
-        checks a single-conflict outcome, so degrading the union to an
-        assignment — losing the first candidate's ids — went unnoticed
-        (issue #1313, mutant runner finding 2). The docstring at the guard
-        claims every id skipped for during the WHOLE call is carried.
-        """
-        cfg = _make_cfg(browse_top_k=20)
-        users = _ranked_users(2)
-        ctx = _make_ctx(cfg, user_upload_speed=_upload_speeds(users))
-        results = _make_results(users)
-        matches = {
-            user: _scored_match(user, matched=True, candidates=0, skips=0)
-            for user in users
-        }
-        conflicts = {users[0]: {11}, users[1]: {22}}
-
-        def conflict_for(planned, request_id, _ctx, *, check_cross_cycle=None):
-            return conflicts[planned[0].username]
-
-        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch(
-                 "lib.enqueue._cross_request_conflict_ids",
-                 side_effect=conflict_for,
-             ):
-            attempt = try_enqueue(
-                _make_tracks(), results, "flac", ctx,
-                match_fn=lambda _t, _f, _d, u, _c: matches[u],
-            )
-
-        self.assertFalse(attempt.matched)
-        self.assertEqual(attempt.conflicting_request_ids, frozenset({11, 22}))
 
     def _multi_disc_partial(self, discs_that_match: int):
         """Drive try_multi_enqueue where only some discs find a folder."""
@@ -3246,6 +3212,69 @@ class TestCrossRequestEnqueueGuard(unittest.TestCase):
         # marker naming its conflicting owner; the winner carries none.
         self.assertEqual(attempt2.conflicting_request_ids, frozenset({1}))
         self.assertEqual(attempt1.conflicting_request_ids, frozenset())
+
+    def test_two_candidates_conflicting_with_two_owners_carry_both(self):
+        """The union across candidates, driven through the real guard.
+
+        Every other assertion on ``conflicting_request_ids`` in this file
+        checks a single-conflict outcome, so degrading the union to an
+        assignment — losing the first candidate's ids — survived the whole
+        enqueue suite (issue #1313, mutant runner finding 2). Two peers,
+        each already owned by a different request, and one attempt that
+        browses both: the guard's own docstring says every id it skipped
+        for during the WHOLE call is carried, and this is what proves it.
+        """
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        for request_id in (1, 2, 3):
+            db.seed_request(make_request_row(id=request_id, status="wanted"))
+        dirs = {
+            "TheBun": "Music\\TheBun\\Album",
+            "OtherPeer": "Music\\OtherPeer\\Album",
+        }
+        candidates = {
+            peer: self._shared_candidate(
+                file_dir, [f"{file_dir}\\0{i}.flac" for i in (1, 2)])
+            for peer, file_dir in dirs.items()
+        }
+        registry = ClaimedQueueKeysRegistry()
+
+        def context(request_id: int, peer: str) -> CratediggerContext:
+            ctx = _ctx_with_download_ownership(
+                cfg=cfg, db=db, slskd=candidates[peer][0], registry=registry)
+            ctx.current_album_cache[request_id] = _album_with_request(
+                request_id)
+            ctx.user_upload_speed.update({"TheBun": 10_000, "OtherPeer": 9_999})
+            return ctx
+
+        results = {peer: {"flac": [d]} for peer, d in dirs.items()}
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("time.sleep"):
+            # Each owner takes one peer's keys, through the real ledger.
+            first = try_enqueue(
+                _make_tracks(), {"TheBun": results["TheBun"]}, "flac",
+                context(1, "TheBun"),
+                match_fn=_const_match(candidates["TheBun"][1]),
+            )
+            second = try_enqueue(
+                _make_tracks(album_id=2), {"OtherPeer": results["OtherPeer"]},
+                "flac", context(2, "OtherPeer"),
+                match_fn=_const_match(candidates["OtherPeer"][1]),
+            )
+            # Request 3 browses both and can have neither.
+            third = try_enqueue(
+                _make_tracks(album_id=3), results, "flac",
+                context(3, "TheBun"),
+                match_fn=lambda _t, _f, _d, peer, _c: candidates[peer][1],
+            )
+
+        self.assertTrue(first.matched)
+        self.assertTrue(second.matched)
+        self.assertFalse(third.matched)
+        self.assertFalse(third.enqueue_failed)
+        self.assertEqual(third.conflicting_request_ids, frozenset({1, 2}))
+        self.assertEqual(db.request(3)["status"], "wanted")
 
     def test_persisted_state_fingerprint_agrees_with_real_ledger_rows_single_disc(self):
         """#1196 item 1 (review F1): agreement-by-construction, driven at
