@@ -841,7 +841,7 @@ class TestImportOperationFence(unittest.TestCase):
 class TestImportOperationFencePostgres(unittest.TestCase):
     def test_startup_recovery_removes_launched_force_action_copy(self) -> None:
         from lib.config import CratediggerConfig
-        from lib.import_preview import force_action_copy_path
+        from lib.preview_snapshot import force_action_copy_path
         from scripts import importer
 
         db = make_db()

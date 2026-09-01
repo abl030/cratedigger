@@ -423,7 +423,7 @@ def importer_required_paths(cfg: CratediggerConfig) -> RequiredPaths:
     """Import queue worker: reads quarantine roots (force-import, beets-
     distance), normalizes owned albums in place, and reclaims retained
     force-action copies from the private ``albums`` tree
-    (``lib.import_preview.cleanup_force_action_copy_for_job``, private
+    (``lib.preview_snapshot.cleanup_force_action_copy_for_job``, private
     primitives). Stages Beets imports under the beets staging root when
     configured."""
     write: list[str] = []
@@ -446,7 +446,7 @@ def preview_worker_required_paths(cfg: CratediggerConfig) -> RequiredPaths:
     one place that failure mode is caught loudly instead). Writes preview
     snapshots (``preview/``) and retains force-action copies (``albums/``)
     through the private tree; ``.preview-snapshot.lock`` is taken directly
-    in the processing root itself (``lib.import_preview._preview_copy_lock``),
+    in the processing root itself (``lib.preview_snapshot._preview_copy_lock``),
     reached via ``snapshot_configured_quarantine_directory``."""
     return RequiredPaths(
         read=_quarantine_roots(cfg),

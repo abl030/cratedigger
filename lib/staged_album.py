@@ -8,7 +8,11 @@ import shutil
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from lib.import_execution import CancellationToken, ExecutionCancelled
+from lib.import_execution import (
+    CancellationToken,
+    ExecutionCancelled,
+    checkpoint,
+)
 from lib.processing_paths import bounded_staged_filename
 
 if TYPE_CHECKING:
@@ -16,11 +20,6 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger("cratedigger")
-
-
-def _checkpoint(cancellation_token: CancellationToken | None) -> None:
-    if cancellation_token is not None:
-        cancellation_token.raise_if_cancelled()
 
 
 def staged_filename(file: DownloadFile) -> str:
@@ -79,16 +78,16 @@ class StagedAlbum:
 
         moved_entries: list[tuple[str, str]] = []
         try:
-            _checkpoint(cancellation_token)
+            checkpoint(cancellation_token)
             os.makedirs(target, exist_ok=True)
             for entry in os.listdir(source):
                 source_entry = os.path.join(source, entry)
                 target_entry = os.path.join(target, entry)
-                _checkpoint(cancellation_token)
+                checkpoint(cancellation_token)
                 shutil.move(source_entry, target_entry)
                 moved_entries.append((source_entry, target_entry))
             self.current_path = target
-            _checkpoint(cancellation_token)
+            checkpoint(cancellation_token)
             shutil.rmtree(source, ignore_errors=True)
             return self.current_path
         except ExecutionCancelled:
@@ -99,12 +98,12 @@ class StagedAlbum:
         except Exception as exc:
             rollback_failures: list[tuple[str, str]] = []
             if moved_entries:
-                _checkpoint(cancellation_token)
+                checkpoint(cancellation_token)
                 os.makedirs(source, exist_ok=True)
                 for source_entry, target_entry in reversed(moved_entries):
                     if os.path.exists(target_entry):
                         try:
-                            _checkpoint(cancellation_token)
+                            checkpoint(cancellation_token)
                             shutil.move(target_entry, source_entry)
                         except ExecutionCancelled:
                             raise
@@ -120,7 +119,7 @@ class StagedAlbum:
                 and os.path.isdir(target)
                 and not os.listdir(target)
             ):
-                _checkpoint(cancellation_token)
+                checkpoint(cancellation_token)
                 shutil.rmtree(target, ignore_errors=True)
             self.current_path = source
             if rollback_failures:

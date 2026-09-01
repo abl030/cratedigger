@@ -46,10 +46,7 @@ from lib.import_execution import (
     OwnerSessionIdentity,
     ProcessIdentity,
 )
-from lib.import_preview import (
-    ImportPreviewResult,
-    force_action_copy_path,
-)
+from lib.import_preview import ImportPreviewResult
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
@@ -65,6 +62,7 @@ from lib.mbid_replace_service import (
 from lib.measurement import ExistingSpectralAuditLookup
 from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
 from lib.pipeline_db.rows import AlbumRequestRow
+from lib.preview_snapshot import force_action_copy_path
 from lib.quality import (
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_SOURCE,

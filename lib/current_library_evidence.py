@@ -335,11 +335,27 @@ def persist_exact_current_spectral_from_attempt(
     return EvidenceBuildResult(loaded, "ready")
 
 
-def load_persisted_existing_spectral(
+def load_linked_current_evidence(
     db: CurrentLibraryEvidenceDB,
     request_id: int,
-) -> tuple[AlbumQualityEvidence | None, SpectralAnalysisDetail, bool]:
-    """Load linked HAVE provenance for the conditional audit boundary."""
+) -> AlbumQualityEvidence | None:
+    """Load the evidence row this request's current-library link names.
+
+    ``None`` covers four worlds on purpose, and the sole caller wants the same
+    thing from all four. There may be no link; the link may name a row that is
+    gone; either read may raise. In every case the resolver hands ``None`` to
+    its loader as ``preloaded_evidence``, which then resolves Beets freshly and
+    backfills — so an unreadable link re-derives from the installed files
+    instead of proceeding on a row nothing could read.
+
+    Until issue #1313 this returned a 3-tuple, and two thirds of it were dead.
+    The second element projected the row's spectral detail, and no branch of
+    the resolver ever read it: two reassign that name before use and the third
+    returns ``CurrentLibraryAuthorityUnavailable`` without touching it. The
+    third element said whether a link had existed at all, and the resolver
+    discarded it into an underscore. Three test functions across two modules
+    read one or the other, which is how both survived.
+    """
     try:
         evidence_id = db.get_request_current_evidence_id(request_id)
     except Exception:
@@ -348,9 +364,9 @@ def load_persisted_existing_spectral(
             request_id,
             exc_info=True,
         )
-        return None, SpectralAnalysisDetail(attempted=False), True
+        return None
     if evidence_id is None:
-        return None, SpectralAnalysisDetail(attempted=False), False
+        return None
     try:
         current_evidence = db.load_album_quality_evidence_by_id(evidence_id)
     except Exception:
@@ -360,29 +376,14 @@ def load_persisted_existing_spectral(
             request_id,
             exc_info=True,
         )
-        return None, SpectralAnalysisDetail(attempted=False), True
+        return None
     if current_evidence is None:
         logger.warning(
             "Current spectral evidence %s is missing for request %s",
             evidence_id,
             request_id,
         )
-        return None, SpectralAnalysisDetail(attempted=False), True
-    measurement = current_evidence.measurement
-    return (
-        current_evidence,
-        spectral_detail_from_persisted_source(
-            measurement.spectral_grade,
-            measurement.spectral_bitrate_kbps,
-            cliff_hz=measurement.cliff_hz,
-            codec_family=measurement.codec_family,
-            ultrasonic_deficit_db=measurement.ultrasonic_deficit_db,
-            spectral_measurement_version=(
-                measurement.spectral_measurement_version
-            ),
-        ),
-        True,
-    )
+    return current_evidence
 
 
 def enrich_current_v0_research_for_preview(
@@ -1093,11 +1094,8 @@ def resolve_current_library_evidence(
     authority failure and returns ``CurrentLibraryAuthorityUnavailable``, so
     a lane can never proceed on a stale or unreadable HAVE row.
     """
-    (
-        current_evidence,
-        existing_spectral_evidence,
-        _current_evidence_authoritative,
-    ) = load_persisted_existing_spectral(db, request_id)
+    current_evidence = load_linked_current_evidence(db, request_id)
+    existing_spectral_evidence = SpectralAnalysisDetail(attempted=False)
     reuse_have_evidence = False
     current_result = loader(
         db,
@@ -1111,7 +1109,6 @@ def resolve_current_library_evidence(
         # Authoritative absence: stale linked HAVE facts describe no current
         # bytes and cannot influence candidate measurement or decision inputs.
         current_evidence = None
-        existing_spectral_evidence = SpectralAnalysisDetail(attempted=False)
     elif current_result.status != "ready" or current_result.evidence is None:
         return CurrentLibraryAuthorityUnavailable(
             f"{current_result.status}: "

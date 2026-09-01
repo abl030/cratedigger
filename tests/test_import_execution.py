@@ -17,6 +17,7 @@ sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401
 
 from album_source import DatabaseSource
+from lib.fs_authority import remove_relative_tree
 from lib.import_execution import (
     CancellationToken,
     CgroupObservation,
@@ -35,7 +36,9 @@ from lib.import_execution import (
     ProcessObservation,
     ProcessState,
     SystemExecutionLivenessProbe,
+    cancellation_hook,
     capture_execution_lease,
+    checkpoint,
     decide_execution_liveness,
     probe_execution_liveness,
 )
@@ -441,6 +444,75 @@ class TestExecutionLivenessDecision(unittest.TestCase):
                     decision.status,
                     expected_status,
                 )
+
+
+class TestCancellationTranslation(unittest.TestCase):
+    """``checkpoint`` and ``cancellation_hook`` — the two shared translations.
+
+    Both used to be spelled per module: five byte-identical ``_checkpoint``
+    copies and four ``*_cancellable`` wrappers plus one inline conditional
+    for the hook (issue #1313).
+    """
+
+    def test_checkpoint_without_a_token_does_nothing(self) -> None:
+        checkpoint(None)
+
+    def test_checkpoint_passes_an_uncancelled_token(self) -> None:
+        checkpoint(CancellationToken())
+
+    def test_checkpoint_refuses_a_cancelled_token(self) -> None:
+        token = CancellationToken()
+        token.cancel("owner_session_lost")
+        with self.assertRaisesRegex(ExecutionCancelled, "owner_session_lost"):
+            checkpoint(token)
+
+    def test_no_token_yields_no_before_mutation_hook(self) -> None:
+        self.assertIsNone(cancellation_hook(None))
+
+    def test_the_hook_reads_the_token_when_called_not_when_taken(self) -> None:
+        """A stage takes the hook once, then mutates for as long as it takes."""
+        token = CancellationToken()
+        hook = cancellation_hook(token)
+        assert hook is not None
+        hook()
+        token.cancel("cancelled_mid_stage")
+        with self.assertRaisesRegex(ExecutionCancelled, "cancelled_mid_stage"):
+            hook()
+
+    def test_the_hook_stops_a_real_tree_removal_before_it_mutates(self) -> None:
+        """The consumer that matters: ``remove_relative_tree``'s own re-check."""
+        token = CancellationToken()
+        token.cancel("owner_session_lost")
+        with tempfile.TemporaryDirectory() as raw:
+            os.mkdir(os.path.join(raw, "doomed"))
+            pathlib.Path(raw, "doomed", "track.flac").write_bytes(b"audio")
+            parent_fd = os.open(raw, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with self.assertRaisesRegex(
+                    ExecutionCancelled, "owner_session_lost",
+                ):
+                    remove_relative_tree(
+                        parent_fd,
+                        "doomed",
+                        before_mutation=cancellation_hook(token),
+                    )
+            finally:
+                os.close(parent_fd)
+            self.assertTrue(pathlib.Path(raw, "doomed", "track.flac").exists())
+
+    def test_no_hook_lets_the_same_removal_run(self) -> None:
+        """Must-still-work: an uncancellable caller still deletes the tree."""
+        with tempfile.TemporaryDirectory() as raw:
+            os.mkdir(os.path.join(raw, "doomed"))
+            pathlib.Path(raw, "doomed", "track.flac").write_bytes(b"audio")
+            parent_fd = os.open(raw, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                remove_relative_tree(
+                    parent_fd, "doomed", before_mutation=cancellation_hook(None),
+                )
+            finally:
+                os.close(parent_fd)
+            self.assertFalse(pathlib.Path(raw, "doomed").exists())
 
 
 class TestCancellationAndProcessGroup(unittest.TestCase):

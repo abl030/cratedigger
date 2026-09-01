@@ -14,7 +14,6 @@ from lib.config import CratediggerConfig
 from lib.current_library_evidence import (
     current_spectral_evidence_reusable,
     enrich_current_v0_research_for_preview,
-    load_persisted_existing_spectral,
     persist_exact_current_spectral_from_attempt,
 )
 from lib.dispatch.types import ImportOneRun
@@ -417,80 +416,6 @@ class TestSpectralAuditMerge(unittest.TestCase):
         assert composed.existing is not None
         self.assertEqual(composed.existing.grade, "likely_transcode")
         self.assertEqual(composed.existing.bitrate_kbps, 224)
-
-    def test_authoritative_empty_evidence_does_not_revive_stale_scalars(self):
-        db = FakePipelineDB()
-        req = make_request_row(
-            id=42,
-            current_spectral_grade="likely_transcode",
-            current_spectral_bitrate=224,
-        )
-        db.seed_request(req)
-        evidence = make_album_quality_evidence(
-            mb_release_id=req["mb_release_id"],
-            measurement=AudioQualityMeasurement(
-                min_bitrate_kbps=122,
-                avg_bitrate_kbps=127,
-                median_bitrate_kbps=127,
-                format="Opus",
-                spectral_grade=None,
-                spectral_bitrate_kbps=None,
-            ),
-            codec="opus",
-            container="opus",
-            storage_format="Opus",
-        )
-        db.upsert_album_quality_evidence(evidence)
-        persisted = db.find_album_quality_evidence(
-            mb_release_id=evidence.mb_release_id,
-            snapshot_fingerprint=evidence.snapshot_fingerprint,
-        )
-        assert persisted is not None and persisted.id is not None
-        db.set_request_current_evidence(42, persisted.id)
-
-        loaded, detail, authoritative = load_persisted_existing_spectral(
-            db, 42)
-
-        self.assertIsNotNone(loaded)
-        self.assertTrue(authoritative)
-        self.assertFalse(detail.attempted)
-        self.assertIsNone(detail.grade)
-        self.assertIsNone(detail.bitrate_kbps)
-
-    def test_linked_missing_or_unreadable_evidence_does_not_use_scalars(self):
-        req = make_request_row(
-            id=42,
-            current_spectral_grade="likely_transcode",
-            current_spectral_bitrate=224,
-        )
-        for load_side_effect in (None, RuntimeError("evidence unavailable")):
-            with self.subTest(load_side_effect=load_side_effect):
-                db = FakePipelineDB()
-                db.seed_request(req)
-                db.set_request_current_evidence(42, 999)
-                context = (
-                    patch.object(
-                        db,
-                        "load_album_quality_evidence_by_id",
-                        side_effect=load_side_effect,
-                    )
-                    if load_side_effect is not None
-                    else patch.object(
-                        db,
-                        "load_album_quality_evidence_by_id",
-                        return_value=None,
-                    )
-                )
-                with context:
-                    loaded, detail, authoritative = (
-                        load_persisted_existing_spectral(db, 42)
-                    )
-
-                self.assertIsNone(loaded)
-                self.assertTrue(authoritative)
-                self.assertFalse(detail.attempted)
-                self.assertIsNone(detail.grade)
-                self.assertIsNone(detail.bitrate_kbps)
 
     def test_existing_measured_error_yields_to_harness_success(self):
         measured = SpectralAnalysisDetail(

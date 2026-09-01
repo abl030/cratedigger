@@ -47,6 +47,7 @@ from lib.import_execution import (
     CancellationToken,
     ExecutionLeaseSnapshot,
     OwnerSessionIdentity,
+    checkpoint,
 )
 from lib.import_manifest import (
     audio_relative_paths,
@@ -83,11 +84,6 @@ logger = logging.getLogger("cratedigger")
 _PRODUCTION_CANONICAL_RELEASE_FN: Final[CanonicalReleaseFn] = (
     production_canonical_release_fn()
 )
-
-
-def _checkpoint(cancellation_token: CancellationToken | None) -> None:
-    if cancellation_token is not None:
-        cancellation_token.raise_if_cancelled()
 
 
 class HandleValidFn(Protocol):
@@ -399,7 +395,7 @@ def _sync_file_tags_after_merge_rekey(
     reconciliation loop for whatever it could not fix. It must never raise
     into the importer; note the blanket except also swallows a
     cancellation raised inside the sync's own DB-lock I/O, which the
-    caller's immediately-following ``_checkpoint`` re-raises (#1260 review
+    caller's immediately-following ``checkpoint`` re-raises (#1260 review
     F8). The other two ready rekey worlds need no assertion here: the
     service re-derives them from Beets — ``not_held`` resolves to
     ``not_found``; ``already_current`` typically to
@@ -896,7 +892,7 @@ def validate_release_with_merge_redirect(
     # go on to retag the shared library and move an identity. The harness is
     # the long pole here, so the checkpoint belongs after it and before the
     # first mutation, not only at the caller's next stage.
-    _checkpoint(cancellation_token)
+    checkpoint(cancellation_token)
     # The one place a MusicBrainz merge is followed. Gated on the exact
     # scenario so the mirror is never touched by a healthy validation.
     merge = _follow_merged_release(
@@ -1016,7 +1012,7 @@ def _process_beets_validation(
             import_job_id=import_job_id,
             cancellation_token=cancellation_token,
         )
-    _checkpoint(cancellation_token)
+    checkpoint(cancellation_token)
     validation = validate_release_with_merge_redirect(
         db=ctx.pipeline_db_source._get_db(),
         cfg=ctx.cfg,
@@ -1034,7 +1030,7 @@ def _process_beets_validation(
         # The row and the library are both at the survivor now; the in-flight
         # entry follows so dispatch imports the identity that was rekeyed.
         album_data.mb_release_id = validation.merge.survivor
-        _checkpoint(cancellation_token)
+        checkpoint(cancellation_token)
         # Best-effort file-tag convergence at the survivor (#1260), for
         # EVERY completed rekey. Deliberately NOT gated on
         # ``bv_result.valid``: validity is a Beets MATCH verdict, and a
@@ -1051,7 +1047,7 @@ def _process_beets_validation(
         # F2, re-review C2).
         # Outcome-inert by contract: the helper never raises and nothing
         # reads its result. It swallows even a cancellation raised inside
-        # its DB-lock I/O — benign ONLY because ``_checkpoint`` on the
+        # its DB-lock I/O — benign ONLY because ``checkpoint`` on the
         # next line re-raises; keep that pairing if this call ever moves
         # (review F8). The checkpoint ABOVE keeps an already-cancelled job
         # from spending the write budget first.
@@ -1061,7 +1057,7 @@ def _process_beets_validation(
             validation.merge.survivor,
             sync_fn=tag_sync_fn,
         )
-    _checkpoint(cancellation_token)
+    checkpoint(cancellation_token)
     usernames_pre = {f.username for f in album_data.files if f.username}
     bv_result.soulseek_username = (
         ", ".join(sorted(usernames_pre)) if usernames_pre else None
@@ -1069,7 +1065,7 @@ def _process_beets_validation(
     bv_result.download_folder = current_path
     bv_result.source_dirs = source_dirs_for_album(album_data)
     if bv_result.valid:
-        _checkpoint(cancellation_token)
+        checkpoint(cancellation_token)
         db = ctx.pipeline_db_source._get_db()
         candidate_result = ensure_candidate_evidence_for_action(
             db,
@@ -1234,7 +1230,7 @@ def _handle_valid_result(
             # authority.
             dest = staged_album.current_path
         else:
-            _checkpoint(cancellation_token)
+            checkpoint(cancellation_token)
             dest = staged_album.move_to(
                 stage_to_ai_path(
                     artist=album_data.artist,
@@ -1245,7 +1241,7 @@ def _handle_valid_result(
                 ),
                 cancellation_token=cancellation_token,
             )
-        _checkpoint(cancellation_token)
+        checkpoint(cancellation_token)
         album_data.import_folder = dest
         log_validation_result(album_data, bv_result, ctx.cfg, dest_path=dest)
         logger.info(
@@ -1316,7 +1312,7 @@ def _handle_valid_result(
                 if quality_gate_fn is not None
                 else _check_quality_gate_core
             )
-            _checkpoint(cancellation_token)
+            checkpoint(cancellation_token)
             # One construction, two possible callees. Before issue #1277 this
             # same 25-kwarg call was spelled twice, verbatim, differing only
             # in which callable it named — the widest drift surface in the
@@ -1358,7 +1354,7 @@ def _handle_valid_result(
                 quality_gate_fn=resolved_quality_gate_fn,
                 cancellation_token=cancellation_token,
             )
-        _checkpoint(cancellation_token)
+        checkpoint(cancellation_token)
         pending = ctx.pipeline_db_source.mark_done(
             album_data,
             bv_result,

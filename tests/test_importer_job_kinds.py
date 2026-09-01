@@ -23,7 +23,6 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from lib.dispatch import DispatchOutcome, _record_rejection_and_maybe_requeue
-from lib.import_preview import ACTION_COPY_PREFIX_BY_JOB_TYPE
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
@@ -41,6 +40,7 @@ from lib.import_queue import (
     local_import_dedupe_key,
     local_import_payload,
 )
+from lib.preview_snapshot import ACTION_COPY_PREFIX_BY_JOB_TYPE
 from lib.quality import DownloadInfo, ValidationResult
 from lib.terminal_outcomes import PendingImportTerminalOutcome
 from scripts import importer
@@ -239,7 +239,7 @@ class TestActionCopyLanes(unittest.TestCase):
                 self.assertIs(kind_lane.distance_threshold_fn, threshold_fn)
 
     def test_the_lanes_are_exactly_the_prefix_tables_own_job_types(self) -> None:
-        # The prefix table in lib/import_preview.py stays the single source
+        # The prefix table in lib/preview_snapshot.py stays the single source
         # for job_type -> action-copy prefix; this proves the kind registry
         # agrees with it in both directions rather than restating it.
         with_lane = {

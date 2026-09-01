@@ -285,7 +285,7 @@ def _default_force_action_copy_path(job_id: int) -> str:
     otherwise has no reason to import.
     """
     from lib.config import read_runtime_config
-    from lib.import_preview import force_action_copy_path
+    from lib.preview_snapshot import force_action_copy_path
 
     return force_action_copy_path(read_runtime_config(), job_id)
 
@@ -807,7 +807,7 @@ class _ImportJobsMixin(
 
         Widened to ``local_import`` by issue #1176 PR3: local-import retains
         the identical job-scoped private copy under a distinct prefix
-        (``lib.import_preview.LOCAL_IMPORT_ACTION_PREFIX``), so a crash
+        (``lib.preview_snapshot.LOCAL_IMPORT_ACTION_PREFIX``), so a crash
         between the terminal commit and the live post-commit cleanup call
         leaves an orphaned copy the same way a force crash would — this
         sweep reaps either. The receipt key

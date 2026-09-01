@@ -66,6 +66,7 @@ from lib.import_execution import (
     ExecutionLeaseSnapshot,
     OwnerSessionIdentity,
     ProcessIdentity,
+    checkpoint,
     checkpoint_automation_owner,
     read_process_start_ticks,
 )
@@ -391,8 +392,7 @@ def _validate_automation_dispatch_authority(
         raise ValueError(
             "cancellation token and owner session identity must be paired"
         )
-    if cancellation_token is not None:
-        cancellation_token.raise_if_cancelled()
+    checkpoint(cancellation_token)
     if execution_lease is None:
         return
     if (
