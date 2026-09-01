@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from pathlib import Path
 from typing import Any
+
+from tests.fakes.subprocess_env import inherited_environment
 
 _SHIM_MODULE = r'''# Shared body for the deploy-cycle-verifier fake ssh command. Imported by a
 # tiny stub (never executed directly as __main__) so CPython compiles it
@@ -288,7 +289,7 @@ class FakeDeployCycleCommands:
         )
 
     def environment(self, *, max_polls: int = 4) -> dict[str, str]:
-        env = os.environ.copy()
+        env = inherited_environment()
         env.update(
             {
                 "PATH": f"{self.fake_bin}:{env['PATH']}",
