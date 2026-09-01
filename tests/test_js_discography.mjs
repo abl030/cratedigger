@@ -16,36 +16,23 @@ import {
 } from '../web/js/discography.js';
 import { renderYoutubeRescueControl } from '../web/js/youtube_rescue_control.js';
 
-let passed = 0;
-let failed = 0;
+import { stubGlobals, suite } from './js_harness.mjs';
 
-console.log('shared YouTube rescue control');
+const t = suite(import.meta.url);
+
+t.section('shared YouTube rescue control');
 {
   const html = renderYoutubeRescueControl('release-7', 7, '129bebd8-a7b9-4099-b0bc-545b704e7a95');
-  assertContains(html, 'yt-rescue-release-7', 'release detail uses a surface-keyed control id');
-  assertContains(html, 'window.checkYoutubeRescue(', 'inline handler uses the shared generic entry point');
-  assertExcludes(html, '"window.checkYoutubeRescue("release-7"', 'inline handler does not break its HTML attribute quoting');
-  assertContains(html, 'Search YouTube', 'control carries an explicit discovery action');
-  assertContains(html, 'Check URL', 'control carries an explicit manual URL action');
-  assertContains(html, 'video or playlist URL', 'control explains the admitted URL shape');
+  t.contains(html, 'yt-rescue-release-7', 'release detail uses a surface-keyed control id');
+  t.contains(html, 'window.checkYoutubeRescue(', 'inline handler uses the shared generic entry point');
+  t.excludes(html, '"window.checkYoutubeRescue("release-7"', 'inline handler does not break its HTML attribute quoting');
+  t.contains(html, 'Search YouTube', 'control carries an explicit discovery action');
+  t.contains(html, 'Check URL', 'control carries an explicit manual URL action');
+  t.contains(html, 'video or playlist URL', 'control explains the admitted URL shape');
 }
 
-function assertEqual(actual, expected, msg) {
-  if (actual === expected) {
-    passed++;
-  } else {
-    failed++;
-    console.error(`  FAIL: ${msg} - expected '${expected}', got '${actual}'`);
-  }
-}
 
-function assertContains(haystack, needle, msg) {
-  assertEqual(haystack.includes(needle), true, msg);
-}
 
-function assertExcludes(haystack, needle, msg) {
-  assertEqual(haystack.includes(needle), false, msg);
-}
 
 /** Independent expected encoder: JSON JS literal, then HTML attribute escaping. */
 function expectedJsArg(value) {
@@ -69,7 +56,7 @@ function expectedEsc(value) {
     .replace(/\\/g, '&#92;');
 }
 
-console.log('synthesizeMasterlessRow() — overlay fields survive the synthesis');
+t.section('synthesizeMasterlessRow() — overlay fields survive the synthesis');
 {
   // The live bug (request 8838, Deloris "Feather Figure/Elastic Bones"):
   // the payload carried pipeline_status=wanted but the synthetic pressing
@@ -94,22 +81,22 @@ console.log('synthesizeMasterlessRow() — overlay fields survive the synthesis'
     pipeline_verified_lossless: true,
     pipeline_provisional: false,
   });
-  assertEqual(row.pipeline_status, 'wanted', 'pipeline_status forwarded');
-  assertEqual(row.pipeline_id, 8838, 'pipeline_id forwarded');
-  assertEqual(row.processing_owner, null, 'non-processing owner null forwarded');
-  assertEqual(row.has_captured_history, true, 'captured history forwarded');
-  assertEqual(row.pipeline_verified_lossless, true, 'verified proof forwarded');
-  assertEqual(row.pipeline_provisional, false, 'provisional fact forwarded');
-  assertEqual(row.in_library, false, 'in_library forwarded');
-  assertEqual(row.beets_album_id, null, 'beets_album_id forwarded');
-  assertEqual(row.id, '8317023', 'id kept');
-  assertEqual(row.title, 'Feather Figure/Elastic Bones', 'title kept');
-  assertEqual(row.format, 'CD', 'formats joined');
-  assertEqual(row.track_count, 10, 'track count derived');
-  assertEqual(row.status, 'Official', 'status kept');
+  t.equal(row.pipeline_status, 'wanted', 'pipeline_status forwarded');
+  t.equal(row.pipeline_id, 8838, 'pipeline_id forwarded');
+  t.equal(row.processing_owner, null, 'non-processing owner null forwarded');
+  t.equal(row.has_captured_history, true, 'captured history forwarded');
+  t.equal(row.pipeline_verified_lossless, true, 'verified proof forwarded');
+  t.equal(row.pipeline_provisional, false, 'provisional fact forwarded');
+  t.equal(row.in_library, false, 'in_library forwarded');
+  t.equal(row.beets_album_id, null, 'beets_album_id forwarded');
+  t.equal(row.id, '8317023', 'id kept');
+  t.equal(row.title, 'Feather Figure/Elastic Bones', 'title kept');
+  t.equal(row.format, 'CD', 'formats joined');
+  t.equal(row.track_count, 10, 'track count derived');
+  t.equal(row.status, 'Official', 'status kept');
 }
 
-console.log('synthesizeMasterlessRow() — exact processing owner survives synthesis');
+t.section('synthesizeMasterlessRow() — exact processing owner survives synthesis');
 {
   const owner = {
     job_id: 8839,
@@ -126,18 +113,18 @@ console.log('synthesizeMasterlessRow() — exact processing owner survives synth
     pipeline_id: 8840,
     processing_owner: owner,
   });
-  assertEqual(row.processing_owner, owner, 'processing_owner object is forwarded unchanged');
+  t.equal(row.processing_owner, owner, 'processing_owner object is forwarded unchanged');
   const html = renderPressingRow(row, {
     artistName: 'Deloris',
     parentRgId: null,
     canReplace: true,
   });
-  assertContains(html, 'previewing', 'pressing action consumes canonical owner label');
-  assertContains(html, '/api/import-jobs/8839/recovery', 'pressing links exact owner recovery detail');
-  assertExcludes(html, 'window.disambRemove', 'processing pressing cannot remove request');
+  t.contains(html, 'previewing', 'pressing action consumes canonical owner label');
+  t.contains(html, '/api/import-jobs/8839/recovery', 'pressing links exact owner recovery detail');
+  t.excludes(html, 'window.disambRemove', 'processing pressing cannot remove request');
 }
 
-console.log('Convergence signal — exact pressing badge without duplicate detail action');
+t.section('Convergence signal — exact pressing badge without duplicate detail action');
 {
   const convergence = {
     request_id: 1240,
@@ -172,21 +159,18 @@ console.log('Convergence signal — exact pressing badge without duplicate detai
     parentRgId: 'release-group',
     canReplace: true,
   });
-  assertContains(pressingHtml, 'search converged', 'exact pressing carries the distinct badge');
+  t.contains(pressingHtml, 'search converged', 'exact pressing carries the distinct badge');
 
   const target = { innerHTML: '' };
   renderReleaseDetail(target, row.id, { ...row, tracks: [] });
-  assertExcludes(target.innerHTML, 'Search appears converged',
+  t.excludes(target.innerHTML, 'Search appears converged',
     'Browse release detail does not duplicate the Library/Recents prompt');
-  assertExcludes(target.innerHTML, 'window.stopConvergedSearch',
+  t.excludes(target.innerHTML, 'window.stopConvergedSearch',
     'Browse release detail has no second stop action');
 }
 
-console.log('addRelease() — processing exists response exposes exact owner recovery');
+t.section('addRelease() — processing exists response exposes exact owner recovery');
 {
-  const oldDocument = globalThis.document;
-  const oldFetch = globalThis.fetch;
-  const oldWindow = globalThis.window;
   const created = [];
   const mounted = [];
   function element(tag = '') {
@@ -226,86 +210,86 @@ console.log('addRelease() — processing exists response exposes exact owner rec
   body.isConnected = true;
   const documentElement = element('html');
   documentElement.isConnected = true;
-  globalThis.document = {
-    activeElement: button,
-    body,
-    documentElement,
-    createElement(tag) { return element(tag); },
-    getElementById(id) {
-      return created.find(node => node.id === id && node.isConnected) || null;
-    },
-    querySelectorAll(selector) {
-      return selector === '[data-pipeline-request-id="321"]'
-        ? [button]
-        : [];
-    },
-  };
-  globalThis.window = {
-    scrollX: 0,
-    scrollY: 0,
-    scrollTo() {},
-  };
   const calls = [];
-  globalThis.fetch = async (url) => {
-    calls.push(String(url));
-    if (url === '/api/pipeline/add') {
+  const globals = stubGlobals({
+    document: {
+      activeElement: button,
+      body,
+      documentElement,
+      createElement(tag) { return element(tag); },
+      getElementById(id) {
+        return created.find(node => node.id === id && node.isConnected) || null;
+      },
+      querySelectorAll(selector) {
+        return selector === '[data-pipeline-request-id="321"]'
+          ? [button]
+          : [];
+      },
+    },
+    window: {
+      scrollX: 0,
+      scrollY: 0,
+      scrollTo() {},
+    },
+    fetch: async (url) => {
+      calls.push(String(url));
+      if (url === '/api/pipeline/add') {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              status: 'exists',
+              id: 321,
+              current_status: 'processing',
+              processing_owner: {
+                job_id: 654,
+                status: 'queued',
+                preview_status: 'running',
+              },
+            };
+          },
+        };
+      }
       return {
-        ok: true,
-        status: 200,
-        async json() {
-          return {
-            status: 'exists',
-            id: 321,
-            current_status: 'processing',
-            processing_owner: {
-              job_id: 654,
-              status: 'queued',
-              preview_status: 'running',
-            },
-          };
-        },
+        ok: false,
+        status: 503,
+        async json() { return {}; },
       };
-    }
-    return {
-      ok: false,
-      status: 503,
-      async json() { return {}; },
-    };
-  };
+    },
+  });
 
   await addRelease(
     'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
     button,
   );
 
-  assertEqual(
+  t.equal(
     button.textContent,
     'previewing',
     'Add exists lock label comes from the exact processing owner',
   );
-  assertEqual(
+  t.equal(
     button.attributes.get('data-pipeline-request-id'),
     '321',
     'Add exists lock binds the authoritative request id',
   );
-  assertEqual(
+  t.equal(
     created.some(
       node => node.href === '/api/import-jobs/654/recovery',
     ),
     true,
     'Add exists lock links exact owner recovery detail',
   );
-  assertEqual(
+  t.equal(
     calls.join(','),
     '/api/pipeline/add,/api/pipeline/321',
     'Add conflict refreshes only the affected request',
   );
-  globalThis.document = oldDocument;
-  globalThis.fetch = oldFetch;
-  globalThis.window = oldWindow;
+  globals.restore();
 }
 
-console.log('synthesizeMasterlessRow() — in-library payload keeps quality fields');
+t.section('synthesizeMasterlessRow() — in-library payload keeps quality fields');
 {
   const row = synthesizeMasterlessRow({
     id: '999',
@@ -324,29 +308,29 @@ console.log('synthesizeMasterlessRow() — in-library payload keeps quality fiel
     pipeline_verified_lossless: true,
     pipeline_provisional: false,
   });
-  assertEqual(row.in_library, true, 'in_library true forwarded');
-  assertEqual(row.beets_album_id, 42, 'beets_album_id forwarded');
-  assertEqual(row.library_format, 'FLAC', 'library_format forwarded');
-  assertEqual(row.library_min_bitrate, 900, 'library_min_bitrate forwarded');
-  assertEqual(row.library_avg_bitrate, 1100, 'library_avg_bitrate forwarded');
-  assertEqual(row.library_rank, 'lossless', 'library_rank forwarded');
-  assertEqual(row.has_captured_history, true, 'has_captured_history forwarded');
-  assertEqual(row.pipeline_verified_lossless, true, 'pipeline_verified_lossless forwarded');
-  assertEqual(row.pipeline_provisional, false, 'pipeline_provisional forwarded');
-  assertEqual(row.format, '?', 'empty formats fall back to ?');
+  t.equal(row.in_library, true, 'in_library true forwarded');
+  t.equal(row.beets_album_id, 42, 'beets_album_id forwarded');
+  t.equal(row.library_format, 'FLAC', 'library_format forwarded');
+  t.equal(row.library_min_bitrate, 900, 'library_min_bitrate forwarded');
+  t.equal(row.library_avg_bitrate, 1100, 'library_avg_bitrate forwarded');
+  t.equal(row.library_rank, 'lossless', 'library_rank forwarded');
+  t.equal(row.has_captured_history, true, 'has_captured_history forwarded');
+  t.equal(row.pipeline_verified_lossless, true, 'pipeline_verified_lossless forwarded');
+  t.equal(row.pipeline_provisional, false, 'pipeline_provisional forwarded');
+  t.equal(row.format, '?', 'empty formats fall back to ?');
 
   const html = renderPressingRow(row, {
     artistName: 'Artist',
     parentRgId: null,
     canReplace: false,
   });
-  assertContains(html, '>in library</span>', 'masterless row renders current holding');
-  assertContains(html, '>F</span>', 'masterless row renders quality independently');
-  assertContains(html, '>captured<', 'masterless row renders captured history');
-  assertContains(html, '>verified<', 'masterless row renders carried proof');
+  t.contains(html, '>in library</span>', 'masterless row renders current holding');
+  t.contains(html, '>F</span>', 'masterless row renders quality independently');
+  t.contains(html, '>captured<', 'masterless row renders captured history');
+  t.contains(html, '>verified<', 'masterless row renders carried proof');
 }
 
-console.log('splitPressings() — owned/in-flight pressings are never hidden (The Meadowlands pin)');
+t.section('splitPressings() — owned/in-flight pressings are never hidden (The Meadowlands pin)');
 {
   // Live confusion (request 4228, The Wrens "The Meadowlands"): the
   // library copy is the 2002 US Promotion pressing, which the old split
@@ -359,14 +343,14 @@ console.log('splitPressings() — owned/in-flight pressings are never hidden (Th
     { id: 'a0fadcc2', status: 'Official', in_library: false, pipeline_status: null },
   ];
   const { visible, hidden } = splitPressings(rows);
-  assertEqual(visible.some(r => r.id === 'cef6b0f6'), true, 'owned promo is visible');
-  assertEqual(hidden.some(r => r.id === 'cef6b0f6'), false, 'owned promo not hidden');
-  assertEqual(hidden.length, 1, 'only the unowned bootleg is hidden');
-  assertEqual(hidden[0].id, '2aa0ae0e', 'unowned bootleg stays in the collapsed bucket');
-  assertEqual(visible.length, 3, 'officials + owned promo visible');
+  t.equal(visible.some(r => r.id === 'cef6b0f6'), true, 'owned promo is visible');
+  t.equal(hidden.some(r => r.id === 'cef6b0f6'), false, 'owned promo not hidden');
+  t.equal(hidden.length, 1, 'only the unowned bootleg is hidden');
+  t.equal(hidden[0].id, '2aa0ae0e', 'unowned bootleg stays in the collapsed bucket');
+  t.equal(visible.length, 3, 'officials + owned promo visible');
 }
 
-console.log('splitPressings() — partition + hoist invariants over the status/ownership space');
+t.section('splitPressings() — partition + hoist invariants over the status/ownership space');
 {
   const statuses = [undefined, '', 'Official', 'Promotion', 'Bootleg', 'Pseudo-Release'];
   const ownerships = [
@@ -387,25 +371,25 @@ console.log('splitPressings() — partition + hoist invariants over the status/o
     }
   }
   const { visible, hidden } = splitPressings(rows);
-  assertEqual(visible.length + hidden.length, rows.length, 'every row lands in exactly one bucket');
+  t.equal(visible.length + hidden.length, rows.length, 'every row lands in exactly one bucket');
   for (const r of rows) {
     const inVisible = visible.includes(r);
     const inHidden = hidden.includes(r);
-    assertEqual(inVisible !== inHidden, true, `${r.id} in exactly one bucket`);
+    t.equal(inVisible !== inHidden, true, `${r.id} in exactly one bucket`);
     // 'replaced' is the terminal frozen-audit status — an abandoned
     // request is NOT an active claim on the pressing and must not pin it.
     const owned = r.in_library === true
       || (!!r.pipeline_status && r.pipeline_status !== 'replaced');
     const official = r.status === 'Official' || !r.status;
     if (owned || official) {
-      assertEqual(inVisible, true, `${r.id} (status=${r.status}, owned=${owned}) must be visible`);
+      t.equal(inVisible, true, `${r.id} (status=${r.status}, owned=${owned}) must be visible`);
     } else {
-      assertEqual(inHidden, true, `${r.id} (status=${r.status}, unowned non-official) must be hidden`);
+      t.equal(inHidden, true, `${r.id} (status=${r.status}, unowned non-official) must be hidden`);
     }
   }
 }
 
-console.log('splitPressings() — a replaced-only pipeline row does not pin (visible frozen audit badge)');
+t.section('splitPressings() — a replaced-only pipeline row does not pin (visible frozen audit badge)');
 {
   // Replaced is visible frozen audit history, not an active ownership
   // claim. Only in_library or an ACTIVE pipeline status pins.
@@ -414,41 +398,41 @@ console.log('splitPressings() — a replaced-only pipeline row does not pin (vis
     { id: 'owned-abandoned', status: 'Promotion', in_library: true, pipeline_status: 'replaced' },
   ];
   const { visible, hidden } = splitPressings(rows);
-  assertEqual(hidden.length, 1, 'unowned replaced bootleg stays collapsed');
-  assertEqual(hidden[0].id, 'abandoned', 'the replaced-only row is the hidden one');
-  assertEqual(visible.length, 1, 'library ownership still pins a replaced row');
-  assertEqual(visible[0].id, 'owned-abandoned', 'in_library wins over replaced');
+  t.equal(hidden.length, 1, 'unowned replaced bootleg stays collapsed');
+  t.equal(hidden[0].id, 'abandoned', 'the replaced-only row is the hidden one');
+  t.equal(visible.length, 1, 'library ownership still pins a replaced row');
+  t.equal(visible[0].id, 'owned-abandoned', 'in_library wins over replaced');
 
   const replacedHtml = renderPressingRow(rows[0], {
     artistName: 'Artist',
     parentRgId: null,
     canReplace: false,
   });
-  assertContains(replacedHtml, '>replaced<', 'collapsed row explains its frozen request history');
+  t.contains(replacedHtml, '>replaced<', 'collapsed row explains its frozen request history');
 }
 
-console.log('splitPressings() — known-bad self-check: the OLD split violates the hoist invariant');
+t.section('splitPressings() — known-bad self-check: the OLD split violates the hoist invariant');
 {
   // Prove the assertion above actually constrains something: the
   // pre-fix split (status-only) hides the owned promo.
   const rows = [{ id: 'x', status: 'Promotion', in_library: true, pipeline_status: null }];
   const oldHidden = rows.filter(r => r.status && r.status !== 'Official');
-  assertEqual(oldHidden.length, 1, 'old split hides the owned promo (the bug)');
-  assertEqual(splitPressings(rows).hidden.length, 0, 'new split does not');
+  t.equal(oldHidden.length, 1, 'old split hides the owned promo (the bug)');
+  t.equal(splitPressings(rows).hidden.length, 0, 'new split does not');
 }
 
-console.log('statusChipHtml() — non-official pressings get a provenance chip');
+t.section('statusChipHtml() — non-official pressings get a provenance chip');
 {
-  assertEqual(statusChipHtml('Official'), '', 'Official -> no chip');
-  assertEqual(statusChipHtml(''), '', 'empty -> no chip');
-  assertEqual(statusChipHtml(undefined), '', 'missing -> no chip');
-  assertEqual(statusChipHtml('Promotion').includes('promo'), true, 'Promotion -> promo chip');
-  assertEqual(statusChipHtml('Promotion').includes('badge-nonofficial'), true, 'chip uses the nonofficial badge class');
-  assertEqual(statusChipHtml('Bootleg').includes('bootleg'), true, 'Bootleg -> bootleg chip');
-  assertEqual(statusChipHtml('Pseudo-Release').includes('pseudo-release'), true, 'other statuses lowercased verbatim');
+  t.equal(statusChipHtml('Official'), '', 'Official -> no chip');
+  t.equal(statusChipHtml(''), '', 'empty -> no chip');
+  t.equal(statusChipHtml(undefined), '', 'missing -> no chip');
+  t.equal(statusChipHtml('Promotion').includes('promo'), true, 'Promotion -> promo chip');
+  t.equal(statusChipHtml('Promotion').includes('badge-nonofficial'), true, 'chip uses the nonofficial badge class');
+  t.equal(statusChipHtml('Bootleg').includes('bootleg'), true, 'Bootleg -> bootleg chip');
+  t.equal(statusChipHtml('Pseudo-Release').includes('pseudo-release'), true, 'other statuses lowercased verbatim');
 }
 
-console.log('Release-id onclick arguments — adversarial deterministic pin');
+t.section('Release-id onclick arguments — adversarial deterministic pin');
 {
   const id = "rg'\"\\</div><script>alert(1)</script>";
   const arg = expectedJsArg(id);
@@ -471,16 +455,16 @@ console.log('Release-id onclick arguments — adversarial deterministic pin');
     track_count: 13,
   }, { artistName: 'The Wrens', parentRgId: 'parent', canReplace: false });
 
-  assertContains(rgHtml, `window.loadReleaseGroup(${arg}, this`, 'RG click passes one encoded JS string argument');
-  assertExcludes(rgHtml, `window.loadReleaseGroup('${id}'`, 'known-bad raw single-quoted RG interpolation is absent');
-  assertContains(pressingHtml, `window.toggleReleaseDetail(${arg})`, 'pressing click passes one encoded JS string argument');
-  assertExcludes(pressingHtml, `window.toggleReleaseDetail('${id}')`, 'known-bad raw single-quoted pressing interpolation is absent');
-  assertExcludes(pressingHtml, '>Remove from beets</button>', 'unowned pressing omits disabled beets action');
-  assertContains(pressingHtml, '>Add request</button>', 'unowned pressing keeps Add request');
-  assertContains(pressingHtml, '>Replace</button>', 'unowned pressing keeps Replace');
+  t.contains(rgHtml, `window.loadReleaseGroup(${arg}, this`, 'RG click passes one encoded JS string argument');
+  t.excludes(rgHtml, `window.loadReleaseGroup('${id}'`, 'known-bad raw single-quoted RG interpolation is absent');
+  t.contains(pressingHtml, `window.toggleReleaseDetail(${arg})`, 'pressing click passes one encoded JS string argument');
+  t.excludes(pressingHtml, `window.toggleReleaseDetail('${id}')`, 'known-bad raw single-quoted pressing interpolation is absent');
+  t.excludes(pressingHtml, '>Remove from beets</button>', 'unowned pressing omits disabled beets action');
+  t.contains(pressingHtml, '>Add request</button>', 'unowned pressing keeps Add request');
+  t.contains(pressingHtml, '>Replace</button>', 'unowned pressing keeps Replace');
 }
 
-console.log('Release-id onclick arguments — generated critical-character property sweep');
+t.section('Release-id onclick arguments — generated critical-character property sweep');
 {
   const atoms = ['a', "'", '"', '\\', '<', '>', '&', '\n', '\u2028'];
   const ids = ['plain-id', ...atoms];
@@ -504,19 +488,19 @@ console.log('Release-id onclick arguments — generated critical-character prope
       format: 'CD',
       track_count: 10,
     }, { artistName: 'Artist', parentRgId: 'parent', canReplace: true });
-    assertContains(rgHtml, `window.loadReleaseGroup(${arg}, this`, `RG id round-trips safely: ${JSON.stringify(id)}`);
-    assertContains(pressingHtml, `window.toggleReleaseDetail(${arg})`, `pressing id round-trips safely: ${JSON.stringify(id)}`);
-    assertContains(pressingHtml, 'window.confirmDeleteBeets(42', `owned removal survives: ${JSON.stringify(id)}`);
+    t.contains(rgHtml, `window.loadReleaseGroup(${arg}, this`, `RG id round-trips safely: ${JSON.stringify(id)}`);
+    t.contains(pressingHtml, `window.toggleReleaseDetail(${arg})`, `pressing id round-trips safely: ${JSON.stringify(id)}`);
+    t.contains(pressingHtml, 'window.confirmDeleteBeets(42', `owned removal survives: ${JSON.stringify(id)}`);
   }
 
   const badId = "break'out";
   const oldHandler = `window.toggleReleaseDetail('${badId}')`;
   let oldCompiles = true;
   try { new Function('window', oldHandler); } catch (_) { oldCompiles = false; }
-  assertEqual(oldCompiles, false, 'known-bad raw interpolation checker rejects apostrophe ID');
+  t.equal(oldCompiles, false, 'known-bad raw interpolation checker rejects apostrophe ID');
 }
 
-console.log('Pressing metadata — hostile catalogue values stay text at the caller-owned HTML boundary');
+t.section('Pressing metadata — hostile catalogue values stay text at the caller-owned HTML boundary');
 {
   const ordinary = renderPressingRow({
     id: 'metadata-ordinary',
@@ -529,7 +513,7 @@ console.log('Pressing metadata — hostile catalogue values stay text at the cal
     in_library: false,
     pipeline_status: null,
   }, { artistName: 'Artist', parentRgId: 'parent', canReplace: false });
-  assertContains(ordinary, 'Australia 2003-06-00 - CD - 13t - Official',
+  t.contains(ordinary, 'Australia 2003-06-00 - CD - 13t - Official',
     'ordinary pressing metadata presentation is unchanged');
 
   const hostile = '<img src=x onerror=alert(1)>';
@@ -548,17 +532,17 @@ console.log('Pressing metadata — hostile catalogue values stay text at the cal
   const metaStart = pressingHtml.indexOf('<div class="release-meta"');
   const metaEnd = pressingHtml.indexOf('</div>', metaStart);
   const metadataHtml = pressingHtml.slice(metaStart, metaEnd);
-  assertEqual(metadataHtml.split(escaped).length - 1, 5,
+  t.equal(metadataHtml.split(escaped).length - 1, 5,
     'country, date, format, track count, and status are each escaped exactly once');
-  assertExcludes(pressingHtml, hostile,
+  t.excludes(pressingHtml, hostile,
     'hostile pressing metadata cannot create an image element');
 
   const oldMeta = `${hostile} ${hostile} - ${hostile} - ${hostile}t - ${hostile}`;
-  assertContains(oldMeta, hostile,
+  t.contains(oldMeta, hostile,
     'known-bad raw metadata composition admits an image element');
 }
 
-console.log('Pressing metadata — generated critical-character property sweep');
+t.section('Pressing metadata — generated critical-character property sweep');
 {
   const atoms = ['plain', '&', '<', '>', '"', "'", '\\'];
   for (const field of ['country', 'date', 'format', 'track_count', 'status']) {
@@ -574,30 +558,30 @@ console.log('Pressing metadata — generated critical-character property sweep')
         pipeline_status: null,
       }, { artistName: 'Artist', parentRgId: 'parent', canReplace: false });
       const expectedMeta = `${expectedEsc(metadata.country)} ${expectedEsc(metadata.date)} - ${expectedEsc(metadata.format)} - ${expectedEsc(metadata.track_count)}t - ${expectedEsc(metadata.status)}`;
-      assertContains(pressingHtml, expectedMeta,
+      t.contains(pressingHtml, expectedMeta,
         `${field} remains escaped text: ${JSON.stringify(value)}`);
     }
   }
 }
 
-console.log('Discogs master/release DOM identities stay distinct at equal numeric IDs');
+t.section('Discogs master/release DOM identities stay distinct at equal numeric IDs');
 {
   const masterId = catalogueDomId('discogs', 'work', '122');
   const releaseId = catalogueDomId('discogs', 'release', '122');
-  assertEqual(masterId, 'rel-discogs-work-122', 'master target is namespaced as work');
-  assertEqual(releaseId, 'rel-discogs-release-122', 'leaf target is namespaced as release');
-  assertEqual(masterId === releaseId, false, 'equal numeric IDs cannot collide');
-  assertEqual(
+  t.equal(masterId, 'rel-discogs-work-122', 'master target is namespaced as work');
+  t.equal(releaseId, 'rel-discogs-release-122', 'leaf target is namespaced as release');
+  t.equal(masterId === releaseId, false, 'equal numeric IDs cannot collide');
+  t.equal(
     catalogueDomId('mb', 'work', '122') === masterId,
     false,
     'equal IDs from different catalogues cannot collide',
   );
-  assertEqual(
+  t.equal(
     releaseGroupRequestPath('122', 'discogs', 'work'),
     '/api/discogs/master/122',
     'work identity loads the master endpoint',
   );
-  assertEqual(
+  t.equal(
     releaseGroupRequestPath('122', 'discogs', 'release'),
     '/api/discogs/release/122',
     'release identity loads the leaf endpoint',
@@ -611,39 +595,38 @@ console.log('Discogs master/release DOM identities stay distinct at equal numeri
     { id: '122', title: 'Release', identity_kind: 'release' },
     { artistName: 'The Rolling Stones', nameLC: 'the rolling stones', source: 'discogs' },
   );
-  assertContains(masterHtml, `id="${masterId}"`, 'master renders its own expansion target');
-  assertContains(releaseHtml, `id="${releaseId}"`, 'release renders its own expansion target');
-  assertContains(masterHtml, 'data-identity-kind="work"', 'master row carries selector identity');
-  assertContains(releaseHtml, 'data-identity-kind="release"', 'release row carries selector identity');
-  assertContains(masterHtml, "source:'discogs',identityKind:'work'", 'master click preserves endpoint identity');
-  assertContains(releaseHtml, "source:'discogs',identityKind:'release'", 'release click preserves endpoint identity');
+  t.contains(masterHtml, `id="${masterId}"`, 'master renders its own expansion target');
+  t.contains(releaseHtml, `id="${releaseId}"`, 'release renders its own expansion target');
+  t.contains(masterHtml, 'data-identity-kind="work"', 'master row carries selector identity');
+  t.contains(releaseHtml, 'data-identity-kind="release"', 'release row carries selector identity');
+  t.contains(masterHtml, "source:'discogs',identityKind:'work'", 'master click preserves endpoint identity');
+  t.contains(releaseHtml, "source:'discogs',identityKind:'release'", 'release click preserves endpoint identity');
 }
 
-console.log('Discogs DOM identity namespace — generated numeric collision sweep');
+t.section('Discogs DOM identity namespace — generated numeric collision sweep');
 {
   for (let id = 1; id <= 1000; id += 37) {
     const master = catalogueDomId('discogs', 'work', id);
     const release = catalogueDomId('discogs', 'release', id);
-    assertEqual(master === release, false, `master/release ${id} targets differ`);
-    assertEqual(
+    t.equal(master === release, false, `master/release ${id} targets differ`);
+    t.equal(
       releaseGroupRequestPath(id, 'discogs', 'work').includes('/master/'),
       true,
       `master ${id} dispatches to master endpoint`,
     );
-    assertEqual(
+    t.equal(
       releaseGroupRequestPath(id, 'discogs', 'release').includes('/release/'),
       true,
       `release ${id} dispatches to release endpoint`,
     );
   }
   const oldDomId = id => `rel-${id}`;
-  assertEqual(oldDomId(122), oldDomId(122), 'known-bad scalar target collides');
-  assertEqual(
+  t.equal(oldDomId(122), oldDomId(122), 'known-bad scalar target collides');
+  t.equal(
     catalogueDomId('discogs', 'work', 122) === catalogueDomId('discogs', 'release', 122),
     false,
     'new checker rejects the known-bad collision',
   );
 }
 
-console.log(`\n${passed} passed, ${failed} failed`);
-process.exit(failed > 0 ? 1 : 0);
+t.done();

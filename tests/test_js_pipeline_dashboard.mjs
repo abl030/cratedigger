@@ -7,37 +7,11 @@ import { __test__, renderPipelineDashboard } from '../web/js/pipeline_dashboard.
 import { state } from '../web/js/state.js';
 import { awstDateTime } from '../web/js/util.js';
 
-let passed = 0;
-let failed = 0;
+import { stubGlobals, suite } from './js_harness.mjs';
 
-function assertContains(haystack, needle, msg) {
-  if (haystack.includes(needle)) {
-    passed++;
-  } else {
-    failed++;
-    console.error(`  FAIL: ${msg} - '${needle}' not in output`);
-  }
-}
+const t = suite(import.meta.url);
 
-function assertExcludes(haystack, needle, msg) {
-  if (!haystack.includes(needle)) {
-    passed++;
-  } else {
-    failed++;
-    console.error(`  FAIL: ${msg} - unexpectedly found '${needle}'`);
-  }
-}
-
-function assert(condition, msg) {
-  if (condition) {
-    passed++;
-  } else {
-    failed++;
-    console.error(`  FAIL: ${msg}`);
-  }
-}
-
-console.log('renderCoverageCard() shows found-enqueue match rates');
+t.section('renderCoverageCard() shows found-enqueue match rates');
 {
   state.pipelineMatchGraphOpen = false;
   state.pipelineHourlyMatchGraphOpen = false;
@@ -54,15 +28,15 @@ console.log('renderCoverageCard() shows found-enqueue match rates');
     matches_per_hour_6h: 1.5,
     top_10_share_24h: 0.25,
   });
-  assertContains(html, 'Match/hr 6h', '6h match-rate label rendered');
-  assertContains(html, '>1.50</strong>', '6h match rate rendered');
-  assertContains(html, 'Match/hr 24h', '24h match-rate label rendered');
-  assertContains(html, '>1.00</strong>', '24h match rate rendered');
-  assertContains(html, "window.toggleCoverageMatchGraph('hourly')", '6h match rate toggles hourly graph');
-  assertContains(html, "window.toggleCoverageMatchGraph('daily')", '24h match rate toggles daily graph');
-  assertExcludes(html, 'match-rate-chart', 'chart stays collapsed by default');
+  t.contains(html, 'Match/hr 6h', '6h match-rate label rendered');
+  t.contains(html, '>1.50</strong>', '6h match rate rendered');
+  t.contains(html, 'Match/hr 24h', '24h match-rate label rendered');
+  t.contains(html, '>1.00</strong>', '24h match rate rendered');
+  t.contains(html, "window.toggleCoverageMatchGraph('hourly')", '6h match rate toggles hourly graph');
+  t.contains(html, "window.toggleCoverageMatchGraph('daily')", '24h match rate toggles daily graph');
+  t.excludes(html, 'match-rate-chart', 'chart stays collapsed by default');
 }
-console.log('renderWantedTrendCard() shows backlog drain and ETA');
+t.section('renderWantedTrendCard() shows backlog drain and ETA');
 {
   const html = __test__.renderWantedTrendCard({
     current_wanted: 10,
@@ -89,15 +63,15 @@ console.log('renderWantedTrendCard() shows backlog drain and ETA');
       },
     ],
   });
-  assertContains(html, 'Wanted Trend', 'card title rendered');
-  assertContains(html, 'Current', 'current row rendered');
-  assertContains(html, '>10</strong>', 'current wanted rendered');
-  assertContains(html, 'down 0.67/hr (-4)', 'drain rate rendered');
-  assertContains(html, 'up 0.08/hr (+2)', 'growth rate rendered');
-  assertContains(html, '15.0h', 'ETA rendered');
-  assertContains(html, 'wanted-trend-line', 'sparkline rendered');
+  t.contains(html, 'Wanted Trend', 'card title rendered');
+  t.contains(html, 'Current', 'current row rendered');
+  t.contains(html, '>10</strong>', 'current wanted rendered');
+  t.contains(html, 'down 0.67/hr (-4)', 'drain rate rendered');
+  t.contains(html, 'up 0.08/hr (+2)', 'growth rate rendered');
+  t.contains(html, '15.0h', 'ETA rendered');
+  t.contains(html, 'wanted-trend-line', 'sparkline rendered');
 }
-console.log('renderCoverageCard() expands an hourly match-rate chart under the 6h row');
+t.section('renderCoverageCard() expands an hourly match-rate chart under the 6h row');
 {
   state.pipelineMatchGraphOpen = false;
   state.pipelineHourlyMatchGraphOpen = true;
@@ -118,15 +92,15 @@ console.log('renderCoverageCard() expands an hourly match-rate chart under the 6
     ],
     top_10_share_24h: 0.25,
   });
-  assertContains(html, 'metric-open', 'clicked row shows open state');
-  assertContains(html, 'match-rate-chart', 'chart container rendered');
-  assertContains(html, '<svg', 'chart svg rendered');
-  assertContains(html, 'peak 3.00/hr', 'chart peak rendered');
-  assertContains(html, 'match-rate-bar active', 'nonzero bars are highlighted');
+  t.contains(html, 'metric-open', 'clicked row shows open state');
+  t.contains(html, 'match-rate-chart', 'chart container rendered');
+  t.contains(html, '<svg', 'chart svg rendered');
+  t.contains(html, 'peak 3.00/hr', 'chart peak rendered');
+  t.contains(html, 'match-rate-bar active', 'nonzero bars are highlighted');
   state.pipelineMatchGraphOpen = false;
   state.pipelineHourlyMatchGraphOpen = false;
 }
-console.log('renderCoverageCard() expands a daily match-rate chart under the 24h row');
+t.section('renderCoverageCard() expands a daily match-rate chart under the 24h row');
 {
   state.pipelineMatchGraphOpen = false;
   state.pipelineHourlyMatchGraphOpen = false;
@@ -147,12 +121,12 @@ console.log('renderCoverageCard() expands a daily match-rate chart under the 24h
     ],
     top_10_share_24h: 0.25,
   });
-  assertContains(html, 'Last 28 days', 'daily chart label rendered');
-  assertContains(html, 'peak 8/day', 'daily chart peak rendered');
-  assertContains(html, 'match-rate-bar active', 'daily nonzero bars are highlighted');
+  t.contains(html, 'Last 28 days', 'daily chart label rendered');
+  t.contains(html, 'peak 8/day', 'daily chart peak rendered');
+  t.contains(html, 'match-rate-bar active', 'daily nonzero bars are highlighted');
   state.pipelineDailyMatchGraphOpen = false;
 }
-console.log('withCoverageMatchRates() falls back to search window found counts');
+t.section('withCoverageMatchRates() falls back to search window found counts');
 {
   const coverage = __test__.withCoverageMatchRates({
     wanted_total: 10,
@@ -161,17 +135,13 @@ console.log('withCoverageMatchRates() falls back to search window found counts')
     {label: '24h', hours: 24, outcomes: {found: 132}},
     {label: '6h', hours: 6, outcomes: {found: 27}},
   ]);
-  if (coverage.matches_24h === 132
+  t.ok(coverage.matches_24h === 132
       && coverage.matches_6h === 27
       && coverage.matches_per_hour_24h === 5.5
-      && coverage.matches_per_hour_6h === 4.5) {
-    passed++;
-  } else {
-    failed++;
-    console.error('  FAIL: coverage fallback did not derive expected match rates');
-  }
+      && coverage.matches_per_hour_6h === 4.5,
+    'coverage fallback did not derive expected match rates');
 }
-console.log('renderPeerBrowseHeavyQueries() shows release ids and exact query tokens');
+t.section('renderPeerBrowseHeavyQueries() shows release ids and exact query tokens');
 {
   const html = __test__.renderPeerBrowseHeavyQueries({
     heavy_query_hours: 24,
@@ -192,14 +162,14 @@ console.log('renderPeerBrowseHeavyQueries() shows release ids and exact query to
       },
     ],
   });
-  assertContains(html, 'Peer/Dir Heavy Queries (24h)', 'card title includes window');
-  assertContains(html, '#1843', 'request id rendered');
-  assertContains(html, 'aaaaaaaa', 'release id prefix rendered');
-  assertContains(html, '*he *iggles 1991', 'exact query rendered');
-  assertContains(html, '32,355', 'peer/dir count rendered');
-  assertContains(html, '64m 28s', 'browse duration rendered');
+  t.contains(html, 'Peer/Dir Heavy Queries (24h)', 'card title includes window');
+  t.contains(html, '#1843', 'request id rendered');
+  t.contains(html, 'aaaaaaaa', 'release id prefix rendered');
+  t.contains(html, '*he *iggles 1991', 'exact query rendered');
+  t.contains(html, '32,355', 'peer/dir count rendered');
+  t.contains(html, '64m 28s', 'browse duration rendered');
 }
-console.log('renderPeersCard() shows totals strip and cumulative day table');
+t.section('renderPeersCard() shows totals strip and cumulative day table');
 {
   const html = __test__.renderPeersCard({
     totals: {
@@ -213,28 +183,28 @@ console.log('renderPeersCard() shows totals strip and cumulative day table');
       { date: '2026-06-11', new_peers: 0, total_peers: 40434 },
     ],
   });
-  assertContains(html, 'Known Peers', 'card title rendered');
-  assertContains(html, '40,746', 'known peer total rendered');
-  assertContains(html, 'Seen 24h', 'seen-24h metric rendered');
-  assertContains(html, '2026-06-11', 'zero-day row rendered');
-  assertContains(html, '40,434', 'carried-forward cumulative total rendered');
+  t.contains(html, 'Known Peers', 'card title rendered');
+  t.contains(html, '40,746', 'known peer total rendered');
+  t.contains(html, 'Seen 24h', 'seen-24h metric rendered');
+  t.contains(html, '2026-06-11', 'zero-day row rendered');
+  t.contains(html, '40,434', 'carried-forward cumulative total rendered');
 }
-console.log('renderPeersCard() with no observations renders the empty row');
+t.section('renderPeersCard() with no observations renders the empty row');
 {
   const html = __test__.renderPeersCard({ totals: {}, days: [] });
-  assertContains(html, 'No peer observations yet', 'empty state rendered');
+  t.contains(html, 'No peer observations yet', 'empty state rendered');
 }
 
-console.log('renderUnfindableCard() with no runs yet renders the honest empty state (#1112)');
+t.section('renderUnfindableCard() with no runs yet renders the honest empty state (#1112)');
 {
   const html = __test__.renderUnfindableCard({ recent_runs: [], backlog_trend: {} });
-  assertContains(html, 'Unfindable Detection', 'card title rendered');
-  assertContains(html, 'No unfindable-detection runs yet', 'empty table row rendered');
-  assertContains(html, '>never</strong>', 'last-run falls back to never');
-  assertContains(html, 'Collecting run history', 'chart empty state rendered');
-  assertExcludes(html, '<polyline', 'no chart line drawn with < 2 samples');
+  t.contains(html, 'Unfindable Detection', 'card title rendered');
+  t.contains(html, 'No unfindable-detection runs yet', 'empty table row rendered');
+  t.contains(html, '>never</strong>', 'last-run falls back to never');
+  t.contains(html, 'Collecting run history', 'chart empty state rendered');
+  t.excludes(html, '<polyline', 'no chart line drawn with < 2 samples');
 }
-console.log('renderUnfindableCard() shows latest-run facts, outcome breakdown, and breaker state');
+t.section('renderUnfindableCard() shows latest-run facts, outcome breakdown, and breaker state');
 {
   const html = __test__.renderUnfindableCard({
     recent_runs: [
@@ -279,33 +249,29 @@ console.log('renderUnfindableCard() shows latest-run facts, outcome breakdown, a
       ],
     },
   });
-  assertContains(html, '1,301', 'cohort total rendered');
-  assertContains(html, '686', 'due backlog rendered');
-  assertContains(html, '240 / 84', 'batch limit / processed rendered for the latest run');
-  assertContains(html, '>81</strong>', 'probes-attempted (real probes, excluding request_not_found) rendered for the latest run');
-  assertContains(html, 'metric-bad">yes', 'breaker-tripped latest run flagged bad');
-  assertContains(html, '<polyline', 'backlog trend line rendered with >= 2 samples');
-  assertContains(html, 'Due backlog per run', 'chart head label rendered');
-  assertContains(html, '77', 'probe-failed count for the tripped run rendered');
+  t.contains(html, '1,301', 'cohort total rendered');
+  t.contains(html, '686', 'due backlog rendered');
+  t.contains(html, '240 / 84', 'batch limit / processed rendered for the latest run');
+  t.contains(html, '>81</strong>', 'probes-attempted (real probes, excluding request_not_found) rendered for the latest run');
+  t.contains(html, 'metric-bad">yes', 'breaker-tripped latest run flagged bad');
+  t.contains(html, '<polyline', 'backlog trend line rendered with >= 2 samples');
+  t.contains(html, 'Due backlog per run', 'chart head label rendered');
+  t.contains(html, '77', 'probe-failed count for the tripped run rendered');
 }
-console.log('normalizeUnfindableBacklogSeries() maps due_backlog_at_start to a plottable series');
+t.section('normalizeUnfindableBacklogSeries() maps due_backlog_at_start to a plottable series');
 {
   const series = __test__.normalizeUnfindableBacklogSeries([
     {sampled_at: '2026-08-11T00:00:00+00:00', due_backlog_at_start: 900},
     {sampled_at: '2026-08-12T00:00:00+00:00', due_backlog_at_start: 686},
   ]);
-  if (series.length === 2
+  t.ok(series.length === 2
       && series[0].time === '2026-08-11T00:00:00+00:00'
       && series[0].backlog === 900
-      && series[1].backlog === 686) {
-    passed++;
-  } else {
-    failed++;
-    console.error('  FAIL: normalizeUnfindableBacklogSeries did not derive expected points', series);
-  }
+      && series[1].backlog === 686,
+    'normalizeUnfindableBacklogSeries did not derive expected points');
 }
 
-console.log('renderDriftRow() renders the operator merge-rekey button for MB-sourced rows (#1089)');
+t.section('renderDriftRow() renders the operator merge-rekey button for MB-sourced rows (#1089)');
 {
   const html = __test__.renderDriftRow({
     id: 8792, artist_name: 'Slipknot', album_title: 'Vol. 3: (The Subliminal Verses)',
@@ -313,14 +279,14 @@ console.log('renderDriftRow() renders the operator merge-rekey button for MB-sou
     discogs_release_id: null, source: 'musicbrainz',
     resolution: {kind: 'missing'},
   });
-  assertContains(html, '#8792 Slipknot', 'row names the request id and artist');
-  assertContains(html, 'Vol. 3: (The Subliminal Verses)', 'row names the album title');
-  assertContains(html, 'metric-bad">missing', 'row truthfully names the missing resolution');
-  assertContains(html, 'window.mergeRekeyRequest(8792, this)', 'button wires the window binding with its request id');
-  assertContains(html, 'Follow MB merge', 'button label rendered');
-  assertContains(html, 'id="drift-note-8792"', 'inline refusal-note slot rendered for this request');
+  t.contains(html, '#8792 Slipknot', 'row names the request id and artist');
+  t.contains(html, 'Vol. 3: (The Subliminal Verses)', 'row names the album title');
+  t.contains(html, 'metric-bad">missing', 'row truthfully names the missing resolution');
+  t.contains(html, 'window.mergeRekeyRequest(8792, this)', 'button wires the window binding with its request id');
+  t.contains(html, 'Follow MB merge', 'button label rendered');
+  t.contains(html, 'id="drift-note-8792"', 'inline refusal-note slot rendered for this request');
 }
-console.log('renderDriftRow() withholds the button for non-MB-sourced rows (#1089 MAJOR-A, review round 3)');
+t.section('renderDriftRow() withholds the button for non-MB-sourced rows (#1089 MAJOR-A, review round 3)');
 {
   // The REAL production shape (#1089 MAJOR-A): a Discogs-sourced row
   // duplicates the numeric id into BOTH mb_release_id and
@@ -332,33 +298,33 @@ console.log('renderDriftRow() withholds the button for non-MB-sourced rows (#108
     status: 'imported', mb_release_id: '1870', discogs_release_id: '1870',
     source: 'discogs', resolution: {kind: 'missing'},
   });
-  assertContains(html, '#1870 Some Artist', 'row still names the request');
-  assertContains(html, 'metric-bad">missing', 'row still shows its resolution');
-  assertExcludes(html, 'window.mergeRekeyRequest', 'no merge-rekey button for a non-MB-sourced row');
-  assertExcludes(html, 'Follow MB merge', 'no button label for a non-MB-sourced row');
-  assertExcludes(html, 'drift-note-1870', 'no inline note slot without a button to write into');
+  t.contains(html, '#1870 Some Artist', 'row still names the request');
+  t.contains(html, 'metric-bad">missing', 'row still shows its resolution');
+  t.excludes(html, 'window.mergeRekeyRequest', 'no merge-rekey button for a non-MB-sourced row');
+  t.excludes(html, 'Follow MB merge', 'no button label for a non-MB-sourced row');
+  t.excludes(html, 'drift-note-1870', 'no inline note slot without a button to write into');
 }
-console.log('renderDriftRow() escapes artist/album HTML');
+t.section('renderDriftRow() escapes artist/album HTML');
 {
   const html = __test__.renderDriftRow({
     id: 1, artist_name: '<script>x</script>', album_title: 'A & B', status: 'imported',
     mb_release_id: 'd990b8af-0000-0000-0000-000000000000', source: 'musicbrainz',
     resolution: {kind: 'missing'},
   });
-  assertExcludes(html, '<script>x</script>', 'artist name is escaped');
-  assertContains(html, 'A &amp; B', 'album title is escaped');
+  t.excludes(html, '<script>x</script>', 'artist name is escaped');
+  t.contains(html, 'A &amp; B', 'album title is escaped');
 }
-console.log('renderDriftRow() distinguishes ambiguity from missing by exact album cardinality');
+t.section('renderDriftRow() distinguishes ambiguity from missing by exact album cardinality');
 {
   const html = __test__.renderDriftRow({
     id: 2, artist_name: 'Ambiguous Artist', album_title: 'Two Albums',
     status: 'imported', source: 'musicbrainz',
     resolution: {kind: 'ambiguous', album_ids: [7, 9], reason: 'multiple_matches'},
   });
-  assertContains(html, 'ambiguous (2 albums)', 'ambiguity includes exact album cardinality');
-  assertExcludes(html, 'metric-bad">missing', 'ambiguity never masquerades as missing');
+  t.contains(html, 'ambiguous (2 albums)', 'ambiguity includes exact album cardinality');
+  t.excludes(html, 'metric-bad">missing', 'ambiguity never masquerades as missing');
 }
-console.log('renderDiskCoverageCard() composes one drift row per off-disk request');
+t.section('renderDiskCoverageCard() composes one drift row per off-disk request');
 {
   const html = __test__.renderDiskCoverageCard({
     counts: {on_disk_total: 9, active_total: 11, off_disk_by_status: {wanted: 1}},
@@ -371,50 +337,50 @@ console.log('renderDiskCoverageCard() composes one drift row per off-disk reques
        resolution: {kind: 'ambiguous', album_ids: [8, 9, 10], reason: 'multiple_matches'}},
     ],
   });
-  assertContains(html, 'Imported, not uniquely in Beets', 'neutral drift metric label rendered');
-  assertContains(html, 'missing', 'missing resolution rendered');
-  assertContains(html, 'ambiguous (3 albums)', 'ambiguous resolution rendered');
-  assertContains(html, 'window.mergeRekeyRequest(316, this)', 'first drift row gets its own button');
-  assertContains(html, 'window.mergeRekeyRequest(8832, this)', 'second drift row gets its own button');
+  t.contains(html, 'Imported, not uniquely in Beets', 'neutral drift metric label rendered');
+  t.contains(html, 'missing', 'missing resolution rendered');
+  t.contains(html, 'ambiguous (3 albums)', 'ambiguous resolution rendered');
+  t.contains(html, 'window.mergeRekeyRequest(316, this)', 'first drift row gets its own button');
+  t.contains(html, 'window.mergeRekeyRequest(8832, this)', 'second drift row gets its own button');
 }
-console.log('renderDiskCoverageCard() keeps wanted coverage neutral when a wanted row is ambiguous');
+t.section('renderDiskCoverageCard() keeps wanted coverage neutral when a wanted row is ambiguous');
 {
   const html = __test__.renderDiskCoverageCard({
     counts: {on_disk_total: 9, active_total: 10, off_disk_by_status: {wanted: 1}},
     drift_rows: [],
   });
-  assertContains(html, 'Wanted, not uniquely in Beets', 'wanted count does not claim missing membership');
-  assertExcludes(html, 'Wanted (not yet acquired)', 'stale wanted-missing claim removed');
+  t.contains(html, 'Wanted, not uniquely in Beets', 'wanted count does not claim missing membership');
+  t.excludes(html, 'Wanted (not yet acquired)', 'stale wanted-missing claim removed');
 }
-console.log('renderDiskCoverageCard() renders no drift rows or buttons when nothing has drifted');
+t.section('renderDiskCoverageCard() renders no drift rows or buttons when nothing has drifted');
 {
   const html = __test__.renderDiskCoverageCard({
     counts: {on_disk_total: 11, active_total: 11, off_disk_by_status: {}},
     drift_rows: [],
   });
-  assertContains(html, 'metric-good">0', 'zero drift renders the good class');
-  assertExcludes(html, 'mergeRekeyRequest', 'no button rendered with an empty drift list');
+  t.contains(html, 'metric-good">0', 'zero drift renders the good class');
+  t.excludes(html, 'mergeRekeyRequest', 'no button rendered with an empty drift list');
 }
 
-console.log('renderRetagDivergenceCensusCard() honestly shows the missing state');
+t.section('renderRetagDivergenceCensusCard() honestly shows the missing state');
 {
   const html = __test__.renderRetagDivergenceCensusCard({
     state: 'missing', error: null, snapshot: null,
   });
-  assertContains(html, 'Beets DB', 'card title mentions Beets DB');
-  assertContains(html, 'File Tags', 'card title mentions file tags — distinct from Disk Coverage');
-  assertContains(html, 'no census published yet', 'honest missing-state copy');
-  assertExcludes(html, 'Disk Coverage', 'never confused with the ledger-vs-beets Disk Coverage card');
+  t.contains(html, 'Beets DB', 'card title mentions Beets DB');
+  t.contains(html, 'File Tags', 'card title mentions file tags — distinct from Disk Coverage');
+  t.contains(html, 'no census published yet', 'honest missing-state copy');
+  t.excludes(html, 'Disk Coverage', 'never confused with the ledger-vs-beets Disk Coverage card');
 }
-console.log('renderRetagDivergenceCensusCard() shows the unreadable state without crashing');
+t.section('renderRetagDivergenceCensusCard() shows the unreadable state without crashing');
 {
   const html = __test__.renderRetagDivergenceCensusCard({
     state: 'unreadable', error: 'DecodeError: bad json', snapshot: null,
   });
-  assertContains(html, 'unreadable', 'unreadable state copy rendered');
-  assertContains(html, 'DecodeError: bad json', 'error detail rendered');
+  t.contains(html, 'unreadable', 'unreadable state copy rendered');
+  t.contains(html, 'DecodeError: bad json', 'error detail rendered');
 }
-console.log('renderRetagDivergenceCensusCard() renders a clean snapshot with zero listed albums');
+t.section('renderRetagDivergenceCensusCard() renders a clean snapshot with zero listed albums');
 {
   const html = __test__.renderRetagDivergenceCensusCard({
     state: 'ok', error: null,
@@ -428,41 +394,41 @@ console.log('renderRetagDivergenceCensusCard() renders a clean snapshot with zer
       },
     },
   });
-  assertContains(html, 'metric-good">clean', 'clean status rendered with good class');
-  assertContains(html, '93,700', 'albums_scanned count rendered');
-  assertExcludes(html, 'window.recheckRetagDivergenceAlbum', 'no recheck buttons with nothing listed');
+  t.contains(html, 'metric-good">clean', 'clean status rendered with good class');
+  t.contains(html, '93,700', 'albums_scanned count rendered');
+  t.excludes(html, 'window.recheckRetagDivergenceAlbum', 'no recheck buttons with nothing listed');
 }
-console.log('retagDivergenceSnapshotAgeHours() computes hours since generated_at');
+t.section('retagDivergenceSnapshotAgeHours() computes hours since generated_at');
 {
   const nowMs = Date.parse('2026-08-16T00:00:00+00:00');
-  assert(
+  t.ok(
     __test__.retagDivergenceSnapshotAgeHours('2026-08-15T00:00:00+00:00', nowMs) === 24,
     '24h old is 24',
   );
-  assert(
+  t.ok(
     __test__.retagDivergenceSnapshotAgeHours(null, nowMs) === null,
     'missing generated_at is null, not NaN',
   );
-  assert(
+  t.ok(
     __test__.retagDivergenceSnapshotAgeHours('not a date', nowMs) === null,
     'unparsable generated_at is null',
   );
 }
-console.log('N5 (#1142 review) — stale boundary is exactly 36h; 36.0h is fresh, 36.01h is stale');
+t.section('N5 (#1142 review) — stale boundary is exactly 36h; 36.0h is fresh, 36.01h is stale');
 {
   const nowMs = Date.parse('2026-08-16T00:00:00+00:00');
   const atBoundary = new Date(nowMs - 36 * 3600000).toISOString();
   const justPastBoundary = new Date(nowMs - 36.01 * 3600000).toISOString();
-  assert(
+  t.ok(
     __test__.retagDivergenceSnapshotIsStale(atBoundary, nowMs) === false,
     'exactly 36h old is NOT stale (boundary is exclusive)',
   );
-  assert(
+  t.ok(
     __test__.retagDivergenceSnapshotIsStale(justPastBoundary, nowMs) === true,
     'just past 36h old IS stale',
   );
 }
-console.log('renderRetagDivergenceCensusCard() N5 — a fresh snapshot never reads stale');
+t.section('renderRetagDivergenceCensusCard() N5 — a fresh snapshot never reads stale');
 {
   const fresh = new Date(Date.now() - 2 * 3600000).toISOString();
   const html = __test__.renderRetagDivergenceCensusCard({
@@ -477,10 +443,10 @@ console.log('renderRetagDivergenceCensusCard() N5 — a fresh snapshot never rea
       },
     },
   });
-  assertExcludes(html, 'stale', 'a 2h-old snapshot never renders any "stale" text');
-  assertContains(html, 'metric-good">fresh', 'freshness row reads fresh');
+  t.excludes(html, 'stale', 'a 2h-old snapshot never renders any "stale" text');
+  t.contains(html, 'metric-good">fresh', 'freshness row reads fresh');
 }
-console.log('renderRetagDivergenceCensusCard() N5 — a snapshot older than 36h reads stale with a warn tone');
+t.section('renderRetagDivergenceCensusCard() N5 — a snapshot older than 36h reads stale with a warn tone');
 {
   const stale = new Date(Date.now() - 40 * 3600000).toISOString();
   const html = __test__.renderRetagDivergenceCensusCard({
@@ -495,10 +461,10 @@ console.log('renderRetagDivergenceCensusCard() N5 — a snapshot older than 36h 
       },
     },
   });
-  assertContains(html, 'metric-warn">stale', 'freshness row reads stale with warn tone');
-  assertContains(html, '40.0h', 'stale label names the exact age');
+  t.contains(html, 'metric-warn">stale', 'freshness row reads stale with warn tone');
+  t.contains(html, '40.0h', 'stale label names the exact age');
 }
-console.log('renderLibraryCompletenessCard() groups findings into collapsed, honestly capped categories');
+t.section('renderLibraryCompletenessCard() groups findings into collapsed, honestly capped categories');
 {
   const stale = new Date(Date.now() - 40 * 3600000).toISOString();
   const html = __test__.renderLibraryCompletenessCard({
@@ -515,31 +481,31 @@ console.log('renderLibraryCompletenessCard() groups findings into collapsed, hon
       },
     },
   });
-  assertContains(html, 'incomplete (stale)', 'stale completeness status is explicit');
-  assertContains(html, '8,496 / 8,498', 'audio complete uses whole-library denominator');
-  assertContains(html, 'Don&#39;t Sit Down', 'missing-source detail is rendered and escaped');
-  assertContains(html, 'uncatalogued=1', 'catalog-drift detail is rendered');
-  assertContains(html, '<summary><span>Missing source audio</span><strong class="metric-bad">2</strong></summary>', 'missing category is expandable');
-  assertContains(html, '<summary><span>Catalog drift</span><strong class="metric-warn">2</strong></summary>', 'drift category is expandable');
-  assertContains(html, '<summary><span>Unknown</span><strong class="metric-muted">0</strong></summary>', 'unknown category is expandable even when empty');
-  assertExcludes(html, '<details open', 'all finding categories start collapsed');
-  assert((html.match(/#11782/g) || []).length === 2, 'an album with two findings appears in both relevant categories');
-  assert((html.match(/Showing 1 of 2/g) || []).length === 2, 'each capped category names its own shown and total counts');
-  assertExcludes(html, 'Exceptional albums', 'the redundant flat exceptional total is gone');
-  assertExcludes(html, 'Non-audio omitted', 'non-audio omissions are not a dashboard category');
-  assertExcludes(html, 'non_audio_omitted', 'the removed raw category is not rendered');
-  assertExcludes(html, '1 / 2', 'uncapped-style fractions are not shown');
+  t.contains(html, 'incomplete (stale)', 'stale completeness status is explicit');
+  t.contains(html, '8,496 / 8,498', 'audio complete uses whole-library denominator');
+  t.contains(html, 'Don&#39;t Sit Down', 'missing-source detail is rendered and escaped');
+  t.contains(html, 'uncatalogued=1', 'catalog-drift detail is rendered');
+  t.contains(html, '<summary><span>Missing source audio</span><strong class="metric-bad">2</strong></summary>', 'missing category is expandable');
+  t.contains(html, '<summary><span>Catalog drift</span><strong class="metric-warn">2</strong></summary>', 'drift category is expandable');
+  t.contains(html, '<summary><span>Unknown</span><strong class="metric-muted">0</strong></summary>', 'unknown category is expandable even when empty');
+  t.excludes(html, '<details open', 'all finding categories start collapsed');
+  t.ok((html.match(/#11782/g) || []).length === 2, 'an album with two findings appears in both relevant categories');
+  t.ok((html.match(/Showing 1 of 2/g) || []).length === 2, 'each capped category names its own shown and total counts');
+  t.excludes(html, 'Exceptional albums', 'the redundant flat exceptional total is gone');
+  t.excludes(html, 'Non-audio omitted', 'non-audio omissions are not a dashboard category');
+  t.excludes(html, 'non_audio_omitted', 'the removed raw category is not rendered');
+  t.excludes(html, '1 / 2', 'uncapped-style fractions are not shown');
 }
-console.log('renderLibraryCompletenessCard() keeps zero defect observations neutral');
+t.section('renderLibraryCompletenessCard() keeps zero defect observations neutral');
 {
   const html = __test__.renderLibraryCompletenessCard({
     state: 'ok', snapshot: {generated_at: new Date().toISOString(), duration_seconds: 1,
       report: {status: 'complete', counts: {albums_scanned: 1, audio_complete: 1, missing_source_audio: 0, catalog_drift: 0, unknown: 0}, albums: []}},
   });
-  assertContains(html, 'metric-muted">0</strong>', 'zero defect counts are neutral, not celebratory');
-  assertExcludes(html, 'metric-good">0</strong>', 'zero defect counts never use good tone');
+  t.contains(html, 'metric-muted">0</strong>', 'zero defect counts are neutral, not celebratory');
+  t.excludes(html, 'metric-good">0</strong>', 'zero defect counts never use good tone');
 }
-console.log('renderRetagDivergenceCensusCard() lists a divergent album with a recheck button');
+t.section('renderRetagDivergenceCensusCard() lists a divergent album with a recheck button');
 {
   const html = __test__.renderRetagDivergenceCensusCard({
     state: 'ok', error: null,
@@ -556,12 +522,12 @@ console.log('renderRetagDivergenceCensusCard() lists a divergent album with a re
       },
     },
   });
-  assertContains(html, 'metric-bad">divergence_found', 'divergence status rendered with bad class');
-  assertContains(html, 'id="retag-album-6612"', 'per-album container id rendered for in-place patching');
-  assertContains(html, 'window.recheckRetagDivergenceAlbum(6612, this)', 'recheck button wired with the album id');
-  assertContains(html, 'id="retag-album-note-6612"', 'inline note slot rendered for this album');
+  t.contains(html, 'metric-bad">divergence_found', 'divergence status rendered with bad class');
+  t.contains(html, 'id="retag-album-6612"', 'per-album container id rendered for in-place patching');
+  t.contains(html, 'window.recheckRetagDivergenceAlbum(6612, this)', 'recheck button wired with the album id');
+  t.contains(html, 'id="retag-album-note-6612"', 'inline note slot rendered for this album');
 }
-console.log('renderRetagDivergenceAlbumRowInner() #1260 — names first, raw MBIDs demoted, Write-tags wired');
+t.section('renderRetagDivergenceAlbumRowInner() #1260 — names first, raw MBIDs demoted, Write-tags wired');
 {
   const html = __test__.renderRetagDivergenceAlbumRowInner({
     album_id: 16948,
@@ -576,17 +542,17 @@ console.log('renderRetagDivergenceAlbumRowInner() #1260 — names first, raw MBI
       detail: null,
     }],
   });
-  assertContains(html, 'Terre Thaemlitz / DJ Sprinkles — RA.1000', 'human name rendered on the album row');
-  assertExcludes(html, '>26693e58-02c0-4bb1-b66f-f0f44f8a234d<', 'full album MBID never rendered as text');
-  assertContains(html, 'title="26693e58-02c0-4bb1-b66f-f0f44f8a234d"', 'full album MBID one hover away');
-  assertContains(html, '>26693e58…<', 'short album MBID code rendered');
-  assertContains(html, '01 RA.1000.opus', 'item row names the file, not a bare UUID');
-  assertContains(html, 'title="/library/Terre Thaemlitz/2025 - RA.1000/01 RA.1000.opus"', 'full item path one hover away');
-  assertContains(html, 'title="fdc54a6a-27c7-4936-87d7-7ab146812d4e"', 'full file-tag MBID one hover away');
-  assertContains(html, 'window.syncRetagDivergenceAlbum(16948, this)', 'Write-tags button wired with the album id');
-  assertContains(html, 'data-expected="26693e58-02c0-4bb1-b66f-f0f44f8a234d"', 'Write-tags carries the compare-and-set identity');
+  t.contains(html, 'Terre Thaemlitz / DJ Sprinkles — RA.1000', 'human name rendered on the album row');
+  t.excludes(html, '>26693e58-02c0-4bb1-b66f-f0f44f8a234d<', 'full album MBID never rendered as text');
+  t.contains(html, 'title="26693e58-02c0-4bb1-b66f-f0f44f8a234d"', 'full album MBID one hover away');
+  t.contains(html, '>26693e58…<', 'short album MBID code rendered');
+  t.contains(html, '01 RA.1000.opus', 'item row names the file, not a bare UUID');
+  t.contains(html, 'title="/library/Terre Thaemlitz/2025 - RA.1000/01 RA.1000.opus"', 'full item path one hover away');
+  t.contains(html, 'title="fdc54a6a-27c7-4936-87d7-7ab146812d4e"', 'full file-tag MBID one hover away');
+  t.contains(html, 'window.syncRetagDivergenceAlbum(16948, this)', 'Write-tags button wired with the album id');
+  t.contains(html, 'data-expected="26693e58-02c0-4bb1-b66f-f0f44f8a234d"', 'Write-tags carries the compare-and-set identity');
 }
-console.log('renderRetagDivergenceAlbumRowInner() #1260 — no Write-tags button without a divergent item');
+t.section('renderRetagDivergenceAlbumRowInner() #1260 — no Write-tags button without a divergent item');
 {
   const html = __test__.renderRetagDivergenceAlbumRowInner({
     album_id: 7,
@@ -597,10 +563,10 @@ console.log('renderRetagDivergenceAlbumRowInner() #1260 — no Write-tags button
       file_mb_albumid: null, detail: 'OSError: EIO',
     }],
   });
-  assertExcludes(html, 'window.syncRetagDivergenceAlbum', 'unreadable-only album gets no Write-tags button');
-  assertContains(html, 'window.recheckRetagDivergenceAlbum(7, this)', 'recheck still offered');
+  t.excludes(html, 'window.syncRetagDivergenceAlbum', 'unreadable-only album gets no Write-tags button');
+  t.contains(html, 'window.recheckRetagDivergenceAlbum(7, this)', 'recheck still offered');
 }
-console.log('renderRetagDivergenceAlbumRowInner() #1260 — a pre-#1260 snapshot without names still renders');
+t.section('renderRetagDivergenceAlbumRowInner() #1260 — a pre-#1260 snapshot without names still renders');
 {
   const html = __test__.renderRetagDivergenceAlbumRowInner({
     album_id: 9,
@@ -611,10 +577,10 @@ console.log('renderRetagDivergenceAlbumRowInner() #1260 — a pre-#1260 snapshot
       file_mb_albumid: 'fdc54a6a-27c7-4936-87d7-7ab146812d4e', detail: null,
     }],
   });
-  assertContains(html, 'Album #9 <code', 'no stray separator when names are absent');
-  assertContains(html, '(unknown file)', 'missing item path degrades honestly');
+  t.contains(html, 'Album #9 <code', 'no stray separator when names are absent');
+  t.contains(html, '(unknown file)', 'missing item path degrades honestly');
 }
-console.log('renderRetagDivergenceCensusCard() escapes the db_mb_albumid value');
+t.section('renderRetagDivergenceCensusCard() escapes the db_mb_albumid value');
 {
   const html = __test__.renderRetagDivergenceCensusCard({
     state: 'ok', error: null,
@@ -631,9 +597,9 @@ console.log('renderRetagDivergenceCensusCard() escapes the db_mb_albumid value')
       },
     },
   });
-  assertExcludes(html, '<script>x</script>', 'db_mb_albumid is escaped');
+  t.excludes(html, '<script>x</script>', 'db_mb_albumid is escaped');
 }
-console.log('renderRetagDivergenceCensusCard() N1 (fresh review) — shows "Showing N of M" when the dashboard route capped the album list');
+t.section('renderRetagDivergenceCensusCard() N1 (fresh review) — shows "Showing N of M" when the dashboard route capped the album list');
 {
   const html = __test__.renderRetagDivergenceCensusCard({
     state: 'ok', error: null,
@@ -651,11 +617,11 @@ console.log('renderRetagDivergenceCensusCard() N1 (fresh review) — shows "Show
       },
     },
   });
-  assertContains(html, 'Showing 50 of 57', 'capped state visibly names shown vs. total — no silent cap');
-  assertContains(html, 'Listed (non-agreeing)', 'listed row label still present');
-  assertContains(html, '>57<', 'listed row shows the TRUE total, not the capped shown count');
+  t.contains(html, 'Showing 50 of 57', 'capped state visibly names shown vs. total — no silent cap');
+  t.contains(html, 'Listed (non-agreeing)', 'listed row label still present');
+  t.contains(html, '>57<', 'listed row shows the TRUE total, not the capped shown count');
 }
-console.log('renderRetagDivergenceCensusCard() N1 (fresh review) — no "Showing" text when nothing was capped');
+t.section('renderRetagDivergenceCensusCard() N1 (fresh review) — no "Showing" text when nothing was capped');
 {
   const html = __test__.renderRetagDivergenceCensusCard({
     state: 'ok', error: null,
@@ -673,9 +639,9 @@ console.log('renderRetagDivergenceCensusCard() N1 (fresh review) — no "Showing
       },
     },
   });
-  assertExcludes(html, 'Showing', 'uncapped state never mentions "Showing" at all');
+  t.excludes(html, 'Showing', 'uncapped state never mentions "Showing" at all');
 }
-console.log('renderRetagDivergenceAlbumRowInner() N2 (fresh review) — shows each non-agreeing item\'s class + identity + detail');
+t.section('renderRetagDivergenceAlbumRowInner() N2 (fresh review) — shows each non-agreeing item\'s class + identity + detail');
 {
   const html = __test__.renderRetagDivergenceAlbumRowInner({
     album_id: 6612, db_mb_albumid: 'd990b8af-0000-0000-0000-000000000000',
@@ -695,22 +661,22 @@ console.log('renderRetagDivergenceAlbumRowInner() N2 (fresh review) — shows ea
       },
     ],
   });
-  assertContains(html, 'Items', 'item count label rendered');
-  assertContains(html, '>3<', 'total item count rendered');
-  assertContains(html, 'diverges', 'first non-agreeing item class rendered');
-  assertContains(html, 'a6269e96-0000-0000-0000-000000000000', 'first item identity rendered');
-  assertContains(html, 'unreadable', 'second non-agreeing item class rendered');
-  assertContains(html, '(none)', 'a null file_mb_albumid renders as (none)');
-  assertContains(html, 'OSError: permission denied', 'unreadable item detail rendered');
-  assertExcludes(html, '/library/Slipknot/03.flac', 'agreeing item path never rendered — only non-agreeing items are itemized');
+  t.contains(html, 'Items', 'item count label rendered');
+  t.contains(html, '>3<', 'total item count rendered');
+  t.contains(html, 'diverges', 'first non-agreeing item class rendered');
+  t.contains(html, 'a6269e96-0000-0000-0000-000000000000', 'first item identity rendered');
+  t.contains(html, 'unreadable', 'second non-agreeing item class rendered');
+  t.contains(html, '(none)', 'a null file_mb_albumid renders as (none)');
+  t.contains(html, 'OSError: permission denied', 'unreadable item detail rendered');
+  t.excludes(html, '/library/Slipknot/03.flac', 'agreeing item path never rendered — only non-agreeing items are itemized');
   // #1260 revised the #1142 N2 stance on operator request: the file NAME
   // is now the row's readable subject, and the FULL path appears only as
   // a hover title attribute — never as flowing row text.
-  assertContains(html, 'title="/library/Slipknot/01.flac"', 'full non-agreeing item path is one hover away');
-  assertExcludes(html, '>diverges: /library/Slipknot/01.flac', 'full path never rendered as row text');
-  assertContains(html, '01.flac', 'the file name is the readable row subject');
+  t.contains(html, 'title="/library/Slipknot/01.flac"', 'full non-agreeing item path is one hover away');
+  t.excludes(html, '>diverges: /library/Slipknot/01.flac', 'full path never rendered as row text');
+  t.contains(html, '01.flac', 'the file name is the readable row subject');
 }
-console.log('renderRetagDivergenceAlbumRowInner() N2 (fresh review) — escapes XSS-looking item identity/detail');
+t.section('renderRetagDivergenceAlbumRowInner() N2 (fresh review) — escapes XSS-looking item identity/detail');
 {
   const html = __test__.renderRetagDivergenceAlbumRowInner({
     album_id: 1, db_mb_albumid: 'cafef00d',
@@ -721,11 +687,11 @@ console.log('renderRetagDivergenceAlbumRowInner() N2 (fresh review) — escapes 
       detail: '<img src=x onerror=alert(2)>',
     }],
   });
-  assertExcludes(html, '<script>alert(1)</script>', 'file_mb_albumid XSS is escaped');
-  assertExcludes(html, '<img src=x onerror=alert(2)>', 'detail XSS is escaped');
-  assertContains(html, '&lt;script&gt;', 'file_mb_albumid renders as escaped entities');
+  t.excludes(html, '<script>alert(1)</script>', 'file_mb_albumid XSS is escaped');
+  t.excludes(html, '<img src=x onerror=alert(2)>', 'detail XSS is escaped');
+  t.contains(html, '&lt;script&gt;', 'file_mb_albumid renders as escaped entities');
 }
-console.log('renderRetagDivergenceCensusCard() N1 — an incomplete report with nothing listed never reads green');
+t.section('renderRetagDivergenceCensusCard() N1 — an incomplete report with nothing listed never reads green');
 {
   // A world the daily writer itself cannot currently produce (incomplete
   // always implies something listed for an unbounded, cursor-less scan —
@@ -744,19 +710,19 @@ console.log('renderRetagDivergenceCensusCard() N1 — an incomplete report with 
       },
     },
   });
-  assertContains(html, 'metric-warn">incomplete', 'incomplete status rendered with warn class');
+  t.contains(html, 'metric-warn">incomplete', 'incomplete status rendered with warn class');
   // The Listed row's own tone must not be metric-good when status isn't
   // clean, regardless of the zero count.
   const listedRowMatch = html.match(/Listed \(non-agreeing\)<\/span><strong class="([^"]*)">0/);
-  assert(listedRowMatch !== null, 'Listed row with a 0 count is present');
-  assert(listedRowMatch[1] !== 'metric-good',
+  t.ok(listedRowMatch !== null, 'Listed row with a 0 count is present');
+  t.ok(listedRowMatch[1] !== 'metric-good',
     `Listed row must not be metric-good for status=incomplete, got ${listedRowMatch[1]}`);
   const scannedRowMatch = html.match(/Albums scanned<\/span><strong class="([^"]*)">0/);
-  assert(scannedRowMatch !== null, 'Albums scanned row is present');
-  assert(scannedRowMatch[1] === 'metric-muted',
+  t.ok(scannedRowMatch !== null, 'Albums scanned row is present');
+  t.ok(scannedRowMatch[1] === 'metric-muted',
     `Albums scanned must read muted (untrustworthy count) for status=incomplete, got ${JSON.stringify(scannedRowMatch[1])}`);
 }
-console.log('renderRetagDivergenceCensusCard() N1 — a clean report keeps Albums scanned unmuted');
+t.section('renderRetagDivergenceCensusCard() N1 — a clean report keeps Albums scanned unmuted');
 {
   const html = __test__.renderRetagDivergenceCensusCard({
     state: 'ok', error: null,
@@ -771,40 +737,40 @@ console.log('renderRetagDivergenceCensusCard() N1 — a clean report keeps Album
     },
   });
   const scannedRowMatch = html.match(/Albums scanned<\/span><strong class="([^"]*)">8,487/);
-  assert(scannedRowMatch !== null, 'Albums scanned row with the real count is present');
-  assert(scannedRowMatch[1] !== 'metric-muted',
+  t.ok(scannedRowMatch !== null, 'Albums scanned row with the real count is present');
+  t.ok(scannedRowMatch[1] !== 'metric-muted',
     `Albums scanned must not read muted for a clean, trustworthy status, got ${JSON.stringify(scannedRowMatch[1])}`);
   const listedRowMatch = html.match(/Listed \(non-agreeing\)<\/span><strong class="([^"]*)">0/);
-  assert(listedRowMatch[1] === 'metric-good', 'clean + zero listed still reads good');
+  t.ok(listedRowMatch[1] === 'metric-good', 'clean + zero listed still reads good');
 }
 
-console.log('renderMarkIncompleteButton() three-state contract (#1241)');
+t.section('renderMarkIncompleteButton() three-state contract (#1241)');
 {
   // Marked row → the clear action, sending marked=false.
   const clearHtml = __test__.renderMarkIncompleteButton(
     {request_id: 310, marked_incomplete: true});
-  assertContains(clearHtml, '>Clear incomplete mark</button>',
+  t.contains(clearHtml, '>Clear incomplete mark</button>',
     'marked row offers the clear action');
-  assertContains(clearHtml, 'window.toggleMarkIncomplete(310, false, this)',
+  t.contains(clearHtml, 'window.toggleMarkIncomplete(310, false, this)',
     'clear action sends marked=false for THIS request');
   // Unmarked row → the mark action, sending marked=true.
   const markHtml = __test__.renderMarkIncompleteButton(
     {request_id: 311, marked_incomplete: false});
-  assertContains(markHtml, '>Mark incomplete</button>',
+  t.contains(markHtml, '>Mark incomplete</button>',
     'unmarked row offers the mark action');
-  assertContains(markHtml, 'window.toggleMarkIncomplete(311, true, this)',
+  t.contains(markHtml, 'window.toggleMarkIncomplete(311, true, this)',
     'mark action sends marked=true for THIS request');
   // No resolvable request → no button at all.
-  assert(
+  t.ok(
     __test__.renderMarkIncompleteButton(
       {request_id: null, marked_incomplete: false}) === '',
     'a census album with no resolvable request renders no button');
-  assert(
+  t.ok(
     __test__.renderMarkIncompleteButton({}) === '',
     'a row with request_id absent renders no button');
 }
 
-console.log('renderLibraryCompletenessCard() wires the mark buttons per row (#1241)');
+t.section('renderLibraryCompletenessCard() wires the mark buttons per row (#1241)');
 {
   const html = __test__.renderLibraryCompletenessCard({
     state: 'ok',
@@ -837,23 +803,23 @@ console.log('renderLibraryCompletenessCard() wires the mark buttons per row (#12
       },
     },
   });
-  assertContains(html, 'window.toggleMarkIncomplete(310, false, this)',
+  t.contains(html, 'window.toggleMarkIncomplete(310, false, this)',
     'card wires the clear action to the marked album');
-  assertContains(html, 'window.toggleMarkIncomplete(311, true, this)',
+  t.contains(html, 'window.toggleMarkIncomplete(311, true, this)',
     'card wires the mark action to the unmarked album');
-  assertExcludes(html, 'window.toggleMarkIncomplete(null',
+  t.excludes(html, 'window.toggleMarkIncomplete(null',
     'card never wires an action to an unresolvable album');
 }
 
-console.log('renderLibraryCompletenessCard() offers Run census now in every branch');
+t.section('renderLibraryCompletenessCard() offers Run census now in every branch');
 {
   const missing = __test__.renderLibraryCompletenessCard({state: 'missing'});
-  assertContains(missing, 'window.refreshLibraryCensus(this)',
+  t.contains(missing, 'window.refreshLibraryCensus(this)',
     'missing branch offers the census run action');
   const unreadable = __test__.renderLibraryCompletenessCard({
     state: 'unreadable', error: 'boom',
   });
-  assertContains(unreadable, 'window.refreshLibraryCensus(this)',
+  t.contains(unreadable, 'window.refreshLibraryCensus(this)',
     'unreadable branch offers the repair action');
   const populated = __test__.renderLibraryCompletenessCard({
     state: 'ok', error: null, albums_shown: 0, albums_listed_total: 0,
@@ -868,47 +834,44 @@ console.log('renderLibraryCompletenessCard() offers Run census now in every bran
       },
     },
   });
-  assertContains(populated, 'window.refreshLibraryCensus(this)',
+  t.contains(populated, 'window.refreshLibraryCensus(this)',
     'populated branch offers the census run action');
-  assertContains(populated, 'metric-value-push',
+  t.contains(populated, 'metric-value-push',
     'Last run value clusters with the button in the value column');
 }
 
-console.log('main.js binds window.refreshLibraryCensus (the onclick dead-end guard, #1110 shape)');
+t.section('main.js binds window.refreshLibraryCensus (the onclick dead-end guard, #1110 shape)');
 {
-  const prevWindow = globalThis.window;
-  const prevDocument = globalThis.document;
-  /** @type {any} */
-  globalThis.window = { setTimeout: () => 0 };
   /** @type {any} */
   const fakeEl = { classList: { add() {}, remove() {} } };
-  /** @type {any} */
-  globalThis.document = {
-    querySelectorAll() {
-      return { forEach(/** @type {(t: any) => void} */ fn) { fn(fakeEl); } };
+  const globals = stubGlobals({
+    window: { setTimeout: () => 0 },
+    document: {
+      querySelectorAll() {
+        return { forEach(/** @type {(t: any) => void} */ fn) { fn(fakeEl); } };
+      },
+      querySelector() { return fakeEl; },
+      getElementById(/** @type {string} */ id) {
+        // main.js wires a listener on #q only when present; the stub has
+        // no addEventListener, so 'q' must be absent (same shape as the
+        // search-plan F12 stub).
+        if (id === 'q') return null;
+        return fakeEl;
+      },
     },
-    querySelector() { return fakeEl; },
-    getElementById(/** @type {string} */ id) {
-      // main.js wires a listener on #q only when present; the stub has
-      // no addEventListener, so 'q' must be absent (same shape as the
-      // search-plan F12 stub).
-      if (id === 'q') return null;
-      return fakeEl;
-    },
-  };
+  });
   try {
     await import('../web/js/main.js');
     /** @type {any} */
     const bound = globalThis.window.refreshLibraryCensus;
-    assert(typeof bound === 'function',
+    t.ok(typeof bound === 'function',
       'main.js wires window.refreshLibraryCensus');
     /** @type {any} */
     const mark = globalThis.window.toggleMarkIncomplete;
-    assert(typeof mark === 'function',
+    t.ok(typeof mark === 'function',
       'main.js wires window.toggleMarkIncomplete (#1241)');
   } finally {
-    globalThis.window = prevWindow;
-    globalThis.document = prevDocument;
+    globals.restore();
   }
 }
 
@@ -920,17 +883,17 @@ console.log('main.js binds window.refreshLibraryCensus (the onclick dead-end gua
 // pinned against the real production entry point.
 // ---------------------------------------------------------------------------
 
-console.log('renderPipelineDashboard() loading branch renders nav + Loading only');
+t.section('renderPipelineDashboard() loading branch renders nav + Loading only');
 {
   const el = { innerHTML: 'stale-content' };
   renderPipelineDashboard('<nav id="nav-sentinel"></nav>', null, el);
-  assertContains(el.innerHTML, 'nav-sentinel', 'loading branch keeps the nav strip');
-  assertContains(el.innerHTML, 'Loading...', 'loading branch shows the loading state');
-  assertExcludes(el.innerHTML, 'dashboard-grid', 'loading branch renders no card grid');
-  assertExcludes(el.innerHTML, 'stale-content', 'loading branch replaces prior content');
+  t.contains(el.innerHTML, 'nav-sentinel', 'loading branch keeps the nav strip');
+  t.contains(el.innerHTML, 'Loading...', 'loading branch shows the loading state');
+  t.excludes(el.innerHTML, 'dashboard-grid', 'loading branch renders no card grid');
+  t.excludes(el.innerHTML, 'stale-content', 'loading branch replaces prior content');
 }
 
-console.log('renderPipelineDashboard() composes all 14 cards, in order, each from its own payload key');
+t.section('renderPipelineDashboard() composes all 14 cards, in order, each from its own payload key');
 {
   state.pipelineMatchGraphOpen = false;
   state.pipelineHourlyMatchGraphOpen = false;
@@ -998,22 +961,22 @@ console.log('renderPipelineDashboard() composes all 14 cards, in order, each fro
   let ordered = true;
   for (const marker of markers) {
     const at = html.indexOf(marker);
-    assert(at !== -1, `card present: ${marker}`);
+    t.ok(at !== -1, `card present: ${marker}`);
     if (at <= prev) ordered = false;
     prev = at;
   }
-  assert(ordered, 'the 14 cards appear in the documented order');
-  assert(html.split('dashboard-card-title').length - 1 === titles.length,
+  t.ok(ordered, 'the 14 cards appear in the documented order');
+  t.ok(html.split('dashboard-card-title').length - 1 === titles.length,
     'exactly 14 card titles render — no duplicated card');
 
   const navAt = html.indexOf('nav-sentinel');
   const headerAt = html.indexOf('dashboard-header');
-  assert(navAt !== -1 && headerAt !== -1 && navAt < headerAt,
+  t.ok(navAt !== -1 && headerAt !== -1 && navAt < headerAt,
     'nav strip renders before the dashboard header');
   const headerSlice = html.slice(headerAt, html.indexOf(markers[0]));
   const generatedLabel = awstDateTime(data.generated_at);
-  assert(generatedLabel.length > 0, 'header timestamp formatter yields a non-empty needle');
-  assertContains(headerSlice, generatedLabel,
+  t.ok(generatedLabel.length > 0, 'header timestamp formatter yields a non-empty needle');
+  t.contains(headerSlice, generatedLabel,
     'generated_at renders in the dashboard header');
 
   /**
@@ -1024,8 +987,8 @@ console.log('renderPipelineDashboard() composes all 14 cards, in order, each fro
   function assertInCard(i, needle, msg) {
     const start = html.indexOf(markers[i]);
     const end = i + 1 < markers.length ? html.indexOf(markers[i + 1]) : html.length;
-    assert(start !== -1, `card slice resolvable for ${titles[i]}`);
-    assertContains(html.slice(start, end), needle, msg);
+    t.ok(start !== -1, `card slice resolvable for ${titles[i]}`);
+    t.contains(html.slice(start, end), needle, msg);
   }
   assertInCard(0, 'rs-status-sentinel', 'Redis card renders data.redis');
   assertInCard(1, '<strong>641</strong>', 'Coverage card renders data.coverage');
@@ -1048,5 +1011,4 @@ console.log('renderPipelineDashboard() composes all 14 cards, in order, each fro
   assertInCard(13, '<strong>731</strong>', 'Unfindable card renders data.unfindable');
 }
 
-console.log(`\n${passed} passed, ${failed} failed`);
-if (failed > 0) process.exit(1);
+t.done();

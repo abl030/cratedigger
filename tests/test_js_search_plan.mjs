@@ -36,87 +36,45 @@ import {
 } from '../web/js/search_plan.js';
 import { state } from '../web/js/state.js';
 
-let passed = 0;
-let failed = 0;
+import { stubGlobals, suite } from './js_harness.mjs';
 
-// Capture the real console.error at module-load time so FAIL messages
-// always reach stderr, even when individual tests stub console.error
-// (e.g. inside withFetchAndConfirmShim).
-const ORIGINAL_CONSOLE_ERROR = console.error.bind(console);
-
-function assert(condition, msg) {
-  if (condition) {
-    passed++;
-  } else {
-    failed++;
-    ORIGINAL_CONSOLE_ERROR(`  FAIL: ${msg}`);
-  }
-}
-
-function assertEqual(actual, expected, msg) {
-  if (actual === expected) {
-    passed++;
-  } else {
-    failed++;
-    ORIGINAL_CONSOLE_ERROR(`  FAIL: ${msg} — expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
-  }
-}
-
-function assertThrows(fn, errorClass, msg) {
-  let caught = null;
-  try {
-    fn();
-  } catch (err) {
-    caught = err;
-  }
-  if (caught === null) {
-    failed++;
-    ORIGINAL_CONSOLE_ERROR(`  FAIL: ${msg} — expected throw, got no throw`);
-  } else if (errorClass && !(caught instanceof errorClass)) {
-    failed++;
-    ORIGINAL_CONSOLE_ERROR(
-      `  FAIL: ${msg} — expected ${errorClass.name}, got ${caught.constructor.name}: ${caught.message}`,
-    );
-  } else {
-    passed++;
-  }
-}
+const t = suite(import.meta.url);
 
 // --- buildHistoryUrl -------------------------------------------------
-console.log('buildHistoryUrl()');
+t.section('buildHistoryUrl()');
 
-assertEqual(
+t.equal(
   buildHistoryUrl({ requestId: 2566, limit: 50, beforeId: null }),
   '/api/pipeline/2566/search-plan/history?limit=50',
   'first page (no before_id) emits limit only',
 );
 
-assertEqual(
+t.equal(
   buildHistoryUrl({ requestId: 2566, limit: 50, beforeId: 12345 }),
   '/api/pipeline/2566/search-plan/history?limit=50&before_id=12345',
   'next page emits both limit and before_id',
 );
 
-assertThrows(
+t.throws(
   () => buildHistoryUrl({ requestId: 0, limit: 50, beforeId: null }),
-  TypeError,
   'requestId=0 throws TypeError',
+  TypeError,
 );
 
-assertThrows(
+t.throws(
   () => buildHistoryUrl(/** @type {any} */ ({ requestId: 'abc', limit: 50, beforeId: null })),
-  TypeError,
   'non-int requestId throws TypeError',
+  TypeError,
 );
 
 // Defaults — limit defaults to HISTORY_PAGE_DEFAULT_LIMIT when nullish.
-assertEqual(
+t.equal(
   buildHistoryUrl({ requestId: 1, beforeId: null }),
   `/api/pipeline/1/search-plan/history?limit=${HISTORY_PAGE_DEFAULT_LIMIT}`,
   'omitted limit defaults to HISTORY_PAGE_DEFAULT_LIMIT',
 );
 
-assertEqual(
+t.equal(
   buildHistoryUrl({ requestId: 1, limit: undefined, beforeId: null }),
   `/api/pipeline/1/search-plan/history?limit=${HISTORY_PAGE_DEFAULT_LIMIT}`,
   'undefined limit defaults to HISTORY_PAGE_DEFAULT_LIMIT',
@@ -125,57 +83,57 @@ assertEqual(
 // beforeId is omitted only when null/undefined; 0 is NOT a valid cursor
 // (id sequences start at 1) but we don't filter — the caller is
 // responsible for not passing rubbish.
-assertEqual(
+t.equal(
   buildHistoryUrl({ requestId: 5, limit: 10 }),
   '/api/pipeline/5/search-plan/history?limit=10',
   'omitted beforeId is left out of query string',
 );
 
-assertThrows(
+t.throws(
   () => buildHistoryUrl({ requestId: -1, limit: 50, beforeId: null }),
-  TypeError,
   'negative requestId throws TypeError',
+  TypeError,
 );
 
-assertThrows(
+t.throws(
   () => buildHistoryUrl({ requestId: 1.5, limit: 50, beforeId: null }),
-  TypeError,
   'non-integer requestId throws TypeError',
+  TypeError,
 );
 
 // --- captureOriginContext / restoreOriginContext round-trip ----------
-console.log('captureOriginContext() / restoreOriginContext()');
+t.section('captureOriginContext() / restoreOriginContext()');
 
 {
   const captured = captureOriginContext({ tab: 'browse', scrollY: 420, subView: null });
-  assertEqual(captured.originTab, 'browse', 'capture stashes tab');
-  assertEqual(captured.originScrollY, 420, 'capture stashes scrollY');
-  assertEqual(captured.originSubView, null, 'capture stashes null subView');
+  t.equal(captured.originTab, 'browse', 'capture stashes tab');
+  t.equal(captured.originScrollY, 420, 'capture stashes scrollY');
+  t.equal(captured.originSubView, null, 'capture stashes null subView');
 
   const restored = restoreOriginContext(captured);
-  assertEqual(restored.tab, 'browse', 'restore returns tab');
-  assertEqual(restored.scrollY, 420, 'restore returns scrollY');
-  assertEqual(restored.subView, null, 'restore returns null subView');
+  t.equal(restored.tab, 'browse', 'restore returns tab');
+  t.equal(restored.scrollY, 420, 'restore returns scrollY');
+  t.equal(restored.subView, null, 'restore returns null subView');
 }
 
 {
   const captured = captureOriginContext({ tab: 'pipeline', scrollY: 0, subView: 'long-tail' });
   const restored = restoreOriginContext(captured);
-  assertEqual(restored.tab, 'pipeline', 'pipeline tab round-trips');
-  assertEqual(restored.scrollY, 0, 'scrollY=0 round-trips');
-  assertEqual(restored.subView, 'long-tail', 'pipeline long-tail subView round-trips');
+  t.equal(restored.tab, 'pipeline', 'pipeline tab round-trips');
+  t.equal(restored.scrollY, 0, 'scrollY=0 round-trips');
+  t.equal(restored.subView, 'long-tail', 'pipeline long-tail subView round-trips');
 }
 
 {
   const captured = captureOriginContext({ tab: 'recents', scrollY: 1234, subView: 'acquisition' });
   const restored = restoreOriginContext(captured);
-  assertEqual(restored.tab, 'recents', 'recents tab round-trips');
-  assertEqual(restored.scrollY, 1234, 'large scrollY round-trips');
-  assertEqual(restored.subView, 'acquisition', 'recents acquisition subView round-trips');
+  t.equal(restored.tab, 'recents', 'recents tab round-trips');
+  t.equal(restored.scrollY, 1234, 'large scrollY round-trips');
+  t.equal(restored.subView, 'acquisition', 'recents acquisition subView round-trips');
 }
 
 // --- invalidateSearchPlanCache ---------------------------------------
-console.log('invalidateSearchPlanCache()');
+t.section('invalidateSearchPlanCache()');
 
 {
   /** @type {Map<number, any>} */
@@ -185,11 +143,11 @@ console.log('invalidateSearchPlanCache()');
   cache.set(3, { inspection: 'c', historyHead: [], fetchedAt: 3000 });
 
   const returned = invalidateSearchPlanCache(cache, 2);
-  assert(returned === cache, 'returns the same Map for chainability');
-  assertEqual(cache.size, 2, 'invalidated cache has 2 entries left');
-  assert(!cache.has(2), 'requestId 2 removed');
-  assert(cache.has(1), 'requestId 1 retained');
-  assert(cache.has(3), 'requestId 3 retained');
+  t.ok(returned === cache, 'returns the same Map for chainability');
+  t.equal(cache.size, 2, 'invalidated cache has 2 entries left');
+  t.ok(!cache.has(2), 'requestId 2 removed');
+  t.ok(cache.has(1), 'requestId 1 retained');
+  t.ok(cache.has(3), 'requestId 3 retained');
 }
 
 {
@@ -199,13 +157,13 @@ console.log('invalidateSearchPlanCache()');
 
   // Removing an absent key is a no-op (no throw, no mutation).
   const returned = invalidateSearchPlanCache(cache, 99);
-  assert(returned === cache, 'returns the same Map even when key absent');
-  assertEqual(cache.size, 1, 'no-op: cache size unchanged');
-  assert(cache.has(7), 'absent-key invalidation does not touch other entries');
+  t.ok(returned === cache, 'returns the same Map even when key absent');
+  t.equal(cache.size, 1, 'no-op: cache size unchanged');
+  t.ok(cache.has(7), 'absent-key invalidation does not touch other entries');
 }
 
 // --- getCacheEntry / setCacheEntry / CACHE_TTL_MS --------------------
-console.log('getCacheEntry() + setCacheEntry()');
+t.section('getCacheEntry() + setCacheEntry()');
 
 {
   // Stale entry treated as a miss and removed from the cache.
@@ -215,8 +173,8 @@ console.log('getCacheEntry() + setCacheEntry()');
   cache.set(42, { inspection: { active_plan: null }, historyHead: [], fetchedAt: staleAt });
 
   const result = getCacheEntry(cache, 42, Date.now());
-  assert(result === undefined, 'stale entry returns undefined');
-  assert(!cache.has(42), 'stale entry is deleted from cache');
+  t.ok(result === undefined, 'stale entry returns undefined');
+  t.ok(!cache.has(42), 'stale entry is deleted from cache');
 }
 
 {
@@ -228,8 +186,8 @@ console.log('getCacheEntry() + setCacheEntry()');
   cache.set(7, entry);
 
   const result = getCacheEntry(cache, 7, freshAt + 100);
-  assert(result === entry, 'fresh entry is returned');
-  assert(cache.has(7), 'fresh entry is not deleted');
+  t.ok(result === entry, 'fresh entry is returned');
+  t.ok(cache.has(7), 'fresh entry is not deleted');
 }
 
 {
@@ -237,7 +195,7 @@ console.log('getCacheEntry() + setCacheEntry()');
   /** @type {Map<number, any>} */
   const cache = new Map();
   const result = getCacheEntry(cache, 99);
-  assert(result === undefined, 'missing key returns undefined');
+  t.ok(result === undefined, 'missing key returns undefined');
 }
 
 {
@@ -249,15 +207,15 @@ console.log('getCacheEntry() + setCacheEntry()');
   for (let i = 0; i < 50; i++) {
     cache.set(i, { inspection: {}, historyHead: [], fetchedAt: now });
   }
-  assertEqual(cache.size, 50, 'cache at capacity before 51st insert');
+  t.equal(cache.size, 50, 'cache at capacity before 51st insert');
 
   // Insert a 51st entry — oldest (key=0) should be evicted.
   setCacheEntry(cache, 50, { inspection: {}, historyHead: [], fetchedAt: now });
-  assertEqual(cache.size, 50, 'cache still at 50 after LRU eviction');
-  assert(!cache.has(0), 'oldest entry (key=0) was evicted');
-  assert(cache.has(50), 'new entry (key=50) is present');
+  t.equal(cache.size, 50, 'cache still at 50 after LRU eviction');
+  t.ok(!cache.has(0), 'oldest entry (key=0) was evicted');
+  t.ok(cache.has(50), 'new entry (key=50) is present');
   // Second-oldest is still there.
-  assert(cache.has(1), 'second-oldest entry (key=1) retained');
+  t.ok(cache.has(1), 'second-oldest entry (key=1) retained');
 }
 
 {
@@ -275,45 +233,45 @@ console.log('getCacheEntry() + setCacheEntry()');
   }
   // Now add entry 51 — should evict key=2.
   setCacheEntry(cache, 51, { inspection: {}, historyHead: [], fetchedAt: now });
-  assert(!cache.has(2), 'key=2 (oldest after re-insert of key=1) was evicted');
-  assert(cache.has(1), 'key=1 (re-inserted, now fresher) survived');
+  t.ok(!cache.has(2), 'key=2 (oldest after re-insert of key=1) was evicted');
+  t.ok(cache.has(1), 'key=1 (re-inserted, now fresher) survived');
 }
 
 // Module-level cache export is a Map and starts empty (sanity check —
 // tests don't share state with the page).
-console.log('searchPlanCache export');
-assert(searchPlanCache instanceof Map, 'searchPlanCache is a Map');
+t.section('searchPlanCache export');
+t.ok(searchPlanCache instanceof Map, 'searchPlanCache is a Map');
 
 // --- renderSearchPlanButton ------------------------------------------
-console.log('renderSearchPlanButton()');
+t.section('renderSearchPlanButton()');
 
 {
   // Happy path — pipelineId present yields a clickable button wired to
   // window.toggleSearchPlanSummary with stopPropagation.
   const html = renderSearchPlanButton({ pipelineId: 42 });
-  assert(html.includes('class="sp-button"'), 'button uses sp-button class');
-  assert(html.includes('window.toggleSearchPlanSummary(42'),
+  t.ok(html.includes('class="sp-button"'), 'button uses sp-button class');
+  t.ok(html.includes('window.toggleSearchPlanSummary(42'),
     'button onclick wires window.toggleSearchPlanSummary with the id');
-  assert(html.includes('event.stopPropagation()'),
+  t.ok(html.includes('event.stopPropagation()'),
     'button onclick stops parent row propagation');
-  assert(html.includes('aria-label='),
+  t.ok(html.includes('aria-label='),
     'button carries an aria-label for accessibility');
 }
 
 {
   // Browse-row conditional — null pipelineId yields the empty string.
-  assertEqual(renderSearchPlanButton({ pipelineId: null }), '',
+  t.equal(renderSearchPlanButton({ pipelineId: null }), '',
     'pipelineId=null returns empty string (Browse-row gating)');
-  assertEqual(renderSearchPlanButton({ pipelineId: 0 }), '',
+  t.equal(renderSearchPlanButton({ pipelineId: 0 }), '',
     'pipelineId=0 returns empty string');
-  assertEqual(renderSearchPlanButton(/** @type {any} */ ({ pipelineId: 'abc' })), '',
+  t.equal(renderSearchPlanButton(/** @type {any} */ ({ pipelineId: 'abc' })), '',
     'non-int pipelineId returns empty string');
-  assertEqual(renderSearchPlanButton(/** @type {any} */ ({})), '',
+  t.equal(renderSearchPlanButton(/** @type {any} */ ({})), '',
     'missing pipelineId returns empty string');
 }
 
 // --- renderSummaryPanel ----------------------------------------------
-console.log('renderSummaryPanel()');
+t.section('renderSummaryPanel()');
 
 /**
  * Build a minimal "happy path" inspection payload with N slots and a
@@ -378,18 +336,18 @@ function makeInspection(overrides = {}) {
   // AE2 — happy path: cursor 2/N, cycle 1, plan status, NO drift.
   const inspection = makeInspection({ next_ordinal: 2, cycle_count: 1 });
   const html = renderSummaryPanel({ inspection, history: { rows: [] } });
-  assert(html.includes('cursor'), 'meta surfaces cursor label');
-  assert(/<strong>2\/4<\/strong>/.test(html),
+  t.ok(html.includes('cursor'), 'meta surfaces cursor label');
+  t.ok(/<strong>2\/4<\/strong>/.test(html),
     'cursor renders as 2/4 inside a single <strong>');
-  assert(/cycle\s*<strong>1<\/strong>/.test(html),
+  t.ok(/cycle\s*<strong>1<\/strong>/.test(html),
     'cycle count rendered with the slot count');
-  assert(html.includes('sp-status'),
+  t.ok(html.includes('sp-status'),
     'plan status badge is rendered');
-  assert(!html.includes('sp-drift'),
+  t.ok(!html.includes('sp-drift'),
     'no drift indicator when generator_id_mismatch=false');
-  assert(html.includes('Test Artist'),
+  t.ok(html.includes('Test Artist'),
     'header carries the artist name');
-  assert(html.includes('Test Album'),
+  t.ok(html.includes('Test Album'),
     'header carries the album title');
 }
 
@@ -400,11 +358,11 @@ function makeInspection(overrides = {}) {
     plan: { generator_id: '12' },
   });
   const html = renderSummaryPanel({ inspection, history: { rows: [] } });
-  assert(html.includes('sp-drift'),
+  t.ok(html.includes('sp-drift'),
     'drift indicator class present when generator_id_mismatch=true');
-  assert(html.includes('plan=12'),
+  t.ok(html.includes('plan=12'),
     'drift indicator surfaces the request plan generator id');
-  assert(html.includes('current=13'),
+  t.ok(html.includes('current=13'),
     'drift indicator surfaces the running SEARCH_PLAN_GENERATOR_ID');
 }
 
@@ -419,18 +377,18 @@ function makeInspection(overrides = {}) {
     next_before_id: null,
   };
   const html = renderSummaryPanel({ inspection: makeInspection(), history });
-  assert(html.includes('q1') && html.includes('q2') && html.includes('q3'),
+  t.ok(html.includes('q1') && html.includes('q2') && html.includes('q3'),
     'all three queries appear in the rendered HTML');
-  assert(html.includes('no_match') && html.includes('partial') && html.includes('success'),
+  t.ok(html.includes('no_match') && html.includes('partial') && html.includes('success'),
     'all three outcomes appear in the rendered HTML');
   // awstDateTime renders as "YYYY-MM-DD HH:MM" (UTC + 8 = AWST). The first
   // row's UTC 01:00 → 09:00 AWST; assert at least one expected stamp.
-  assert(html.includes('2026-05-09 09:00'),
+  t.ok(html.includes('2026-05-09 09:00'),
     'first attempt relative-time stamp rendered via awstDateTime');
   // Three attempt rows, three blocks.
   const attemptCount = (html.match(/class="sp-attempt /g) || []).length
     + (html.match(/class="sp-attempt sp-/g) || []).length;
-  assert(attemptCount >= 3,
+  t.ok(attemptCount >= 3,
     'three attempt entries rendered (any class permutation)');
 }
 
@@ -443,14 +401,14 @@ function makeInspection(overrides = {}) {
     next_before_id: null,
   };
   const html = renderSummaryPanel({ inspection: makeInspection(), history });
-  assert(html.includes('lone'), 'sole attempt query appears');
-  assert(!html.includes('No attempts yet'),
+  t.ok(html.includes('lone'), 'sole attempt query appears');
+  t.ok(!html.includes('No attempts yet'),
     'non-empty history does not show empty-state copy');
   // No malformed HTML — the section markup remains balanced.
   const openSection = (html.match(/<div class="sp-summary-section">/g) || []).length;
   const openInner = (html.match(/<div class="sp-summary-inner">/g) || []).length;
-  assert(openInner === 1, 'one .sp-summary-inner wrapper');
-  assert(openSection >= 1, 'at least one .sp-summary-section');
+  t.ok(openInner === 1, 'one .sp-summary-inner wrapper');
+  t.ok(openSection >= 1, 'at least one .sp-summary-section');
 }
 
 {
@@ -467,13 +425,13 @@ function makeInspection(overrides = {}) {
     },
   });
   const html = renderSummaryPanel({ inspection, history: { rows: [] } });
-  assert(html.includes('no_runnable_query'),
+  t.ok(html.includes('no_runnable_query'),
     'failure class surfaced');
-  assert(html.includes('metadata incomplete'),
+  t.ok(html.includes('metadata incomplete'),
     'sanitised error surfaced');
-  assert(html.includes('sp-failure'),
+  t.ok(html.includes('sp-failure'),
     'failure container wraps the messaging');
-  assert(!/cursor\s*<strong>/.test(html),
+  t.ok(!/cursor\s*<strong>/.test(html),
     'no cursor metadata when active_plan is null');
 }
 
@@ -487,9 +445,9 @@ function makeInspection(overrides = {}) {
     next_before_id: null,
   };
   const html = renderSummaryPanel({ inspection: makeInspection(), history });
-  assert(!html.includes('<script>alert(1)</script>'),
+  t.ok(!html.includes('<script>alert(1)</script>'),
     'raw <script> substring not present');
-  assert(html.includes('&lt;script&gt;'),
+  t.ok(html.includes('&lt;script&gt;'),
     'angle brackets entity-escaped in rendered HTML');
 }
 
@@ -498,7 +456,7 @@ function makeInspection(overrides = {}) {
 // U4 scenarios. All DOM-free string-match assertions on the HTML
 // returned by `renderDetailPage`, plus pure assertions on the back-
 // button restore logic via tiny window/document shims (no jsdom).
-console.log('renderDetailPage()');
+t.section('renderDetailPage()');
 
 /**
  * Build a slot-stats bucket for the inspection.stats.current.slots block.
@@ -621,14 +579,14 @@ function makeHistoryRows() {
     nextBeforeId: 12300,
   });
   // Plan slot list rendered, with the cursor (next_ordinal=2) highlighted.
-  assert(html.includes('sp-slot-list'),
+  t.ok(html.includes('sp-slot-list'),
     'AE5: slot list rendered');
-  assert(html.includes('sp-slot-current'),
+  t.ok(html.includes('sp-slot-current'),
     'AE5: cursor slot has sp-slot-current marker');
   // Plan-aware history table with telemetry columns visible.
-  assert(html.includes('sp-history-table'),
+  t.ok(html.includes('sp-history-table'),
     'AE5: plan-aware history table present');
-  assert(html.includes('Outcome') && html.includes('Strategy')
+  t.ok(html.includes('Outcome') && html.includes('Strategy')
     && html.includes('Elapsed') && html.includes('Final state')
     && html.includes('Cursor') && html.includes('Stale')
     && html.includes('Consumed') && html.includes('Cycle')
@@ -636,46 +594,46 @@ function makeHistoryRows() {
     && html.includes('Forensics'),
     'AE5: history columns include outcome/strategy/elapsed/final_state/cursor/stale/consumed/cycle/peers/fanout/forensics');
   // Specific row data: ordinal 2, strategy track_2, attempt_consumed=yes.
-  assert(html.includes('q-current'),
+  t.ok(html.includes('q-current'),
     'AE5: current attempt query rendered');
-  assert(html.includes('q-stale'),
+  t.ok(html.includes('q-stale'),
     'AE5: stale attempt query rendered');
-  assert(html.includes('plan_superseded'),
+  t.ok(html.includes('plan_superseded'),
     'AE5: stale_reason rendered for the second row');
-  assert(html.includes('sp-history-row-stale'),
+  t.ok(html.includes('sp-history-row-stale'),
     'AE5: stale row carries the .sp-history-row-stale CSS class');
-  assert(html.includes('sp-candidate-forensics'),
+  t.ok(html.includes('sp-candidate-forensics'),
     'AE5: candidate forensics rendered as <details>');
-  assert(html.includes('peer-A'),
+  t.ok(html.includes('peer-A'),
     'AE5: candidate JSONB serialised inside the forensics block');
   // Per-slot stats.
-  assert(html.includes('sp-stats-table'),
+  t.ok(html.includes('sp-stats-table'),
     'AE5: per-slot stats table rendered');
-  assert(html.includes('track_0') && html.includes('track_1'),
+  t.ok(html.includes('track_0') && html.includes('track_1'),
     'AE5: per-slot stats include both strategies');
   // Plan-health block.
-  assert(html.includes('sp-health'),
+  t.ok(html.includes('sp-health'),
     'AE5: plan-health block rendered');
-  assert(html.includes('no_runnable_query'),
+  t.ok(html.includes('no_runnable_query'),
     'AE5: failure class surfaced in plan-health');
-  assert(html.includes('metadata incomplete'),
+  t.ok(html.includes('metadata incomplete'),
     'AE5: failure error_message surfaced');
-  assert(html.includes('omitted_candidates'),
+  t.ok(html.includes('omitted_candidates'),
     'AE5: provenance: omitted_candidates rendered');
-  assert(html.includes('deduped_losers'),
+  t.ok(html.includes('deduped_losers'),
     'AE5: provenance: deduped_losers rendered');
-  assert(html.includes('dropped_low_entropy_tokens'),
+  t.ok(html.includes('dropped_low_entropy_tokens'),
     'AE5: provenance: dropped_low_entropy_tokens rendered');
   // Pre-rollout legacy section, collapsed.
-  assert(html.includes('sp-history-legacy-section'),
+  t.ok(html.includes('sp-history-legacy-section'),
     'AE5: pre-rollout legacy section rendered');
-  assert(html.includes('Pre-rollout history'),
+  t.ok(html.includes('Pre-rollout history'),
     'AE5: pre-rollout summary text present');
-  assert(html.includes('<details class="sp-history-legacy">'),
+  t.ok(html.includes('<details class="sp-history-legacy">'),
     'AE5: pre-rollout block is collapsed via <details>');
-  assert(html.includes('class="sp-history-row legacy"'),
+  t.ok(html.includes('class="sp-history-row legacy"'),
     'AE5: legacy rows tagged distinctly');
-  assert(html.includes('old_q'),
+  t.ok(html.includes('old_q'),
     'AE5: legacy row content rendered inside the collapsed block');
 }
 
@@ -687,9 +645,9 @@ function makeHistoryRows() {
     history: makeHistoryRows(),
     nextBeforeId: null,
   });
-  assert(html.includes('cycle-level'),
+  t.ok(html.includes('cycle-level'),
     'AE6: cache attribution label literally reads "cycle-level"');
-  assert(html.includes('Cache attribution'),
+  t.ok(html.includes('Cache attribution'),
     'AE6: cache attribution label introduces the level');
 }
 
@@ -712,15 +670,15 @@ function makeHistoryRows() {
     nextBeforeId: null,
   });
   // Plan-aware rows live inside .sp-history-table without .legacy.
-  assert(/<tr class="sp-history-row[ "]/.test(html),
+  t.ok(/<tr class="sp-history-row[ "]/.test(html),
     'AE7: plan-aware rows use .sp-history-row without .legacy');
   // Legacy rows live in .sp-history-legacy-section as .sp-history-row.legacy.
-  assert(html.includes('class="sp-history-row legacy"'),
+  t.ok(html.includes('class="sp-history-row legacy"'),
     'AE7: legacy rows distinguished via .legacy CSS suffix');
-  assert(html.includes('sp-history-legacy-section'),
+  t.ok(html.includes('sp-history-legacy-section'),
     'AE7: legacy rows live in their own section');
   // The two rendered queries must both appear, in the expected sections.
-  assert(html.includes('q-current') && html.includes('legacy-q1'),
+  t.ok(html.includes('q-current') && html.includes('legacy-q1'),
     'AE7: both plan-aware and legacy queries rendered');
 }
 
@@ -728,18 +686,18 @@ function makeHistoryRows() {
   // AE10: a Refresh button is rendered and bound to the window handler.
   // The function-spec assertion (export exists, button HTML present) is
   // sufficient — fetch wiring is exercised by impure tests (not unit-runable here).
-  assert(typeof renderSearchPlanDetail === 'function',
+  t.ok(typeof renderSearchPlanDetail === 'function',
     'AE10: renderSearchPlanDetail is exported as a function');
-  assert(typeof searchPlanRefreshDetail === 'function',
+  t.ok(typeof searchPlanRefreshDetail === 'function',
     'AE10: searchPlanRefreshDetail is exported (Refresh handler)');
   const html = renderDetailPage({
     inspection: makeDetailInspection(),
     history: makeHistoryRows(),
     nextBeforeId: null,
   });
-  assert(html.includes('window.searchPlanRefreshDetail'),
+  t.ok(html.includes('window.searchPlanRefreshDetail'),
     'AE10: Refresh button wires to window.searchPlanRefreshDetail');
-  assert(/>\s*Refresh\s*</.test(html),
+  t.ok(/>\s*Refresh\s*</.test(html),
     'AE10: Refresh button label rendered');
 }
 
@@ -750,9 +708,9 @@ function makeHistoryRows() {
     history: makeHistoryRows(),
     nextBeforeId: 12300,
   });
-  assert(html.includes('sp-load-older-button'),
+  t.ok(html.includes('sp-load-older-button'),
     'pagination: Load older button rendered when nextBeforeId is non-null');
-  assert(html.includes('window.searchPlanLoadOlder(2566, 12300)'),
+  t.ok(html.includes('window.searchPlanLoadOlder(2566, 12300)'),
     'pagination: button onclick wires the cursor seed');
 }
 
@@ -763,7 +721,7 @@ function makeHistoryRows() {
     history: makeHistoryRows(),
     nextBeforeId: null,
   });
-  assert(!html.includes('sp-load-older-button'),
+  t.ok(!html.includes('sp-load-older-button'),
     'pagination: no Load older button when nextBeforeId is null');
 }
 
@@ -782,9 +740,9 @@ function makeHistoryRows() {
     history: [],
     nextBeforeId: null,
   });
-  assert(html.includes('No plan-aware attempts yet'),
+  t.ok(html.includes('No plan-aware attempts yet'),
     'edge: empty plan-aware history shows an empty-state message');
-  assert(html.includes('legacy-only'),
+  t.ok(html.includes('legacy-only'),
     'edge: legacy section still renders the legacy row');
 }
 
@@ -798,14 +756,14 @@ function makeHistoryRows() {
     history: [],
     nextBeforeId: null,
   });
-  assert(html.includes('No plan-aware attempts yet'),
+  t.ok(html.includes('No plan-aware attempts yet'),
     'both-empty: plan-aware empty-state shown');
-  assert(html.includes('No legacy attempts'),
+  t.ok(html.includes('No legacy attempts'),
     'both-empty: legacy empty-state shown');
 }
 
 // --- closeSearchPlanDetail back-button restore -----------------------
-console.log('closeSearchPlanDetail() / openSearchPlanDetail()');
+t.section('closeSearchPlanDetail() / openSearchPlanDetail()');
 
 /**
  * Tiny shim — capture window-side effects without a real DOM.
@@ -814,8 +772,6 @@ function withFakeWindow(impl) {
   const calls = { showTab: [], scrollTo: [], rafCount: 0, scheduledScrolls: [] };
   const prevState = state.searchPlanDetailContext;
   const prevPipelineView = state.pipelineView;
-  const prevWindow = globalThis.window;
-  const prevDocument = globalThis.document;
   /** @type {any} */
   const fakeWindow = {
     scrollY: 0,
@@ -831,21 +787,20 @@ function withFakeWindow(impl) {
     /** @param {string} name */
     showTab(name) { calls.showTab.push(name); },
   };
-  globalThis.window = fakeWindow;
-  // The module reads `document.querySelector` inside `snapshotActiveTab`,
-  // which we don't invoke here for the close-side path. Stub minimally.
-  globalThis.document = /** @type {any} */ ({
-    querySelector() { return null; },
+  const globals = stubGlobals({
+    window: fakeWindow,
+    // The module reads `document.querySelector` inside `snapshotActiveTab`,
+    // which we don't invoke here for the close-side path. Stub minimally.
+    document: /** @type {any} */ ({
+      querySelector() { return null; },
+    }),
   });
   try {
     impl(fakeWindow, calls);
   } finally {
     state.searchPlanDetailContext = prevState;
     state.pipelineView = prevPipelineView;
-    if (prevWindow === undefined) delete globalThis.window;
-    else globalThis.window = prevWindow;
-    if (prevDocument === undefined) delete globalThis.document;
-    else globalThis.document = prevDocument;
+    globals.restore();
   }
 }
 
@@ -860,11 +815,11 @@ function withFakeWindow(impl) {
       originSubView: null,
     };
     closeSearchPlanDetail();
-    assert(calls.showTab.length === 1 && calls.showTab[0] === 'browse',
+    t.ok(calls.showTab.length === 1 && calls.showTab[0] === 'browse',
       'AE3: showTab("browse") called once');
-    assert(calls.scrollTo.length === 1 && calls.scrollTo[0] === 420,
+    t.ok(calls.scrollTo.length === 1 && calls.scrollTo[0] === 420,
       'AE3: window.scrollTo(0, 420) scheduled via requestAnimationFrame');
-    assert(state.searchPlanDetailContext === null,
+    t.ok(state.searchPlanDetailContext === null,
       'AE3: stash cleared after close');
   });
 }
@@ -880,11 +835,11 @@ function withFakeWindow(impl) {
     };
     state.pipelineView = 'search-plan-detail';
     closeSearchPlanDetail();
-    assertEqual(state.pipelineView, 'long-tail',
+    t.equal(state.pipelineView, 'long-tail',
       'pipeline-origin: pipelineView restored to long-tail');
-    assert(calls.showTab.length === 1 && calls.showTab[0] === 'pipeline',
+    t.ok(calls.showTab.length === 1 && calls.showTab[0] === 'pipeline',
       'pipeline-origin: showTab("pipeline") called');
-    assert(calls.scrollTo.length === 1 && calls.scrollTo[0] === 64,
+    t.ok(calls.scrollTo.length === 1 && calls.scrollTo[0] === 64,
       'pipeline-origin: scrollTo scheduled to origin scrollY');
   });
 }
@@ -900,7 +855,7 @@ function withFakeWindow(impl) {
     };
     state.pipelineView = 'search-plan-detail';
     closeSearchPlanDetail();
-    assertEqual(state.pipelineView, 'dashboard',
+    t.equal(state.pipelineView, 'dashboard',
       'pipeline-origin dashboard subView restored');
   });
 }
@@ -916,9 +871,9 @@ function withFakeWindow(impl) {
     };
     state.recentsSub = 'history';
     closeSearchPlanDetail();
-    assertEqual(state.recentsSub, 'acquisition',
+    t.equal(state.recentsSub, 'acquisition',
       'recents-origin: recentsSub restored to acquisition');
-    assert(calls.showTab[0] === 'recents',
+    t.ok(calls.showTab[0] === 'recents',
       'recents-origin: showTab("recents") called');
   });
 }
@@ -934,9 +889,9 @@ function withFakeWindow(impl) {
     };
     state.recentsSub = 'history';
     closeSearchPlanDetail();
-    assertEqual(state.recentsSub, 'imports',
+    t.equal(state.recentsSub, 'imports',
       'recents-origin: Imports subview restored');
-    assert(calls.showTab[0] === 'recents',
+    t.ok(calls.showTab[0] === 'recents',
       'imports-origin: showTab("recents") called');
   });
 }
@@ -952,10 +907,10 @@ function withFakeWindow(impl) {
     } catch (err) {
       threw = true;
     }
-    assert(!threw, 'no-origin: close does not throw');
-    assertEqual(state.pipelineView, 'dashboard',
+    t.ok(!threw, 'no-origin: close does not throw');
+    t.equal(state.pipelineView, 'dashboard',
       'no-origin: fallback to pipelineView=dashboard');
-    assert(calls.showTab.length === 1 && calls.showTab[0] === 'pipeline',
+    t.ok(calls.showTab.length === 1 && calls.showTab[0] === 'pipeline',
       'no-origin: fallback shows the pipeline tab');
   });
 }
@@ -966,73 +921,73 @@ function withFakeWindow(impl) {
 // scenario passes a synthetic `{strategy?, ordinal?}` object (mirroring
 // what the form's Confirm handler reads) and asserts the typed return
 // or that a typed error fires.
-console.log('parseAdvanceTarget()');
+t.section('parseAdvanceTarget()');
 
-assertEqual(
+t.equal(
   JSON.stringify(parseAdvanceTarget({ strategy: 'track' })),
   JSON.stringify({ toStrategy: 'track' }),
   'AE9: strategy-only input → {toStrategy}',
 );
 
-assertEqual(
+t.equal(
   JSON.stringify(parseAdvanceTarget({ ordinal: '7' })),
   JSON.stringify({ toOrdinal: 7 }),
   'AE9: ordinal-only string input → {toOrdinal}',
 );
 
-assertEqual(
+t.equal(
   JSON.stringify(parseAdvanceTarget({ ordinal: 7 })),
   JSON.stringify({ toOrdinal: 7 }),
   'AE9: ordinal-only numeric input → {toOrdinal}',
 );
 
-assertThrows(
+t.throws(
   () => parseAdvanceTarget({ strategy: 'track', ordinal: '7' }),
-  TypeError,
   'AE9: both fields populated throws TypeError',
+  TypeError,
 );
 
-assertThrows(
+t.throws(
   () => parseAdvanceTarget({}),
-  TypeError,
   'AE9: neither field populated throws TypeError',
+  TypeError,
 );
 
-assertThrows(
+t.throws(
   () => parseAdvanceTarget({ ordinal: 'abc' }),
-  TypeError,
   'AE9: non-numeric ordinal throws TypeError',
+  TypeError,
 );
 
-assertThrows(
+t.throws(
   () => parseAdvanceTarget({ ordinal: '-1' }),
-  TypeError,
   'AE9: negative ordinal throws TypeError',
+  TypeError,
 );
 
-assertThrows(
+t.throws(
   () => parseAdvanceTarget({ strategy: '' }),
-  TypeError,
   'AE9: empty-string strategy throws TypeError',
+  TypeError,
 );
 
 // Defensive — ordinal is non-integer (1.5).
-assertThrows(
+t.throws(
   () => parseAdvanceTarget({ ordinal: '1.5' }),
-  TypeError,
   'AE9: non-integer ordinal (1.5) throws TypeError',
+  TypeError,
 );
 
 // Numeric -1 covers the {ordinal: -1} numeric branch alongside the
 // string branch above.
-assertThrows(
+t.throws(
   () => parseAdvanceTarget({ ordinal: -1 }),
-  TypeError,
   'AE9: numeric -1 ordinal throws TypeError',
+  TypeError,
 );
 
 // --- U5: renderAdvanceForm -------------------------------------------
-console.log('renderAdvanceForm()');
+t.section('renderAdvanceForm()');
 
 {
   // Pure helper test — given an active plan with 10 slots and 5 unique
@@ -1053,40 +1008,40 @@ console.log('renderAdvanceForm()');
     requestId: 42,
   });
   // Strategy select with leading "no choice" option + 5 unique strategies.
-  assert(html.includes('<select'),
+  t.ok(html.includes('<select'),
     'renderAdvanceForm: emits a <select>');
-  assert(html.includes('— (use ordinal)'),
+  t.ok(html.includes('— (use ordinal)'),
     'renderAdvanceForm: leading "— (use ordinal)" option present');
   for (let i = 0; i < 5; i++) {
-    assert(html.includes(`>track_${i}</option>`),
+    t.ok(html.includes(`>track_${i}</option>`),
       `renderAdvanceForm: strategy option for track_${i}`);
   }
   // Strategy options are de-duped (5 unique strategies, not 10).
   const optionMatches = html.match(/<option /g) || [];
-  assertEqual(optionMatches.length, 6,
+  t.equal(optionMatches.length, 6,
     'renderAdvanceForm: 6 options total (5 unique strategies + leading "—")');
   // Ordinal input bounded to items.length - 1.
-  assert(/<input[^>]*type="number"[^>]*min="0"/.test(html),
+  t.ok(/<input[^>]*type="number"[^>]*min="0"/.test(html),
     'renderAdvanceForm: ordinal input is type="number" min="0"');
-  assert(html.includes('max="9"'),
+  t.ok(html.includes('max="9"'),
     'renderAdvanceForm: ordinal max=N-1 (items.length - 1)');
   // Confirm + Cancel buttons.
-  assert(/>Confirm</.test(html),
+  t.ok(/>Confirm</.test(html),
     'renderAdvanceForm: Confirm button present');
-  assert(/>Cancel</.test(html),
+  t.ok(/>Cancel</.test(html),
     'renderAdvanceForm: Cancel button present');
   // Confirm wires to the submit handler with the request id.
-  assert(html.includes('window.searchPlanSubmitAdvance(42'),
+  t.ok(html.includes('window.searchPlanSubmitAdvance(42'),
     'renderAdvanceForm: Confirm button wires window.searchPlanSubmitAdvance');
   // Cancel wires to cancel handler.
-  assert(html.includes('window.searchPlanCancelAdvance(42'),
+  t.ok(html.includes('window.searchPlanCancelAdvance(42'),
     'renderAdvanceForm: Cancel button wires window.searchPlanCancelAdvance');
   // form id captured for the submit handler to read inputs back.
-  assert(html.includes('class="sp-advance-form"'),
+  t.ok(html.includes('class="sp-advance-form"'),
     'renderAdvanceForm: form has the sp-advance-form class');
-  assert(html.includes('data-field="strategy"'),
+  t.ok(html.includes('data-field="strategy"'),
     'renderAdvanceForm: strategy input data-field marker');
-  assert(html.includes('data-field="ordinal"'),
+  t.ok(html.includes('data-field="ordinal"'),
     'renderAdvanceForm: ordinal input data-field marker');
 }
 
@@ -1096,15 +1051,15 @@ console.log('renderAdvanceForm()');
 // consequences before clicking through. The literal message is
 // exported so this assertion does not depend on string matching the
 // source code.
-console.log('REGENERATE_CONFIRM_MESSAGE');
+t.section('REGENERATE_CONFIRM_MESSAGE');
 
 {
   const lower = REGENERATE_CONFIRM_MESSAGE.toLowerCase();
-  assert(lower.includes('cursor'),
+  t.ok(lower.includes('cursor'),
     'AE8: regenerate confirm message includes "cursor"');
-  assert(lower.includes('cycle'),
+  t.ok(lower.includes('cycle'),
     'AE8: regenerate confirm message includes "cycle"');
-  assert(REGENERATE_CONFIRM_MESSAGE.length > 10,
+  t.ok(REGENERATE_CONFIRM_MESSAGE.length > 10,
     'AE8: regenerate confirm message is non-trivially long');
 }
 
@@ -1113,7 +1068,7 @@ console.log('REGENERATE_CONFIRM_MESSAGE');
 // The action handler MUST call window.confirm with the published
 // message before dispatching a fetch. We swap window.confirm + fetch
 // for shims and observe both side effects.
-console.log('searchPlanRegenerate()');
+t.section('searchPlanRegenerate()');
 
 /**
  * Shim helper — swap globals (window.confirm, fetch, document) before
@@ -1131,9 +1086,6 @@ async function withFetchAndConfirmShim(opts, impl) {
     toast: /** @type {Array<{msg: string, isError: boolean|undefined}>} */ ([]),
     consoleError: /** @type {any[][]} */ ([]),
   };
-  const prevWindow = globalThis.window;
-  const prevFetch = globalThis.fetch;
-  const prevDocument = globalThis.document;
   const prevState = state.searchPlanDetailContext;
   const prevPipelineView = state.pipelineView;
   const confirmReturns = opts.confirmReturns ?? true;
@@ -1165,32 +1117,29 @@ async function withFetchAndConfirmShim(opts, impl) {
   console.error = (/** @type {any[]} */ ...args) => {
     calls.consoleError.push(args);
   };
-  globalThis.window = fakeWindow;
-  globalThis.document = fakeDocument;
-  /** @type {any} */
-  globalThis.fetch = (/** @type {string} */ url, /** @type {any} */ init) => {
-    calls.fetch.push({ url, init });
-    return Promise.resolve({
-      ok: fetchResp.ok ?? true,
-      status: fetchResp.status ?? 200,
-      text() {
-        const body = fetchResp.body == null ? '' : JSON.stringify(fetchResp.body);
-        return Promise.resolve(body);
-      },
-      json() { return Promise.resolve(fetchResp.body); },
-    });
-  };
+  const globals = stubGlobals({
+    window: fakeWindow,
+    document: fakeDocument,
+    /** @type {any} */
+    fetch: (/** @type {string} */ url, /** @type {any} */ init) => {
+      calls.fetch.push({ url, init });
+      return Promise.resolve({
+        ok: fetchResp.ok ?? true,
+        status: fetchResp.status ?? 200,
+        text() {
+          const body = fetchResp.body == null ? '' : JSON.stringify(fetchResp.body);
+          return Promise.resolve(body);
+        },
+        json() { return Promise.resolve(fetchResp.body); },
+      });
+    },
+  });
   try {
     await impl(calls);
   } finally {
     state.searchPlanDetailContext = prevState;
     state.pipelineView = prevPipelineView;
-    if (prevWindow === undefined) delete globalThis.window;
-    else globalThis.window = prevWindow;
-    if (prevDocument === undefined) delete globalThis.document;
-    else globalThis.document = prevDocument;
-    if (prevFetch === undefined) delete globalThis.fetch;
-    else globalThis.fetch = prevFetch;
+    globals.restore();
     console.error = prevConsoleError;
   }
 }
@@ -1198,11 +1147,11 @@ async function withFetchAndConfirmShim(opts, impl) {
 // AE8: confirm returns false → no fetch.
 await withFetchAndConfirmShim({ confirmReturns: false }, async (calls) => {
   await searchPlanRegenerate(2566);
-  assertEqual(calls.fetch.length, 0,
+  t.equal(calls.fetch.length, 0,
     'AE8: confirm=false suppresses the regenerate fetch');
-  assertEqual(calls.confirm.length, 1,
+  t.equal(calls.confirm.length, 1,
     'AE8: confirm dialog was shown once');
-  assertEqual(calls.confirm[0], REGENERATE_CONFIRM_MESSAGE,
+  t.equal(calls.confirm[0], REGENERATE_CONFIRM_MESSAGE,
     'AE8: confirm dialog received the published message');
 });
 
@@ -1219,16 +1168,16 @@ await withFetchAndConfirmShim({
     inspection: { foo: 'old' }, historyHead: [], fetchedAt: 1000,
   });
   await searchPlanRegenerate(2566);
-  assertEqual(calls.fetch.length, 1,
+  t.equal(calls.fetch.length, 1,
     'AE8: confirm=true dispatches one fetch');
-  assert(calls.fetch[0].url.endsWith('/search-plan/regenerate'),
+  t.ok(calls.fetch[0].url.endsWith('/search-plan/regenerate'),
     'AE8: regenerate hits the regenerate endpoint');
-  assertEqual(calls.fetch[0].init.method, 'POST',
+  t.equal(calls.fetch[0].init.method, 'POST',
     'AE8: regenerate uses POST');
-  assertEqual(calls.fetch[0].init.body, '{}',
+  t.equal(calls.fetch[0].init.body, '{}',
     'AE8: regenerate sends an empty JSON body');
   // Cache invalidated on success — refresh-after-success contract.
-  assert(!searchPlanCache.has(2566),
+  t.ok(!searchPlanCache.has(2566),
     'AE8: cache for the request is cleared on regenerate success');
 });
 
@@ -1244,7 +1193,7 @@ await withFetchAndConfirmShim({
     inspection: { foo: 'old' }, historyHead: [], fetchedAt: 1000,
   });
   await searchPlanRegenerate(2566);
-  assert(!searchPlanCache.has(2566),
+  t.ok(!searchPlanCache.has(2566),
     'noop_active_plan_exists also invalidates the cache');
 });
 
@@ -1263,7 +1212,7 @@ await withFetchAndConfirmShim({
     inspection: { foo: 'old' }, historyHead: [], fetchedAt: 1000,
   });
   await searchPlanRegenerate(2566);
-  assert(searchPlanCache.has(2566),
+  t.ok(searchPlanCache.has(2566),
     '422 failure path does NOT invalidate the cache');
 });
 
@@ -1282,12 +1231,12 @@ await withFetchAndConfirmShim({
     inspection: { foo: 'old' }, historyHead: [], fetchedAt: 1000,
   });
   await searchPlanRegenerate(2566);
-  assert(searchPlanCache.has(2566),
+  t.ok(searchPlanCache.has(2566),
     '503 failure path does NOT invalidate the cache');
 });
 
 // --- U5: searchPlanAdvance error-mapping ----------------------------
-console.log('searchPlanAdvance()');
+t.section('searchPlanAdvance()');
 
 // Happy path — 200 with outcome=advanced invalidates cache.
 await withFetchAndConfirmShim({
@@ -1303,15 +1252,15 @@ await withFetchAndConfirmShim({
     inspection: { foo: 'old' }, historyHead: [], fetchedAt: 1000,
   });
   await searchPlanAdvance(2566, { toOrdinal: 5 });
-  assertEqual(calls.fetch.length, 1,
+  t.equal(calls.fetch.length, 1,
     'advance: dispatches one fetch with a typed target');
-  assert(calls.fetch[0].url.endsWith('/search-plan/advance'),
+  t.ok(calls.fetch[0].url.endsWith('/search-plan/advance'),
     'advance: hits the advance endpoint');
-  assertEqual(calls.fetch[0].init.method, 'POST',
+  t.equal(calls.fetch[0].init.method, 'POST',
     'advance: uses POST');
-  assertEqual(JSON.parse(calls.fetch[0].init.body).to_ordinal, 5,
+  t.equal(JSON.parse(calls.fetch[0].init.body).to_ordinal, 5,
     'advance: serialises toOrdinal as to_ordinal in the request body');
-  assert(!searchPlanCache.has(2566),
+  t.ok(!searchPlanCache.has(2566),
     'advance: cache invalidated on outcome=advanced');
 });
 
@@ -1330,13 +1279,13 @@ await withFetchAndConfirmShim({
     inspection: { foo: 'old' }, historyHead: [], fetchedAt: 1000,
   });
   await searchPlanAdvance(2566, { toOrdinal: 1 });
-  assert(searchPlanCache.has(2566),
+  t.ok(searchPlanCache.has(2566),
     'AE9: invalid_target does NOT invalidate the cache');
   // The fetch was still dispatched (toast happens after the response).
-  assertEqual(calls.fetch.length, 1,
+  t.equal(calls.fetch.length, 1,
     'AE9: invalid_target reports the fetch was dispatched');
   // body sent the correct shape.
-  assertEqual(JSON.parse(calls.fetch[0].init.body).to_ordinal, 1,
+  t.equal(JSON.parse(calls.fetch[0].init.body).to_ordinal, 1,
     'AE9: body shape preserved on the failure path');
 });
 
@@ -1354,9 +1303,9 @@ await withFetchAndConfirmShim({
     inspection: { foo: 'old' }, historyHead: [], fetchedAt: 1000,
   });
   await searchPlanAdvance(2566, { toStrategy: 'track' });
-  assert(searchPlanCache.has(2566),
+  t.ok(searchPlanCache.has(2566),
     '409 no_active_plan: cache preserved');
-  assertEqual(JSON.parse(calls.fetch[0].init.body).to_strategy, 'track',
+  t.equal(JSON.parse(calls.fetch[0].init.body).to_strategy, 'track',
     'advance with toStrategy → to_strategy in body');
 });
 
@@ -1371,7 +1320,7 @@ await withFetchAndConfirmShim({
     inspection: { foo: 'old' }, historyHead: [], fetchedAt: 1000,
   });
   await searchPlanAdvance(9999, { toOrdinal: 0 });
-  assert(searchPlanCache.has(9999),
+  t.ok(searchPlanCache.has(9999),
     '404 request_not_found: cache preserved');
 });
 
@@ -1389,7 +1338,7 @@ await withFetchAndConfirmShim({
     inspection: { foo: 'old' }, historyHead: [], fetchedAt: 1000,
   });
   await searchPlanAdvance(2566, { toOrdinal: 5 });
-  assert(searchPlanCache.has(2566),
+  t.ok(searchPlanCache.has(2566),
     '503 failed_transient: cache preserved');
 });
 
@@ -1405,14 +1354,14 @@ await withFetchAndConfirmShim({
     inspection: { foo: 'old' }, historyHead: [], fetchedAt: 1000,
   });
   await searchPlanAdvance(2566, { toOrdinal: 5 });
-  assert(searchPlanCache.has(2566),
+  t.ok(searchPlanCache.has(2566),
     '400 internal: cache preserved');
-  assert(calls.consoleError.length >= 1,
+  t.ok(calls.consoleError.length >= 1,
     '400 internal bug: console.error logged');
 });
 
 // --- U5: stubs are gone ---------------------------------------------
-console.log('U5: stub-removal sanity check');
+t.section('U5: stub-removal sanity check');
 
 {
   // Both handlers are real — they DO NOT throw "not implemented".
@@ -1425,7 +1374,7 @@ console.log('U5: stub-removal sanity check');
     try { await searchPlanRegenerate(2566); }
     catch (err) { regenError = err; }
   });
-  assert(regenError === null,
+  t.ok(regenError === null,
     'searchPlanRegenerate: confirm-cancel returns without throwing (no stub)');
 
   let advError = null;
@@ -1433,7 +1382,7 @@ console.log('U5: stub-removal sanity check');
     try { await searchPlanAdvance(2566, { toOrdinal: 0 }); }
     catch (err) { advError = err; }
   });
-  assert(advError === null,
+  t.ok(advError === null,
     'searchPlanAdvance: real implementation does not throw "not implemented"');
 }
 
@@ -1443,7 +1392,7 @@ console.log('U5: stub-removal sanity check');
 // during a fetch, double-clicking Advance, and so on. Each test uses a
 // "deferred" Promise that the test resolves manually so we can land
 // events between fetches.
-console.log('Race-condition guards (F1/F2/F3/F13)');
+t.section('Race-condition guards (F1/F2/F3/F13)');
 
 /** @returns {{promise: Promise<any>, resolve: (v: any) => void, reject: (err: any) => void}} */
 function makeDeferred() {
@@ -1489,9 +1438,6 @@ async function withRaceFixture(impl) {
   const fetchCalls = /** @type {string[]} */ ([]);
   /** @type {Array<{promise: Promise<any>, resolve: (v: any) => void}>} */
   const fetchQueue = [];
-  const prevFetch = globalThis.fetch;
-  const prevWindow = globalThis.window;
-  const prevDocument = globalThis.document;
   const prevState = state.searchPlanDetailContext;
   const prevPipelineView = state.pipelineView;
   /** @type {string} */
@@ -1539,15 +1485,17 @@ async function withRaceFixture(impl) {
     scrollTo() {},
     showTab() {},
   };
-  globalThis.window = fakeWindow;
-  globalThis.document = fakeDocument;
-  /** @type {any} */
-  globalThis.fetch = (/** @type {string} */ url) => {
-    fetchCalls.push(url);
-    const d = makeDeferred();
-    fetchQueue.push({ promise: d.promise, resolve: d.resolve });
-    return d.promise;
-  };
+  const globals = stubGlobals({
+    window: fakeWindow,
+    document: fakeDocument,
+    /** @type {any} */
+    fetch: (/** @type {string} */ url) => {
+      fetchCalls.push(url);
+      const d = makeDeferred();
+      fetchQueue.push({ promise: d.promise, resolve: d.resolve });
+      return d.promise;
+    },
+  });
   try {
     await impl({
       document: fakeDocument,
@@ -1560,12 +1508,7 @@ async function withRaceFixture(impl) {
   } finally {
     state.searchPlanDetailContext = prevState;
     state.pipelineView = prevPipelineView;
-    if (prevFetch === undefined) delete globalThis.fetch;
-    else globalThis.fetch = prevFetch;
-    if (prevWindow === undefined) delete globalThis.window;
-    else globalThis.window = prevWindow;
-    if (prevDocument === undefined) delete globalThis.document;
-    else globalThis.document = prevDocument;
+    globals.restore();
   }
 }
 
@@ -1590,14 +1533,14 @@ async function withRaceFixture(impl) {
     await p43;
     // Capture the post-43-paint HTML.
     const after43 = ctx.getInnerHtml();
-    assert(after43.includes('sp-detail') || after43.length > 0,
+    t.ok(after43.includes('sp-detail') || after43.length > 0,
       'F1: detail page rendered after 43 resolved');
     // Now resolve 42's fetches — the stale render must NOT clobber.
     ctx.fetchQueue[0].resolve(fakeOkResponse(inspection42));
     ctx.fetchQueue[1].resolve(fakeOkResponse({ rows: [], next_before_id: null }));
     await p42;
     // The HTML must still match the 43 paint, not get overwritten by 42.
-    assertEqual(ctx.getInnerHtml(), after43,
+    t.equal(ctx.getInnerHtml(), after43,
       'F1: stale 42 render did NOT clobber the live 43 paint');
   });
 }
@@ -1633,7 +1576,7 @@ async function withRaceFixture(impl) {
     const p1 = toggleSearchPlanSummary(42, rowEl);
     const p2 = toggleSearchPlanSummary(42, rowEl);
     // We expect 2 fetches at most (inspection + history) — not 4.
-    assertEqual(ctx.fetchCalls.length, 2,
+    t.equal(ctx.fetchCalls.length, 2,
       'F2: concurrent calls dedup — exactly one fetch pair dispatched');
     // Resolve to settle promises.
     ctx.fetchQueue[0].resolve(fakeOkResponse(makeInspection()));
@@ -1669,11 +1612,11 @@ async function withRaceFixture(impl) {
     };
     // Open call (in-flight).
     const p1 = toggleSearchPlanSummary(77, rowEl);
-    assertEqual(ctx.fetchCalls.length, 2,
+    t.equal(ctx.fetchCalls.length, 2,
       'F2 close: open call dispatched the initial fetch pair');
     // Capture the loading-state HTML that was set synchronously.
     const beforeResolve = createdPanel.innerHTML;
-    assert(beforeResolve.includes('Loading'),
+    t.ok(beforeResolve.includes('Loading'),
       'F2 close: panel shows loading text while fetch is in-flight');
     // Simulate the panel being detached (operator clicked Close /
     // navigated away). getElementById will now return null for this id.
@@ -1684,7 +1627,7 @@ async function withRaceFixture(impl) {
     await p1;
     // F2 closed-mid-fetch guard: the detached panel must NOT have been
     // overwritten with the resolved summary HTML.
-    assertEqual(createdPanel.innerHTML, beforeResolve,
+    t.equal(createdPanel.innerHTML, beforeResolve,
       'F2 close: detached-during-fetch panel was NOT overwritten by stale resolve');
   });
 }
@@ -1725,11 +1668,11 @@ async function withRaceFixture(impl) {
     const p1 = searchPlanLoadOlder(42, 12300);
     // The very first call should immediately dispatch a fetch AND disable
     // the button before any await yields.
-    assertEqual(ctx.fetchCalls.length, 1,
+    t.equal(ctx.fetchCalls.length, 1,
       'F3: first load-older click fires one fetch');
     // Now click again — must NOT dispatch a second fetch.
     const p2 = searchPlanLoadOlder(42, 12300);
-    assertEqual(ctx.fetchCalls.length, 1,
+    t.equal(ctx.fetchCalls.length, 1,
       'F3: second click during in-flight load-older does NOT dispatch a second fetch');
     ctx.fetchQueue[0].resolve(fakeOkResponse({ rows: [], next_before_id: null }));
     await Promise.all([p1, p2]);
@@ -1745,56 +1688,50 @@ async function withRaceFixture(impl) {
   const calls = {
     fetch: /** @type {Array<{url: string, init: any}>} */ ([]),
   };
-  const prevFetch = globalThis.fetch;
-  const prevWindow = globalThis.window;
-  const prevDocument = globalThis.document;
   const prevState = state.searchPlanDetailContext;
   const prevPipelineView = state.pipelineView;
   /** @type {Array<{promise: Promise<any>, resolve: (v: any) => void}>} */
   const fetchQueue = [];
-  /** @type {any} */
-  globalThis.window = {
-    confirm() { return true; },
-    scrollY: 0,
-    requestAnimationFrame(/** @type {() => void} */ fn) { fn(); return 1; },
-    scrollTo() {},
-    showTab() {},
-  };
-  /** @type {any} */
-  globalThis.document = {
-    getElementById() { return null; },
-    querySelector() { return null; },
-    querySelectorAll() { return []; },
-  };
-  /** @type {any} */
-  globalThis.fetch = (/** @type {string} */ url, /** @type {any} */ init) => {
-    calls.fetch.push({ url, init });
-    const d = makeDeferred();
-    fetchQueue.push({ promise: d.promise, resolve: d.resolve });
-    return d.promise.then((body) => ({
-      ok: true, status: 200,
-      text() { return Promise.resolve(JSON.stringify(body)); },
-      json() { return Promise.resolve(body); },
-    }));
-  };
+  const globals = stubGlobals({
+    /** @type {any} */
+    window: {
+      confirm() { return true; },
+      scrollY: 0,
+      requestAnimationFrame(/** @type {() => void} */ fn) { fn(); return 1; },
+      scrollTo() {},
+      showTab() {},
+    },
+    /** @type {any} */
+    document: {
+      getElementById() { return null; },
+      querySelector() { return null; },
+      querySelectorAll() { return []; },
+    },
+    /** @type {any} */
+    fetch: (/** @type {string} */ url, /** @type {any} */ init) => {
+      calls.fetch.push({ url, init });
+      const d = makeDeferred();
+      fetchQueue.push({ promise: d.promise, resolve: d.resolve });
+      return d.promise.then((body) => ({
+        ok: true, status: 200,
+        text() { return Promise.resolve(JSON.stringify(body)); },
+        json() { return Promise.resolve(body); },
+      }));
+    },
+  });
   try {
     const p1 = searchPlanRegenerate(2566);
     const p2 = searchPlanRegenerate(2566);
     // Only the first call should have dispatched a fetch. The second
     // is suppressed by the in-flight guard.
-    assertEqual(calls.fetch.length, 1,
+    t.equal(calls.fetch.length, 1,
       'F13: concurrent regenerate clicks dispatch exactly one fetch');
     fetchQueue[0].resolve({ request_id: 2566, outcome: 'success', plan_id: 999 });
     await Promise.all([p1, p2]);
   } finally {
     state.searchPlanDetailContext = prevState;
     state.pipelineView = prevPipelineView;
-    if (prevFetch === undefined) delete globalThis.fetch;
-    else globalThis.fetch = prevFetch;
-    if (prevWindow === undefined) delete globalThis.window;
-    else globalThis.window = prevWindow;
-    if (prevDocument === undefined) delete globalThis.document;
-    else globalThis.document = prevDocument;
+    globals.restore();
   }
 }
 
@@ -1814,14 +1751,14 @@ await withFetchAndConfirmShim({
     inspection: { foo: 'old' }, historyHead: [], fetchedAt: 1000,
   });
   await searchPlanRegenerate(9999);
-  assert(searchPlanCache.has(9999),
+  t.ok(searchPlanCache.has(9999),
     'F8: 404 request_not_found does NOT invalidate the cache');
-  assertEqual(calls.fetch.length, 1,
+  t.equal(calls.fetch.length, 1,
     'F8: 404 reports one fetch was dispatched (toast happens after)');
 });
 
 // --- F14: Testing gaps -----------------------------------------------
-console.log('F14: misc test gaps');
+t.section('F14: misc test gaps');
 
 // F14.1 — renderSummaryPanel debug-line branch: no active plan and no
 // failure plan → surfaces the booleans.
@@ -1835,13 +1772,13 @@ console.log('F14: misc test gaps');
     latest_failed_deterministic: null,
   });
   const html = renderSummaryPanel({ inspection, history: { rows: [] } });
-  assert(html.includes('No active plan'),
+  t.ok(html.includes('No active plan'),
     'F14.1: no-plan + no-failure surfaces the "No active plan" debug line');
-  assert(html.includes('has_active_plan='),
+  t.ok(html.includes('has_active_plan='),
     'F14.1: debug line surfaces has_active_plan=');
-  assert(html.includes('has_deterministic_failure='),
+  t.ok(html.includes('has_deterministic_failure='),
     'F14.1: debug line surfaces has_deterministic_failure=');
-  assert(html.includes('has_retryable_failure='),
+  t.ok(html.includes('has_retryable_failure='),
     'F14.1: debug line surfaces has_retryable_failure=');
 }
 
@@ -1857,7 +1794,7 @@ console.log('F14: misc test gaps');
       originSubView: null,
     };
     closeSearchPlanDetail();
-    assertEqual(calls.showTab[0], 'browse',
+    t.equal(calls.showTab[0], 'browse',
       'F14.2: browse-origin restores the Browse tab');
   });
 }
@@ -1872,9 +1809,9 @@ console.log('F14: misc test gaps');
     /** @type {any} */
     const malformed = { toOrdinal: 'not-a-number', toStrategy: 12345 };
     await searchPlanAdvance(2566, malformed);
-    assertEqual(calls.fetch.length, 0,
+    t.equal(calls.fetch.length, 0,
       'F14.3: malformed target does NOT dispatch a fetch');
-    assert(calls.consoleError.length >= 1,
+    t.ok(calls.consoleError.length >= 1,
       'F14.3: malformed target logs console.error');
   });
 }
@@ -1888,35 +1825,35 @@ console.log('F14: misc test gaps');
 //
 // main.js's showTab is a closure over imported state. We reach it by
 // dynamic import after stubbing globals.
-console.log('F12: tab-switch clears detail context');
+t.section('F12: tab-switch clears detail context');
 
 {
   // Set up DOM stubs needed by main.js's showTab.
-  const prevWindow = globalThis.window;
-  const prevDocument = globalThis.document;
   const prevState = state.searchPlanDetailContext;
   const prevPipelineView = state.pipelineView;
-  /** @type {any} */
-  globalThis.window = { setTimeout: () => 0 };
   /** @type {any} */
   const fakeTabEl = { classList: { add() {}, remove() {} } };
   /** @type {any} */
   const fakeSecEl = { classList: { add() {}, remove() {} } };
-  /** @type {any} */
-  globalThis.document = {
-    querySelectorAll() {
-      return {
-        forEach(/** @type {(t: any) => void} */ fn) {
-          fn({ classList: { remove() {} } });
-        },
-      };
+  const globals = stubGlobals({
+    /** @type {any} */
+    window: { setTimeout: () => 0 },
+    /** @type {any} */
+    document: {
+      querySelectorAll() {
+        return {
+          forEach(/** @type {(t: any) => void} */ fn) {
+            fn({ classList: { remove() {} } });
+          },
+        };
+      },
+      querySelector() { return fakeTabEl; },
+      getElementById(/** @type {string} */ id) {
+        if (id === 'q') return null;
+        return fakeSecEl;
+      },
     },
-    querySelector() { return fakeTabEl; },
-    getElementById(/** @type {string} */ id) {
-      if (id === 'q') return null;
-      return fakeSecEl;
-    },
-  };
+  });
   try {
     // Dynamically import main.js so it sees our stubbed globals.
     // main.js wires window.showTab at import; we read it back.
@@ -1925,9 +1862,9 @@ console.log('F12: tab-switch clears detail context');
     const showTab = globalThis.window.showTab;
     /** @type {any} */
     const showTabPreserving = globalThis.window.showTabPreservingDetail;
-    assert(typeof showTab === 'function',
+    t.ok(typeof showTab === 'function',
       'F12 prereq: main.js wires window.showTab');
-    assert(typeof showTabPreserving === 'function',
+    t.ok(typeof showTabPreserving === 'function',
       'F12 prereq: main.js wires window.showTabPreservingDetail');
     // Set up: pipelineView is search-plan-detail, context populated.
     state.pipelineView = 'search-plan-detail';
@@ -1937,9 +1874,9 @@ console.log('F12: tab-switch clears detail context');
     };
     // Switch to a different tab.
     showTab('browse');
-    assertEqual(state.pipelineView, 'dashboard',
+    t.equal(state.pipelineView, 'dashboard',
       'F12: switching away resets search-plan-detail to dashboard');
-    assert(state.searchPlanDetailContext === null,
+    t.ok(state.searchPlanDetailContext === null,
       'F12: detail context cleared when leaving search-plan-detail');
     // Now re-set and switch INTO pipeline directly — should also reset.
     state.pipelineView = 'search-plan-detail';
@@ -1948,9 +1885,9 @@ console.log('F12: tab-switch clears detail context');
       originScrollY: 0, originSubView: null,
     };
     showTab('pipeline');
-    assertEqual(state.pipelineView, 'dashboard',
+    t.equal(state.pipelineView, 'dashboard',
       'F12: switching into pipeline resets stuck detail state to dashboard');
-    assert(state.searchPlanDetailContext === null,
+    t.ok(state.searchPlanDetailContext === null,
       'F12: switching into pipeline tab clears stale detail context');
     // Verify the openSearchPlanDetail flow does NOT trip the reset:
     // showTabPreservingDetail wraps showTab and preserves the
@@ -1961,20 +1898,16 @@ console.log('F12: tab-switch clears detail context');
       originScrollY: 0, originSubView: null,
     };
     showTabPreserving('pipeline');
-    assertEqual(state.pipelineView, 'search-plan-detail',
+    t.equal(state.pipelineView, 'search-plan-detail',
       'F12: showTabPreservingDetail preserves pipelineView for openSearchPlanDetail flow');
-    assert(state.searchPlanDetailContext !== null,
+    t.ok(state.searchPlanDetailContext !== null,
       'F12: showTabPreservingDetail preserves detail context');
   } finally {
     state.searchPlanDetailContext = prevState;
     state.pipelineView = prevPipelineView;
-    if (prevWindow === undefined) delete globalThis.window;
-    else globalThis.window = prevWindow;
-    if (prevDocument === undefined) delete globalThis.document;
-    else globalThis.document = prevDocument;
+    globals.restore();
   }
 }
 
 // --- Summary ---------------------------------------------------------
-console.log(`\n${passed} passed, ${failed} failed`);
-if (failed > 0) process.exit(1);
+t.done();

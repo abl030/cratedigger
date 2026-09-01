@@ -148,7 +148,7 @@ t.section('checker vocabulary — the passing side of every method');
     + "t.contains('abc', 'b', 'contains'); t.excludes('abc', 'z', 'excludes');\n"
     + "t.match('abc', /b/, 'match'); t.notMatch('abc', /z/, 'notMatch');\n"
     + "t.throws(() => { throw new TypeError('x'); }, 'throws', TypeError);\n"
-    + "t.pass();\n"
+    + "t.pass('pass');\n"
     + "await t.rejects(Promise.reject(new RangeError('x')), 'rejects', RangeError);\n"
     + 't.done();',
   );
@@ -177,6 +177,32 @@ t.section('checker vocabulary — the failing side of every method');
   t.contains(run.stdout, 'expected a throw, none happened', 'throws() explains a missing throw');
   t.contains(run.stdout, 'expected a rejection, none happened', 'rejects() explains a missing rejection');
   t.contains(run.stdout, 'expected RangeError, got TypeError', 'the wrong error class is named');
+}
+
+t.section('an assertion with no message fails closed, even when it would pass');
+{
+  // The pre-harness idiom allowed `assertEqual(a, b)` with no message.
+  // An unnamed assertion has no identity, and identity is the whole point
+  // of the per-assertion marker, so the harness refuses it — including on
+  // the success side, where nothing else would ever notice.
+  const run = runFixture(
+    "t.equal(1, 1, 'named');\n"
+    + 't.equal(1, 1);\n'
+    + "t.ok(true, '');\n"
+    + 't.pass();\n'
+    + "t.throws(() => { throw new Error('x'); });\n"
+    + 't.done();',
+    { inRepo: true },
+  );
+  t.equal(run.status, 1, 'an unnamed assertion reds the suite even though its check passed');
+  t.equal(run.markers.length, 4, 'each unnamed site is reported once');
+  t.equal(
+    run.markers[0].split('\t')[1],
+    `${run.file}::<unnamed assertion>`,
+    'the identity says what is wrong instead of naming `undefined`',
+  );
+  t.contains(run.markers[0], 'assertion has no message', 'the detail explains the refusal');
+  t.contains(run.stdout, '1 passed, 4 failed', 'only the named assertion counted as a pass');
 }
 
 t.section('a suite that stubs console cannot swallow its own markers');

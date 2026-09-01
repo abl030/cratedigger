@@ -104,6 +104,23 @@ export function suite(moduleUrl) {
   }
 
   function record(succeeded, message, detail) {
+    // An assertion with no message has no identity, and identity is the
+    // whole point of this harness: an unnamed failure lands in the suite
+    // index as `<file>::undefined`, indistinguishable from every other
+    // unnamed one in the same file. Fail closed rather than emit that.
+    // The pre-harness idiom permitted it — `assertEqual(a, b)` with no
+    // third argument — and the conversion of all 23 suites had to name
+    // every such site (measured: 0 remain).
+    if (typeof message !== 'string' || message === '') {
+      failed += 1;
+      const detailText = `assertion has no message; detail was ${oneLine(detail, 200)}`;
+      writeOut(
+        `${FAILURE_MARKER}\t${oneLine(identityFor('<unnamed assertion>'), 240)}`
+          + `\t${detailText}\n`,
+      );
+      writeErr(`  FAIL: <unnamed assertion> — ${detailText}\n`);
+      return false;
+    }
     if (succeeded) {
       passed += 1;
       return true;
@@ -204,8 +221,7 @@ export function suite(moduleUrl) {
           `expected ${errorClass.name}, got ${thrown && thrown.constructor && thrown.constructor.name}`,
         );
       }
-      passed += 1;
-      return true;
+      return record(true, message, '');
     },
     /** Await `promiseOrFn` and assert it rejects. */
     async rejects(promiseOrFn, message, errorClass) {
@@ -225,17 +241,19 @@ export function suite(moduleUrl) {
           `expected ${errorClass.name}, got ${thrown && thrown.constructor && thrown.constructor.name}`,
         );
       }
-      passed += 1;
-      return true;
+      return record(true, message, '');
     },
     /** Record a failure directly — for a local helper doing its own check. */
     fail(message, detail = 'explicit failure') {
       return record(false, message, detail);
     },
-    /** Record a pass directly — the counterpart of `fail()`. */
-    pass() {
-      passed += 1;
-      return true;
+    /**
+     * Record a pass directly — the counterpart of `fail()`. Used where the
+     * claim is "this call completed at all"; it still takes a name, so the
+     * suite index can say which assertion it was.
+     */
+    pass(message) {
+      return record(true, message, '');
     },
     get passed() {
       return passed;

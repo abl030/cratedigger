@@ -12,38 +12,21 @@ import {
   renderRecordingsBlock,
 } from '../web/js/analysis.js';
 
-let passed = 0;
-let failed = 0;
+import { stubGlobals, suite } from './js_harness.mjs';
 
-function assertEqual(actual, expected, msg) {
-  if (actual === expected) {
-    passed++;
-  } else {
-    failed++;
-    console.error(`  FAIL: ${msg} - expected '${expected}', got '${actual}'`);
-  }
-}
+const t = suite(import.meta.url);
 
-function assertContains(haystack, needle, msg) {
-  if (haystack.includes(needle)) {
-    passed++;
-  } else {
-    failed++;
-    console.error(`  FAIL: ${msg} - '${needle}' not in output`);
-  }
-}
-
-console.log('analysisChipHtml() — coverage precedence');
+t.section('analysisChipHtml() — coverage precedence');
 {
-  assertContains(analysisChipHtml({ covered_by: 'Some <Comp>', unique_track_count: 3 }),
+  t.contains(analysisChipHtml({ covered_by: 'Some <Comp>', unique_track_count: 3 }),
     'covered by Some &lt;Comp&gt;', 'covered_by wins over unique count, escaped');
-  assertContains(analysisChipHtml({ covered_by: null, unique_track_count: 9 }),
+  t.contains(analysisChipHtml({ covered_by: null, unique_track_count: 9 }),
     '9 unique', 'unique count chip');
-  assertContains(analysisChipHtml({ covered_by: null, unique_track_count: 0 }),
+  t.contains(analysisChipHtml({ covered_by: null, unique_track_count: 0 }),
     '0 unique', 'zero-unique chip');
 }
 
-console.log('applyAnalysisChips() — one DOM index for a large catalogue');
+t.section('applyAnalysisChips() — one DOM index for a large catalogue');
 {
   let wholeDocumentQueries = 0;
   const inserted = [];
@@ -60,7 +43,7 @@ console.log('applyAnalysisChips() — one DOM index for a large catalogue');
   const rows = Array.from({ length: 300 }, (_unused, index) => row(`rg-${index}`));
   const container = {
     querySelectorAll(selector) {
-      assertEqual(selector, '.rg[data-rg-id]', 'index selects all release-group rows once');
+      t.equal(selector, '.rg[data-rg-id]', 'index selects all release-group rows once');
       wholeDocumentQueries++;
       return rows;
     },
@@ -71,11 +54,11 @@ console.log('applyAnalysisChips() — one DOM index for a large catalogue');
       release_group_id: entry.dataset.rgId, covered_by: null, unique_track_count: index,
     })),
   });
-  assertEqual(wholeDocumentQueries, 1, 'one catalogue-wide DOM query');
-  assertEqual(inserted.length, 300, 'every indexed group receives its chip');
+  t.equal(wholeDocumentQueries, 1, 'one catalogue-wide DOM query');
+  t.equal(inserted.length, 300, 'every indexed group receives its chip');
 }
 
-console.log('computeRecordingDots() — membership + exclusives');
+t.section('computeRecordingDots() — membership + exclusives');
 {
   // Two pressings: P0 has r1,r2; P1 has r2,r3. r1 exclusive to P0,
   // r3 exclusive to P1, r2 shared.
@@ -91,14 +74,14 @@ console.log('computeRecordingDots() — membership + exclusives');
     ],
   };
   const { trackToPressings, pressingExclusiveCounts, totalPressings } = computeRecordingDots(rg);
-  assertEqual(totalPressings, 2, 'two pressings');
-  assertEqual(trackToPressings['r1'].join(','), '0', 'r1 only on P0');
-  assertEqual(trackToPressings['r2'].join(','), '0,1', 'r2 on both');
-  assertEqual(trackToPressings['r3'].join(','), '1', 'r3 only on P1');
-  assertEqual(pressingExclusiveCounts.join(','), '1,1', 'one exclusive each');
+  t.equal(totalPressings, 2, 'two pressings');
+  t.equal(trackToPressings['r1'].join(','), '0', 'r1 only on P0');
+  t.equal(trackToPressings['r2'].join(','), '0,1', 'r2 on both');
+  t.equal(trackToPressings['r3'].join(','), '1', 'r3 only on P1');
+  t.equal(pressingExclusiveCounts.join(','), '1,1', 'one exclusive each');
 }
 
-console.log('renderRecordingsBlock() — markers stay with titles');
+t.section('renderRecordingsBlock() — markers stay with titles');
 {
   const rg = {
     pressings: [
@@ -112,22 +95,18 @@ console.log('renderRecordingsBlock() — markers stay with titles');
     ],
   };
   const html = renderRecordingsBlock(rg);
-  assertContains(html, 'Recordings', 'heading present');
-  assertContains(html, 'type-header', 'heading styled as a section header (separates the block from Bootleg / Promo)');
+  t.contains(html, 'Recordings', 'heading present');
+  t.contains(html, 'type-header', 'heading styled as a section header (separates the block from Bootleg / Promo)');
   // Single-span rows: marker and title inside one <span> (the flex
   // justify-between fix from PR3's screenshot loop).
-  assertContains(html, '●</span></span>Only On P0', 'dot adjacent to partial-coverage title');
-  assertContains(html, '★</span> Everywhere', 'star adjacent to all-pressings title');
-  assertContains(html, 'also on: Best Of', 'non-unique row keeps also-on note');
-  assertEqual(renderRecordingsBlock({ tracks: [] }), '', 'no tracks -> empty');
+  t.contains(html, '●</span></span>Only On P0', 'dot adjacent to partial-coverage title');
+  t.contains(html, '★</span> Everywhere', 'star adjacent to all-pressings title');
+  t.contains(html, 'also on: Best Of', 'non-unique row keeps also-on note');
+  t.equal(renderRecordingsBlock({ tracks: [] }), '', 'no tracks -> empty');
 }
 
-console.log('disambRemove() — processing conflict locks and refreshes only the acted-on row');
+t.section('disambRemove() — processing conflict locks and refreshes only the acted-on row');
 {
-  const oldConfirm = globalThis.confirm;
-  const oldDocument = globalThis.document;
-  const oldFetch = globalThis.fetch;
-  const oldWindow = globalThis.window;
   const attributes = new Map([['data-pipeline-request-id', '903']]);
   const inserted = [];
   const btn = {
@@ -146,80 +125,78 @@ console.log('disambRemove() — processing conflict locks and refreshes only the
     },
   };
   const live = { textContent: '', setAttribute() {} };
-  globalThis.confirm = () => true;
-  globalThis.document = {
-    activeElement: btn,
-    body: { appendChild() {} },
-    createElement() {
-      return {
-        children: [],
-        className: '',
-        id: '',
-        textContent: '',
-        isConnected: false,
-        setAttribute() {},
-        appendChild(child) { this.children.push(child); },
-        remove() { this.isConnected = false; },
-      };
-    },
-    getElementById(id) {
-      if (id === 'processing-lock-live-region') return live;
-      return inserted.find(element => element.id === id && element.isConnected) || null;
-    },
-    querySelectorAll() { return [btn]; },
-  };
-  globalThis.window = { scrollX: 5, scrollY: 9, scrollTo() {} };
   const calls = [];
-  globalThis.fetch = async (url) => {
-    calls.push(String(url));
-    if (url === '/api/pipeline/delete') {
-      return {
-        status: 409,
-        async json() {
-          return {
-            error: 'processing_locked',
-            request_id: 903,
-            processing_owner: {
-              job_id: 70,
-              status: 'queued',
-              preview_status: 'waiting',
-            },
-          };
-        },
-      };
-    }
-    if (url === '/api/pipeline/903') {
-      return {
-        ok: true,
-        async json() {
-          return {
-            request: {
-              id: 903,
-              status: 'processing',
-              mb_release_id: 'analysis-owner',
+  const globals = stubGlobals({
+    confirm: () => true,
+    document: {
+      activeElement: btn,
+      body: { appendChild() {} },
+      createElement() {
+        return {
+          children: [],
+          className: '',
+          id: '',
+          textContent: '',
+          isConnected: false,
+          setAttribute() {},
+          appendChild(child) { this.children.push(child); },
+          remove() { this.isConnected = false; },
+        };
+      },
+      getElementById(id) {
+        if (id === 'processing-lock-live-region') return live;
+        return inserted.find(element => element.id === id && element.isConnected) || null;
+      },
+      querySelectorAll() { return [btn]; },
+    },
+    window: { scrollX: 5, scrollY: 9, scrollTo() {} },
+    fetch: async (url) => {
+      calls.push(String(url));
+      if (url === '/api/pipeline/delete') {
+        return {
+          status: 409,
+          async json() {
+            return {
+              error: 'processing_locked',
+              request_id: 903,
               processing_owner: {
                 job_id: 70,
-                status: 'running',
-                preview_status: 'evidence_ready',
+                status: 'queued',
+                preview_status: 'waiting',
               },
-            },
-          };
-        },
-      };
-    }
-    throw new Error(`unexpected fetch ${url}`);
-  };
+            };
+          },
+        };
+      }
+      if (url === '/api/pipeline/903') {
+        return {
+          ok: true,
+          async json() {
+            return {
+              request: {
+                id: 903,
+                status: 'processing',
+                mb_release_id: 'analysis-owner',
+                processing_owner: {
+                  job_id: 70,
+                  status: 'running',
+                  preview_status: 'evidence_ready',
+                },
+              },
+            };
+          },
+        };
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    },
+  });
   await disambRemove(903, btn);
-  assertEqual(calls.join(','), '/api/pipeline/delete,/api/pipeline/903',
+  t.equal(calls.join(','), '/api/pipeline/delete,/api/pipeline/903',
     'typed conflict refetches only the affected request');
-  assertEqual(attributes.get('aria-disabled'), 'true', 'remove control becomes aria-disabled');
-  assertEqual(btn.textContent, 'importing', 'authoritative owner status replaces stale action');
-  assertEqual(live.textContent.includes('job #70'), true, 'owner change is announced');
-  globalThis.confirm = oldConfirm;
-  globalThis.document = oldDocument;
-  globalThis.fetch = oldFetch;
-  globalThis.window = oldWindow;
+  t.equal(attributes.get('aria-disabled'), 'true', 'remove control becomes aria-disabled');
+  t.equal(btn.textContent, 'importing', 'authoritative owner status replaces stale action');
+  t.equal(live.textContent.includes('job #70'), true, 'owner change is announced');
+  globals.restore();
 }
 
-console.log(`\n${passed} passed, ${failed} failed`);
-process.exit(failed > 0 ? 1 : 0);
+t.done();
