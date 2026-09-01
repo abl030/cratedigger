@@ -217,8 +217,11 @@ class TestRunImportAudioCoverage(unittest.TestCase):
         )])
         mock_popen.side_effect = [default, expanded]
 
-        with patch.object(import_one, "max_distance", 999.0):
-            outcome = import_one.run_import("/tmp/test", "2823685")
+        outcome = import_one.run_import(
+            "/tmp/test",
+            "2823685",
+            max_distance=import_one.apply_max_distance(force=True),
+        )
 
         self.assertEqual(outcome.exit_code, 2)
         self.assertIn("discard admitted audio", outcome.failure_reason or "")

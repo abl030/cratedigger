@@ -108,7 +108,13 @@ class TestImportOneArgparseAudit(unittest.TestCase):
 
     def test_main_gets_argv_from_the_one_parser_builder(self) -> None:
         class _ParserSentinel:
-            def parse_args(self) -> argparse.Namespace:
+            # Mirrors the real ``parse_args(args=None)`` signature —
+            # ``ImportOneRequest.from_argv`` forwards its argv argument, and
+            # a sentinel that could not accept one would fail for the wrong
+            # reason.
+            def parse_args(
+                self, args: list[str] | None = None,
+            ) -> argparse.Namespace:
                 raise RuntimeError("parser sentinel")
 
         with (

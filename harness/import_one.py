@@ -34,7 +34,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
-from typing import NoReturn, TypeGuard
+from typing import Final, NoReturn, Protocol, TypeGuard
 
 import msgspec
 
@@ -139,19 +139,127 @@ from lib.v0_probe import (
 HARNESS = os.path.join(os.path.dirname(__file__), "..", "harness", "run_beets_harness.sh")
 HARNESS_TIMEOUT = 300
 IMPORT_TIMEOUT = 1800
-max_distance = 0.5
 DUPLICATE_REMOVE_GUARD_EXIT_CODE = 7
+
+#: Apply-time Beets distance ceiling for an ordinary run. ``--force`` raises
+#: this run's ceiling to ``lib.beets.FORCE_IMPORT_DISTANCE_THRESHOLD``; see
+#: :func:`apply_max_distance`. The ceiling is threaded into ``run_import``
+#: rather than parked in a mutable module attribute, so one run's override
+#: cannot outlive the run that asked for it.
+DEFAULT_MAX_DISTANCE: Final[float] = 0.5
+
+#: The partial result ``_run_entrypoint`` acknowledges when a run dies before
+#: it can return one. This is the one piece of per-run state that stays a
+#: module global on purpose: the crash handler sits outside the run and has no
+#: other way to see what the run had built so far.
 _current_result: ImportResult | None = None
-_preview_temp_root: str | None = None
+
+#: Wall clock behind the ``[TIMING] total`` line, owned by ``main`` because it
+#: measures the CLI invocation. An in-process ``run_import_one`` caller simply
+#: gets no total line.
 _import_total_start: float | None = None
 
 
-# Rank config for BeetsDB.get_album_info() mixed-format reduction + (commit 5)
-# quality_rank() / compare_quality() / quality_gate_decision(). main() replaces
-# this with the deserialized --quality-rank-config argv blob passed by
-# lib.dispatch.core.dispatch_import_core. Missing or malformed argv falls
-# back to the hardcoded defaults.
-_rank_cfg: QualityRankConfig = QualityRankConfig.defaults()
+@dataclass(frozen=True)
+class ImportOneRequest:
+    """One import's complete argv contract, typed.
+
+    ``build_parser`` (further down, beside ``main``) owns the flag spellings;
+    :meth:`from_argv` is the one place they become this value. The optional
+    defaults here ARE the parser's own defaults — ``TestImportOneRequest``
+    pins that field by field, so the two declarations cannot drift apart
+    silently.
+    """
+
+    path: str
+    mb_release_id: str
+    request_id: int | None = None
+    override_min_bitrate: int | None = None
+    force: bool = False
+    verified_lossless_target: str | None = None
+    target_format: str | None = None
+    quality_rank_config: str | None = None
+    quality_evidence_action_file: str | None = None
+    beets_library_db: str | None = None
+    beets_library_root: str | None = None
+    beets_config_dir: str | None = None
+    beets_python: str | None = None
+    existing_v0_probe_min_bitrate: int | None = None
+    existing_v0_probe_avg_bitrate: int | None = None
+    existing_v0_probe_median_bitrate: int | None = None
+    preserve_source: bool = False
+    dry_run: bool = False
+
+    @classmethod
+    def from_argv(cls, argv: Sequence[str] | None = None) -> "ImportOneRequest":
+        """Parse argv (``sys.argv[1:]`` when omitted) into this contract."""
+        return cls.from_namespace(build_parser().parse_args(argv))
+
+    @classmethod
+    def from_namespace(cls, args: argparse.Namespace) -> "ImportOneRequest":
+        """Read every parser destination off a parsed namespace.
+
+        The parameter is named ``args`` on purpose: this is now the module's
+        only ``args.<flag>`` site, and ``tests/test_import_one_argparse_audit``
+        compares the parser's destinations against exactly that spelling.
+        Rename it and the audit sees zero reads and fails, loudly but
+        confusingly.
+        """
+        return cls(
+            path=args.path,
+            mb_release_id=args.mb_release_id,
+            request_id=args.request_id,
+            override_min_bitrate=args.override_min_bitrate,
+            force=args.force,
+            verified_lossless_target=args.verified_lossless_target,
+            target_format=args.target_format,
+            quality_rank_config=args.quality_rank_config,
+            quality_evidence_action_file=args.quality_evidence_action_file,
+            beets_library_db=args.beets_library_db,
+            beets_library_root=args.beets_library_root,
+            beets_config_dir=args.beets_config_dir,
+            beets_python=args.beets_python,
+            existing_v0_probe_min_bitrate=args.existing_v0_probe_min_bitrate,
+            existing_v0_probe_avg_bitrate=args.existing_v0_probe_avg_bitrate,
+            existing_v0_probe_median_bitrate=(
+                args.existing_v0_probe_median_bitrate
+            ),
+            preserve_source=args.preserve_source,
+            dry_run=args.dry_run,
+        )
+
+
+def apply_max_distance(force: bool) -> float:
+    """The apply-time Beets distance ceiling one run runs under.
+
+    ``--force`` raises it to the ONE override constant the force lane also
+    hands ``beets_validate``, so both comparison sites in a force import run
+    under one convention (#1080).
+    """
+    return FORCE_IMPORT_DISTANCE_THRESHOLD if force else DEFAULT_MAX_DISTANCE
+
+
+def resolve_rank_config(serialized: str | None) -> QualityRankConfig:
+    """Deserialize ``--quality-rank-config``, falling back to the defaults.
+
+    The rank config drives ``BeetsDB.get_album_info()``'s mixed-format
+    reduction plus ``quality_rank()`` / ``compare_quality()`` /
+    ``quality_gate_decision()``. ``lib.dispatch.core.dispatch_import_core``
+    passes its own runtime config across the wire so the harness classifies
+    ranks the way the caller does; missing or malformed argv falls back to
+    the hardcoded defaults.
+    """
+    if not serialized:
+        return QualityRankConfig.defaults()
+    try:
+        cfg = QualityRankConfig.from_json(serialized)
+        _log(f"[CONFIG] quality_rank_config: "
+             f"metric={cfg.bitrate_metric.value}")
+    except (ValueError, KeyError) as exc:
+        _log(f"[WARN] --quality-rank-config parse failed ({exc}); "
+             f"falling back to defaults")
+        return QualityRankConfig.defaults()
+    return cfg
 
 
 def _as_json_dict(value: object) -> TypeGuard[dict[str, object]]:
@@ -886,14 +994,16 @@ def _v0_probe_from_bitrates(
     return _shared_v0_probe_from_bitrates(bitrates, kind=kind)
 
 
-def _existing_v0_probe_from_args(args: argparse.Namespace) -> V0ProbeEvidence | None:
-    if args.existing_v0_probe_avg_bitrate is None:
+def _existing_v0_probe_from_request(
+    request: ImportOneRequest,
+) -> V0ProbeEvidence | None:
+    if request.existing_v0_probe_avg_bitrate is None:
         return None
     return V0ProbeEvidence(
         kind=V0_PROBE_LOSSLESS_SOURCE,
-        min_bitrate_kbps=args.existing_v0_probe_min_bitrate,
-        avg_bitrate_kbps=args.existing_v0_probe_avg_bitrate,
-        median_bitrate_kbps=args.existing_v0_probe_median_bitrate,
+        min_bitrate_kbps=request.existing_v0_probe_min_bitrate,
+        avg_bitrate_kbps=request.existing_v0_probe_avg_bitrate,
+        median_bitrate_kbps=request.existing_v0_probe_median_bitrate,
     )
 
 
@@ -1282,6 +1392,7 @@ def _run_import_once(
     path: str,
     mb_release_id: str,
     *,
+    max_distance: float,
     beets_config_dir: str | None = None,
     beets_python: str | None = None,
     beets_library_db_path: str | None = None,
@@ -1291,6 +1402,9 @@ def _run_import_once(
     """Drive the beets harness to import one album.
 
     Returns ``RunImportOutcome``.
+
+    ``max_distance`` is this run's apply-time ceiling, required rather than
+    defaulted so no caller can reach the apply decision without stating it.
 
     Guarded Beets-owned replacement answers ``remove`` only when Beets
     reports exactly one duplicate whose release identity matches the target.
@@ -1566,16 +1680,23 @@ def run_import(
     path: str,
     mb_release_id: str,
     *,
+    max_distance: float = DEFAULT_MAX_DISTANCE,
     beets_config_dir: str | None = None,
     beets_python: str | None = None,
     beets_library_db_path: str | None = None,
     beets_library_root: str | None = None,
 ) -> RunImportOutcome:
-    """Import one exact release with at most one safe Discogs retry."""
+    """Import one exact release with at most one safe Discogs retry.
+
+    Both attempts run under the SAME ``max_distance`` — a retry that quietly
+    reverted to the default ceiling would let a force import's second pass
+    reject what its first pass was authorized to apply.
+    """
 
     outcome = _run_import_once(
         path,
         mb_release_id,
+        max_distance=max_distance,
         beets_config_dir=beets_config_dir,
         beets_python=beets_python,
         beets_library_db_path=beets_library_db_path,
@@ -1591,6 +1712,7 @@ def run_import(
     return _run_import_once(
         path,
         mb_release_id,
+        max_distance=max_distance,
         beets_config_dir=beets_config_dir,
         beets_python=beets_python,
         beets_library_db_path=beets_library_db_path,
@@ -1654,19 +1776,32 @@ def _log_timing(stage: str, start: float) -> None:
 
 
 def _emit_and_exit(r: ImportResult) -> NoReturn:
-    """Emit ImportResult JSON on stdout and exit."""
-    global _preview_temp_root
+    """Emit ImportResult JSON on stdout and exit.
+
+    The CLI's one exit. ``run_import_one`` returns its result instead of
+    reaching for this, and owns the dry-run scratch copy it creates, so the
+    only other caller is ``_run_entrypoint``'s crash acknowledgement.
+    """
     if _import_total_start is not None:
         _log_timing("total", _import_total_start)
-    if _preview_temp_root is not None:
-        shutil.rmtree(_preview_temp_root, ignore_errors=True)
-        _preview_temp_root = None
     print(r.to_sentinel_line(), flush=True)
     sys.exit(r.exit_code)
 
 
+class ItemPathSource(Protocol):
+    """The single Beets read ``_record_bad_extension_warnings`` performs.
+
+    Narrow port rather than the concrete ``BeetsDB``: the warning pass only
+    ever asks for one release's item paths, and the narrower annotation is
+    what lets a test pass ``FakeBeetsDB`` without a ``cast(Any, ...)``.
+    """
+
+    def get_item_paths(self, mb_release_id: str) -> list[tuple[int, str]]:
+        ...
+
+
 def _record_bad_extension_warnings(
-    beets: BeetsDB,
+    beets: ItemPathSource,
     mbid: str,
     r: ImportResult,
 ) -> list[str]:
@@ -1970,13 +2105,15 @@ def _cleanup_staged_dir(
 
 def _run_quality_evidence_authorized_import(
     *,
-    args: argparse.Namespace,
+    request: ImportOneRequest,
     beets: BeetsDB,
     mbid: str,
     request_id: int | None,
     already_in_beets: bool,
-) -> NoReturn:
-    action_file = args.quality_evidence_action_file
+    rank_cfg: QualityRankConfig,
+    max_distance: float,
+) -> ImportResult:
+    action_file = request.quality_evidence_action_file
     assert action_file is not None
     r = ImportResult()
     r.already_in_beets = already_in_beets
@@ -2032,11 +2169,11 @@ def _run_quality_evidence_authorized_import(
             r.exit_code = 5
             r.decision = "quality_evidence_action_failed"
             r.error = "quality evidence action decision does not allow import"
-            _emit_and_exit(r)
+            return r
 
-        _validate_quality_evidence_action_snapshot(args.path, payload)
+        _validate_quality_evidence_action_snapshot(request.path, payload)
         quality_is_transcode = _materialize_quality_evidence_action(
-            work_path=args.path,
+            work_path=request.path,
             payload=payload,
             r=r,
         )
@@ -2045,14 +2182,15 @@ def _run_quality_evidence_authorized_import(
         r.decision = "quality_evidence_action_failed"
         r.error = str(exc)
         _log(f"[ERROR] {r.error}")
-        _emit_and_exit(r)
+        return r
 
-    _log(f"[IMPORT] {args.path} → beets (mbid={mbid})")
+    _log(f"[IMPORT] {request.path} → beets (mbid={mbid})")
     stage_start = time.monotonic()
     import_outcome = run_import(
-        args.path,
+        request.path,
         mbid,
-        **import_beets_subprocess_kwargs(args),
+        max_distance=max_distance,
+        **import_beets_subprocess_kwargs(request),
     )
     _log_timing("beets_import", stage_start)
     rc = import_outcome.exit_code
@@ -2072,7 +2210,7 @@ def _run_quality_evidence_authorized_import(
             r.decision = "mbid_missing" if rc == 4 else "import_failed"
             r.error = _harness_failure_error(import_outcome, rc)
         _log(f"[ERROR] Import failed (rc={rc})")
-        _emit_and_exit(r)
+        return r
 
     stage_start = time.monotonic()
     post_import_ids = beets.get_all_album_ids_for_release(mbid)
@@ -2084,7 +2222,7 @@ def _run_quality_evidence_authorized_import(
                    "survives.")
         _log(f"[ERROR] {r.error}")
         beets.close()
-        _emit_and_exit(r)
+        return r
     if len(post_import_ids) != 1:
         r.exit_code = 2
         r.decision = "import_failed"
@@ -2094,17 +2232,17 @@ def _run_quality_evidence_authorized_import(
                    "post-import stale-row cleanup.")
         _log(f"[ERROR] {r.error}")
         beets.close()
-        _emit_and_exit(r)
+        return r
     imported_album_id = post_import_ids[0]
 
-    pf_info = beets.get_album_info(mbid, _rank_cfg)
+    pf_info = beets.get_album_info(mbid, rank_cfg)
     if not pf_info:
         r.exit_code = 2
         r.decision = "import_failed"
         r.error = f"Post-flight: MBID {mbid} NOT in beets DB after import"
         _log(f"[ERROR] {r.error}")
         beets.close()
-        _emit_and_exit(r)
+        return r
 
     if pf_info.album_id != imported_album_id:
         r.exit_code = 2
@@ -2114,7 +2252,7 @@ def _run_quality_evidence_authorized_import(
                    "beets is in an inconsistent state.")
         _log(f"[ERROR] {r.error}")
         beets.close()
-        _emit_and_exit(r)
+        return r
 
     accounting_error = _postflight_audio_accounting_error(
         import_outcome,
@@ -2135,7 +2273,7 @@ def _run_quality_evidence_authorized_import(
         )
         _log(f"[ERROR] {r.error}")
         beets.close()
-        _emit_and_exit(r)
+        return r
 
     r.materialized_measurement = _materialized_measurement_from_album_info(
         pf_info, r,
@@ -2154,7 +2292,7 @@ def _run_quality_evidence_authorized_import(
     fix_library_modes(album_path)
     _log_timing("postflight_verification", stage_start)
 
-    _cleanup_staged_dir(args.path)
+    _cleanup_staged_dir(request.path)
 
     if request_id:
         stage_start = time.monotonic()
@@ -2164,7 +2302,7 @@ def _run_quality_evidence_authorized_import(
     beets.close()
     r.exit_code = final_exit_decision(quality_is_transcode)
     _log("[OK] Evidence-authorized import complete")
-    _emit_and_exit(r)
+    return r
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2241,70 +2379,75 @@ def open_import_beets(
 
 
 def import_beets_subprocess_kwargs(
-    args: argparse.Namespace,
+    request: ImportOneRequest,
 ) -> dict[str, str | None]:
     """Forward the child's complete snapshotted Beets authority downstream."""
 
     return {
-        "beets_config_dir": args.beets_config_dir,
-        "beets_python": args.beets_python,
-        "beets_library_db_path": args.beets_library_db,
-        "beets_library_root": args.beets_library_root,
+        "beets_config_dir": request.beets_config_dir,
+        "beets_python": request.beets_python,
+        "beets_library_db_path": request.beets_library_db,
+        "beets_library_root": request.beets_library_root,
     }
 
 
-def main():
-    global _import_total_start
-    _import_total_start = time.monotonic()
+@dataclass
+class _PreviewScratch:
+    """The dry-run private copy, owned by the run that allocates it.
 
-    # Belt-and-suspenders for the group-writable import boundary (umask 0o002) —
-    # see lib/permissions.py / GH #84. Done in main() (not at module import) so
-    # importing this module for tests doesn't leak the process umask into the
-    # test process.
-    reset_umask()
+    A preview must never mutate the caller's album, so it works on an
+    isolated copy. Ownership sits here rather than in the exit path because
+    ``run_import_one`` can now RETURN, and a returning run that left its
+    scratch behind would leak a full album copy per call.
+    """
 
-    args = build_parser().parse_args()
+    root: str | None = None
 
-    mbid = args.mb_release_id
-    request_id = args.request_id
+    def allocate(self, source_path: str) -> str:
+        """Create the scratch root and return the album path inside it."""
+        self.root = tempfile.mkdtemp(prefix="cratedigger-import-preview-")
+        basename = os.path.basename(os.path.abspath(source_path)) or "album"
+        return os.path.join(self.root, basename)
 
-    # Parse --quality-rank-config and replace the module-level _rank_cfg default.
-    # Used by BeetsDB.get_album_info() mixed-format reduction + (commit 5)
-    # quality_rank()/compare_quality()/quality_gate_decision().
-    global _rank_cfg
-    if args.quality_rank_config:
-        try:
-            _rank_cfg = QualityRankConfig.from_json(args.quality_rank_config)
-            _log(f"[CONFIG] quality_rank_config: "
-                 f"metric={_rank_cfg.bitrate_metric.value}")
-        except (ValueError, KeyError) as exc:
-            _log(f"[WARN] --quality-rank-config parse failed ({exc}); "
-                 f"falling back to defaults")
-            _rank_cfg = QualityRankConfig.defaults()
+    def remove(self) -> None:
+        """Delete the scratch root if one was allocated. Safe to repeat."""
+        if self.root is not None:
+            shutil.rmtree(self.root, ignore_errors=True)
+            self.root = None
 
-    # --force: raise distance threshold so high-distance candidates are
-    # accepted. The same number the force path already handed to
-    # ``beets_validate`` at the validation seam, so both comparison sites in a
-    # force import run under one override rather than two conventions (#1080).
-    global max_distance
-    if args.force:
-        max_distance = FORCE_IMPORT_DISTANCE_THRESHOLD
+
+def _run_import_one_stages(
+    request: ImportOneRequest,
+    scratch: _PreviewScratch,
+) -> ImportResult:
+    """The stage sequence, returning where the CLI used to exit.
+
+    Same stages in the same order as before the split; ``run_import_one`` is
+    the public entry that owns ``scratch`` and the only caller.
+    """
+    mbid = request.mb_release_id
+    request_id = request.request_id
+
+    rank_cfg = resolve_rank_config(request.quality_rank_config)
+
+    max_distance = apply_max_distance(request.force)
+    if request.force:
         _log(
             "[FORCE] Distance check disabled "
             f"(max_distance={FORCE_IMPORT_DISTANCE_THRESHOLD})"
         )
 
     r = ImportResult()
-    r.preview = args.dry_run
-    r.existing_v0_probe = _existing_v0_probe_from_args(args)
+    r.preview = request.dry_run
+    r.existing_v0_probe = _existing_v0_probe_from_request(request)
     global _current_result
     _current_result = r
 
     # --- Pre-flight: already imported? ---
     stage_start = time.monotonic()
     beets = open_import_beets(
-        db_path=args.beets_library_db,
-        library_root=args.beets_library_root,
+        db_path=request.beets_library_db,
+        library_root=request.beets_library_root,
     )
     import atexit
     atexit.register(beets.close)
@@ -2315,15 +2458,15 @@ def main():
         _log(f"[PRE-FLIGHT] Already in beets: {mbid} — checking if new files are better")
 
     # --- Path check (pure decision) ---
-    pf = preflight_decision(already_in_beets, os.path.isdir(args.path))
+    pf = preflight_decision(already_in_beets, os.path.isdir(request.path))
     if pf.is_terminal:
         r.decision = pf.decision
         r.exit_code = pf.exit_code
         r.error = pf.error
         if pf.decision == "preflight_existing":
             _log("[PRE-FLIGHT] No new files, keeping existing import")
-            if request_id and not args.dry_run:
-                info = beets.get_album_info(mbid, _rank_cfg)
+            if request_id and not request.dry_run:
+                info = beets.get_album_info(mbid, rank_cfg)
                 if info:
                     r.postflight = PostflightInfo(
                         beets_id=info.album_id,
@@ -2333,25 +2476,24 @@ def main():
         else:
             _log(f"[ERROR] {r.error}")
         beets.close()
-        _emit_and_exit(r)
+        return r
 
-    if args.quality_evidence_action_file and not args.dry_run:
-        _run_quality_evidence_authorized_import(
-            args=args,
+    if request.quality_evidence_action_file and not request.dry_run:
+        return _run_quality_evidence_authorized_import(
+            request=request,
             beets=beets,
             mbid=mbid,
             request_id=request_id,
             already_in_beets=already_in_beets,
+            rank_cfg=rank_cfg,
+            max_distance=max_distance,
         )
 
-    work_path = args.path
-    if args.dry_run:
-        global _preview_temp_root
-        _preview_temp_root = tempfile.mkdtemp(prefix="cratedigger-import-preview-")
-        basename = os.path.basename(os.path.abspath(args.path)) or "album"
-        work_path = os.path.join(_preview_temp_root, basename)
+    work_path = request.path
+    if request.dry_run:
+        work_path = scratch.allocate(request.path)
         stage_start = time.monotonic()
-        shutil.copytree(args.path, work_path)
+        shutil.copytree(request.path, work_path)
         _log_timing("dry_run_copy", stage_start)
         _log(f"[DRY-RUN] Previewing isolated copy: {work_path}")
 
@@ -2366,7 +2508,7 @@ def main():
             r.decision = f"media_readiness_{exc.kind}"
             r.error = str(exc)
             _log(f"[ERROR] {r.error}")
-            _emit_and_exit(r)
+            return r
 
     # Capture downloaded-source truth before any V0 probe or target conversion
     # mutates the isolated/staged folder.
@@ -2402,8 +2544,8 @@ def main():
     # preview worker from the installed release's persisted source evidence;
     # the on-disk derivative must never be spectrally re-analyzed.
     preview_candidate = (
-        _preview_candidate_evidence(args.quality_evidence_action_file)
-        if args.dry_run else None
+        _preview_candidate_evidence(request.quality_evidence_action_file)
+        if request.dry_run else None
     )
     has_cd_rip_proof = (
         preview_candidate is not None
@@ -2448,7 +2590,7 @@ def main():
     _log_timing("spectral_analysis", stage_start)
 
     # --- Convert lossless → V0 (unless keeping lossless on disk) ---
-    keep_lossless = args.target_format in ("flac", "lossless")
+    keep_lossless = request.target_format in ("flac", "lossless")
     converted = 0
     failed = 0
     original_ext = None
@@ -2457,7 +2599,7 @@ def main():
     is_transcode = False
     supported_lossless_source = False
 
-    has_target = bool(args.verified_lossless_target)
+    has_target = bool(request.verified_lossless_target)
     # V0 must keep the lossless source when either a second conversion pass
     # is planned (``verified_lossless_target``) OR the caller asked us to
     # hold it until the quality decision (``--preserve-source``, issue #111).
@@ -2467,7 +2609,7 @@ def main():
         try:
             converted, failed, original_ext, source_channels = convert_lossless(
                 work_path, V0_SPEC,
-                keep_source=has_target or args.preserve_source,
+                keep_source=has_target or request.preserve_source,
                 audit=r.conversion,
             )
         finally:
@@ -2489,13 +2631,13 @@ def main():
             r.decision = cd.decision
             r.error = cd.error
             _log(f"[ERROR] {r.error}")
-            _emit_and_exit(r)
+            return r
 
         # --- Transcode detection ---
         # When the source is retained, FLAC+MP3 coexist — measure only MP3.
         v0_ext_filter = (
             {".mp3"}
-            if (has_target or args.preserve_source) and converted > 0
+            if (has_target or request.preserve_source) and converted > 0
             else None
         )
         post_conv_br = _get_folder_min_bitrate(
@@ -2540,9 +2682,9 @@ def main():
                 r.decision = cd.decision
                 r.error = cd.error
                 _log(f"[ERROR] {r.error}")
-                _emit_and_exit(r)
+                return r
         else:
-            _log(f"[CONVERT] Keeping lossless on disk (target_format={args.target_format})")
+            _log(f"[CONVERT] Keeping lossless on disk (target_format={request.target_format})")
         r.final_format = "flac"
         stage_start = time.monotonic()
         if not has_cd_rip_proof:
@@ -2573,17 +2715,17 @@ def main():
     new_min_br = min(new_bitrates) if new_bitrates else None
     new_avg_br = int(sum(new_bitrates) / len(new_bitrates)) if new_bitrates else None
     projected_is_cbr = projected_is_cbr_from_bitrates(new_bitrates)
-    existing_info = beets.get_album_info(mbid, _rank_cfg)
+    existing_info = beets.get_album_info(mbid, rank_cfg)
     _log_timing("quality_measurement", stage_start)
     existing_min_br = existing_info.min_bitrate_kbps if existing_info else None
     if (
-        args.override_min_bitrate is not None
+        request.override_min_bitrate is not None
         and existing_min_br is not None
-        and args.override_min_bitrate != existing_min_br
+        and request.override_min_bitrate != existing_min_br
     ):
-        _log(f"  [OVERRIDE] pipeline says {args.override_min_bitrate}kbps, "
+        _log(f"  [OVERRIDE] pipeline says {request.override_min_bitrate}kbps, "
              f"beets says {existing_min_br}kbps")
-    effective_existing = args.override_min_bitrate if args.override_min_bitrate is not None else existing_min_br
+    effective_existing = request.override_min_bitrate if request.override_min_bitrate is not None else existing_min_br
     if effective_existing is not None:
         _log(f"  prev_min_bitrate={effective_existing}")
     if new_min_br is not None:
@@ -2595,12 +2737,12 @@ def main():
     # 15 FLAC + 2 MP3 bonus tracks) is rejected at the evidence layer via
     # ``preimport_mixed_source``. The lossy files would otherwise pass
     # through to the library untouched and the album would falsely stamp
-    # verified-lossless. Look at the original source directory (``args.path``)
+    # verified-lossless. Look at the original source directory (``request.path``)
     # — ``work_path`` has already been mutated by conversion so it contains
     # the V0 outputs alongside the kept FLAC originals.
     _source_audio_files: list[str] = []
     try:
-        source_dir: str = args.path
+        source_dir: str = request.path
         _source_audio_files = [
             f for f in os.listdir(source_dir)
             if os.path.splitext(f)[1].lower() in AUDIO_EXTENSIONS
@@ -2620,11 +2762,11 @@ def main():
     # literally what was measured: ``collect_attempt_spectral_audit`` ran
     # over the downloaded folder in this process, before any conversion.
     #
-    # ``args.path`` is the right container list for the decode-path
+    # ``request.path`` is the right container list for the decode-path
     # question on the path that matters. The evidence-authorized
-    # production import returns above (``NoReturn``) carrying the proof
+    # production import returns its own result above, carrying the proof
     # the PREVIEW minted, and preview runs ``--dry-run``, where
-    # ``work_path`` is an isolated copy and ``args.path`` stays pristine.
+    # ``work_path`` is an isolated copy and ``request.path`` stays pristine.
     # A legacy non-preview caller converts in place, so its list can mix
     # kept originals with V0 outputs — which resolves to an unknown decode
     # path and withholds the leg. Fail closed, and the same direction the
@@ -2669,7 +2811,7 @@ def main():
         else None
     )
     will_be_verified_lossless = cd_rip_proof is not None or determine_verified_lossless(
-        args.target_format, spectral_grade, converted, is_transcode,
+        request.target_format, spectral_grade, converted, is_transcode,
         v0_probe=r.v0_probe,
         has_lossy_passthrough=has_lossy_passthrough,
         ultrasonic_leg=candidate_ultrasonic_leg,
@@ -2687,7 +2829,7 @@ def main():
     # surface (Phase 5 plan §2, §1.7). Mirrors ``v0_verified_override`` in
     # ``lib/quality/pipeline.py``, which the decision twins share.
     certified_without_proof_legs = determine_verified_lossless(
-        args.target_format, spectral_grade, converted, is_transcode,
+        request.target_format, spectral_grade, converted, is_transcode,
         v0_probe=r.v0_probe,
         has_lossy_passthrough=has_lossy_passthrough)
     v0_verified_lossless_override = (
@@ -2718,15 +2860,15 @@ def main():
     # the target conversion always reads the ORIGINALS, never our own V0
     # proxies (``convert_lossless`` selects ``_lossless_filenames``).
     new_conv_target = conversion_target(
-        args.target_format, supported_lossless_source,
-        args.verified_lossless_target)
+        request.target_format, supported_lossless_source,
+        request.verified_lossless_target)
     # Probe the real native codec once and reuse at both comparison_format_hint
     # call sites. ``comparison_format_hint`` only consumes this on the native
     # (converted==0) branch; on converted paths it's ignored, so one probe is
     # enough for the whole function.
     native_codec_family = _detect_native_codec_family(work_path)
     new_format_label = comparison_format_hint(
-        target_format=args.target_format,
+        target_format=request.target_format,
         verified_lossless_target=new_conv_target,
         converted_count=converted,
         is_transcode=quality_is_transcode,
@@ -2762,7 +2904,7 @@ def main():
     )
     existing_m = build_existing_measurement(
         existing_info,
-        override_min_bitrate=args.override_min_bitrate,
+        override_min_bitrate=request.override_min_bitrate,
         existing_spectral_grade=existing_spectral_grade,
         existing_spectral_bitrate=existing_spectral_bitrate,
     )
@@ -2791,7 +2933,7 @@ def main():
                 spectral_grade=spectral_grade,
                 supported_lossless_source=supported_lossless_source,
             ),
-            cfg=_rank_cfg,
+            cfg=rank_cfg,
         )
     if provisional.decision is not None:
         decision = provisional.decision
@@ -2809,7 +2951,7 @@ def main():
     else:
         qd = quality_decision_stage(
             new_m, existing_m, is_transcode=quality_is_transcode,
-            cfg=_rank_cfg,
+            cfg=rank_cfg,
             target_contract=target_contract,
             v0_probe=r.v0_probe,
             verified_lossless_proof=r.verified_lossless_proof is not None,
@@ -2818,7 +2960,7 @@ def main():
         r.decision = decision
         r.comparison_basis = qd.comparison_basis
 
-    if args.dry_run:
+    if request.dry_run:
         if provisional.decision is not None:
             r.exit_code = 5 if provisional.confident_reject else 0
         else:
@@ -2826,7 +2968,7 @@ def main():
             r.exit_code = qd.exit_code if qd.is_terminal else 0
         _log(f"[DRY-RUN] Preview decision={decision}; stopping before beets import")
         beets.close()
-        _emit_and_exit(r)
+        return r
 
     if provisional.confident_reject:
         r.exit_code = 5
@@ -2836,11 +2978,11 @@ def main():
             else "[SUSPECT LOSSLESS REJECT]"
         )
         _log(f"{log_prefix} {provisional.reason}")
-        if args.preserve_source and not keep_lossless and converted > 0:
+        if request.preserve_source and not keep_lossless and converted > 0:
             _remove_files_by_ext(work_path, "." + V0_SPEC.extension)
             _log("  [PRESERVE-SOURCE] Removed temporary V0 artifacts; "
                  "lossless originals left intact for retry")
-        _emit_and_exit(r)
+        return r
 
     if qd is not None and qd.is_terminal:
         r.exit_code = qd.exit_code
@@ -2855,11 +2997,11 @@ def main():
         # convert_lossless skips (output exists) and returns converted=0,
         # the quality stage then measures across mixed files and the
         # verified_lossless_target pass is wrongly skipped.
-        if args.preserve_source and not keep_lossless and converted > 0:
+        if request.preserve_source and not keep_lossless and converted > 0:
             _remove_files_by_ext(work_path, "." + V0_SPEC.extension)
             _log("  [PRESERVE-SOURCE] Removed temporary V0 artifacts; "
                  "lossless originals left intact for retry")
-        _emit_and_exit(r)
+        return r
 
     # Non-terminal quality decisions — log and proceed to import
     if decision == "import":
@@ -2927,7 +3069,7 @@ def main():
                 r.decision = "target_conversion_failed"
                 r.error = f"{target_failed} {target_spec.label} conversions failed"
                 _log(f"[ERROR] {r.error}")
-                _emit_and_exit(r)
+                return r
             target_achieved = True
             if target_converted > 0:
                 r.conversion.was_converted = True
@@ -2977,7 +3119,7 @@ def main():
     # copy (PR #112 Codex round 1 P1).
     if not keep_lossless and target_cleanup_decision(
             target_achieved, has_target, converted,
-            preserve_source=args.preserve_source):
+            preserve_source=request.preserve_source):
         stage_start = time.monotonic()
         _remove_lossless_files(work_path)
         _log_timing("source_cleanup", stage_start)
@@ -2990,7 +3132,8 @@ def main():
     import_outcome = run_import(
         work_path,
         mbid,
-        **import_beets_subprocess_kwargs(args),
+        max_distance=max_distance,
+        **import_beets_subprocess_kwargs(request),
     )
     _log_timing("beets_import", stage_start)
     rc = import_outcome.exit_code
@@ -3010,7 +3153,7 @@ def main():
             r.decision = "import_failed" if rc == 2 else "mbid_missing" if rc == 4 else "import_failed"
             r.error = _harness_failure_error(import_outcome, rc)
         _log(f"[ERROR] Import failed (rc={rc})")
-        _emit_and_exit(r)
+        return r
 
     # Beets owns duplicate replacement. Cratedigger only validates the
     # resulting DB shape and fails loudly if Beets did not leave exactly one
@@ -3025,7 +3168,7 @@ def main():
                    "survives.")
         _log(f"[ERROR] {r.error}")
         beets.close()
-        _emit_and_exit(r)
+        return r
     if len(post_import_ids) != 1:
         r.exit_code = 2
         r.decision = "import_failed"
@@ -3035,18 +3178,18 @@ def main():
                    "post-import stale-row cleanup.")
         _log(f"[ERROR] {r.error}")
         beets.close()
-        _emit_and_exit(r)
+        return r
     imported_album_id = post_import_ids[0]
 
     # --- Post-flight verification ---
-    pf_info = beets.get_album_info(mbid, _rank_cfg)
+    pf_info = beets.get_album_info(mbid, rank_cfg)
     if not pf_info:
         r.exit_code = 2
         r.decision = "import_failed"
         r.error = f"Post-flight: MBID {mbid} NOT in beets DB after import"
         _log(f"[ERROR] {r.error}")
         beets.close()
-        _emit_and_exit(r)
+        return r
 
     # Extra guard: pf_info must resolve to the single row validated above.
     if pf_info.album_id != imported_album_id:
@@ -3057,7 +3200,7 @@ def main():
                    "beets is in an inconsistent state.")
         _log(f"[ERROR] {r.error}")
         beets.close()
-        _emit_and_exit(r)
+        return r
 
     accounting_error = _postflight_audio_accounting_error(
         import_outcome,
@@ -3078,7 +3221,7 @@ def main():
         )
         _log(f"[ERROR] {r.error}")
         beets.close()
-        _emit_and_exit(r)
+        return r
 
     r.materialized_measurement = _materialized_measurement_from_album_info(
         pf_info, r,
@@ -3125,7 +3268,38 @@ def main():
         _log("[OK] Transcode imported (upgrade) — denylist user, keep searching")
     else:
         _log("[OK] Import complete")
-    _emit_and_exit(r)
+    return r
+
+
+def run_import_one(request: ImportOneRequest) -> ImportResult:
+    """Import one album in this process and return its result.
+
+    The whole run — preflight, spectral, conversion, quality, the Beets
+    child, postflight — reduced to one call with a typed request in and an
+    ``ImportResult`` out. Nothing here exits the process, so a caller can
+    read the result directly instead of catching ``SystemExit`` and parsing
+    the sentinel line back off stdout.
+    """
+    scratch = _PreviewScratch()
+    try:
+        return _run_import_one_stages(request, scratch)
+    finally:
+        scratch.remove()
+
+
+def main() -> None:
+    """Parse argv, run one import, emit its result. The CLI's whole job."""
+    global _import_total_start
+    _import_total_start = time.monotonic()
+
+    # Belt-and-suspenders for the group-writable import boundary (umask 0o002) —
+    # see lib/permissions.py / GH #84. Done in main() (not at module import) so
+    # importing this module for tests doesn't leak the process umask into the
+    # test process, and not in ``run_import_one`` so an in-process caller does
+    # not inherit a CLI-shaped umask it never asked for.
+    reset_umask()
+
+    _emit_and_exit(run_import_one(ImportOneRequest.from_argv()))
 
 
 def _run_entrypoint(*, main_fn: Callable[[], None] = main) -> None:
