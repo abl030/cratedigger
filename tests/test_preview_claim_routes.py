@@ -9,6 +9,7 @@ arms that quietly differed from each other.
 
 from __future__ import annotations
 
+import contextlib
 import unittest
 from collections.abc import Callable
 
@@ -24,6 +25,53 @@ from lib.import_queue import (
 from lib.import_worker_loop import ClaimState
 from scripts import import_preview_worker
 from scripts.import_preview_worker import _PreviewHeartbeatDB
+
+
+class _RecordingStageDB:
+    """A pinned-session stage connection that records which claim it took.
+
+    Both request-scoped claim methods are declared, exactly as production's
+    ``_RequestScopedPreviewStageDB`` declares them, so the route's own
+    ``claim_fn`` choice is the only thing that decides which one runs.
+    """
+
+    def __init__(self) -> None:
+        self.claims: list[str] = []
+
+    @contextlib.contextmanager
+    def _pin_owner_session(self, cancellation_token: object):
+        del cancellation_token
+        yield object()
+
+    @contextlib.contextmanager
+    def advisory_lock(self, namespace: int, key: int):
+        del namespace, key
+        yield True
+
+    def claim_force_import_preview_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None:
+        del job_id, request_id, worker_id
+        self.claims.append("force")
+        return None
+
+    def claim_local_import_preview_job_under_lock(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        worker_id: str | None,
+    ) -> ImportJob | None:
+        del job_id, request_id, worker_id
+        self.claims.append("local")
+        return None
+
+    def close(self) -> None:
+        return None
 
 
 class _StubHeartbeatDB:
@@ -119,6 +167,7 @@ def _attempt(
     execution_lease: ExecutionLeaseSnapshot | None = None,
     process_fn: Callable[..., ImportJob | None] = _noop_process,
     heartbeat_db_factory: Callable[[str], _PreviewHeartbeatDB] | None = None,
+    stage_db_factory: Callable[[str], object] | None = None,
 ) -> import_preview_worker._PreviewClaimAttempt:
     return import_preview_worker._PreviewClaimAttempt(
         db=db,
@@ -126,7 +175,7 @@ def _attempt(
         execution_lease=execution_lease,
         heartbeat_interval=1.0,
         runtime_config=None,
-        stage_db_factory=lambda _dsn: object(),
+        stage_db_factory=stage_db_factory or (lambda _dsn: object()),
         heartbeat_db_factory=heartbeat_db_factory or (
             lambda _dsn: _StubHeartbeatDB()
         ),
@@ -197,6 +246,43 @@ class TestAutomationRouteRefusals(unittest.TestCase):
         self.assertFalse(attempt.claim_state.claimed)
 
 
+class TestRequestScopedRoutesTakeTheirOwnClaim(unittest.TestCase):
+    """Each route's ``claim_fn`` — the only thing force and local differ by.
+
+    Inverting it is silent: ``claim_force_import_preview_job_under_lock``
+    binds ``job_type = 'force_import'``, so a local row would simply never
+    claim and local-import previews would stall with no error anywhere.
+    """
+
+    def _route_reaches(self, job_type: str, route: object) -> list[str]:
+        stage = _RecordingStageDB()
+        attempt = _attempt(
+            _RecordingClaimer(dsn="dsn"),
+            stage_db_factory=lambda _dsn: stage,
+        )
+        assert callable(route)
+        route(_job(job_type), attempt)
+        return stage.claims
+
+    def test_the_force_route_takes_the_force_claim(self) -> None:
+        self.assertEqual(
+            self._route_reaches(
+                IMPORT_JOB_FORCE,
+                import_preview_worker._preview_route_force_import,
+            ),
+            ["force"],
+        )
+
+    def test_the_local_route_takes_the_local_claim(self) -> None:
+        self.assertEqual(
+            self._route_reaches(
+                IMPORT_JOB_LOCAL,
+                import_preview_worker._preview_route_local_import,
+            ),
+            ["local"],
+        )
+
+
 class TestRequestScopedRouteRefusals(unittest.TestCase):
     def test_no_dsn_leaves_the_claim_unmarked(self) -> None:
         for job_type, route in (
@@ -235,11 +321,12 @@ class TestPlainRoute(unittest.TestCase):
     ) -> None:
         """The one place the two claim shapes genuinely disagree.
 
-        The pinned-session routes need a concrete heartbeat factory and get
-        ``heartbeat_db_factory or PipelineDB``; this route hands the caller's
-        own value straight to ``process_fn``, which reads ``None`` as "use my
-        own default". Substituting ``PipelineDB`` here would silently open a
-        real connection in every test that passes ``None``.
+        The ladder's pinned-session arms passed ``heartbeat_db_factory or
+        PipelineDB`` and its ``else`` arm passed the caller's raw value; this
+        route is the ``else`` arm. ``process_fn`` reads ``None`` as "use my
+        own default" and reaches the same factory either way, so the two are
+        equivalent in production — this pins the ladder's exact behaviour,
+        not a live hazard.
         """
         forwarded: list[object] = []
 

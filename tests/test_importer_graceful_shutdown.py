@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import signal
 import sys
 import unittest
 
@@ -12,22 +11,6 @@ import conftest  # noqa: F401
 
 from scripts import importer
 from tests.fakes import FakePipelineDB
-
-
-class TestGracefulShutdownFlag(unittest.TestCase):
-    def test_starts_unrequested(self) -> None:
-        flag = importer.GracefulShutdown()
-
-        self.assertFalse(flag.requested)
-
-    def test_request_is_a_valid_signal_handler_and_sets_the_flag(self) -> None:
-        """The exact call shape ``signal.signal(SIGTERM, flag.request)``
-        invokes: ``(signum, frame)``."""
-        flag = importer.GracefulShutdown()
-
-        flag.request(signal.SIGTERM, None)
-
-        self.assertTrue(flag.requested)
 
 
 class TestDrainImportQueue(unittest.TestCase):

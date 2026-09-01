@@ -83,6 +83,7 @@ from lib.import_worker_loop import (
     capture_worker_execution_lease,
     claim_one_candidate,
     execution_lease_from_job,
+    stage_dsn,
 )
 from lib.measurement import (
     ExistingSpectralAuditLookup,
@@ -1947,11 +1948,14 @@ class _PreviewClaimAttempt:
     runtime_config: CratediggerConfig | None
     stage_db_factory: Callable[[str], object]
     heartbeat_db_factory: Callable[[str], _PreviewHeartbeatDB]
-    #: The caller's own value, ``None`` included. The pinned-session routes
-    #: need a concrete factory to open their heartbeat connection, but the
-    #: plain route forwards this straight to ``process_fn``, which treats
-    #: ``None`` as "use my own default" — so the two are NOT interchangeable
-    #: and both are carried.
+    #: The caller's own value, ``None`` included. Carried beside the
+    #: defaulted one for FIDELITY, not for a runtime hazard: the ladder's
+    #: pinned-session arms passed ``heartbeat_db_factory or PipelineDB`` and
+    #: its ``else`` arm passed the raw value, and ``process_fn`` reads
+    #: ``None`` as "use my own default". Since production never overrides
+    #: ``process_fn`` the two are equivalent in production; the distinction
+    #: is observable only to a test that inspects the forwarded kwarg, which
+    #: is exactly how the ladder's own behaviour is pinned.
     raw_heartbeat_db_factory: Callable[[str], _PreviewHeartbeatDB] | None
     candidate_measurement_fn: Callable[..., ImportPreviewResult] | None
     process_fn: Callable[..., ImportJob | None]
@@ -1959,8 +1963,7 @@ class _PreviewClaimAttempt:
 
     def dsn(self) -> str | None:
         """The pinned-session routes each open a stage connection of their own."""
-        value = getattr(self.db, "dsn", None)
-        return str(value) if value else None
+        return stage_dsn(self.db)
 
 
 class _PreviewClaimRoute(Protocol):
@@ -2074,11 +2077,14 @@ def _preview_route_plain(
     )
 
 
-#: The one place every preview job-type routing decision in this module is
-#: made — the preview lane's twin of ``scripts/importer.py``'s
+#: The one place every preview CLAIM-ROUTE decision in this module is made
+#: — the preview lane's twin of ``scripts/importer.py``'s
 #: ``_IMPORT_JOB_KINDS``, which replaced the same if/elif ladder on the
-#: import side (issue #1278). Positive routing, like the candidate scans'
-#: own ``job_type`` table: every type is named.
+#: import side (issue #1278). Scope, deliberately narrow: this module still
+#: decides on ``job_type`` elsewhere (the action-copy prefix table, the
+#: preview-input ladder, the front-gate arms); only claiming routes here.
+#: Positive routing, like the candidate scans' own ``job_type`` table:
+#: every type is named.
 _PREVIEW_CLAIM_ROUTES: dict[str, _PreviewClaimRoute] = {
     IMPORT_JOB_AUTOMATION: _preview_route_automation,
     IMPORT_JOB_FORCE: _preview_route_force_import,

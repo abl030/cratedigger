@@ -28,9 +28,12 @@ from lib.import_queue import (
 #: *i* here is the assignment for column *i* there. Two ordered lists rather
 #: than one mapping so the lane's fields stay ordinary attribute reads (a
 #: reflective lookup would hide them from the dead-code sweep), and
-#: ``JobLane.__post_init__`` refuses any lane whose column count disagrees
+#: ``JobLane.__post_init__`` refuses any lane whose column COUNT disagrees
 #: with this — so a lane that grows a sixth stamped column cannot silently
-#: grow it in only one of the two places.
+#: grow it in only one of the two places. It cannot check the ORDER: swapping
+#: two entries on either side keeps the count and silently pairs a column
+#: with the wrong assignment. The rendered-SQL pins in
+#: ``tests/test_import_job_lane.py`` are what catch that.
 CLAIM_ASSIGNMENT_TEMPLATES: Final[tuple[str, ...]] = (
     "{column} = 'running'",
     "{column} = {column} + 1",

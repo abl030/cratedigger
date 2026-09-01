@@ -23,6 +23,7 @@ from lib.import_queue import (
     ImportJob,
     youtube_import_payload,
 )
+from lib.import_worker_loop import CandidateScanCursor
 from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
 from tests.dispatch_helpers import claim_next_import_job
 from tests.fakes import FakePipelineDB
@@ -252,7 +253,7 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
             observed.append(claimed.request_id)
             return claimed
 
-        import_cursor = importer.CandidateScanCursor()
+        import_cursor = CandidateScanCursor()
         if lane == "import":
             for _poll in range(2):
                 importer.run_once(
@@ -264,7 +265,7 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
                     scan_cursor=import_cursor,
                 )
         else:
-            preview_cursor = import_preview_worker.CandidateScanCursor()
+            preview_cursor = CandidateScanCursor()
             for _poll in range(2):
                 import_preview_worker.run_once(
                     db,
@@ -516,8 +517,8 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
             observed.append(claimed.request_id)
             return claimed
 
-        import_cursor = importer.CandidateScanCursor()
-        preview_cursor = import_preview_worker.CandidateScanCursor()
+        import_cursor = CandidateScanCursor()
+        preview_cursor = CandidateScanCursor()
         if lane == "import":
             importer.run_once(
                 db,  # pyright: ignore[reportArgumentType]
@@ -661,8 +662,8 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
                 observed_job_ids.append(claimed.id)
                 return claimed
 
-            import_cursor = importer.CandidateScanCursor()
-            preview_cursor = import_preview_worker.CandidateScanCursor()
+            import_cursor = CandidateScanCursor()
+            preview_cursor = CandidateScanCursor()
             for _poll in range(older_count):
                 if lane == "import":
                     importer.run_once(
@@ -814,8 +815,8 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
                 observed_job_ids.append(claimed.id)
                 return claimed
 
-            import_cursor = importer.CandidateScanCursor()
-            preview_cursor = import_preview_worker.CandidateScanCursor()
+            import_cursor = CandidateScanCursor()
+            preview_cursor = CandidateScanCursor()
 
             # One fully contended page advances to the tail.
             if lane == "import":

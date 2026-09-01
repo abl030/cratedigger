@@ -83,6 +83,7 @@ from lib.import_worker_loop import (
     capture_worker_execution_lease,
     claim_one_candidate,
     execution_lease_from_job,
+    stage_dsn,
 )
 from lib.mb_canonical import configure_canonical_release_lookup
 from lib.pipeline_db import (
@@ -329,8 +330,7 @@ class _ClaimAttempt:
 
     def dsn(self) -> str | None:
         """The pinned-session routes each open a stage connection of their own."""
-        value = getattr(self.db, "dsn", None)
-        return str(value) if value else None
+        return stage_dsn(self.db)
 
 
 class _JobKindClaimRoute(Protocol):

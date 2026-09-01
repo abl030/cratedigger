@@ -60,7 +60,7 @@ CLAUSE_CLAIMED_WRONG_LANE = (
     "a claim took a row parked in the other lane"
 )
 CLAUSE_CLAIMED_GUARDED_REQUEST = (
-    "a claim took a row its request guard refuses"
+    "a claim took a row its guards refuse"
 )
 CLAUSE_REFUSED_ITS_OWN_LANE = (
     "a claim refused a row its own lane and guard admit"
@@ -74,8 +74,11 @@ CLAUSE_LANE_NOT_STAMPED = (
 CLAUSE_CLEARED_COLUMN_SURVIVED = (
     "a successful claim left its lane's cleared columns set"
 )
+CLAUSE_CLAIM_DID_NOT_ADVANCE_UPDATED_AT = (
+    "a successful claim did not advance the queue-timeline clock"
+)
 CLAUSE_GUARDED_CANDIDATE_VISIBLE = (
-    "a candidate scan offered a row its request guard refuses"
+    "a candidate scan offered a row its guards refuse"
 )
 CLAUSE_ADMISSIBLE_CANDIDATE_INVISIBLE = (
     "a candidate scan hid a row its own lane admits"
@@ -116,7 +119,8 @@ class LaneWorld:
     claim_lane: str
     #: The lane the seeded row was parked in.
     row_lane: str
-    #: Whether the request guard admits THIS claim call. Derived from the
+    #: Whether every guard on THIS claim call admits it — the request guard
+    #: AND the row's own ``status = 'queued'`` stage gate. Derived from the
     #: state the test really produced, not from the claim's answer.
     guard_admits: bool
     #: Whether the shared routing table should offer this row in
@@ -167,18 +171,25 @@ def lane_claim_violations(
             and _attempts(columns_after, lane) == _attempts(columns_before, lane) + 1
             and columns_after[lane.heartbeat_at_column] is not None
             and columns_after[lane.started_at_column] is not None
-            # COALESCE: a re-claim never re-dates the first claim.
+            # COALESCE: a re-claim never re-dates the first claim. This
+            # conjunct is fail-closed LEGISLATION, not patrol — every
+            # producer that returns a row to a claimable stage
+            # (requeue_import_job_for_preview, both preview requeues) NULLs
+            # the lane's started_at on the way, so no producible world can
+            # enter a claim with it already set and nothing here can make it
+            # false. It legislates for a future producer that stops doing
+            # that; the deterministic render pin is what kills a COALESCE
+            # mutant today.
             and (
                 columns_before[lane.started_at_column] is None
                 or columns_after[lane.started_at_column]
                 == columns_before[lane.started_at_column]
             )
-            # Every claim advances the queue-timeline clock.
-            and columns_after["updated_at"]
-            != columns_before["updated_at"]
         )
         if not stamped:
             violations.append(CLAUSE_LANE_NOT_STAMPED)
+        if columns_after["updated_at"] == columns_before["updated_at"]:
+            violations.append(CLAUSE_CLAIM_DID_NOT_ADVANCE_UPDATED_AT)
         if any(
             columns_after[column] is not None
             for column in lane.cleared_columns
@@ -273,10 +284,13 @@ class TestImportJobLaneParityGenerated(unittest.TestCase):
         have anything to clear.
 
         ``preview_restart``: the worker-restart sequence — claim the preview,
-        then let startup recovery requeue the running row, which is the only
-        producer of a ``waiting`` row whose ``preview_message`` is set.
-        ``import_requeued``: the importer's own missing-evidence requeue,
-        which returns the row to ``waiting`` with ``attempts`` preserved.
+        then let startup recovery requeue the running row, which leaves a
+        ``waiting`` row whose ``preview_message`` is set.
+        ``requeue_stale_import_preview_jobs`` produces the same state by the
+        same SQL shape on a heartbeat-age threshold; this one is used because
+        it needs no backdated row. ``import_requeued``: the importer's own
+        missing-evidence requeue, which returns the row to ``waiting`` with
+        ``attempts`` preserved.
         """
         if prior_attempt == "none":
             return
@@ -674,6 +688,12 @@ class TestImportJobLaneParityGenerated(unittest.TestCase):
         )
 
 
+#: The two instants the checker's own self-test worlds use for a claim that
+#: did, and did not, advance the queue-timeline clock.
+_EARLIER = "2026-09-01T00:00:00+00:00"
+_LATER = "2026-09-01T00:00:01+00:00"
+
+
 def _columns(**overrides: object) -> ColumnSnapshot:
     """A claim-column snapshot for the checker's own self-tests."""
     snapshot: ColumnSnapshot = {
@@ -689,7 +709,7 @@ def _columns(**overrides: object) -> ColumnSnapshot:
         "preview_heartbeat_at": None,
         "preview_message": None,
         "preview_error": None,
-        "updated_at": "2026-09-01T00:00:00+00:00",
+        "updated_at": _EARLIER,
     }
     snapshot.update(overrides)
     return snapshot
@@ -701,9 +721,9 @@ def _stamped(lane: JobLane, base: ColumnSnapshot) -> ColumnSnapshot:
     after[lane.status_column] = "running"
     after[lane.attempts_column] = _attempts(base, lane) + 1
     after[lane.worker_id_column] = "lane-worker"
-    after[lane.started_at_column] = "2026-09-01T00:00:00+00:00"
-    after[lane.heartbeat_at_column] = "2026-09-01T00:00:01+00:00"
-    after["updated_at"] = "2026-09-01T00:00:01+00:00"
+    after[lane.started_at_column] = _EARLIER
+    after[lane.heartbeat_at_column] = _LATER
+    after["updated_at"] = _LATER
     for column in lane.cleared_columns:
         after[column] = None
     return after
@@ -787,9 +807,25 @@ class TestLaneClaimClausesTripOnViolations(unittest.TestCase):
                 ),
                 claimed=True,
                 columns_before=clean,
-                columns_after=clean,
+                # The clock advanced; only the lane stamp is missing, so the
+                # timeline clause below stays silent for this world.
+                columns_after={**clean, "updated_at": _LATER},
                 visible=True,
                 message=CLAUSE_LANE_NOT_STAMPED,
+            ),
+            _ClauseCase(
+                "a successful preview claim left the timeline clock alone",
+                LaneWorld(
+                    IMPORT_JOB_FORCE, "preview", "preview",
+                    guard_admits=True, scan_admits=True,
+                ),
+                claimed=True,
+                columns_before=clean,
+                columns_after={
+                    **preview_ok, "updated_at": clean["updated_at"],
+                },
+                visible=True,
+                message=CLAUSE_CLAIM_DID_NOT_ADVANCE_UPDATED_AT,
             ),
             _ClauseCase(
                 "a successful preview claim kept the previous attempt's error",
@@ -887,6 +923,7 @@ class TestLaneClaimClausesTripOnViolations(unittest.TestCase):
             CLAUSE_OTHER_LANE_MUTATED,
             CLAUSE_LANE_NOT_STAMPED,
             CLAUSE_CLEARED_COLUMN_SURVIVED,
+            CLAUSE_CLAIM_DID_NOT_ADVANCE_UPDATED_AT,
             CLAUSE_GUARDED_CANDIDATE_VISIBLE,
             CLAUSE_ADMISSIBLE_CANDIDATE_INVISIBLE,
         )

@@ -8053,8 +8053,10 @@ class TestFakeClaimMirrorsProductionsLaneGuards(unittest.TestCase):
             job.id, worker_id="second",
         )
         assert reclaimed is not None
+        # ``preview_message`` is the only half this constrains: the requeue
+        # already NULLs ``preview_error``, so asserting it here would pin a
+        # bystander.
         self.assertIsNone(reclaimed.preview_message)
-        self.assertIsNone(reclaimed.preview_error)
 
 
 class TestFakeMergeRekeyForceClaimFence(unittest.TestCase):

@@ -8,8 +8,11 @@ and it lived here twice: the same bounded-scan cursor, the same
 peek-then-wrap-then-claim skeleton, the same lease reconstruction, the same
 claim marker.
 
-Only that shape lives here. Nothing in this module knows what a claim is
-for, which is why the executing halves of both workers stay where they are.
+Nothing here knows what a claim is FOR, which is why the executing halves
+of both workers stay where they are. One member is not shared:
+``GracefulShutdown`` has a single user (the importer owns the only SIGTERM
+handler), and it lives here beside the loop it stops rather than in the
+worker that installs it.
 """
 
 from __future__ import annotations
@@ -58,8 +61,12 @@ class CandidateScanCursor:
 class GracefulShutdown:
     """Signal-safe stop flag: SIGTERM sets it, the poll loop reads it.
 
+    The IMPORTER is the only worker that installs a handler for this; the
+    preview worker has no SIGTERM handling at all, which is why this flag
+    lives beside the shared loop rather than being shared itself.
+
     Best-effort drain (issue #1089): a deploy switch's SIGTERM no longer has
-    to kill an in-flight import mid-flight. A worker's ``run_once`` never
+    to kill an in-flight import mid-flight. The importer's ``run_once`` never
     returns until its own at-most-one claimed job reaches a terminal write,
     so simply not calling it again once this flag is set already IS "let the
     in-flight job finish, then stop claiming new work" — no special
@@ -74,6 +81,16 @@ class GracefulShutdown:
     def request(self, signum: int, frame: object) -> None:
         del signum, frame
         self.requested = True
+
+
+def stage_dsn(db: object) -> str | None:
+    """The DSN a pinned-session claim route opens its own connection on.
+
+    Every such route needs one and refuses the candidate without it, in both
+    workers — so the falsy-to-``None`` coercion is written once.
+    """
+    value = getattr(db, "dsn", None)
+    return str(value) if value else None
 
 
 def execution_lease_from_job(
@@ -150,11 +167,12 @@ def claim_one_candidate(
 ) -> ImportJob | None:
     """One bounded scan: offer a page of candidates, claim at most one.
 
-    The cursor advances past a page that yielded nothing and wraps to the
-    head when a page comes back empty, so a run of unclaimable rows cannot
-    hide the rows behind them; a successful claim resets it, because any
-    success is a bounded revisit point for older rows that may now be
-    claimable.
+    The cursor advances past a page that yielded nothing, and wraps to the
+    head when a page comes back empty AND the cursor was not already there
+    — so a run of unclaimable rows cannot hide the rows behind them, while
+    an empty page at the head is not scanned twice. A successful claim
+    resets it, because any success is a bounded revisit point for older
+    rows that may now be claimable.
     """
     candidates = peek(scan_cursor.offset)
     if not candidates and scan_cursor.offset:

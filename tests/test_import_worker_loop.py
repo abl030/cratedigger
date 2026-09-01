@@ -143,6 +143,21 @@ class TestCaptureWorkerExecutionLease(unittest.TestCase):
             ),
         )
 
+    def test_only_the_off_systemd_refusal_is_swallowed(self) -> None:
+        """A programming error in lease capture must NOT read as "no lease".
+
+        Broadening the catch past ``ValueError`` turns a real defect into a
+        silent "automation stays invisible", which is the opposite of
+        CLAUDE.md invariant 11's surface-and-restart contract.
+        """
+        def _broken(**_kwargs: object) -> ExecutionLeaseSnapshot:
+            raise AttributeError("lease capture is broken")
+
+        with self.assertRaises(AttributeError):
+            capture_worker_execution_lease(
+                systemd_unit="cratedigger-importer.service", factory=_broken,
+            )
+
     def test_the_unit_reaches_the_factory_and_its_lease_is_returned(
         self,
     ) -> None:
@@ -229,6 +244,25 @@ class TestClaimOneCandidate(unittest.TestCase):
         result, peeked = self._scan({}, cursor=cursor)
         self.assertIsNone(result)
         self.assertEqual(peeked, [0])
+        self.assertEqual(cursor.offset, 0)
+
+    def test_wrapping_onto_an_unclaimable_page_advances_from_the_head(
+        self,
+    ) -> None:
+        """The wrap resets the cursor before the second page is counted."""
+        cursor = CandidateScanCursor(offset=9)
+        result, peeked = self._scan({0: [_job(1), _job(2)]}, cursor=cursor)
+        self.assertIsNone(result)
+        self.assertEqual(peeked, [9, 0])
+        self.assertEqual(cursor.offset, 2)
+
+    def test_wrapping_onto_a_second_empty_page_leaves_the_cursor_at_the_head(
+        self,
+    ) -> None:
+        cursor = CandidateScanCursor(offset=9)
+        result, peeked = self._scan({}, cursor=cursor)
+        self.assertIsNone(result)
+        self.assertEqual(peeked, [9, 0])
         self.assertEqual(cursor.offset, 0)
 
     def test_a_claimed_candidate_that_produced_nothing_still_rewinds(
