@@ -118,24 +118,48 @@ function show(value) {
  *
  * `Object.is` at the leaves, so `NaN` equals `NaN` and `-0` does not equal
  * `0` — the same strictness `assert.deepStrictEqual` applies.
+ *
+ * CYCLES are handled, because `assert.deepStrictEqual` — the idiom
+ * `browse` and `convergence` came from — handles them, and the first cut
+ * of this function did not: it overflowed the stack (measured:
+ * `RangeError`). `pending` holds the pairs currently being compared
+ * further UP the stack, and a pair already on it is assumed equal; the
+ * entry is removed once that comparison finishes, so the assumption never
+ * leaks sideways into a sibling. Two structures that differ only in where
+ * they close their loop still differ at a leaf, so the assumption cannot
+ * manufacture an equality on its own.
  */
-function deepMatches(actual, expected) {
+function deepMatches(actual, expected, pending = new Map()) {
   if (Object.is(actual, expected)) return true;
   if (
     typeof actual !== 'object' || actual === null
     || typeof expected !== 'object' || expected === null
   ) return false;
   if (Array.isArray(actual) !== Array.isArray(expected)) return false;
-  if (Array.isArray(actual)) {
-    return actual.length === expected.length
-      && actual.every((item, index) => deepMatches(item, expected[index]));
+
+  const against = pending.get(actual);
+  if (against) {
+    if (against.has(expected)) return true;
+    against.add(expected);
+  } else {
+    pending.set(actual, new Set([expected]));
   }
-  const actualKeys = Object.keys(actual);
-  if (actualKeys.length !== Object.keys(expected).length) return false;
-  return actualKeys.every(
-    key => Object.prototype.hasOwnProperty.call(expected, key)
-      && deepMatches(actual[key], expected[key]),
-  );
+  try {
+    if (Array.isArray(actual)) {
+      return actual.length === expected.length
+        && actual.every(
+          (item, index) => deepMatches(item, expected[index], pending),
+        );
+    }
+    const actualKeys = Object.keys(actual);
+    if (actualKeys.length !== Object.keys(expected).length) return false;
+    return actualKeys.every(
+      key => Object.prototype.hasOwnProperty.call(expected, key)
+        && deepMatches(actual[key], expected[key], pending),
+    );
+  } finally {
+    pending.get(actual).delete(expected);
+  }
 }
 
 /**

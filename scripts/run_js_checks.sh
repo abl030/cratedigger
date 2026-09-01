@@ -36,13 +36,23 @@ case "$mode" in
             if [ -n "$output" ]; then
                 printf '%s\n' "$output"
             fi
+            # The done marker's failure count, or empty if there is none.
+            #
+            # `$1 ==` anchors the match to the FIRST TAB FIELD, not anywhere
+            # on the line: a failure detail may legitimately quote the
+            # marker name (`tests/test_js_harness.mjs` does), and a loose
+            # match would read that detail as the done marker. `exit` stops
+            # at the first one, so a suite that calls `done()` twice yields
+            # one value rather than a multi-line string. Printing nothing
+            # when absent leaves ONE guard for "no marker" — the `''` case
+            # below — rather than two mutually redundant ones.
             reported=$(printf '%s\n' "$output" | awk -F'\t' '
-                $1 == "CRATEDIGGER_JS_DONE" { print $4; found = 1; exit }
-                END { if (!found) print "none" }')
+                $1 == "CRATEDIGGER_JS_DONE" { print $4; exit }')
             case "$reported" in
                 ''|*[!0-9]*)
-                    # No done marker (or a garbled one): the suite never
-                    # reached its exit path, whatever it exited with.
+                    # No done marker, or one whose count is not a number:
+                    # the suite never reached its exit path, whatever it
+                    # exited with.
                     printf 'CRATEDIGGER_JS_FAILURE\t%s\t%s\n' \
                         "$file" \
                         "suite exited before reaching checker.done()"

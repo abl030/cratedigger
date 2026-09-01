@@ -2605,6 +2605,95 @@ class JsCheckHelperTestCase(unittest.TestCase):
         self.assertIn("tests/test_js_a.mjs::sec::one", result.stdout)
         self.assertNotIn("suite exited before reaching", result.stdout)
 
+    def test_a_green_suite_produces_no_marker_and_a_zero_exit(self) -> None:
+        """The GREEN path, which nothing else in this class exercises.
+
+        Every other fake node here exits nonzero or reports a failure, so
+        the guard that keeps the "died after a clean done()" marker from
+        firing on a healthy suite was unconstrained: making it
+        unconditional left all nine tests green while turning `js-unit`
+        permanently red for every passing suite (round-2 review, mutant M8).
+        """
+        (Path(self.root.name) / "tests" / "test_js_a.mjs").write_text(
+            "x", encoding="utf-8"
+        )
+        self._fake_node_emitting(
+            "printf '7 passed, 0 failed\\n'\n"
+            "printf 'CRATEDIGGER_JS_DONE\\ttests/test_js_a.mjs\\t7\\t0\\n'",
+            exit_code=0,
+        )
+
+        result = self._run("unit")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn("CRATEDIGGER_JS_FAILURE", result.stdout)
+        self.assertIn("7 passed, 0 failed", result.stdout)
+
+    def test_a_failure_detail_quoting_the_done_marker_is_not_the_done_marker(
+        self,
+    ) -> None:
+        """The done-marker match is anchored to the first tab field.
+
+        A suite may legitimately quote the marker NAME in a failure detail
+        -- `tests/test_js_harness.mjs` asserts on `DONE_MARKER` and prints
+        it -- and an unanchored match would read that detail as the marker
+        (round-2 review, mutant M2). Here the quoting detail arrives BEFORE
+        any real done marker, so a loose match reads its field 4 instead.
+        """
+        (Path(self.root.name) / "tests" / "test_js_a.mjs").write_text(
+            "x", encoding="utf-8"
+        )
+        self._fake_node_emitting(
+            "printf 'CRATEDIGGER_JS_FAILURE\\ttests/test_js_a.mjs::s::one\\t"
+            "expected CRATEDIGGER_JS_DONE\\tnope\\n'\n"
+            "printf 'CRATEDIGGER_JS_DONE\\ttests/test_js_a.mjs\\t4\\t1\\n'"
+        )
+
+        result = self._run("unit")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout.count("CRATEDIGGER_JS_FAILURE"), 1)
+        self.assertNotIn("suite exited before reaching", result.stdout)
+
+    def test_a_suite_that_finishes_twice_is_read_once(self) -> None:
+        """Nothing stops a suite calling `done()` twice.
+
+        Without the `exit` in the marker scan both counts are printed, the
+        shell compares a two-line string against its numeric cases, and a
+        perfectly healthy suite is reported as never having finished
+        (round-2 review, mutant M3).
+        """
+        (Path(self.root.name) / "tests" / "test_js_a.mjs").write_text(
+            "x", encoding="utf-8"
+        )
+        self._fake_node_emitting(
+            "printf 'CRATEDIGGER_JS_DONE\\ttests/test_js_a.mjs\\t3\\t0\\n'\n"
+            "printf 'CRATEDIGGER_JS_DONE\\ttests/test_js_a.mjs\\t3\\t0\\n'",
+            exit_code=0,
+        )
+
+        result = self._run("unit")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn("CRATEDIGGER_JS_FAILURE", result.stdout)
+
+    def test_a_done_marker_with_a_non_numeric_count_is_not_trusted(
+        self,
+    ) -> None:
+        """A garbled count cannot be compared, so the suite is not credited."""
+        (Path(self.root.name) / "tests" / "test_js_a.mjs").write_text(
+            "x", encoding="utf-8"
+        )
+        self._fake_node_emitting(
+            "printf 'CRATEDIGGER_JS_DONE\\ttests/test_js_a.mjs\\t3\\tlots\\n'",
+            exit_code=0,
+        )
+
+        result = self._run("unit")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("suite exited before reaching", result.stdout)
+
     def test_a_suite_that_exits_zero_without_running_is_not_credited(
         self,
     ) -> None:

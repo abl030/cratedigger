@@ -150,6 +150,20 @@ t.section('withCoverageMatchRates() falls back to search window found counts');
     },
     'the coverage fallback derives a per-hour match rate for each window',
   );
+
+  // A HALF-populated coverage payload is the only world that separates the
+  // early-return's `&&` from `||`; with `||` the present rate short-circuits
+  // and the absent one is never derived. Pre-existing gap that the old
+  // compound assertion shared (round-2 review, mutant M58).
+  const halfKnown = __test__.withCoverageMatchRates({
+    wanted_total: 10,
+    matches_per_hour_24h: 5.5,
+  }, [
+    {label: '24h', hours: 24, outcomes: {found: 132}},
+    {label: '6h', hours: 6, outcomes: {found: 27}},
+  ]);
+  t.equal(halfKnown.matches_per_hour_6h, 4.5,
+    'a coverage payload missing only the 6h rate still gets it derived');
 }
 t.section('renderPeerBrowseHeavyQueries() shows release ids and exact query tokens');
 {

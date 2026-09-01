@@ -163,12 +163,25 @@ class TestEveryJsSuiteUsesTheSharedHarness(unittest.TestCase):
         """The harness must not match the glob `run_js_checks.sh` really uses.
 
         The pattern is READ OUT of the script rather than hand-typed: an
-        earlier version of this test compared two literals
+        earlier version compared two literals
         (``fnmatch("js_harness.mjs", "test_js_*.mjs")``) and so proved
-        nothing about the script at all — widening its glob to
-        ``tests/*js*.mjs``, which DOES match the harness, left this test
-        green (independent review, mutant B9). That is the constant-versus-
-        hand-typed-literal shape `.claude/rules/code-quality.md` names.
+        nothing about the script at all — the constant-versus-hand-typed-
+        literal shape `.claude/rules/code-quality.md` names.
+
+        Two different widenings reach two different clauses here, and the
+        distinction was mis-stated once (round-2 review, claim 1):
+
+        - ``tests/*js*.mjs`` does not contain the literal ``test_js_``, so
+          ``_FOR_GLOB_RE`` never matches it and the CARDINALITY assertion
+          fires ("got []"). That is a real kill, but not by the fnmatch
+          clause.
+        - ``tests/*[test_js_]*.mjs`` does match the regex AND matches
+          ``js_harness.mjs``, so it is what actually reaches the fnmatch
+          assertion below.
+
+        Both are covered: this test kills the first, and
+        ``test_a_glob_matching_the_harness_is_refused`` pins the second
+        against the parser directly.
         """
         script = pinned_source(Path(RUN_JS_CHECKS))
         patterns = [
@@ -185,6 +198,32 @@ class TestEveryJsSuiteUsesTheSharedHarness(unittest.TestCase):
             "as if it were a suite",
         )
         self.assertNotIn("js_harness.mjs", _js_suite_names_on_disk())
+
+    def test_a_glob_matching_the_harness_is_refused(self) -> None:
+        """The fnmatch clause itself, driven by a glob the parser accepts.
+
+        `tests/*[test_js_]*.mjs` contains the literal `test_js_`, so
+        `_FOR_GLOB_RE` matches it and the cardinality assertion passes --
+        which is what makes this the world that reaches the fnmatch clause
+        rather than short-circuiting before it (round-2 review, mutant M42).
+        """
+        script = (
+            "for file in tests/*[test_js_]*.mjs; do\n"
+            '    node "$file"\n'
+            "done\n"
+        )
+        patterns = [
+            os.path.basename(m.group(2)) for m in _FOR_GLOB_RE.finditer(script)
+        ]
+        self.assertEqual(len(patterns), 1, "the parser must accept this glob")
+        self.assertTrue(
+            fnmatch.fnmatch("js_harness.mjs", patterns[0]),
+            "this world exists precisely because the harness DOES match it",
+        )
+        self.assertTrue(
+            covered_js_suite_names(script, {"test_js_util.mjs"}),
+            "and the glob still covers real suites, so nothing else objects",
+        )
 
     KNOWN_BAD = (
         (

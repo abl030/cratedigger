@@ -256,15 +256,48 @@ t.section('deepEqual is structural, not a JSON string comparison');
     + "t.deepEqual({ a: NaN }, { a: NaN }, 'NaN equals NaN');\n"
     + "t.deepEqual({ a: 1 }, { a: 1, b: 2 }, 'a missing key is a difference');\n"
     + "t.deepEqual([1, 2], { 0: 1, 1: 2 }, 'an array is not a plain object');\n"
+    // Each of the four below was an unconstrained guard: dropping it left
+    // every suite green (round-2 review, mutants M14/M15/M17/M19).
+    + "t.deepEqual({ 0: 1, 1: 2 }, [1, 2], 'nor is a plain object an array');\n"
+    + "t.deepEqual([1, 2], [1, 2, 3], 'a shorter array is a difference');\n"
+    + "t.deepEqual([1, 2, 3], [1, 2], 'and so is a longer one');\n"
+    + "t.deepEqual({ a: undefined }, { b: undefined }, 'same key COUNT is not the same keys');\n"
+    + "t.deepEqual(null, { a: 1 }, 'null is not an object');\n"
+    + "t.deepEqual({ a: 1 }, null, 'nor is an object null');\n"
     + 't.done();',
   );
-  t.equal(run.markers.length, 3, 'exactly the three genuine differences fail');
-  t.contains(run.stdout, '3 passed, 3 failed', 'order-independence and NaN pass');
+  t.equal(run.markers.length, 9, 'exactly the nine genuine differences fail');
+  t.contains(run.stdout, '3 passed, 9 failed', 'order-independence and NaN pass');
+  t.equal(run.status, 1, 'and none of the nine crashed the suite instead of failing');
   t.contains(
     run.markers[0],
     'an undefined-valued key is NOT dropped',
     'JSON.stringify would have called these two equal',
   );
+}
+
+t.section('deepEqual compares cyclic structures instead of overflowing');
+{
+  // `assert.deepStrictEqual` -- the idiom browse and convergence came from
+  // -- handles cycles; the first cut of `deepMatches` blew the stack on
+  // one (round-2 review). A `RangeError` here would abort the whole suite,
+  // so the third case proves the guard does not simply answer "equal" to
+  // everything cyclic.
+  const run = runFixture(
+    'const a = { name: 1 }; a.self = a;\n'
+    + 'const b = { name: 1 }; b.self = b;\n'
+    + 'const c = { name: 2 }; c.self = c;\n'
+    + "t.deepEqual(a, b, 'two identically-shaped cycles are equal');\n"
+    + "t.deepEqual(a, c, 'cycles differing at a leaf are not');\n"
+    + 'const d = [1]; d.push(d);\n'
+    + 'const e = [1]; e.push(e);\n'
+    + "t.deepEqual(d, e, 'cyclic arrays too');\n"
+    + 't.done();',
+  );
+  t.equal(run.status, 1, 'the one genuine difference fails');
+  t.equal(run.markers.length, 1, 'and only it — no stack overflow, no false equality');
+  t.contains(run.stdout, '2 passed, 1 failed', 'both matching cycles compare equal');
+  t.excludes(run.stderr, 'RangeError', 'nothing overflowed the stack');
 }
 
 t.section('throws and rejects accept an error class OR a message regexp');
