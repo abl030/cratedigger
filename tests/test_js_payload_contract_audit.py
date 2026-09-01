@@ -211,7 +211,7 @@ renderDownloadHistoryFixture({outcome: 'success', request_id: 1});
             'const name = "renderDownloadHistoryItem"; '
             "historyModule[name]({invented_client_only: 1});"),
             'helpers["renderDownloadHistoryFixture"]({invented_client_only: 1});',
-            "__test__.renderDownloadHistoryFixture({invented_client_only: 1});",
+            "helpers.renderDownloadHistoryFixture({invented_client_only: 1});",
         ):
             with self.subTest(bypass=bypass), self.assertRaises(ValueError):
                 fixture_fields_for_call(
@@ -231,9 +231,9 @@ import historyDefault, {
 renderDownloadHistoryFixture({outcome: 'success'});
 """
         shadowed_test = """
-import { __test__ } from './recents.js';
-function renderWithShadow(__test__) {
-  const { renderRecentsItems: renderRecentsFixture } = __test__;
+import { renderRecentsItems } from './recents.js';
+function renderWithShadow(helpers) {
+  const { renderRecentsItems: renderRecentsFixture } = helpers;
   return renderRecentsFixture([{outcome: 'success'}]);
 }
 """
@@ -298,11 +298,7 @@ function renderWithShadow(__test__) {
     def test_scanner_rejects_unsupported_renderer_reference_forms(self) -> None:
         cases = (
             'globalThis["renderDownloadHistoryItem"]({invented_client_only: 1});',
-            (
-                'const name = "renderDownloadHistoryItem"; '
-                "__test__[name]({invented_client_only: 1});"
-            ),
-            "__test__?.renderDownloadHistoryItem({invented_client_only: 1});",
+            "helpers?.renderDownloadHistoryItem({invented_client_only: 1});",
             "(0, renderDownloadHistoryItem)({invented_client_only: 1});",
             "renderDownloadHistoryItem.call(null, {invented_client_only: 1});",
             "renderDownloadHistoryItem?.({invented_client_only: 1});",

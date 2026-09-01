@@ -1,4 +1,9 @@
-"""Audit: every JS suite on disk must be reached by the canonical full suite.
+"""Audit: the shape of the JavaScript test surface — suites and the modules
+they import.
+
+Three rules live here. Every suite on disk must be reached by the canonical
+full suite; every suite must be on the one shared harness; and no `web/js`
+module may ship a `__test__` bag.
 
 See issue #537. PR #531 fixed a hardcoded ``node tests/test_js_X.mjs`` list
 in ``scripts/run_tests.sh`` that had silently stopped covering three suites
@@ -32,6 +37,7 @@ RUN_TESTS_SH = os.path.join(REPO_ROOT, "scripts", "run_tests.sh")
 RUN_TEST_SUITE = os.path.join(REPO_ROOT, "scripts", "run_test_suite.py")
 RUN_JS_CHECKS = os.path.join(REPO_ROOT, "scripts", "run_js_checks.sh")
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+WEB_JS_DIR = os.path.join(REPO_ROOT, "web", "js")
 
 # An explicit, hardcoded invocation: node tests/test_js_foo.mjs
 _EXPLICIT_NODE_RE = re.compile(
@@ -124,6 +130,114 @@ def harness_violations(name: str, source: str) -> list[str]:
     if _NODE_ASSERT_RE.search(source) is not None:
         violations.append(f"{name} imports node:assert instead of the harness")
     return violations
+
+
+# The retired bag, in every position it could return to. One identifier,
+# checked as a whole word anywhere in the file rather than only in an
+# `export const` — the alias forms (`export { renderEntry as __test__ }`,
+# `export let`, a re-export through another module) are the same construct
+# spelled differently, and a prose mention is how the convention taught
+# itself to the next author.
+_TEST_BAG_RE = re.compile(r"(?<![\w$])__test__(?![\w$])")
+
+
+def _web_js_module_names() -> set[str]:
+    """Every web/js/*.js file that exists right now."""
+    return {
+        os.path.basename(p) for p in glob.glob(os.path.join(WEB_JS_DIR, "*.js"))
+    }
+
+
+def test_bag_violations(name: str, source: str) -> list[str]:
+    """Every mention of the retired ``__test__`` convention in ``source``.
+
+    Accumulating rather than short-circuiting, for the same reason
+    ``harness_violations`` is: a known-bad world must be able to prove one
+    clause on its own.
+    """
+    violations: list[str] = []
+    if _TEST_BAG_RE.search(source) is not None:
+        violations.append(f"{name} mentions the retired __test__ bag")
+    return violations
+
+
+class TestNoModuleShipsATestBag(unittest.TestCase):
+    """`web/js` modules export names, not test bags (issue #1313).
+
+    Seven modules used to carry ``export const __test__ = {…}``, a
+    137-entry object listing module-private names for the Node suites. It
+    had three costs and no benefit that survived measurement. Fifty-six of
+    the entries were already named exports, listed a second time hundreds
+    of lines from their declaration. Sixteen more were exported for
+    nobody. Four renamed the function on the way out
+    (``pollImportJob: _pollImportJob``), so production and tests spelled
+    the same thing two ways. And nothing enforced the "these are private"
+    claim the bag made — it is not a language construct, just an object.
+
+    Every name a suite uses is now a named export at its declaration. This
+    audit is what stops the convention coming back: it was the house shape
+    for a year and two plan documents still describe it.
+    """
+
+    def test_no_web_js_module_mentions_the_bag(self) -> None:
+        names = sorted(_web_js_module_names())
+        self.assertTrue(names, "no web/js/*.js files found")
+        violations: list[str] = []
+        for name in names:
+            source = pinned_source(Path(WEB_JS_DIR) / name)
+            violations.extend(test_bag_violations(f"web/js/{name}", source))
+        self.assertEqual(
+            violations,
+            [],
+            "web/js modules export names directly, never a __test__ bag: "
+            + "; ".join(violations),
+        )
+
+    def test_no_js_suite_reaches_for_a_bag(self) -> None:
+        """The suite-side mirror.
+
+        Clause one is the load-bearing half — a snippet elsewhere can only
+        import a bag that some module exports. This clause catches the
+        author who writes the import first and would otherwise get a bare
+        ESM resolution error with no explanation of the convention behind
+        it.
+        """
+        names = sorted(_js_suite_names_on_disk())
+        self.assertTrue(names, "no tests/test_js_*.mjs files found")
+        violations: list[str] = []
+        for name in names:
+            source = pinned_source(Path(TESTS_DIR) / name)
+            violations.extend(test_bag_violations(f"tests/{name}", source))
+        self.assertEqual(
+            violations,
+            [],
+            "JS suites import names directly, never a __test__ bag: "
+            + "; ".join(violations),
+        )
+
+    BAG_SPELLINGS = (
+        ("the original object literal", "export const __test__ = {\n  renderEntry,\n};\n"),
+        ("a let instead of a const", "export let __test__ = { renderEntry };\n"),
+        ("an alias on the way out", "export { renderEntry as __test__ };\n"),
+        ("the import side", "import { __test__ } from '../web/js/thing.js';\n"),
+        ("prose teaching the convention", "// Helpers are exported via `__test__`.\n"),
+    )
+
+    def test_the_clause_trips_on_every_spelling_of_the_bag(self) -> None:
+        for label, source in self.BAG_SPELLINGS:
+            with self.subTest(spelling=label):
+                violations = test_bag_violations("web/js/thing.js", source)
+                self.assertEqual(len(violations), 1, f"{label} was not caught")
+                self.assertIn("retired __test__ bag", violations[0])
+
+    def test_a_named_export_and_a_lookalike_identifier_trip_nothing(self) -> None:
+        source = (
+            "export function renderEntry(e) { return `<b>${e}</b>`; }\n"
+            "const __test__helper = 1;\n"
+            "const my__test__ = 2;\n"
+            "export const tests = { renderEntry };\n"
+        )
+        self.assertEqual(test_bag_violations("web/js/thing.js", source), [])
 
 
 class TestEveryJsSuiteUsesTheSharedHarness(unittest.TestCase):
