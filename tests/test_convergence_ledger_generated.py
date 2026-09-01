@@ -56,7 +56,11 @@ from lib.grab_list import DownloadFile
 from lib.pipeline_db import TransferLedgerRow
 from lib.slskd_transfers import cancel_and_delete, converge_slskd_orphans
 from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
-from tests.helpers import make_request_row
+from tests.helpers import (
+    make_cycle_collaborators,
+    make_request_row,
+    rebind_collaborators,
+)
 
 _LIVE_STATES = ("InProgress", "Queued, Remotely", "Queued, Locally", "")
 _TERMINAL_STATES = (
@@ -138,7 +142,12 @@ def _build_world_fakes(
 
 def _ctx(db: FakePipelineDB, slskd: FakeSlskdAPI) -> CratediggerContext:
     return CratediggerContext(
-        cfg=_cfg(), slskd=slskd, pipeline_db_source=FakePipelineDBSource(db))
+        collaborators=make_cycle_collaborators(
+            cfg=_cfg(),
+            slskd=slskd,
+            pipeline_db_source=FakePipelineDBSource(db),
+        ),
+    )
 
 
 # --- Invariant checkers (module-level so the known-bad self-tests can
@@ -265,11 +274,17 @@ def _cleanup_ctx(
     db: FakePipelineDB, slskd: FakeSlskdAPI, root: str,
 ) -> CratediggerContext:
     ctx = CratediggerContext(
-        cfg=replace(_cfg(), slskd_download_dir=root),
-        slskd=slskd,
-        pipeline_db_source=FakePipelineDBSource(db))
-    ctx.download_ownership = DownloadOwnershipWriter(
-        db_factory=lambda: db, close_after_use=False)
+        collaborators=make_cycle_collaborators(
+            cfg=replace(_cfg(), slskd_download_dir=root),
+            slskd=slskd,
+            pipeline_db_source=FakePipelineDBSource(db),
+        ),
+    )
+    rebind_collaborators(
+        ctx,
+        download_ownership=DownloadOwnershipWriter(
+        db_factory=lambda: db, close_after_use=False),
+    )
     return ctx
 
 

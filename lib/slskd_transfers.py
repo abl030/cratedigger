@@ -125,7 +125,7 @@ def positively_owned_files[FileT: CanonicalFolderFile](
     """
     if not files:
         return []
-    writer = getattr(ctx, "download_ownership", None)
+    writer = ctx.download_ownership
     if writer is None:
         logger.warning(
             "SLSKD OWNERSHIP: no ownership collaborator wired; refusing to "
@@ -382,7 +382,7 @@ def _write_ahead_transfer_ledger(
     before the ledger commits; DB-down is already cycle-fatal), matching
     the search ledger's ``record_search_id`` precedent.
     """
-    writer = getattr(ctx, "download_ownership", None)
+    writer = ctx.download_ownership
     if writer is None or request_id is None or not files:
         return
     from lib.pipeline_db import TransferLedgerRow
@@ -441,7 +441,7 @@ def slskd_enqueue_with_outcome(
     if not enqueue:
         return SlskdEnqueueOutcome(status="rejected")
 
-    writer = getattr(ctx, "download_ownership", None)
+    writer = ctx.download_ownership
     if writer is not None and request_id is not None:
         # ``request_id is None`` confirms NOTHING, mirroring
         # ``_write_ahead_transfer_ledger``'s own skip exactly (issue #1278

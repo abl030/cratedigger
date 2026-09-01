@@ -32,18 +32,22 @@ from lib.grab_list import DownloadFile
 from lib.slskd_transfers import cancel_and_delete, slskd_do_enqueue
 from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
 from tests.helpers import (
+    make_cycle_collaborators,
     make_download_file,
     make_grab_list_entry,
     make_request_row,
+    rebind_collaborators,
 )
 
 
 def _make_ctx(cfg=None, slskd=None, pipeline_db_source=None, **cache_overrides):
     """Build a test CratediggerContext."""
     return CratediggerContext(
-        cfg=cfg or MagicMock(),
-        slskd=slskd or MagicMock(),
-        pipeline_db_source=pipeline_db_source or MagicMock(),
+        collaborators=make_cycle_collaborators(
+            cfg=cfg or MagicMock(),
+            slskd=slskd or MagicMock(),
+            pipeline_db_source=pipeline_db_source or MagicMock(),
+        ),
         **cache_overrides,
     )
 
@@ -547,8 +551,11 @@ class TestCancelAndDelete(unittest.TestCase):
             request_id=1, username="user1", filename="track.flac")])
         ledger_db.confirm_transfer_enqueue(
             "user1", "track.flac", request_id=1)
-        ctx.download_ownership = DownloadOwnershipWriter(
-            db_factory=lambda: ledger_db, close_after_use=False)
+        rebind_collaborators(
+            ctx,
+            download_ownership=DownloadOwnershipWriter(
+            db_factory=lambda: ledger_db, close_after_use=False),
+        )
 
         cancel_and_delete(files, ctx)
         self.assertEqual(slskd.transfers.cancel_download_calls[0].username, "user1")

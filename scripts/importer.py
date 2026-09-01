@@ -1180,10 +1180,18 @@ def _build_runtime_context(
     *,
     borrow_session: bool = False,
 ):
-    """Build the minimal CratediggerContext needed by download processing."""
+    """Build the minimal CratediggerContext needed by download processing.
+
+    ``WorkerCollaborators``, not ``CycleCollaborators``: the serial
+    importer holds no slskd client, so no destructive slskd path is
+    reachable from this context and the ownership writer that gates one
+    is structurally absent rather than defaulted away (#1313). Giving
+    this worker an slskd client means swapping the collaborator type,
+    which cannot be constructed without naming an ownership writer.
+    """
     from album_source import DatabaseSource
     from lib.config import read_runtime_config
-    from lib.context import CratediggerContext
+    from lib.context import CratediggerContext, WorkerCollaborators
     from web.api_bases import mb_ws2_base
 
     cfg = read_runtime_config()
@@ -1193,7 +1201,9 @@ def _build_runtime_context(
         discogs_api_base=cfg.discogs_api_base,
         borrowed_db=db if borrow_session else None,
     )
-    return CratediggerContext(cfg=cfg, slskd=None, pipeline_db_source=source)
+    return CratediggerContext(
+        collaborators=WorkerCollaborators(cfg=cfg, pipeline_db_source=source),
+    )
 
 
 def _dispatch_outcome_from_completion(

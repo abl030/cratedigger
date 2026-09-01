@@ -40,8 +40,13 @@ if TYPE_CHECKING:
 
     from album_source import AlbumRecord, DatabaseSource
     from lib.config import CratediggerConfig
-    from lib.context import CratediggerContext, PipelineDBSource
+    from lib.context import (
+        CratediggerContext,
+        CycleCollaborators,
+        PipelineDBSource,
+    )
     from lib.grab_list import GrabListEntry
+    from lib.peer_cache import PeerCache
     from lib.pipeline_db import ActiveSearchPlan
     from lib.quality import AudioFileSpec, CandidateScore
     from lib.search import PlanExecutionContext, SearchResult
@@ -626,7 +631,7 @@ def _merge_search_result(result: SearchResult, ctx: CratediggerContext) -> None:
                 if d not in ctx.search_cache[album_id][username][filetype]:
                     ctx.search_cache[album_id][username][filetype].append(d)
 
-    peer_cache = getattr(ctx, "peer_cache", None)
+    peer_cache = ctx.peer_cache
     if peer_cache is not None:
         for username, filetypes in result.cache_entries.items():
             cached_speed = peer_cache.get_upload_speed(username)
@@ -1394,9 +1399,17 @@ def build_phase1_context(
     Phase 1 is the only production consumer of (it decrements the field
     in ``lib.download._timeout_album``), so its own per-context default
     IS the cycle's budget and forwarding would share a counter nothing
-    else spends. Everything else on the owner context — the registry,
-    peer cache, browse coordinator, and the per-cycle caches and
+    else spends; and the owner's peer cache, for the thread-safety reason
+    stated at the construction below. Everything else on the owner
+    context — the browse coordinator and the per-cycle caches and
     accumulators — is unread by every module Phase 1 reaches.
+
+    ``claimed_queue_keys_registry`` IS forwarded since #1313 made it a
+    required field. Phase 1 reads no registry today (every use is in
+    ``lib.enqueue``, the Phase 2 path), so this is behaviourally inert
+    now; the registry is designed to be shared by reference across
+    threads, which is how ``prepare_find_download_context`` treats it,
+    so forwarding is the safe direction for the day Phase 1 does.
 
     ``download_ownership`` is the one that bites (issue #1278). Phase 1
     reaches ``lib.download._timeout_album`` -> ``cancel_and_delete``,
@@ -1408,16 +1421,37 @@ def build_phase1_context(
 
     This is a named function rather than an inline constructor so the
     forwarding is a behaviour a test can call, instead of a line inside a
-    closure that the next collaborator gets forgotten from.
+    closure that the next collaborator gets forgotten from. Since #1313
+    the collaborators are also a required frozen value, so an inline
+    construction would have to NAME all six rather than silently inherit
+    ``None`` for the ones it forgot; the helper stays because deciding
+    WHICH value each one takes is the part that needed a docstring.
     """
-    from lib.context import CratediggerContext
+    from lib.context import CratediggerContext, CycleCollaborators
 
     return CratediggerContext(
-        cfg=cfg,
-        slskd=slskd,
-        pipeline_db_source=pipeline_db_source,
+        # Constructed field by field, never dataclasses.replace: replace()
+        # kwargs are checked by pyright for neither name nor type, so the
+        # derivation would be exactly as unchecked as the omission this
+        # helper exists to prevent (#1313, measured against 1.1.412).
+        collaborators=CycleCollaborators(
+            cfg=cfg,
+            slskd=slskd,
+            pipeline_db_source=pipeline_db_source,
+            download_ownership=owner_ctx.download_ownership,
+            claimed_queue_keys_registry=(
+                owner_ctx.claimed_queue_keys_registry),
+            # Deliberately NOT the owner's peer cache. Phase 1 reads no
+            # peer cache today (nothing lib/download.py reaches imports
+            # lib.browse or lib.peer_cache), and the owner's instance is
+            # not the one to hand a background thread if it ever does:
+            # prepare_find_download_context FORKS it per worker for
+            # exactly that reason. A Phase-1 peer cache would be a fork,
+            # not this reference. Patrolled by
+            # tests/test_context_generated.py.
+            peer_cache=None,
+        ),
         cooled_down_users=owner_ctx.cooled_down_users,
-        download_ownership=owner_ctx.download_ownership,
     )
 
 
@@ -1434,6 +1468,13 @@ def grab_most_wanted(albums: list[AlbumRecord], ctx: CratediggerContext) -> int:
     return _grab_most_wanted_impl(albums, _search_and_queue_fn, ctx)
 
 
+# A module-level binding because ``_run_phase1``'s ``poll_fn`` seam captures
+# it as a definition-time default (#1313). ``lib.download`` is already
+# imported at runtime a few lines above (the ``TYPE_CHECKING`` else-branch),
+# so this adds no new import edge.
+from lib.download import poll_active_downloads as _poll_active_downloads
+
+
 def _default_phase1_source(cfg: CratediggerConfig) -> DatabaseSource:
     from album_source import DatabaseSource
     from web.api_bases import mb_ws2_base
@@ -1447,15 +1488,23 @@ def _default_phase1_source(cfg: CratediggerConfig) -> DatabaseSource:
 def _run_phase1(
     ctx: CratediggerContext,
     phase1_source_factory: Callable[[CratediggerConfig], PipelineDBSource],
+    *,
+    poll_fn: Callable[[CratediggerContext], None] = _poll_active_downloads,
 ) -> None:
     """Run Phase 1 in a background thread with its own DB connection.
 
     Phase 1 gets its own source because psycopg2 connections are not
     thread-safe; the factory is the kwarg-DI seam ``run_cycle`` forwards so
     tests can drive a complete cycle without a live PostgreSQL.
-    """
-    from lib.download import poll_active_downloads
 
+    ``poll_fn`` is the second kwarg-DI seam (issue #1313): it is the only
+    place the Phase-1 context this function builds becomes observable, so
+    a test can assert the collaborators it carries — the owner's ownership
+    writer and cooldown set, its OWN db source — instead of pinning the
+    call to ``build_phase1_context`` by parsing this function's source.
+    Pass a replacement; never patch the module binding (a definition-time
+    default is captured, not looked up).
+    """
     phase1_source = phase1_source_factory(ctx.cfg)
     phase1_ctx = build_phase1_context(
         cfg=ctx.cfg,
@@ -1464,7 +1513,7 @@ def _run_phase1(
         owner_ctx=ctx,
     )
     try:
-        poll_active_downloads(phase1_ctx)
+        poll_fn(phase1_ctx)
     finally:
         phase1_source.close()
 
@@ -1472,10 +1521,12 @@ def _run_phase1(
 def _reconcile_dry_run(pipeline_db_source: PipelineDBSource) -> int:
     """Deploy-verification mode: read-only reconciliation only, then exit.
 
-    Runs BEFORE any convergence step, Phase 1, or Phase 2 — the position pin
-    in tests/test_convergence_runner_generated.py holds the dry-run gate
-    ahead of main()'s run_cycle hand-off. No plans are generated and nothing
-    is mutated; only classification counts are emitted.
+    Runs BEFORE any convergence step, Phase 1, or Phase 2:
+    ``run_startup_and_cycle`` takes this branch instead of the cycle.
+    ``tests/test_cycle_startup.py::TestCycleHandoff`` drives that function
+    with a stub in this position and proves no cycle runs and the stub's
+    exit code comes back. No plans are generated and nothing is mutated;
+    only classification counts are emitted.
     """
     from lib.startup_reconciliation import (
         log_reconciliation_summary,
@@ -1502,8 +1553,9 @@ def run_cycle(
 ) -> None:
     """Run one complete pipeline cycle over an already-constructed context.
 
-    ``main()`` owns argv, config, the startup gates, locking, collaborator
-    construction, and teardown; everything cyclical lives here so a test can
+    ``main()`` owns argv, config, the startup gates, locking and teardown,
+    and hands the rest to ``run_startup_and_cycle``, which owns collaborator
+    construction (#1313). Everything cyclical lives here so a test can
     execute a whole cycle against fakes. The only non-context collaborator is
     the Phase 1 source factory above.
     """
@@ -1590,6 +1642,94 @@ def run_cycle(
 
 
 from lib.util import setup_logging
+
+
+def _connect_peer_cache(cfg: CratediggerConfig) -> PeerCache:
+    """Production default for ``build_cycle_collaborators``'s peer-cache seam.
+
+    A named wrapper rather than a module-level import so ``lib.peer_cache``
+    (and with it ``redis``) stays deferred exactly as it was when ``main()``
+    imported it inline, and so the definition-time default is a stable
+    object a test can substitute.
+    """
+    from lib.peer_cache import connect_from_config
+    return connect_from_config(cfg)
+
+
+def build_cycle_collaborators(
+    cfg: CratediggerConfig,
+    pipeline_db_source: PipelineDBSource,
+    *,
+    slskd_factory: Callable[[CratediggerConfig], object] = _create_slskd_client,
+    peer_cache_factory: Callable[
+        [CratediggerConfig], PeerCache] = _connect_peer_cache,
+) -> CycleCollaborators:
+    """Build the six collaborators one cycle's owner context is built from.
+
+    ``main()``'s startup gates need live infrastructure, so before #1313
+    the only constraint on this wiring was a bounded AST parse of
+    ``main()``'s own source asserting the ``claimed_queue_keys_registry=``
+    kwarg spelled a real ``ClaimedQueueKeysRegistry()``. Lifting the
+    wiring out of ``main()`` makes it a function a test executes: the
+    registry really is fresh per call, and the ownership writer really is
+    a ``DownloadOwnershipWriter`` on the configured DSN — neither of which
+    the source pin could see.
+
+    The two factories are kwarg-DI seams because they reach real
+    infrastructure (``_create_slskd_client`` resolves the API key from
+    disk; ``connect_from_config`` pings Redis). The other three are
+    constructed here: they are cheap, lazy, and their identity is the
+    thing worth pinning.
+    """
+    from lib.context import CycleCollaborators
+    from lib.download_ownership import DownloadOwnershipWriter
+    from lib.enqueue import ClaimedQueueKeysRegistry
+
+    return CycleCollaborators(
+        cfg=cfg,
+        slskd=slskd_factory(cfg),
+        pipeline_db_source=pipeline_db_source,
+        download_ownership=DownloadOwnershipWriter(cfg.pipeline_db_dsn),
+        # One same-cycle registry per cycle (issue #1178 PR2 review F7) --
+        # threaded into every find-download worker context by reference
+        # via prepare_find_download_context.
+        claimed_queue_keys_registry=ClaimedQueueKeysRegistry(),
+        peer_cache=peer_cache_factory(cfg),
+    )
+
+
+def run_startup_and_cycle(
+    cfg: CratediggerConfig,
+    pipeline_db_source: PipelineDBSource,
+    *,
+    reconcile_dry_run: bool,
+    collaborators_factory: Callable[
+        [CratediggerConfig, PipelineDBSource], CycleCollaborators,
+    ] = build_cycle_collaborators,
+    run_cycle_fn: Callable[[CratediggerContext], None] = run_cycle,
+    reconcile_dry_run_fn: Callable[[PipelineDBSource], int] = _reconcile_dry_run,
+) -> int:
+    """Build the cycle's owner context, then dry-run or run exactly one cycle.
+
+    ``main()`` owns argv, the startup gates, locking and teardown — all of
+    which need live infrastructure — so this tail is split out as the part
+    a test can drive (issue #1313). Two claims that used to be bounded AST
+    parses of ``main()``'s source are behaviour here: a normal run hands
+    off to ``run_cycle`` exactly once, and ``--reconcile-dry-run`` returns
+    the reconciliation's exit code without running a cycle at all.
+
+    Collaborators are built BEFORE the dry-run gate, preserving the order
+    ``main()`` has always had: a dry run still opens an slskd client and
+    pings Redis, then throws both away. Moving the gate earlier would be a
+    behaviour change to a deploy-verification mode, not a refactor.
+    """
+    from lib.context import CratediggerContext
+
+    collaborators = collaborators_factory(cfg, pipeline_db_source)
+    if reconcile_dry_run:
+        return reconcile_dry_run_fn(pipeline_db_source)
+    run_cycle_fn(CratediggerContext(collaborators=collaborators))
+    return 0
 
 
 def main() -> int:
@@ -1722,29 +1862,11 @@ def main() -> int:
         )
         logger.info(f"Pipeline DB: {cfg.pipeline_db_dsn}")
 
-        slskd = _create_slskd_client(cfg)
-
-        # Build context with fresh caches for this cycle
-        from lib.context import CratediggerContext
-        from lib.download_ownership import DownloadOwnershipWriter
-        from lib.enqueue import ClaimedQueueKeysRegistry
-        ctx = CratediggerContext(
-            cfg=cfg,
-            slskd=slskd,
-            pipeline_db_source=pipeline_db_source,
-            download_ownership=DownloadOwnershipWriter(cfg.pipeline_db_dsn),
-            # One same-cycle registry per cycle (issue #1178 PR2 review
-            # F7) -- threaded into every find-download worker context by
-            # reference via prepare_find_download_context.
-            claimed_queue_keys_registry=ClaimedQueueKeysRegistry(),
+        return run_startup_and_cycle(
+            cfg,
+            pipeline_db_source,
+            reconcile_dry_run=args.reconcile_dry_run,
         )
-        from lib.peer_cache import connect_from_config
-        ctx.peer_cache = connect_from_config(cfg)
-
-        if args.reconcile_dry_run:
-            return _reconcile_dry_run(pipeline_db_source)
-
-        run_cycle(ctx)
 
     finally:
         # Clean up pipeline DB connection
@@ -1756,7 +1878,6 @@ def main() -> int:
         # Remove the lock file after activity is done
         if not args.no_lock_file and os.path.exists(lock_file_path):
             os.remove(lock_file_path)
-    return 0
 
 
 if __name__ == "__main__":

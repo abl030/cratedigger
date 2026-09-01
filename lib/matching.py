@@ -636,7 +636,7 @@ def check_for_match(
         browse_attempts = len(uncached)
         negative_skips: set[tuple[str, str]] = set()
         try:
-            if getattr(ctx, "peer_cache", None) is not None:
+            if ctx.peer_cache is not None:
                 browse_result = _browse_directories_for_ctx_result(
                     uncached,
                     username,
@@ -664,7 +664,7 @@ def check_for_match(
             # separately from peers_browsed so the cycle summary can
             # distinguish primary fan-out load from residual lazy retries.
             ctx.peers_browsed_lazy += browse_attempts
-        if getattr(ctx, "peer_cache", None) is None:
+        if ctx.peer_cache is None:
             for d, result in browsed.items():
                 cache_browsed_directory(ctx, username, d, result)
 

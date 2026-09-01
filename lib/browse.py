@@ -47,12 +47,8 @@ class BrowseOneResult:
     cache_negative: bool = False
 
 
-def _peer_cache_for(ctx: CratediggerContext) -> Any | None:
-    return getattr(ctx, "peer_cache", None)
-
-
 def _drain_peer_cache_stats(ctx: CratediggerContext) -> None:
-    cache = _peer_cache_for(ctx)
+    cache = ctx.peer_cache
     if cache is None:
         return
     from lib.peer_cache import drain_stats_into_context
@@ -116,7 +112,7 @@ class BrowseCoordinator:
                     futures[key] = existing_future
                     continue
 
-            peer_cache = _peer_cache_for(self._ctx)
+            peer_cache = self._ctx.peer_cache
             if peer_cache is not None:
                 redis_cached = peer_cache.get_directory(user, file_dir)
                 _drain_peer_cache_stats(self._ctx)
@@ -270,7 +266,7 @@ def _write_peer_cache_directory(
     file_dir: str,
     directory: Any,
 ) -> None:
-    peer_cache = _peer_cache_for(ctx)
+    peer_cache = ctx.peer_cache
     if peer_cache is not None:
         peer_cache.set_directory(username, file_dir, directory)
         _drain_peer_cache_stats(ctx)
@@ -281,7 +277,7 @@ def _write_peer_cache_negative(
     username: str,
     file_dir: str,
 ) -> None:
-    peer_cache = _peer_cache_for(ctx)
+    peer_cache = ctx.peer_cache
     if peer_cache is not None:
         peer_cache.set_negative(username, file_dir)
         _drain_peer_cache_stats(ctx)

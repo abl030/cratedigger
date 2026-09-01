@@ -38,6 +38,7 @@ from lib.search import (
     SearchResult,
 )
 from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
+from tests.helpers import make_cycle_collaborators
 
 
 def _seed_plan(db: FakePipelineDB, request_id: int, *, query: str = "Artist Album") -> PlanExecutionContext:
@@ -85,7 +86,11 @@ class TestSearchMaxInflightPipelineLog(unittest.TestCase):
         the captured "Pipelined search" log line."""
         slskd = FakeSlskdAPI()
         ctx = CratediggerContext(
-            cfg=cfg, slskd=slskd, pipeline_db_source=FakePipelineDBSource(),
+            collaborators=make_cycle_collaborators(
+                cfg=cfg,
+                slskd=slskd,
+                pipeline_db_source=FakePipelineDBSource(),
+            ),
         )
         with self.assertLogs("cratedigger", level=logging.INFO) as captured:
             cratedigger._search_and_queue_parallel([], ctx)
@@ -115,7 +120,13 @@ class TestFindDownloadDoesNotBlockSearchRefill(unittest.TestCase):
         slskd = FakeSlskdAPI()
         slskd.searches.search_text_id_sequence = [101, 102]
         source = FakePipelineDBSource()
-        ctx = CratediggerContext(cfg=cfg, slskd=slskd, pipeline_db_source=source)
+        ctx = CratediggerContext(
+            collaborators=make_cycle_collaborators(
+                cfg=cfg,
+                slskd=slskd,
+                pipeline_db_source=source,
+            ),
+        )
         albums: list[AlbumRecord] = [
             MagicMock(id=1, artist_name="Artist", title="One"),
             MagicMock(id=2, artist_name="Artist", title="Two"),
@@ -224,7 +235,13 @@ class TestFindDownloadDoesNotBlockSearchRefill(unittest.TestCase):
         plan_exec_miss = _seed_plan(db, rid_miss, query="Artist Miss")
         plan_for = {-rid_found: plan_exec_found, -rid_miss: plan_exec_miss}
         source = FakePipelineDBSource(db)
-        ctx = CratediggerContext(cfg=cfg, slskd=slskd, pipeline_db_source=source)
+        ctx = CratediggerContext(
+            collaborators=make_cycle_collaborators(
+                cfg=cfg,
+                slskd=slskd,
+                pipeline_db_source=source,
+            ),
+        )
         albums: list[AlbumRecord] = [
             MagicMock(
                 id=-rid_found,
@@ -395,7 +412,13 @@ class TestFindDownloadDoesNotBlockSearchRefill(unittest.TestCase):
         plan_exec_found = _seed_plan(db, rid_found, query="Artist Found")
         plan_for = {-rid_found: plan_exec_found}
         source = FakePipelineDBSource(db)
-        ctx = CratediggerContext(cfg=cfg, slskd=slskd, pipeline_db_source=source)
+        ctx = CratediggerContext(
+            collaborators=make_cycle_collaborators(
+                cfg=cfg,
+                slskd=slskd,
+                pipeline_db_source=source,
+            ),
+        )
         albums: list[AlbumRecord] = [
             MagicMock(
                 id=-rid_found,

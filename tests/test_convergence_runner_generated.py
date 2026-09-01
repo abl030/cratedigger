@@ -15,6 +15,7 @@ import sys
 import tempfile
 import unittest
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import cast
 from unittest.mock import MagicMock, patch
@@ -173,9 +174,13 @@ class TestCycleConvergenceWindows(unittest.TestCase):
     ``run_cycle`` is executable with fakes (TestRunCycleExecutable below
     drives it for real); this bounded AST pin keeps the WINDOW claim —
     Phase 0 strictly before the Phase-1/Phase-2 block, end-of-cycle
-    strictly after it — plus the claim that ``main()`` hands off to
-    ``run_cycle`` exactly once, which no behavioral test can reach because
-    ``main()`` still needs a live DB and slskd client.
+    strictly after it.
+
+    The two hand-off claims this class also used to parse out of
+    ``main()``'s source, one cycle per run and dry-run gate first, moved to
+    ``tests/test_cycle_startup.py::TestCycleHandoff`` when #1313 split
+    ``run_startup_and_cycle`` out of ``main()``. They are executed there
+    rather than parsed.
     """
 
     def test_run_cycle_calls_both_groups_in_their_required_windows(self):
@@ -226,127 +231,6 @@ class TestCycleConvergenceWindows(unittest.TestCase):
         self.assertLess(phase_zero_line, phase1_start_lines[0])
         self.assertLess(phase_zero_line, phase1_with_start)
         self.assertGreater(end_of_cycle_line, phase1_with_end)
-
-    def test_main_hands_off_to_run_cycle_exactly_once(self):
-        tree = ast.parse(inspect.getsource(cratedigger.main))
-        calls = [
-            node for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "run_cycle"
-        ]
-        self.assertEqual(
-            len(calls), 1,
-            "main() must run exactly one cycle via run_cycle(ctx)")
-
-    def test_dry_run_gate_precedes_the_cycle_handoff(self):
-        # A count alone would let run_cycle(ctx) move ABOVE the dry-run
-        # gate, silently breaking --reconcile-dry-run's read-only contract
-        # while keeping the count at 1 (review F2). Pin the position.
-        tree = ast.parse(inspect.getsource(cratedigger.main))
-        gate_lines = [
-            node.lineno for node in ast.walk(tree)
-            if isinstance(node, ast.If)
-            and any(
-                isinstance(child, ast.Attribute)
-                and child.attr == "reconcile_dry_run"
-                for child in ast.walk(node.test)
-            )
-        ]
-        run_cycle_lines = [
-            node.lineno for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "run_cycle"
-        ]
-        self.assertEqual(len(gate_lines), 1)
-        self.assertEqual(len(run_cycle_lines), 1)
-        self.assertLess(gate_lines[0], run_cycle_lines[0])
-
-
-class TestMainContextWiring(unittest.TestCase):
-    """#1178 PR2 review F1 (mutant b): a bounded AST parse of
-    ``cratedigger.main`` -- the same technique as
-    ``TestCycleConvergenceWindows`` above, since ``main()`` needs a live DB
-    / slskd client to actually run -- pinning that the per-cycle
-    owner-``ctx`` construction wires a real
-    ``lib.enqueue.ClaimedQueueKeysRegistry()`` into
-    ``claimed_queue_keys_registry``. Deleting the kwarg (or the whole
-    construction) would silently degrade the cross-request enqueue guard
-    to its cross-cycle-only layer, which does not reliably catch the
-    actual #1178 same-cycle collision: neither sibling request has an
-    accepted ledger row yet at the moment the other's guard runs."""
-
-    def test_module_ctx_wires_a_claimed_queue_keys_registry(self):
-        tree = ast.parse(inspect.getsource(cratedigger.main))
-        matches: list[ast.keyword] = []
-        for node in ast.walk(tree):
-            if not (
-                isinstance(node, ast.Assign)
-                and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name)
-                and node.targets[0].id == "ctx"
-                and isinstance(node.value, ast.Call)
-                and isinstance(node.value.func, ast.Name)
-                and node.value.func.id == "CratediggerContext"
-            ):
-                continue
-            for kw in node.value.keywords:
-                if kw.arg == "claimed_queue_keys_registry":
-                    matches.append(kw)
-
-        self.assertEqual(
-            len(matches), 1,
-            "expected exactly one ctx = CratediggerContext(...) "
-            "assignment carrying a claimed_queue_keys_registry= kwarg",
-        )
-        value = matches[0].value
-        self.assertTrue(
-            isinstance(value, ast.Call)
-            and isinstance(value.func, ast.Name)
-            and value.func.id == "ClaimedQueueKeysRegistry",
-            f"claimed_queue_keys_registry= must construct a real "
-            f"ClaimedQueueKeysRegistry(), got {ast.dump(value)}",
-        )
-
-
-class TestPhase1ContextCallSite(unittest.TestCase):
-    """#1278 review: the SAME bounded-AST technique, pinning the site the
-    defect actually shipped at.
-
-    `build_phase1_context` forwards `download_ownership` and
-    `tests/test_cycle_summary.py::TestPhase1ContextForwarding` pins that
-    it does. Neither constrains `main()` to CALL it — and the shipped
-    defect was exactly that: an inline `CratediggerContext(...)` in
-    `_run_phase1` missing the kwarg, which made every download-timeout
-    cleanup a no-op under the ownership gate. Reverting that one line
-    reproduces the production bug with the whole suite green.
-    """
-
-    def test_phase1_ctx_is_built_by_the_forwarding_helper(self):
-        tree = ast.parse(inspect.getsource(cratedigger._run_phase1))
-        assignments = [
-            node for node in ast.walk(tree)
-            if isinstance(node, ast.Assign)
-            and len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Name)
-            and node.targets[0].id == "phase1_ctx"
-        ]
-
-        self.assertEqual(
-            len(assignments), 1,
-            "expected exactly one phase1_ctx = ... assignment in _run_phase1",
-        )
-        value = assignments[0].value
-        self.assertTrue(
-            isinstance(value, ast.Call)
-            and isinstance(value.func, ast.Name)
-            and value.func.id == "build_phase1_context",
-            "phase1_ctx must be built by build_phase1_context(...), never "
-            "by an inline CratediggerContext(...) — an inline construction "
-            "silently drops whatever collaborator the next author forgets, "
-            f"got {ast.dump(value)}",
-        )
 
 
 class TestGeneratedConvergenceIsolation(unittest.TestCase):
@@ -527,7 +411,6 @@ def _cycle_cfg():
     pending pins neither reconciler makes an HTTP call.
     """
     import configparser
-    from dataclasses import replace
     cfg = CratediggerConfig.from_ini(configparser.ConfigParser())
     return replace(
         cfg,

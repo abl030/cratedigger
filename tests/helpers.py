@@ -32,7 +32,15 @@ if TYPE_CHECKING:
     # Import-time cycle: ``tests.fakes`` does not import this module, but
     # keeping the reference type-only preserves that independence.
     from lib.beets_db import BeetsDB
-    from lib.context import CratediggerContext
+    from lib.context import (
+        CratediggerContext,
+        CycleCollaborators,
+        PipelineDBSource,
+        WorkerCollaborators,
+    )
+    from lib.download_ownership import DownloadOwnershipWriter
+    from lib.enqueue import ClaimedQueueKeysRegistry
+    from lib.peer_cache import PeerCache
     from lib.pipeline_db import PipelineDB
     from tests.fakes import FakeBeetsDB, FakePipelineDB
     from web.runtime import WebRuntime
@@ -786,11 +794,150 @@ def make_validation_result(**overrides: object) -> ValidationResult:
 # Shared context wiring
 # ---------------------------------------------------------------------------
 
+#: The builders' config seam. Tests pass either a real ``CratediggerConfig``
+#: or a ``MagicMock`` stand-in, which is why it has always been ``Any`` here;
+#: one alias so the reason is stated once instead of at every parameter.
+_CfgLike = Any
+
+
+def make_cycle_collaborators(
+    *,
+    cfg: _CfgLike = None,
+    slskd: object = None,
+    pipeline_db_source: PipelineDBSource | None = None,
+    download_ownership: DownloadOwnershipWriter | None = None,
+    claimed_queue_keys_registry: ClaimedQueueKeysRegistry | None = None,
+    peer_cache: PeerCache | None = None,
+) -> CycleCollaborators:
+    """Build a ``CycleCollaborators`` with test defaults (issue #1313).
+
+    ``lib.context.CycleCollaborators`` requires all six fields on purpose:
+    a production site that forgets one does not type-check, which is what
+    replaced the hand-registered construction audit. The defaults belong
+    HERE rather than on the production type — a test that does not care
+    about a collaborator says so by omission, while production must name
+    every one. A seventh collaborator therefore breaks the five production
+    sites (correct) and none of the tests (also correct).
+
+    ``None`` is the honest default for four of them: it is exactly what
+    ``CratediggerContext`` carried before this split, so the worlds these
+    tests drive are unchanged. Passing ``download_ownership=None`` keeps
+    ownership-gated destructive paths failing closed, which is what the
+    tests that omit it have always exercised.
+    """
+    from lib.context import CycleCollaborators
+    from tests.fakes import FakePipelineDBSource
+    return CycleCollaborators(
+        cfg=cfg if cfg is not None else MagicMock(),
+        slskd=slskd,
+        pipeline_db_source=(
+            pipeline_db_source if pipeline_db_source is not None
+            else FakePipelineDBSource()
+        ),
+        download_ownership=download_ownership,
+        claimed_queue_keys_registry=claimed_queue_keys_registry,
+        peer_cache=peer_cache,
+    )
+
+
+class _Keep:
+    """Sentinel type for ``rebind_collaborators``.
+
+    A distinct CLASS rather than a bare ``object()`` so each parameter keeps
+    its real declared type in the union and ``isinstance`` narrows the
+    sentinel away: "leave this one alone" stays distinguishable from an
+    explicit ``None`` — which several tests pass on purpose, to exercise a
+    fail-closed path — without an escape hatch.
+    """
+
+
+_KEEP = _Keep()
+
+
+def rebind_collaborators(
+    ctx: CratediggerContext,
+    *,
+    slskd: object = _KEEP,
+    pipeline_db_source: PipelineDBSource | _Keep = _KEEP,
+    download_ownership: DownloadOwnershipWriter | None | _Keep = _KEEP,
+    claimed_queue_keys_registry: (
+        ClaimedQueueKeysRegistry | None | _Keep) = _KEEP,
+    peer_cache: PeerCache | None | _Keep = _KEEP,
+) -> None:
+    """Swap one collaborator on an existing context — TESTS ONLY (#1313).
+
+    ``CycleCollaborators`` is frozen, so ``ctx.download_ownership = w`` no
+    longer works and production has no way to bolt a collaborator on after
+    the fact. Tests legitimately do vary exactly one collaborator against
+    an otherwise-shared world — most often removing the ownership writer
+    mid-test to exercise the destructive gate's fail-closed path — so this
+    rebinds the whole frozen value rather than mutating a field.
+
+    Every field is named explicitly here rather than going through
+    ``dataclasses.replace``, for the same reason production does: measured
+    against pyright 1.1.412, ``replace()`` kwargs are checked for neither
+    name nor type. A misspelled NAME is still loud, at runtime, because
+    ``__init__`` rejects the unknown kwarg; what ``replace()`` loses is the
+    wrong-TYPE check, which a constructor call gets and which nothing else
+    here would catch.
+
+    ``cfg`` is deliberately not reboundable: no test varies it this way,
+    and a context whose config changes mid-scenario is a different world,
+    not a rebound collaborator.
+    """
+    from lib.context import CycleCollaborators
+    current = ctx.collaborators
+    if not isinstance(current, CycleCollaborators):
+        raise TypeError(
+            "rebind_collaborators expects a cycle-world context; "
+            f"got {type(current).__name__}")
+    ctx.collaborators = CycleCollaborators(
+        cfg=current.cfg,
+        slskd=current.slskd if isinstance(slskd, _Keep) else slskd,
+        pipeline_db_source=(
+            current.pipeline_db_source
+            if isinstance(pipeline_db_source, _Keep)
+            else pipeline_db_source),
+        download_ownership=(
+            current.download_ownership
+            if isinstance(download_ownership, _Keep)
+            else download_ownership),
+        claimed_queue_keys_registry=(
+            current.claimed_queue_keys_registry
+            if isinstance(claimed_queue_keys_registry, _Keep)
+            else claimed_queue_keys_registry),
+        peer_cache=(
+            current.peer_cache if isinstance(peer_cache, _Keep)
+            else peer_cache),
+    )
+
+
+def make_worker_collaborators(
+    *,
+    cfg: _CfgLike = None,
+    pipeline_db_source: PipelineDBSource | None = None,
+) -> WorkerCollaborators:
+    """Build a ``WorkerCollaborators`` — the slskd-less out-of-cycle world.
+
+    Use this where the context under test stands in for the importer or
+    the preview worker; ``make_cycle_collaborators`` everywhere else.
+    """
+    from lib.context import WorkerCollaborators
+    from tests.fakes import FakePipelineDBSource
+    return WorkerCollaborators(
+        cfg=cfg if cfg is not None else MagicMock(),
+        pipeline_db_source=(
+            pipeline_db_source if pipeline_db_source is not None
+            else FakePipelineDBSource()
+        ),
+    )
+
+
 def make_ctx_with_fake_db(
     fake_db: FakePipelineDB,
     *,
-    cfg: Any = None,
-    slskd: Any = None,
+    cfg: _CfgLike = None,
+    slskd: _CfgLike = None,
 ) -> CratediggerContext:
     """Build a CratediggerContext wired to a FakePipelineDB.
 
@@ -806,9 +953,11 @@ def make_ctx_with_fake_db(
     from tests.fakes import FakePipelineDBSource
     source = FakePipelineDBSource(fake_db)
     return CratediggerContext(
-        cfg=cfg if cfg is not None else MagicMock(),
-        slskd=slskd if slskd is not None else MagicMock(),
-        pipeline_db_source=source,
+        collaborators=make_cycle_collaborators(
+            cfg=cfg if cfg is not None else MagicMock(),
+            slskd=slskd if slskd is not None else MagicMock(),
+            pipeline_db_source=source,
+        ),
     )
 
 
