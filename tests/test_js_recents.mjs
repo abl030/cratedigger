@@ -3,20 +3,30 @@
  * Run with: node tests/test_js_recents.mjs
  */
 
-import { __test__, renderAcquisitionItems } from '../web/js/recents.js';
+import {
+  loadRecents,
+  matchRatesFromDashboardWindows,
+  normalizeYoutubeIngestItem,
+  recentsLogUrl,
+  renderAcquisitionItems,
+  renderImportItems,
+  renderRecentsCounts,
+  renderRecentsItems as renderRecentsFixture,
+  renderRecentsSubnav,
+  triageLabelText,
+} from '../web/js/recents.js';
 import { state } from '../web/js/state.js';
 import { esc } from '../web/js/util.js';
 import { validDualProviderProof } from './fixtures/cd_rip_proof.mjs';
 
 import { domStub, stubGlobals, suite } from './js_harness.mjs';
 
-const { renderRecentsItems: renderRecentsFixture } = __test__;
 
 const t = suite(import.meta.url);
 
 t.section('renderImportItems() consumes the server-classified display contract');
 {
-  const html = __test__.renderImportItems([{
+  const html = renderImportItems([{
     id: 77,
     job_type: 'force_import',
     status: 'queued',
@@ -40,7 +50,7 @@ t.section('renderImportItems() consumes the server-classified display contract')
 t.section('renderRecentsSubnav() refreshes the active recents subtab');
 {
   state.recentsSub = 'acquisition';
-  const html = __test__.renderRecentsSubnav();
+  const html = renderRecentsSubnav();
   t.contains(html, 'window.setRecentsSub(\'history\')', 'history tab rendered');
   t.contains(html, 'window.setRecentsSub(\'acquisition\')', 'acquisition tab rendered');
   t.contains(html, '>Acquisition<', 'request lifecycle subtab has ownership-neutral name');
@@ -63,7 +73,7 @@ t.section('renderRecentsCounts() stays focused on history filters');
     matches_per_hour_24h: 1,
     matches_per_hour_6h: 2,
   };
-  const html = __test__.renderRecentsCounts();
+  const html = renderRecentsCounts();
   t.contains(html, '<div class="count-num">10</div><div class="count-label">all</div>',
     'all count rendered');
   t.contains(html, '<div class="count-num">3</div><div class="count-label">imported</div>',
@@ -144,18 +154,18 @@ t.section('renderRecentsItems() shows attributable positive CD proof');
 t.section('recentsLogUrl() requests enough history for triage labels');
 {
   state.recentsFilter = 'all';
-  t.contains(__test__.recentsLogUrl(), '/api/pipeline/log?limit=500',
+  t.contains(recentsLogUrl(), '/api/pipeline/log?limit=500',
     'all recents requests the expanded bounded history window');
   state.recentsFilter = 'rejected';
-  t.contains(__test__.recentsLogUrl(), '/api/pipeline/log?outcome=rejected&limit=500',
+  t.contains(recentsLogUrl(), '/api/pipeline/log?outcome=rejected&limit=500',
     'filtered recents keeps outcome filter and expanded limit');
 }
 
 t.section('triageLabelText() restores the old recents label wording');
 {
-  t.contains(__test__.triageLabelText('kept: would import'), 'triage - kept would import',
+  t.contains(triageLabelText('kept: would import'), 'triage - kept would import',
     'kept would import label uses old wording');
-  t.contains(__test__.triageLabelText('deleted: spectral reject'), 'triage - deleted spectral reject',
+  t.contains(triageLabelText('deleted: spectral reject'), 'triage - deleted spectral reject',
     'deleted spectral reject label uses old wording');
 }
 
@@ -184,7 +194,7 @@ t.section('renderRecentsItems() shows match rates beside the first date header')
 
 t.section('matchRatesFromDashboardWindows() derives found enqueue rates from old dashboard payloads');
 {
-  const rates = __test__.matchRatesFromDashboardWindows([
+  const rates = matchRatesFromDashboardWindows([
     {label: '24h', hours: 24, outcomes: {found: 132}},
     {label: '6h', hours: 6, outcomes: {found: 27}},
   ]);
@@ -207,7 +217,7 @@ t.section('matchRatesFromDashboardWindows() derives found enqueue rates from old
 
 t.section('renderImportItems() shows server-classified uncertain preview failures');
 {
-  const html = __test__.renderImportItems([{
+  const html = renderImportItems([{
     id: 78,
     job_type: 'force_import',
     status: 'failed',
@@ -231,7 +241,7 @@ t.section('renderImportItems() renders server-classified measurement failure');
   // 'uncertain'. The badge must be present (no blank pill) and the border
   // must be the same red as 'confident_reject' so operators see the failure
   // at a glance.
-  const html = __test__.renderImportItems([{
+  const html = renderImportItems([{
     id: 79,
     job_type: 'force_import',
     status: 'failed',
@@ -253,7 +263,7 @@ t.section('renderImportItems() renders server-classified measurement failure');
 
 t.section('renderImportItems() trusts the server summary over stale raw messages');
 {
-  const html = __test__.renderImportItems([{
+  const html = renderImportItems([{
     id: 731,
     job_type: 'automation_import',
     status: 'failed',
@@ -275,7 +285,7 @@ t.section('renderImportItems() trusts the server summary over stale raw messages
 
 t.section('renderImportItems() surfaces failed force-import source cleanup');
 {
-  const html = __test__.renderImportItems([{
+  const html = renderImportItems([{
     id: 40636,
     job_type: 'force_import',
     status: 'failed',
@@ -303,7 +313,7 @@ t.section('renderImportItems() surfaces failed force-import source cleanup');
 
 t.section('renderAcquisitionItems() shows current transfer progress and user');
 {
-  const html = __test__.renderAcquisitionItems([{
+  const html = renderAcquisitionItems([{
     id: 81,
     status: 'downloading',
     processing_owner: null,
@@ -342,7 +352,7 @@ t.section('renderAcquisitionItems() shows current transfer progress and user');
 
 t.section('renderAcquisitionItems() escapes current download fields');
 {
-  const html = __test__.renderAcquisitionItems([{
+  const html = renderAcquisitionItems([{
     id: 82,
     status: 'downloading',
     processing_owner: null,
@@ -363,7 +373,7 @@ t.section('renderAcquisitionItems() escapes current download fields');
 
 t.section('renderAcquisitionItems() shows active YouTube ingest rows without processor ownership');
 {
-  const row = __test__.normalizeYoutubeIngestItem({
+  const row = normalizeYoutubeIngestItem({
     download_log_id: 301,
     request_id: 202,
     created_at: '2026-05-28T01:00:00+00:00',
@@ -374,7 +384,7 @@ t.section('renderAcquisitionItems() shows active YouTube ingest rows without pro
       expected_track_count: 2,
     },
   });
-  const html = __test__.renderAcquisitionItems([row]);
+  const html = renderAcquisitionItems([row]);
   t.equal(row.processing_owner, null, 'YouTube normalization cannot grant processing ownership');
   t.contains(html, 'YT Album', 'YT album title rendered');
   t.contains(html, 'YT Artist', 'YT artist rendered');
@@ -386,7 +396,7 @@ t.section('renderAcquisitionItems() shows active YouTube ingest rows without pro
 
 t.section('renderAcquisitionItems() consumes only the exact processing owner');
 {
-  const html = __test__.renderAcquisitionItems([{
+  const html = renderAcquisitionItems([{
     id: 203,
     status: 'processing',
     created_at: '2026-07-29T01:00:00+00:00',
@@ -447,7 +457,7 @@ t.section('loadRecents() consumes the combined Acquisition route without changin
     },
   });
   state.recentsSub = 'acquisition';
-  await __test__.loadRecents();
+  await loadRecents();
   t.equal(calls.join(','), '/api/pipeline/acquisition', 'only combined route is fetched');
   t.contains(content.innerHTML, 'waiting to import', 'processing acquisition is rendered');
   t.equal(state.recentsSub, 'acquisition', 'active subview is preserved');

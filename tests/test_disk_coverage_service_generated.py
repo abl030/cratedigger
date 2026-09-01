@@ -26,13 +26,13 @@ from tests.node_jsonl_worker import NodeJsonlWorker
 ROOT = Path(__file__).resolve().parents[1]
 
 _PRESENTATION_WORKER = """
-import { __test__ } from './web/js/pipeline_dashboard.js';
+import { renderDriftRow } from './web/js/pipeline_dashboard.js';
 
 async function handle(operation, payload) {
   if (operation !== 'render_drift_row') {
     throw new Error(`unknown disk-coverage operation: ${operation}`);
   }
-  return __test__.renderDriftRow(payload);
+  return renderDriftRow(payload);
 }
 """
 

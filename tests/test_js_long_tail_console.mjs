@@ -17,35 +17,31 @@
  */
 
 import {
-  __test__,
   checkYoutube,
+  consoleCanStart,
+  consoleClearGuards,
+  consoleClose,
+  consoleIsOpen,
+  consoleIsStale,
+  consoleOpen,
+  consoleOpenIds,
+  consolePrune,
+  consoleSetYoutubeResult,
+  consoleSettle,
   consoleStates,
+  consoleToken,
+  consoleYoutubeResult,
   longTailDeleteRequest,
   longTailSetImported,
   longTailSetIntent,
+  renderSpectralFragment,
+  renderYoutubeBody,
 } from '../web/js/long_tail_console.js';
 import { loadLongTail, renderLongTailRow } from '../web/js/long_tail.js';
 import { renderPipeline, setPipelineView } from '../web/js/pipeline.js';
 import { state } from '../web/js/state.js';
 
 import { stubGlobals, suite } from './js_harness.mjs';
-
-const {
-  consoleOpen,
-  consoleClose,
-  consolePrune,
-  consoleCanStart,
-  consoleSettle,
-  consoleClearGuards,
-  consoleToken,
-  consoleIsStale,
-  consoleIsOpen,
-  consoleYoutubeResult,
-  consoleSetYoutubeResult,
-  consoleOpenIds,
-  renderSpectralFragment,
-  renderYoutubeBody,
-} = __test__;
 
 const t = suite(import.meta.url);
 

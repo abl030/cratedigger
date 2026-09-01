@@ -289,17 +289,6 @@ def _payload_call_reference(
         raise ValueError(f"unsupported optional audited renderer call: {call_name}")
     if _identifier_is(function, source_bytes, call_name):
         return function
-    if (
-        function is not None
-        and function.type == "member_expression"
-        and _identifier_is(
-            function.child_by_field_name("object"), source_bytes, "__test__"
-        )
-        and _identifier_is(
-            function.child_by_field_name("property"), source_bytes, call_name
-        )
-    ):
-        return function.child_by_field_name("property")
     raise ValueError(f"unsupported audited renderer callee form: {call_name}")
 
 
@@ -342,12 +331,7 @@ def _fixture_registration_nodes(
         )
         for module_import in module_imports
     )
-    has_recents_test_import = renderer_name == "renderRecentsItems" and any(
-        _identifier_is(child, source_bytes, "__test__")
-        for module_import in module_imports
-        for child in _walk(module_import)
-    )
-    mentions_boundary = has_opaque_module_import or has_recents_test_import or any(
+    mentions_boundary = has_opaque_module_import or any(
         _identifier_is(node, source_bytes, fixture_name)
         or _identifier_is(node, source_bytes, renderer_name)
         for node in _walk(root)
@@ -364,17 +348,6 @@ def _fixture_registration_nodes(
                 return True
             parent = parents.get(_node_key(parent))
         return False
-
-    imported_test_namespace = False
-
-    def top_level_declarator(node: Node) -> bool:
-        declaration = parents.get(_node_key(node))
-        return (
-            declaration is not None
-            and declaration.type == "lexical_declaration"
-            and (parent := parents.get(_node_key(declaration))) is not None
-            and parent.type == "program"
-        )
 
     for node in _walk(root):
         if node.type == "import_specifier":
@@ -395,52 +368,14 @@ def _fixture_registration_nodes(
             ):
                 renderer_nodes.add(_node_key(identifiers[0]))
                 allowed.add(_node_key(identifiers[1]))
-            if (
-                len(identifiers) == 1
-                and inside_target_import(node)
-                and _identifier_is(
-                    identifiers[0], source_bytes, "__test__", exact_spelling=True
-                )
-            ):
-                imported_test_namespace = True
-        if (
-            node.type != "variable_declarator"
-            or not top_level_declarator(node)
-            or not _identifier_is(
-                node.child_by_field_name("value"), source_bytes, "__test__"
-            )
-        ):
-            continue
-        pattern = node.child_by_field_name("name")
-        if pattern is None or pattern.type != "object_pattern":
-            continue
-        for entry in _semantic_named_children(pattern):
-            if entry.type != "pair_pattern":
-                continue
-            key = entry.child_by_field_name("key")
-            value = entry.child_by_field_name("value")
-            if _identifier_is(
-                key, source_bytes, renderer_name, exact_spelling=True
-            ) and _identifier_is(
-                value, source_bytes, fixture_name, exact_spelling=True
-            ):
-                if key is not None:
-                    renderer_nodes.add(_node_key(key))
-                if value is not None:
-                    allowed.add(_node_key(value))
 
-    registration_is_import = any(
-        parents.get(key) is not None
-        and parents[key].type == "import_specifier"
-        for key in allowed
-    )
+    # `allowed` is now populated at exactly one site, from a child of an
+    # `import_specifier`, so a separate `registration_is_import` term would
+    # be true whenever `allowed` is nonempty and the cardinality check below
+    # already covers that. It went with the `__test__` destructuring loop
+    # (#1313); two mutants proved the pair mutually redundant beforehand.
     module_registration_valid = (
-        len(module_imports) == 1
-        and not has_opaque_module_import
-        and (
-            registration_is_import
-            or (imported_test_namespace and renderer_name == "renderRecentsItems")
-        )
+        len(module_imports) == 1 and not has_opaque_module_import
     )
     if (
         len(allowed) != 1
@@ -474,28 +409,14 @@ def _validate_renderer_references(
     """Enforce the explicit direct-callee fixture-registration boundary."""
     allowed = set(declaration_nodes or ())
     for node in _walk(root):
-        if node.type != "call_expression":
-            continue
-        function = node.child_by_field_name("function")
-        if function is None or function.type != "subscript_expression":
-            continue
-        namespace, _ = _subscript_parts(function)
-        if _identifier_is(namespace, source_bytes, "__test__"):
-            raise ValueError(
-                "computed audited renderer fixture namespace calls are unsupported"
-            )
-
-    for node in _walk(root):
         if node.type == "call_expression":
             reference = _payload_call_reference(node, source_bytes, call_name)
             if reference is not None:
-                if declaration_nodes and not _identifier_is(
-                    node.child_by_field_name("function"), source_bytes, call_name
-                ):
-                    raise ValueError(
-                        f"registered fixture {call_name} must be called through "
-                        "its direct local alias"
-                    )
+                # `_payload_call_reference` returns non-None only when the
+                # callee IS the bare identifier, so a "must be called
+                # through its direct local alias" guard here could never
+                # fire. It was reachable while a `__test__` member callee
+                # was also accepted; that branch went with the bags (#1313).
                 allowed.add(_node_key(reference))
         elif node.type == "import_specifier":
             identifiers = [
