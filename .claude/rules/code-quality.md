@@ -493,6 +493,18 @@ of checks. The suite's terminal output is a compact complete failure index; the
 printed private-tmpfs bundle contains `summary.json`, `summary.md`, and every
 complete phase log.
 
+Each phase's `PhaseSpec` names the callable that reads its own log, and that
+callable lives in the module named after the wrapper whose output it decodes
+(`scripts/run_ruff.sh` → `scripts/phase_parsers/ruff.py`, and so on; issue
+#1313). `scripts/phase_parsers/__init__.py` is the contract they share and
+holds no dialect: the `CheckFailure` the bundle persists, the `PhaseLog` a
+parser is handed, the `PhaseFailures` it may return, and the `PARSER_ERRORS`
+it may raise. The coordinator runs a command and indexes what comes back —
+adding a phase means writing a parser beside its wrapper, never editing
+`scripts/run_test_suite.py`'s decoding, because it has none. Dialect tests
+live in `tests/test_phase_parsers.py` and are deterministic-only like every
+other test-infrastructure test.
+
 **Admission control on the shared test RAM root** (issue #1111): the fixed-size
 tmpfs backing `TMPDIR` has no capacity of its own to arbitrate concurrent
 suites, so `scripts/run_test_suite.py::run_suite` takes an advisory

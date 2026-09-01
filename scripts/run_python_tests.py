@@ -36,7 +36,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from lib.json_narrow import json_dict, json_list
-from scripts.run_test_suite import (
+from scripts.phase_parsers.python_tests import (
     FAILURE_MARKER_PREFIX,
     METRICS_MARKER_PREFIX,
     CheckFailureMarker,

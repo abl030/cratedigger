@@ -15,6 +15,7 @@ import time
 import unittest
 from pathlib import Path, PurePosixPath
 
+from scripts.phase_parsers import python_tests
 from scripts.run_python_tests import (
     _parser as _run_python_tests_parser,
 )
@@ -1131,7 +1132,7 @@ class TestTargetedSuiteWiring(unittest.TestCase):
             ("js-syntax", "js-unit", "pyright", "ruff", "vulture", "python"),
         )
         python_phase = phases[-1]
-        self.assertEqual(python_phase.parser, "python")
+        self.assertIs(python_phase.parser, python_tests.parse_failures)
         self.assertEqual(
             python_phase.command,
             (
