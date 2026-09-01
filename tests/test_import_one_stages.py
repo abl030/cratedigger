@@ -4,6 +4,7 @@ These test the decision points extracted from main() — each stage function
 takes data inputs and returns a StageResult without I/O.
 """
 import contextlib
+import dataclasses
 import io
 import json
 import os
@@ -15,7 +16,7 @@ import unittest
 import warnings
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import Any, ClassVar, cast
+from typing import ClassVar
 from unittest.mock import patch
 
 import msgspec
@@ -25,6 +26,7 @@ HARNESS_DIR = os.path.join(ROOT_DIR, "harness")
 
 sys.path.insert(0, ROOT_DIR)
 
+from lib.quality import ImportResult
 from tests.audio_fixtures import make_test_flac
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.test_beets_harness_session import (
@@ -108,7 +110,9 @@ def fake_harness_import_world(
         ):
             warnings.simplefilter("ignore", ResourceWarning)
             yield tmpdir, lambda: import_one.run_import(
-                tmpdir, "release-under-test",
+                tmpdir,
+                "release-under-test",
+                max_distance=import_one.DEFAULT_MAX_DISTANCE,
             )
 
 
@@ -122,12 +126,6 @@ def run_import_with_fake_harness(
         process_status=process_status, stderr_lines=stderr_lines,
     ) as (_tmpdir, run):
         return run()
-
-
-def _spectral_collection_precedes_conversion(source: str) -> bool:
-    collect_at = source.index("collect_attempt_spectral_audit(work_path, None)")
-    first_conversion_at = source.index("convert_lossless(")
-    return collect_at < first_conversion_at
 
 
 class TestHarnessFailureError(unittest.TestCase):
@@ -476,22 +474,563 @@ class TestImportBootstrap(unittest.TestCase):
         self.assertIn("OK", proc.stdout)
 
     def test_candidate_spectral_collection_precedes_any_conversion(self):
-        """The harness must inspect source audio before it creates derivatives."""
-        import inspect
+        """The harness must inspect source audio before it creates derivatives.
 
+        Run, don't read: a real preview over a real FLAC album, with the
+        spectral collector spying on what is actually on disk the moment it
+        is called. It used to be an ``inspect.getsource`` substring check on
+        ``main`` — that pin could only see the two calls' textual order, and
+        went blind the moment the body moved to another function.
+        """
         from harness import import_one
+        from lib.measurement import collect_attempt_spectral_audit
 
-        source = inspect.getsource(import_one.main)
-        self.assertTrue(_spectral_collection_precedes_conversion(source))
+        observed_at_spectral: list[list[str]] = []
+        real_collect = collect_attempt_spectral_audit
 
-    def test_ordering_checker_rejects_conversion_first_mutant(self):
-        mutant = (
-            "convert_lossless(work_path, V0_SPEC)\n"
-            "collect_attempt_spectral_audit(work_path, None)\n"
-            "convert_lossless(work_path, V0_SPEC)"
+        def spy(candidate_path: str, existing_path: str | None):
+            observed_at_spectral.append(sorted(os.listdir(candidate_path)))
+            return real_collect(candidate_path, existing_path)
+
+        beets = FakeBeetsDB()
+        beets.set_album_exists("mbid-ordering", False)
+        beets.set_album_info("mbid-ordering", None)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            album = os.path.join(tmpdir, "album")
+            os.makedirs(album)
+            make_test_flac(os.path.join(album, "01 - One.flac"), duration=1)
+
+            with patch("harness.import_one.BeetsDB", return_value=beets), \
+                 patch("lib.measurement.collect_attempt_spectral_audit", spy), \
+                 patch("harness.import_one._log"):
+                result = import_one.run_import_one(
+                    import_one.ImportOneRequest(
+                        path=album,
+                        mb_release_id="mbid-ordering",
+                        dry_run=True,
+                    )
+                )
+
+        self.assertEqual(observed_at_spectral, [["01 - One.flac"]])
+        # Non-vacuous: a derivative really was created afterwards, so the
+        # assertion above is about ordering rather than about a run that
+        # never converted anything.
+        self.assertTrue(result.conversion.was_converted)
+        self.assertEqual(result.conversion.target_filetype, "mp3")
+
+
+def _current_umask() -> int:
+    """Read the process umask. ``os`` offers no plain getter, only a swap."""
+    value = os.umask(0o022)
+    os.umask(value)
+    return value
+
+
+def run_evidence_authorized_import(
+    tmp_root: str,
+    *,
+    force: bool = False,
+    mbid: str = "mbid-evidence",
+    child_exit_code: int = 0,
+) -> tuple[ImportResult, list[float]]:
+    """Drive one whole evidence-authorized import in this process.
+
+    Builds a real album directory, a real action file whose snapshot the
+    production matcher accepts, and a ``FakeBeetsDB`` postflight, then calls
+    ``run_import_one`` with the Beets child recorded instead of launched.
+    Returns the result the run RETURNED (no ``SystemExit``, no stdout
+    parsing) plus every apply-time distance ceiling the child was handed.
+
+    Shared with ``tests/test_force_import.py``, which owns the ``--force``
+    ceiling pins.
+    """
+    from harness import import_one
+    from lib.beets_db import AlbumInfo
+    from lib.evidence_action_file import (
+        remove_quality_evidence_action_file,
+        write_quality_evidence_action_file,
+    )
+    from lib.quality import (
+        AudioQualityMeasurement,
+        QualityEvidenceActionPayload,
+    )
+    from lib.quality_evidence import snapshot_audio_files
+    from tests.evidence_helpers import make_album_quality_evidence
+
+    staging = os.path.join(tmp_root, "staging")
+    album = os.path.join(staging, "album")
+    os.makedirs(album)
+    with open(os.path.join(album, "01 - One.mp3"), "wb") as handle:
+        handle.write(b"cratedigger test bytes")
+    library = os.path.join(tmp_root, "library", "Artist", "Album")
+    os.makedirs(library)
+
+    evidence = make_album_quality_evidence(
+        mb_release_id=mbid,
+        source_path=album,
+        # Rule C: the snapshot comes from the production producer, never a
+        # hand-typed file list the matcher could never have written.
+        files=snapshot_audio_files(album),
+        measurement=AudioQualityMeasurement(
+            min_bitrate_kbps=320, format="MP3"),
+        codec="mp3",
+        container="mp3",
+        storage_format="MP3",
+    )
+    action_file = write_quality_evidence_action_file(
+        QualityEvidenceActionPayload(
+            candidate=evidence,
+            decision={"imported": True, "stage2_import": "import"},
+            decision_name="import",
+        )
+    )
+
+    beets = FakeBeetsDB()
+    beets.set_album_exists(mbid, False)
+    # ``set_album_info`` seeds the album rows the postflight reads, and it
+    # must come last: ``set_item_paths`` re-seeds the album and drops them.
+    beets.set_item_paths(mbid, [(1, os.path.join(library, "01 - One.mp3"))])
+    beets.set_album_info(mbid, AlbumInfo(
+        album_id=77,
+        track_count=1,
+        min_bitrate_kbps=320,
+        is_cbr=True,
+        album_path=library,
+    ))
+
+    ceilings: list[float] = []
+
+    def recording_run_import(
+        path: str,
+        mb_release_id: str,
+        *,
+        max_distance: float,
+        **_kwargs: str | None,
+    ):
+        ceilings.append(max_distance)
+        return import_one.RunImportOutcome(
+            child_exit_code,
+            [],
+            applied_distance=0.01,
+            admitted_audio_count=1,
+            applied_audio_count=1,
+            failure_reason=(
+                None if child_exit_code == 0
+                else f"fake beets child exited {child_exit_code}"
+            ),
         )
 
-        self.assertFalse(_spectral_collection_precedes_conversion(mutant))
+    request = import_one.ImportOneRequest(
+        path=album,
+        mb_release_id=mbid,
+        force=force,
+        quality_evidence_action_file=action_file,
+    )
+    try:
+        with patch("harness.import_one.BeetsDB", return_value=beets), \
+             patch("harness.import_one.run_import", recording_run_import), \
+             patch("harness.import_one._log"):
+            result = import_one.run_import_one(request)
+    finally:
+        remove_quality_evidence_action_file(action_file)
+    return result, ceilings
+
+
+class TestImportOneRequest(unittest.TestCase):
+    """The typed argv contract ``main`` hands the in-process run."""
+
+    def test_positional_only_argv_equals_the_declared_defaults(self):
+        """The parser's defaults ARE the dataclass's own, field by field.
+
+        Two declarations of the same defaults can drift silently; this is
+        what stops them. Compare per field first so a failure names the one
+        that moved, then compare the whole value.
+        """
+        from harness.import_one import ImportOneRequest
+
+        parsed = ImportOneRequest.from_argv(["/staged/album", "mbid-1"])
+        declared = ImportOneRequest(
+            path="/staged/album", mb_release_id="mbid-1")
+
+        for field in dataclasses.fields(ImportOneRequest):
+            with self.subTest(field=field.name):
+                self.assertEqual(
+                    getattr(parsed, field.name),
+                    getattr(declared, field.name),
+                )
+        self.assertEqual(parsed, declared)
+
+    def test_every_parser_destination_reaches_a_field(self):
+        """A flag the parser accepts but the request drops is a silent loss."""
+        from harness.import_one import ImportOneRequest, build_parser
+
+        destinations = set(
+            vars(build_parser().parse_args(["/staged/album", "mbid-1"]))
+        )
+        fields = {f.name for f in dataclasses.fields(ImportOneRequest)}
+
+        self.assertEqual(destinations, fields)
+
+    def test_the_request_cannot_be_mutated_mid_run(self):
+        from harness.import_one import ImportOneRequest
+
+        request = ImportOneRequest(path="/a", mb_release_id="m")
+
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            request.force = True  # pyright: ignore[reportAttributeAccessIssue]
+
+
+class TestResolveRankConfig(unittest.TestCase):
+    """``--quality-rank-config`` is how the caller's runtime config crosses.
+
+    Ignoring it silently makes the harness classify ranks by the hardcoded
+    defaults while the caller believes its own config applied — a quality
+    decision made on the wrong table, with nothing to see in the log.
+    """
+
+    def test_a_serialized_config_survives_the_round_trip(self):
+        from harness.import_one import resolve_rank_config
+        from lib.quality import QualityRankConfig, RankBitrateMetric
+
+        sent = dataclasses.replace(
+            QualityRankConfig.defaults(),
+            bitrate_metric=RankBitrateMetric.MIN,
+        )
+        self.assertNotEqual(sent, QualityRankConfig.defaults())
+
+        self.assertEqual(resolve_rank_config(sent.to_json()), sent)
+
+    def test_absent_or_malformed_argv_falls_back_to_defaults(self):
+        from harness.import_one import resolve_rank_config
+        from lib.quality import QualityRankConfig
+
+        cases = [
+            ("flag absent", None),
+            ("empty string", ""),
+            ("not JSON at all", "{not json"),
+        ]
+        for desc, serialized in cases:
+            with self.subTest(desc=desc), patch("harness.import_one._log"):
+                self.assertEqual(
+                    resolve_rank_config(serialized),
+                    QualityRankConfig.defaults(),
+                )
+
+
+class TestRunImportOneReturnsInsteadOfExiting(unittest.TestCase):
+    """``run_import_one`` hands its caller a result; only ``main`` exits."""
+
+    def test_terminal_stage_returns_the_result(self):
+        from harness import import_one
+
+        beets = FakeBeetsDB()
+        beets.set_album_exists("mbid-missing", False)
+
+        with patch("harness.import_one.BeetsDB", return_value=beets), \
+             patch("harness.import_one._log"):
+            result = import_one.run_import_one(
+                import_one.ImportOneRequest(
+                    path="/tmp/cratedigger-no-such-album",
+                    mb_release_id="mbid-missing",
+                )
+            )
+
+        self.assertEqual(result.decision, "path_missing")
+        self.assertEqual(result.exit_code, 3)
+
+    def test_main_emits_exactly_one_sentinel_for_that_result(self):
+        """parse → run → emit, with one exit and one acknowledgement."""
+        from harness import import_one
+        from lib.quality import IMPORT_RESULT_SENTINEL, parse_import_result
+
+        beets = FakeBeetsDB()
+        beets.set_album_exists("mbid-missing", False)
+        stdout = io.StringIO()
+        argv = [
+            "import_one.py", "/tmp/cratedigger-no-such-album", "mbid-missing",
+        ]
+
+        saved_umask = os.umask(0o022)
+        os.umask(saved_umask)
+        self.addCleanup(os.umask, saved_umask)
+        with patch.object(sys, "argv", argv), \
+             patch("sys.stdout", stdout), \
+             patch("harness.import_one.BeetsDB", return_value=beets), \
+             patch("harness.import_one._log"), \
+             self.assertRaises(SystemExit) as caught:
+            import_one.main()
+
+        self.assertEqual(caught.exception.code, 3)
+        lines = stdout.getvalue().splitlines()
+        self.assertEqual(
+            sum(line.startswith(IMPORT_RESULT_SENTINEL) for line in lines), 1)
+        parsed = parse_import_result(stdout.getvalue())
+        assert parsed is not None
+        self.assertEqual(parsed.decision, "path_missing")
+
+    def test_preview_scratch_is_removed_whether_the_run_returns_or_raises(self):
+        """The run owns its scratch copy, so no caller can leak an album.
+
+        The scratch root used to be a module global the process-exit path
+        deleted. A returning run has no exit path, so ownership moved into
+        the run itself — and this drives both endings.
+        """
+        from harness import import_one
+        from lib.quality import SpectralAnalysisDetail, SpectralDetail
+
+        audit = SpectralDetail(
+            candidate=SpectralAnalysisDetail(
+                attempted=True, grade="genuine", suspect_pct=0.0),
+            existing=SpectralAnalysisDetail(attempted=False),
+        )
+        beets = FakeBeetsDB()
+        beets.set_album_exists("mbid-scratch", False)
+        beets.set_album_info("mbid-scratch", None)
+        scratch_roots: list[str] = []
+
+        def record_scratch(candidate_path: str, _existing: str | None):
+            # Spectral analysis runs on the preview's private copy, so
+            # ``candidate_path``'s parent IS the scratch root, observed
+            # while it is still alive.
+            scratch_roots.append(os.path.dirname(candidate_path))
+            return audit
+
+        def record_then_raise(candidate_path: str, existing: str | None):
+            record_scratch(candidate_path, existing)
+            raise RuntimeError("boom")
+
+        request_for = import_one.ImportOneRequest
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            album = os.path.join(tmpdir, "album")
+            os.makedirs(album)
+            make_test_flac(os.path.join(album, "01 - One.flac"), duration=1)
+
+            with patch("harness.import_one.BeetsDB", return_value=beets), \
+                 patch("harness.import_one.convert_lossless",
+                       return_value=(1, 0, "flac", 2)), \
+                 patch("harness.import_one._log"):
+                with patch("lib.measurement.collect_attempt_spectral_audit",
+                           record_scratch):
+                    returned = import_one.run_import_one(request_for(
+                        path=album,
+                        mb_release_id="mbid-scratch",
+                        dry_run=True,
+                    ))
+                with patch("lib.measurement.collect_attempt_spectral_audit",
+                           record_then_raise), \
+                     self.assertRaises(RuntimeError):
+                    import_one.run_import_one(request_for(
+                        path=album,
+                        mb_release_id="mbid-scratch",
+                        dry_run=True,
+                    ))
+
+        self.assertTrue(returned.preview)
+        self.assertEqual(len(scratch_roots), 2)
+        self.assertEqual(len(set(scratch_roots)), 2)
+        for root in scratch_roots:
+            with self.subTest(root=root):
+                self.assertFalse(os.path.exists(root))
+
+    def test_a_whole_import_runs_in_process_and_returns_its_result(self):
+        from harness import import_one
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result, ceilings = run_evidence_authorized_import(tmpdir)
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.decision, "import")
+        self.assertEqual(result.postflight.beets_id, 77)
+        self.assertEqual(ceilings, [import_one.DEFAULT_MAX_DISTANCE])
+
+    def test_a_failed_beets_child_returns_import_failed_and_stops(self):
+        """The evidence lane's ``rc != 0`` return, which nothing drove.
+
+        Every existing mock in this file hands the lane a zero-exit child,
+        so deleting that early return left the whole postflight running
+        against a Beets that never applied anything.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result, ceilings = run_evidence_authorized_import(
+                tmpdir, child_exit_code=2)
+
+        self.assertEqual(result.exit_code, 2)
+        self.assertEqual(result.decision, "import_failed")
+        self.assertEqual(result.error, "fake beets child exited 2")
+        # The run stopped AT the failure: no postflight identity was
+        # recorded, which is what the deleted return was protecting.
+        self.assertIsNone(result.postflight.beets_id)
+        self.assertEqual(len(ceilings), 1)
+
+    def test_a_missing_release_returns_mbid_missing(self):
+        """rc 4 takes the other side of the same branch."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result, _ceilings = run_evidence_authorized_import(
+                tmpdir, child_exit_code=4)
+
+        self.assertEqual(result.exit_code, 4)
+        self.assertEqual(result.decision, "mbid_missing")
+
+    def test_the_measured_lane_hands_its_derived_ceiling_to_the_child(self):
+        """The non-evidence lane's ``run_import`` call had zero coverage.
+
+        Production reaches it only from a bare CLI invocation today —
+        ``lib/dispatch/core.py`` writes an evidence action file on every
+        launch — but the code is live, and its ceiling argument was the one
+        place a dropped ``max_distance=`` would silently import at 0.5.
+        """
+        from harness import import_one
+        from lib.beets import FORCE_IMPORT_DISTANCE_THRESHOLD
+        from lib.beets_db import AlbumInfo
+        from lib.quality import SpectralAnalysisDetail, SpectralDetail
+
+        audit = SpectralDetail(
+            candidate=SpectralAnalysisDetail(
+                attempted=True, grade="genuine", suspect_pct=0.0),
+            existing=SpectralAnalysisDetail(attempted=False),
+        )
+        ceilings: list[float] = []
+
+        def recording_run_import(
+            path: str,
+            mb_release_id: str,
+            *,
+            max_distance: float,
+            **_kwargs: str | None,
+        ):
+            ceilings.append(max_distance)
+            return import_one.RunImportOutcome(
+                0,
+                [],
+                applied_distance=0.02,
+                admitted_audio_count=1,
+                applied_audio_count=1,
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # One level down, like the evidence driver: the real
+            # ``_cleanup_staged_dir`` runs at the end of a successful import
+            # and prunes the album's parent, which must not be the
+            # ``TemporaryDirectory`` itself.
+            album = os.path.join(tmpdir, "staging", "album")
+            library = os.path.join(tmpdir, "library", "Artist", "Album")
+            os.makedirs(album)
+            os.makedirs(library)
+            with open(os.path.join(album, "01 - One.mp3"), "wb") as handle:
+                handle.write(b"cratedigger test bytes")
+
+            beets = FakeBeetsDB()
+            beets.set_album_exists("mbid-measured", False)
+            beets.set_item_paths(
+                "mbid-measured", [(1, os.path.join(library, "01 - One.mp3"))])
+            beets.set_album_info("mbid-measured", AlbumInfo(
+                album_id=88,
+                track_count=1,
+                min_bitrate_kbps=320,
+                is_cbr=True,
+                album_path=library,
+                format="MP3",
+            ))
+
+            with patch("harness.import_one.BeetsDB", return_value=beets), \
+                 patch("harness.import_one.run_import", recording_run_import), \
+                 patch("lib.measurement.collect_attempt_spectral_audit",
+                       return_value=audit), \
+                 patch("harness.import_one.convert_lossless",
+                       return_value=(0, 0, None, None)), \
+                 patch("harness.import_one._get_folder_bitrates",
+                       return_value=[900]), \
+                 patch("harness.import_one._detect_source_format",
+                       return_value="MP3"), \
+                 patch("harness.import_one._detect_native_codec_family",
+                       return_value="mp3"), \
+                 patch("harness.import_one._probe_native_lossy_as_v0",
+                       return_value=None), \
+                 patch("harness.import_one.fix_library_modes"), \
+                 patch("harness.import_one._log"):
+                result = import_one.run_import_one(
+                    import_one.ImportOneRequest(
+                        path=album,
+                        mb_release_id="mbid-measured",
+                        force=True,
+                    )
+                )
+
+        self.assertEqual(ceilings, [FORCE_IMPORT_DISTANCE_THRESHOLD])
+        self.assertEqual(result.exit_code, 0)
+
+    def test_a_crash_before_any_terminal_stage_is_still_acknowledged(self):
+        """``_current_result`` is published before the run touches Beets.
+
+        ``_run_entrypoint`` reads that global to acknowledge a crash with
+        whatever the run had built. Publishing it later — after the
+        preflight block, say — silently downgrades every early crash to a
+        bare ``ImportResult``, losing the preview flag and the caller's V0
+        probe. The existing crash tests set the global by hand, so they
+        cannot see the ordering at all.
+        """
+        from harness import import_one
+        from lib.quality import parse_import_result
+
+        stdout = io.StringIO()
+
+        def crash_in_preflight() -> None:
+            import_one.run_import_one(import_one.ImportOneRequest(
+                path="/tmp/cratedigger-no-such-album",
+                mb_release_id="mbid-crash",
+                dry_run=True,
+                existing_v0_probe_avg_bitrate=253,
+            ))
+
+        with patch("sys.stdout", stdout), \
+             patch("harness.import_one.BeetsDB",
+                   side_effect=RuntimeError("beets DB unreachable")), \
+             patch.object(import_one, "_import_total_start", None), \
+             patch("harness.import_one._log"), \
+             self.assertRaises(SystemExit) as caught:
+            import_one._run_entrypoint(main_fn=crash_in_preflight)
+
+        self.assertEqual(caught.exception.code, 99)
+        parsed = parse_import_result(stdout.getvalue())
+        assert parsed is not None
+        self.assertEqual(parsed.decision, "crash")
+        self.assertEqual(parsed.error, "RuntimeError: beets DB unreachable")
+        # Both come from the partial result the run had already published.
+        self.assertTrue(parsed.preview)
+        assert parsed.existing_v0_probe is not None
+        self.assertEqual(parsed.existing_v0_probe.avg_bitrate_kbps, 253)
+
+    def test_main_resets_the_umask_for_the_subprocess_chain(self):
+        """GH #84's group-writable boundary, asserted rather than assumed.
+
+        The expected value comes from ``reset_umask`` itself, not a typed
+        literal: the number lives inside that function and nowhere else, so
+        a pin holding its own copy would go stale silently.
+        """
+        from harness import import_one
+        from lib.permissions import reset_umask
+
+        saved = _current_umask()
+        self.addCleanup(os.umask, saved)
+        reset_umask()
+        expected = _current_umask()
+        # A value nothing in this run would arrive at by accident.
+        os.umask(0o077)
+
+        beets = FakeBeetsDB()
+        beets.set_album_exists("mbid-missing", False)
+        with patch.object(
+            sys, "argv",
+            ["import_one.py", "/tmp/cratedigger-no-such-album", "mbid-missing"],
+        ), patch("sys.stdout", io.StringIO()), \
+             patch("harness.import_one.BeetsDB", return_value=beets), \
+             patch("harness.import_one._log"), \
+             self.assertRaises(SystemExit):
+            import_one.main()
+
+        self.assertEqual(_current_umask(), expected)
 
 
 class TestPipelineDbUpdate(unittest.TestCase):
@@ -616,15 +1155,24 @@ class TestPreviewImportResultSurface(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertNotIn("--preview-import-result-file", result.stdout)
 
-    def test_no_preview_import_result_reuse_path_in_main(self):
+    def test_no_preview_import_result_reuse_path_anywhere_in_the_harness(self):
+        """The retired preview-reuse lane must not come back, in any function.
+
+        Scoped to the whole module rather than ``main``: the import body has
+        already moved once (``main`` → ``run_import_one`` →
+        ``_run_import_one_stages``), and a pin aimed at one function goes
+        quietly green the next time it moves. Read raw, not through
+        ``pinned_source``, because this clause fails on PRESENCE — comment
+        stripping would let a commented-out reuse path slip past it (#1326).
+        """
         import inspect
 
         from harness import import_one
 
-        main_source = inspect.getsource(import_one.main)
+        module_source = inspect.getsource(import_one)
 
-        self.assertNotIn("preview_import_result", main_source)
-        self.assertNotIn("reuse_preview", main_source)
+        self.assertNotIn("preview_import_result", module_source)
+        self.assertNotIn("reuse_preview", module_source)
         self.assertFalse(hasattr(import_one, "_load_preview_import_result"))
         self.assertFalse(hasattr(import_one, "_preview_import_result_reuse_reason"))
         self.assertFalse(hasattr(import_one, "_preview_conversion_target"))
@@ -661,7 +1209,7 @@ class TestPostflightBadExtensionWarnings(unittest.TestCase):
             with patch("os.rename") as mock_rename, \
                  patch("sqlite3.connect") as mock_connect:
                 found = import_one._record_bad_extension_warnings(
-                    cast(Any, beets), "mbid-123", result)
+                    beets, "mbid-123", result)
 
             self.assertEqual(found, ["01 Track.bak"])
             self.assertEqual(result.postflight.bad_extensions, ["01 Track.bak"])
@@ -1644,6 +2192,7 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
             mock_run_import.assert_called_once_with(
                 album,
                 "mbid-123",
+                max_distance=import_one.DEFAULT_MAX_DISTANCE,
                 beets_config_dir=None,
                 beets_python=None,
                 beets_library_db_path=None,

@@ -864,11 +864,18 @@ not exactly one same-release album.
 ### Constants
 
 ```python
-BEETS_DB = "/mnt/virtio/cratedigger/beets-db/beets-library.db"
-HARNESS_TIMEOUT = 300   # 5 min for match selection
-IMPORT_TIMEOUT = 1800   # 30 min for actual import (fetchart, embedart, lyrics can be slow)
-max_distance = 0.5      # Reject matches above this distance
+HARNESS_TIMEOUT = 300           # 5 min for match selection
+IMPORT_TIMEOUT = 1800           # 30 min for actual import (fetchart, embedart, lyrics can be slow)
+DEFAULT_MAX_DISTANCE = 0.5      # Reject matches above this distance
 ```
+
+The Beets library pair is not a constant: dispatch snapshots it and passes
+`--beets-library-db` / `--beets-library-root` on the child's argv, so a
+runtime-config swap between dispatch and child launch cannot redirect the
+preflight/postflight DB. The distance ceiling is not a constant either at
+runtime — `DEFAULT_MAX_DISTANCE` is only the floor value one run starts
+from, and `--force` raises that run's ceiling to
+`lib.beets.FORCE_IMPORT_DISTANCE_THRESHOLD`.
 
 ## Beets Distance
 

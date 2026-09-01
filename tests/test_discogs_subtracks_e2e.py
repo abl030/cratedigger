@@ -283,6 +283,7 @@ class TestDiscogsSubtracksEndToEnd(unittest.TestCase):
                 outcome = import_one.run_import(
                     str(source),
                     _RELEASE_ID,
+                    max_distance=import_one.DEFAULT_MAX_DISTANCE,
                     beets_config_dir=str(beets_dir),
                     beets_python=os.environ.get("CRATEDIGGER_BEETS_PYTHON"),
                     beets_library_db_path=str(database),
@@ -400,11 +401,6 @@ class TestDiscogsSubtracksEndToEnd(unittest.TestCase):
 
             with (
                 patch.dict(os.environ, env, clear=False),
-                patch.object(
-                    import_one,
-                    "max_distance",
-                    FORCE_IMPORT_DISTANCE_THRESHOLD,
-                ),
                 patch.object(import_one, "HARNESS", harness_path),
             ):
                 validation = beets_validate(
@@ -417,6 +413,7 @@ class TestDiscogsSubtracksEndToEnd(unittest.TestCase):
                 outcome = import_one.run_import(
                     str(source),
                     _RELEASE_ID,
+                    max_distance=FORCE_IMPORT_DISTANCE_THRESHOLD,
                     beets_config_dir=str(beets_dir),
                     beets_python=os.environ.get("CRATEDIGGER_BEETS_PYTHON"),
                     beets_library_db_path=str(database),
