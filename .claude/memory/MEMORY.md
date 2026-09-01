@@ -123,4 +123,4 @@
 - [#1278 hygiene items SHIPPED](project_1278_hygiene_items_shipped.md) — PRs #1308+#1309 live-verified 2026-08-31; match_transfer_id NOT deletable (demoted); job-kind registry 14/15 sites; preview-worker db:Any deferred with measurement; count errors were the round defect class
 - [#1278 register CLOSED](project_1278_register_closed.md) — 2026-08-31 residual sweep PR #1311 live; candidate 1 -> #1312; V6 harness-scoping + Pyright-finishes-kwarg-sweeps lessons
 - [#1313 architecture register OPEN](project_1313_architecture_register.md) — 2026-09-01 review; 6 strong candidates, top pick JobLane collapse; de-dupe here first
-- [mutmut evaluation](project_mutmut_evaluation.md) — 2026-09-01: viable runner breadth pass; 460 mutants/20.5s; recipe on branch worktree-mutmut-explore
+- [mutmut ADOPTED](project_mutmut_evaluation.md) — PRs #1318+#1320 merged 2026-09-01; #1317 closed; whole-repo convergence register OPEN at #1321
