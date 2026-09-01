@@ -677,15 +677,17 @@ def post_wrong_match_triage(h: RouteHandler, body: dict[str, object]) -> None:
 
     The sweep takes minutes when stale rows trigger re-measurement
     (#271); running it inline wedged the single-threaded server for the
-    duration. The sweep thread opens its own DB connection via
-    ``runtime().new_db`` — psycopg2 handles are not thread-safe to
-    share with the request thread.
+    duration. The sweep thread opens and releases its own DB connection
+    through ``runtime().open_background_db`` — one handle is one
+    PostgreSQL session, so sharing the request thread's would put both
+    threads inside the same session-level advisory locks. The runtime,
+    not the runner, owns that handle's lifetime.
     """
     req_body = parse_body(h, body, WrongMatchTriageRequest)
     if req_body is None:
         return
     started = _triage_runner.start(
-        db_factory=runtime().new_db,
+        db_session=runtime().open_background_db,
         cleanup_fn=cleanup_all_wrong_matches,
     )
     if not started:

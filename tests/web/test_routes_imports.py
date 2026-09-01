@@ -2139,6 +2139,32 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertEqual(data["summary"]["processed"], 3)
         self.assertEqual(data["summary"]["deleted"], 2)
 
+    @patch("web.routes.imports.cleanup_all_wrong_matches")
+    def test_bulk_triage_leaves_the_injected_handle_open(self, mock_cleanup):
+        """The sweep never closes a handle the runtime did not open.
+
+        With no DSN the background session yields the injected shared
+        handle — the dev server's one read-only connection, this
+        harness's fake — and the runtime owns neither. Closing it is the
+        same violation ``close_thread_handles`` already refuses.
+        """
+        from lib.wrong_match_cleanup_service import WrongMatchCleanupSummary
+
+        runner = _fresh_triage_runner(self)
+        mock_cleanup.return_value = WrongMatchCleanupSummary(processed=0)
+
+        status, _data = self._post(
+            "/api/wrong-matches/triage",
+            {"confirm_all_wrong_matches": True},
+        )
+        self.assertEqual(status, 202)
+        runner.join(timeout=5)
+
+        _status, data = self._get("/api/wrong-matches/triage/status")
+        self.assertEqual(data["state"], "completed")
+        self.assertFalse(self.db.closed, "the sweep closed the injected handle")
+        self.assertEqual(self.db.close_calls, 0)
+
     def test_cancel_stops_a_running_sweep_and_reports_cancelled_not_failed(
         self,
     ) -> None:

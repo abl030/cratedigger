@@ -69,6 +69,30 @@ ephemeral PostgreSQL and applies migrations at import, and pytest collects
 3. Triage every survivor (see below), then delete `pyproject.toml` and
    `mutants/` before committing.
 
+## What it silently does not mutate
+
+**A decorated class body is skipped whole, and so is a decorated
+function.** `mutmut/mutation/file_mutation.py` returns "ignore" for any
+`cst.ClassDef` carrying a decorator, and for any `cst.FunctionDef`
+carrying one other than a lone `@staticmethod` / `@classmethod`. Nothing
+in the output says so: the run reports a tally over whatever it did
+mutate, and a file whose every method sits inside `@dataclass` scores a
+clean sheet by mutating nothing.
+
+That covers a lot of this repository. Measured 2026-09-01 across `lib/`,
+`web/`, `scripts/`, and `harness/`: 350 decorated classes holding 307
+functions, plus 136 decorated functions elsewhere — about 11% of the
+4,168 production functions, and it lands on exactly the frozen
+dataclasses and `msgspec.Struct`s the house style prefers. Issue #1313's
+batch A hit it head on: the breadth pass over `web/runtime.py` mutated
+`runtime()` and nothing else, because every method under test belongs to
+`@dataclass(frozen=True) class WebRuntime`.
+
+So before reading a tally, check `mutants/<file>.py` for the function you
+changed. If it is there verbatim with no `__mutmut_` trampoline, the
+breadth pass said nothing about it and the aimed mutants are your only
+mutation evidence. Say which in the PR.
+
 ## Hard rules
 
 - **Don't list a `source_paths` member in `also_copy` — it's redundant, not

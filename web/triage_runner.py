@@ -25,9 +25,11 @@ rows processed. Every ARMED cancel refreshes the pending timestamp
 later, genuinely-in-window armed cancel be silently dropped once an
 earlier one had gone stale-but-uncleared.
 
-The sweep thread gets its OWN pipeline-DB connection from ``db_factory``
-— psycopg2 connections must not be shared between the handler thread and
-the sweep thread.
+The sweep thread gets its pipeline handle by entering ``db_session`` on
+that thread — ``web/runtime.py::WebRuntime.open_background_db``, which
+opens a connection of its own under a DSN so nothing is shared with the
+handler thread. Handle ownership stays there: this module enters and
+exits the session and never closes anything itself.
 
 In-memory state only: a web-service restart aborts the sweep and resets
 the status to idle, which matches the old synchronous behaviour (the
@@ -42,8 +44,9 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime
-from typing import Protocol, TypedDict
+from typing import TypedDict
 
 from lib.import_execution import CancellationToken
 from lib.wrong_match_cleanup_service import WrongMatchCleanupSummary
@@ -78,16 +81,12 @@ logger = logging.getLogger("cratedigger")
 PENDING_CANCEL_WINDOW_SECONDS = 10.0
 
 
-class _ClosableDB(Protocol):
-    """The only fact ``TriageRunner`` itself needs about the sweep's own
-    DB handle: it can be closed once the sweep finishes. Everything else
-    about the handle is opaque here and passed straight through to
-    ``cleanup_fn``, which owns the real narrow contract
-    (``lib.wrong_match_cleanup_service.WrongMatchCleanupDB``) — this
-    layer never calls another method on it."""
-
-    def close(self) -> None: ...
-
+#: Opens the sweep's pipeline handle for the duration of one sweep.
+#: The handle itself is opaque here and passed straight through to
+#: ``cleanup_fn``, which owns the real narrow contract
+#: (``lib.wrong_match_cleanup_service.WrongMatchCleanupDB``); this layer
+#: never touches it, and closing it is the session's own business.
+type SweepDbSession = Callable[[], AbstractContextManager[object]]
 
 STATE_IDLE = "idle"
 STATE_RUNNING = "running"
@@ -133,17 +132,19 @@ class TriageRunner:
     def start(
         self,
         *,
-        db_factory: Callable[[], _ClosableDB],
+        db_session: SweepDbSession,
         cleanup_fn: Callable[..., WrongMatchCleanupSummary],
     ) -> bool:
         """Start a sweep on a background thread.
 
         Returns False (and starts nothing) when a sweep is already
-        running. ``db_factory`` is called ON the sweep thread so the
-        connection is created and used by one thread only. When a
-        pending cancel (#1106) is still within its window, the sweep is
-        still admitted (still True, still starts a thread) but its
-        token is pre-cancelled before ``cleanup_fn`` ever runs.
+        running. ``db_session`` is entered ON the sweep thread so the
+        connection is opened, used, and released by one thread only, and
+        it is exited on every terminal path, a raising ``cleanup_fn``
+        included. When a pending cancel (#1106) is still within its
+        window, the sweep is still admitted (still True, still starts a
+        thread) but its token is pre-cancelled before ``cleanup_fn``
+        ever runs.
         """
         with self._lock:
             if self._state == STATE_RUNNING:
@@ -160,7 +161,7 @@ class TriageRunner:
             self._token = token
             self._thread = threading.Thread(
                 target=self._run,
-                args=(db_factory, cleanup_fn, token),
+                args=(db_session, cleanup_fn, token),
                 name="wrong-match-triage",
                 daemon=True,
             )
@@ -244,16 +245,17 @@ class TriageRunner:
 
     def _run(
         self,
-        db_factory: Callable[[], _ClosableDB],
+        db_session: SweepDbSession,
         cleanup_fn: Callable[..., WrongMatchCleanupSummary],
         token: CancellationToken,
     ) -> None:
-        db: _ClosableDB | None = None
         try:
-            db = db_factory()
-            summary = cleanup_fn(
-                db, confirm_all_wrong_matches=True, cancellation_token=token,
-            )
+            with db_session() as db:
+                summary = cleanup_fn(
+                    db,
+                    confirm_all_wrong_matches=True,
+                    cancellation_token=token,
+                )
             # Compute the whole terminal payload BEFORE taking the lock
             # or writing any state. If ``to_dict()`` raised after
             # ``self._state`` had already been written, the ``except``
@@ -277,14 +279,6 @@ class TriageRunner:
                 self._state = STATE_FAILED
                 self._error = f"{type(exc).__name__}: {exc}"
                 self._finished_at = _utcnow_iso()
-        finally:
-            if db is not None:
-                try:
-                    db.close()
-                except Exception:
-                    logger.exception(
-                        "wrong_match_triage_sweep.db_close_failed",
-                    )
 
 
 def _utcnow_iso() -> str:

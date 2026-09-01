@@ -116,17 +116,51 @@ class WebRuntime:
             self._threads.db = handle
         return handle
 
-    def new_db(self) -> PipelineDB:
-        """Open a fresh pipeline-DB connection for a background thread.
+    @contextmanager
+    def open_background_db(self) -> Generator[PipelineDB]:
+        """A scoped pipeline handle for work that outlives the request.
 
-        Background work that outlives a request (the bulk-triage sweep)
-        must not borrow a request thread's handle. Falls back to the
-        shared handle when no DSN is configured (test harness — the one
-        fake stands in for both).
+        The bulk-triage sweep runs on its own thread for minutes after
+        its POST has answered 202, so it must not borrow the request
+        thread's handle. One handle is one PostgreSQL session: the two
+        threads would share session-level advisory locks and whatever
+        transaction either one opened, and
+        :meth:`close_thread_handles` would release the connection out
+        from under the sweep the moment the request's own connection
+        ended.
+
+        Under a DSN this opens a connection nothing else holds and
+        closes it on the way out, best-effort in the same sense
+        :meth:`close_thread_handles` is: a failing close is logged, not
+        raised at the caller, whose own work already succeeded or failed
+        on its own terms.
+
+        With no DSN it yields the injected shared handle and leaves it
+        OPEN. The dev server and the test harness own that one, so the
+        rule teardown already follows applies here too — the runtime
+        closes only what the runtime opened. The separation above is
+        genuinely absent in that case, one session serving both threads,
+        which is accepted for those two callers and never reached in
+        production, where the DSN is always set.
+
+        A context manager rather than a method returning a handle, so
+        ownership is structural instead of conventional: nothing can
+        pass this where :meth:`db` belongs, or the reverse, without
+        Pyright saying so.
         """
-        if self.db_dsn:
-            return PipelineDB(self.db_dsn)
-        return self.db()
+        if not self.db_dsn:
+            yield self.db()
+            return
+        handle = PipelineDB(self.db_dsn)
+        try:
+            yield handle
+        finally:
+            try:
+                handle.close()
+            except Exception:
+                # Best-effort, like close_thread_handles: the caller's
+                # own work already succeeded or failed on its own terms.
+                log.exception("Background pipeline DB handle failed to close")
 
     def db_available(self) -> bool:
         """True when :meth:`db` can return a handle."""

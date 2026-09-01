@@ -30,6 +30,7 @@ from __future__ import annotations
 import threading
 import unittest
 from collections.abc import Callable
+from contextlib import AbstractContextManager, closing
 
 from hypothesis import example, given
 from hypothesis import strategies as st
@@ -63,6 +64,12 @@ class _FakeClock:
 class _ClosableDB:
     def close(self) -> None:
         return None
+
+
+def _db_session() -> AbstractContextManager[object]:
+    """Stands in for ``WebRuntime.open_background_db``: yield a handle,
+    close it when the sweep's block ends."""
+    return closing(_ClosableDB())
 
 
 def _cleanup_fn(
@@ -194,7 +201,7 @@ def _run_steps(steps: list[tuple[str, float, bool]]) -> None:
                 <= PENDING_CANCEL_WINDOW_SECONDS
             )
             started = runner.start(
-                db_factory=_ClosableDB, cleanup_fn=_cleanup_fn,
+                db_session=_db_session, cleanup_fn=_cleanup_fn,
             )
             if not started:
                 raise AssertionError(
@@ -220,7 +227,7 @@ def _run_steps(steps: list[tuple[str, float, bool]]) -> None:
         elif kind == "cancel_while_running":
             cleanup_fn, entered, release = _blocking_cleanup_fn_factory()
             started = runner.start(
-                db_factory=_ClosableDB, cleanup_fn=cleanup_fn,
+                db_session=_db_session, cleanup_fn=cleanup_fn,
             )
             if not started:
                 raise AssertionError(

@@ -45,6 +45,18 @@ from web.runtime import WebRuntime, install_runtime, runtime
 UNDIALLED_DSN = "postgresql://generated-never-connected/cratedigger"
 
 
+def _close_count(handle: object) -> int:
+    """How many times a recording fake has been closed.
+
+    Every injected pipeline handle these strategies build is a
+    :class:`FakePipelineDB`, which records ``close_calls``. Anything
+    else reports 0, and the clause reading this simply does not speak
+    about that world.
+    """
+    calls = getattr(handle, "close_calls", 0)
+    return calls if isinstance(calls, int) else 0
+
+
 def runtime_resolution_violations(rt: WebRuntime) -> list[str]:
     """Every way a runtime's handle resolution can be wrong."""
     violations: list[str] = []
@@ -63,6 +75,20 @@ def runtime_resolution_violations(rt: WebRuntime) -> list[str]:
             violations.append(
                 "a DSN-less runtime did not return its injected pipeline handle",
             )
+        if rt.shared_db is not None:
+            injected = rt.shared_db
+            closes_before = _close_count(injected)
+            with rt.open_background_db() as background:
+                if background is not injected:
+                    violations.append(
+                        "a DSN-less background session did not yield the "
+                        "injected handle",
+                    )
+            if _close_count(injected) != closes_before:
+                violations.append(
+                    "a background session closed an injected handle it does "
+                    "not own",
+                )
 
     if rt.shared_beets is not None and rt.beets_db() is not rt.shared_beets:
         violations.append(
@@ -243,6 +269,40 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         wrong = make_web_runtime(Wrong(), db=FakePipelineDB())
         self.assertIn(
             "a DSN-less runtime did not return its injected pipeline handle",
+            runtime_resolution_violations(wrong),
+        )
+
+    def test_background_session_yields_the_injected_handle_clause(
+        self,
+    ) -> None:
+        class Wrong(WebRuntime):
+            @contextmanager
+            def open_background_db(self) -> Generator[PipelineDB]:
+                # A DSN-less session that opens something of its own
+                # instead of yielding the handle the caller injected.
+                yield FakePipelineDB()  # pyright: ignore[reportReturnType]
+
+        wrong = make_web_runtime(Wrong(), db=FakePipelineDB())
+        self.assertIn(
+            "a DSN-less background session did not yield the injected handle",
+            runtime_resolution_violations(wrong),
+        )
+
+    def test_background_session_closes_an_injected_handle_clause(self) -> None:
+        """The exact pre-fix behaviour: the sweep closed whatever it got."""
+
+        class Wrong(WebRuntime):
+            @contextmanager
+            def open_background_db(self) -> Generator[PipelineDB]:
+                handle = self.db()
+                try:
+                    yield handle
+                finally:
+                    handle.close()
+
+        wrong = make_web_runtime(Wrong(), db=FakePipelineDB())
+        self.assertIn(
+            "a background session closed an injected handle it does not own",
             runtime_resolution_violations(wrong),
         )
 
