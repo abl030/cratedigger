@@ -7,6 +7,7 @@ siblings live in `tests/test_current_library_evidence_generated.py`.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import tempfile
@@ -349,6 +350,51 @@ class TestResolveCurrentLibraryEvidence(unittest.TestCase):
                 assert isinstance(resolved, CurrentLibraryEvidence)
                 self.assertIsNone(resolved.evidence)
                 self.assertFalse(resolved.existing_spectral_evidence.attempted)
+
+    def test_a_link_naming_a_vanished_row_says_which_row_vanished(self):
+        """The one world here whose only trace is a log line.
+
+        A link pointing at a row that is gone returns None exactly like the
+        three other absences, so nothing about the resolved bundle can tell
+        an operator a link was broken. The warning is the whole signal, and
+        it is useless without the id it could not load: this is the only
+        assertion that stops that branch inverting, or losing its arguments,
+        without a single test noticing (issue #1313 mutmut pass).
+        """
+        db = self._db()
+        db.set_request_current_evidence(42, 999)
+
+        with self.assertLogs("cratedigger", level="WARNING") as captured:
+            resolved = self._resolve(
+                db, lambda *_a, **_k: EvidenceBuildResult(None, "empty_current"),
+            )
+
+        assert isinstance(resolved, CurrentLibraryEvidence)
+        self.assertIsNone(resolved.evidence)
+        self.assertEqual(len(captured.records), 1)
+        self.assertEqual(
+            captured.records[0].getMessage(),
+            "Current spectral evidence 999 is missing for request 42",
+        )
+
+    def test_a_resolvable_link_warns_about_nothing(self):
+        """Must-still-work: the healthy world must not accuse itself."""
+        db = self._db()
+        source = self._source_dir()
+        evidence = make_album_quality_evidence(
+            mb_release_id="mb-release",
+            source_path=source,
+            files=snapshot_audio_files(source),
+        )
+        _link(db, evidence)
+        logger = logging.getLogger("cratedigger")
+
+        with patch.object(logger, "warning") as warned:
+            self._resolve(
+                db, lambda *_a, **_k: EvidenceBuildResult(evidence, "ready"),
+            )
+
+        warned.assert_not_called()
 
 
 class _PersistRecordingDB(FakePipelineDB):
