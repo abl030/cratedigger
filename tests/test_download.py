@@ -8916,6 +8916,45 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
         self.assertEqual(outcome, HavePreparation.NO_CURRENT_EVIDENCE)
         self.assertEqual(ctx.evidence_enrichment_budget, 2)
 
+    def test_exhausted_budget_attempts_no_have_preparation(self):
+        """An exhausted budget returns None — no outcome, nothing attempted.
+
+        ``None`` is distinct from every member ``HavePreparation`` can carry,
+        and it must NOT satisfy the downstream ``== READY`` gate. Nothing
+        covered the equivalent early return before issue #1313 (it used to
+        return the caller-invented token ``"budget_exhausted"``).
+        """
+        from lib.download import (
+            _enrich_have_evidence_after_failure,
+            _prepare_have_evidence_before_failure_log,
+        )
+
+        ctx = make_ctx_with_fake_db(FakePipelineDB())
+        ctx.evidence_enrichment_budget = 0
+        prepare_calls: list[int] = []
+        enrich, enrich_calls = self._recorder(HaveEnrichment.ENRICHED)
+
+        def prepare(
+            _db: object, *, request_id: int, **_kwargs: object,
+        ) -> HavePreparation:
+            prepare_calls.append(request_id)
+            return HavePreparation.READY
+
+        outcome = _prepare_have_evidence_before_failure_log(
+            42, "mb-uuid", ctx, prepare_fn=prepare,
+        )
+
+        self.assertIsNone(outcome)
+        self.assertEqual(prepare_calls, [])
+        self.assertEqual(ctx.evidence_enrichment_budget, 0)
+
+        # The None must fall through the enrichment gate exactly as a
+        # non-READY outcome does, rather than being treated as prepared.
+        _enrich_have_evidence_after_failure(
+            42, "mb-uuid", ctx, prepared_outcome=outcome, enrich_fn=enrich,
+        )
+        self.assertEqual(enrich_calls, [])
+
     def test_timeout_album_default_enrichment_marks_v0_attempted(self):
         """Default wiring, no injection: a real (failing) probe still lands
         the once-only attempted marker on the exact current snapshot."""

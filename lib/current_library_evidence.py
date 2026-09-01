@@ -142,10 +142,15 @@ class HavePreparation(enum.Enum):
 class HaveEnrichment(enum.Enum):
     """What ``enrich_incomplete_current_evidence_for_request`` resolved.
 
-    ``ENRICHED`` and ``PARTIAL`` both mean measurement work actually ran, so
-    both spend a budget unit. ``COMPLETE`` (nothing was missing), ``STALE``
-    (the files moved under the capture) and ``NO_CURRENT_EVIDENCE`` (Beets
-    authoritatively has nothing) all return without measuring and are free.
+    ``ENRICHED`` and ``PARTIAL`` both spend a budget unit: between them they
+    cover every lane that did work, or could not prove it did none. A
+    rebuild counts as work even when nothing was left to measure
+    (``ENRICHED`` with an empty plan), and an adapter or backfill failure
+    before any measurement counts as ``PARTIAL`` — the same rule
+    ``docs/quality-verification.md`` states. ``COMPLETE`` (nothing was
+    missing), ``STALE`` (the files moved under the capture) and
+    ``NO_CURRENT_EVIDENCE`` (Beets authoritatively has nothing) each return
+    having neither measured nor rebuilt, and are free.
     """
 
     COMPLETE = "complete"
@@ -1067,9 +1072,10 @@ def resolve_current_library_evidence(
     ``loader`` against a fresh exact Beets resolution, project the surviving
     row's persisted spectral fact, and decide reuse/preserve — that every
     attempt lane needs before it can measure or reuse candidate evidence.
-    It existed three times before issue #1313: both preview lanes via
-    ``lib/import_preview.py`` and, copy-pasted down to this function's own
-    unavailable-detail string, the preview worker's front-gate reuse path.
+    It existed twice before issue #1313, reached from three call sites:
+    ``lib/import_preview.py::_resolve_lane_current_evidence``, shared by both
+    preview lanes, and — copy-pasted down to this function's own
+    unavailable-detail string — the preview worker's front-gate reuse path.
 
     ``loader`` is the lanes' only difference. The measure-and-persist lane
     and the worker's reuse path pass ``load_current_evidence_for_preview``
@@ -1149,8 +1155,17 @@ def persist_measured_have_spectral(
     decide.** An audit-only scan left the decision spectrally blind
     (download_log 37206): the preview reported the fact in its audit payload,
     marked the job importable, and the importer then read a current-evidence
-    row that still carried no spectral grade. Any caller that measures HAVE
-    and then marks a job importable owes this call in between.
+    row that still carried no spectral grade. The preview worker's front-gate
+    reuse path measures HAVE and then marks the job importable, so it owes
+    this call in between.
+
+    This is the WORKER lane's guard, not a universal one.
+    ``lib/import_preview.py``'s measure-and-persist lane reaches
+    ``persist_exact_current_spectral_from_attempt`` directly under its own
+    condition (``not reuse_have_evidence``) — a predicate this one cannot
+    express, since a reusing lane never produces a fresh scan to persist at
+    all. What both lanes share is that persister's own guards, which are the
+    real floor: R19, exact path, exact snapshot.
 
     Returns ``None`` when there is nothing to persist — no linked HAVE row,
     a preserved lossless-source row (R19: an installed-derivative scan is

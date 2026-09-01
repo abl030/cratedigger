@@ -16,15 +16,18 @@ from unittest.mock import patch
 from lib.current_library_evidence import (
     CurrentLibraryAuthorityUnavailable,
     CurrentLibraryEvidence,
+    CurrentLibraryEvidenceDB,
     HaveEnrichment,
     HavePreparation,
     enrich_incomplete_current_evidence_for_request,
     persist_measured_have_spectral,
     prepare_current_evidence_for_failure,
+    preserve_existing_source_spectral,
     resolve_current_library_evidence,
 )
 from lib.quality import (
     CURRENT_EVIDENCE_LINEAGE_VERSION,
+    EVIDENCE_SUBJECT_SOURCE,
     AudioQualityMeasurement,
     QualityRankConfig,
     SpectralAnalysisDetail,
@@ -189,6 +192,9 @@ class TestResolveCurrentLibraryEvidence(unittest.TestCase):
             measurement=AudioQualityMeasurement(
                 spectral_grade="genuine",
                 spectral_bitrate_kbps=192,
+                cliff_hz=19500,
+                codec_family="mp3",
+                ultrasonic_deficit_db=-7.25,
                 spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
             ),
             lineage_version=CURRENT_EVIDENCE_LINEAGE_VERSION,
@@ -200,12 +206,79 @@ class TestResolveCurrentLibraryEvidence(unittest.TestCase):
 
         assert isinstance(resolved, CurrentLibraryEvidence)
         self.assertIs(resolved.evidence, evidence)
-        self.assertEqual(resolved.existing_spectral_evidence.grade, "genuine")
+        # EVERY projected field, not just the two obvious ones: this detail
+        # is what the decision reads as HAVE, so a field silently dropped
+        # here is a spectrally blinder decision, not a cosmetic loss.
+        projected = resolved.existing_spectral_evidence
+        self.assertEqual(projected.grade, "genuine")
+        self.assertEqual(projected.bitrate_kbps, 192)
+        self.assertEqual(projected.cliff_hz, 19500)
+        self.assertEqual(projected.codec_family, "mp3")
+        self.assertEqual(projected.ultrasonic_deficit_db, -7.25)
         self.assertEqual(
-            resolved.existing_spectral_evidence.bitrate_kbps, 192,
+            projected.spectral_measurement_version,
+            SPECTRAL_MEASUREMENT_VERSION,
         )
         self.assertTrue(resolved.reuse_have_evidence)
         self.assertFalse(resolved.preserve_have_source)
+
+    def test_preserved_lossless_source_row_sets_the_preserve_flag(self):
+        """R19 lineage must reach the bundle the lanes branch on."""
+        db = self._db()
+        source = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, source, ignore_errors=True)
+        with open(os.path.join(source, "01.opus"), "wb") as handle:
+            handle.write(b"installed derivative")
+        evidence = make_album_quality_evidence(
+            mb_release_id="mb-release",
+            source_path=source,
+            files=snapshot_audio_files(source),
+            measurement=AudioQualityMeasurement(
+                format="Opus",
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=160,
+                spectral_subject=EVIDENCE_SUBJECT_SOURCE,
+                spectral_provenance="carried",
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+                was_converted_from="wav",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+        assert preserve_existing_source_spectral(evidence)
+
+        resolved = self._resolve(
+            db, lambda *_a, **_k: EvidenceBuildResult(evidence, "ready"),
+        )
+
+        assert isinstance(resolved, CurrentLibraryEvidence)
+        self.assertTrue(resolved.preserve_have_source)
+
+    def test_loader_receives_the_caller_s_beets_authority(self):
+        """The resolver forwards authority, it does not re-derive it."""
+        db = self._db()
+        ranks = QualityRankConfig.defaults()
+        seen: list[dict[str, object]] = []
+
+        def loader(_db, **kwargs):
+            seen.append(dict(kwargs))
+            return EvidenceBuildResult(None, "empty_current")
+
+        resolve_current_library_evidence(
+            db,
+            request_id=42,
+            mb_release_id="mb-release",
+            quality_ranks=ranks,
+            beets_library_root="/library",
+            loader=loader,
+        )
+
+        self.assertEqual(len(seen), 1)
+        self.assertIs(seen[0]["quality_ranks"], ranks)
+        self.assertEqual(seen[0]["beets_library_root"], "/library")
+        self.assertEqual(seen[0]["request_id"], 42)
+        self.assertEqual(seen[0]["mb_release_id"], "mb-release")
 
     def test_loader_receives_the_linked_row_as_its_preloaded_evidence(self):
         db = self._db()
@@ -231,11 +304,23 @@ class TestResolveCurrentLibraryEvidence(unittest.TestCase):
         self.assertEqual(getattr(preloaded, "id"), stored.id)  # noqa: B009
 
 
+class _PersistRecordingDB(FakePipelineDB):
+    """Records the one write these declining guards must never reach."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.spectral_persist_calls: list[int] = []
+
+    def persist_current_spectral_measurement(self, **kwargs) -> bool:
+        self.spectral_persist_calls.append(int(kwargs["expected_evidence_id"]))
+        return super().persist_current_spectral_measurement(**kwargs)
+
+
 class TestPersistMeasuredHaveSpectral(unittest.TestCase):
     """The guard on making a fresh HAVE scan durable."""
 
-    def _db(self) -> FakePipelineDB:
-        db = FakePipelineDB()
+    def _db(self) -> _PersistRecordingDB:
+        db = _PersistRecordingDB()
         db.seed_request(make_request_row(id=42, status="wanted"))
         return db
 
@@ -247,48 +332,101 @@ class TestPersistMeasuredHaveSpectral(unittest.TestCase):
             spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
         )
 
+    def _installed_dir(self, name: str) -> str:
+        source = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, source, ignore_errors=True)
+        with open(os.path.join(source, name), "wb") as handle:
+            handle.write(b"installed bytes")
+        return source
+
+    def _linked_installed_row(self, db: FakePipelineDB, source: str):
+        """An ordinary linked installed row: every callee guard would pass."""
+        return _link(db, make_album_quality_evidence(
+            source_path=source,
+            files=snapshot_audio_files(source),
+            measurement=AudioQualityMeasurement(),
+        ))
+
+    def _linked_preserved_source_row(self, db: FakePipelineDB, source: str):
+        """A row R19 protects — the predicate itself proves it (Rule C)."""
+        stored = _link(db, make_album_quality_evidence(
+            source_path=source,
+            files=snapshot_audio_files(source),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=128,
+                format="Opus",
+                spectral_grade="genuine",
+                spectral_subject=EVIDENCE_SUBJECT_SOURCE,
+                spectral_provenance="carried",
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+                was_converted_from="wav",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        ))
+        assert preserve_existing_source_spectral(stored)
+        return stored
+
     def test_declines_when_no_have_row_is_linked(self):
+        """No row to write onto — and the DB is never touched."""
+        db = self._db()
         result = persist_measured_have_spectral(
-            self._db(),
+            db,
             request_id=42,
             resolved=_resolved(evidence=None),
             measured_existing=self._fresh_scan(),
-            measured_existing_path="/library/Artist/Album",
+            measured_existing_path=self._installed_dir("01.mp3"),
         )
         self.assertIsNone(result)
+        self.assertEqual(db.spectral_persist_calls, [])
 
     def test_declines_for_a_preserved_lossless_source_row(self):
-        """R19: an installed-derivative scan is never that row's grade."""
-        source = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, source, ignore_errors=True)
-        with open(os.path.join(source, "01.opus"), "wb") as handle:
-            handle.write(b"derivative bytes")
-        evidence = make_album_quality_evidence(
-            source_path=source, files=snapshot_audio_files(source),
-        )
+        """R19: an installed-derivative scan is never that row's grade.
+
+        Every other guard on both sides passes for this world — the row is
+        linked, its fingerprint matches the scanned path, and the fresh scan
+        is usable — so the only thing that can decline is R19 itself.
+        """
+        db = self._db()
+        source = self._installed_dir("01.opus")
+        linked = self._linked_preserved_source_row(db, source)
 
         result = persist_measured_have_spectral(
-            self._db(),
+            db,
             request_id=42,
-            resolved=_resolved(evidence=evidence, preserve=True),
+            resolved=_resolved(evidence=linked, preserve=True),
             measured_existing=self._fresh_scan(),
             measured_existing_path=source,
         )
 
         self.assertIsNone(result)
+        self.assertEqual(db.spectral_persist_calls, [])
+        stored = db.load_album_quality_evidence_by_id(linked.id)
+        assert stored is not None
+        self.assertEqual(stored.measurement.spectral_grade, "genuine")
 
     def test_declines_when_the_scan_resolved_no_installed_path(self):
-        evidence = make_album_quality_evidence()
+        """A linked, otherwise-persistable row still declines with no path."""
+        db = self._db()
+        source = self._installed_dir("01.mp3")
+        linked = self._linked_installed_row(db, source)
 
         result = persist_measured_have_spectral(
-            self._db(),
+            db,
             request_id=42,
-            resolved=_resolved(evidence=evidence),
+            resolved=_resolved(evidence=linked),
             measured_existing=self._fresh_scan(),
             measured_existing_path=None,
         )
 
         self.assertIsNone(result)
+        self.assertEqual(db.spectral_persist_calls, [])
+        stored = db.load_album_quality_evidence_by_id(linked.id)
+        assert stored is not None
+        self.assertIsNone(stored.measurement.spectral_grade)
 
     def test_persists_a_fresh_scan_onto_the_exact_snapshot(self):
         db = self._db()
@@ -737,3 +875,38 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
         assert persisted is not None
         self.assertIsNone(persisted.measurement.spectral_grade)
         self.assertIsNone(persisted.measurement.spectral_bitrate_kbps)
+
+
+class TestCurrentLibraryEvidenceDBProtocolParity(unittest.TestCase):
+    """#409 shape for this module's own port (#1313).
+
+    ``ImportPreviewDB`` extends ``CurrentLibraryEvidenceDB``, so the preview
+    module's parity tests cover this one only transitively — and nothing
+    pinned that inheritance. These three assertions make the HAVE port's own
+    contract explicit, so narrowing either side fails here rather than
+    silently through a sibling.
+    """
+
+    def test_pipeline_db_satisfies_protocol(self) -> None:
+        from lib.pipeline_db import PipelineDB
+
+        self.assertTrue(issubclass(PipelineDB, CurrentLibraryEvidenceDB))
+
+    def test_fake_pipeline_db_satisfies_protocol(self) -> None:
+        self.assertTrue(issubclass(FakePipelineDB, CurrentLibraryEvidenceDB))
+
+    def test_have_protocol_extends_evidence_protocol(self) -> None:
+        """The HAVE writers sit on top of the candidate-evidence reads."""
+        from lib.quality_evidence import QualityEvidenceDB
+
+        self.assertTrue(
+            issubclass(CurrentLibraryEvidenceDB, QualityEvidenceDB),
+        )
+
+    def test_preview_protocol_extends_the_have_protocol(self) -> None:
+        """The preview lanes forward their handle into the HAVE persisters."""
+        from lib.import_preview import ImportPreviewDB
+
+        self.assertTrue(
+            issubclass(ImportPreviewDB, CurrentLibraryEvidenceDB),
+        )

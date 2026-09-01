@@ -14,22 +14,39 @@ over generated HAVE worlds (issue #1313). Three invariants:
 - **V3 absence** — an authoritative absence has no row to write onto, so
   nothing is persisted.
 
-**R19 is deliberately NOT a clause here.** A preserved lossless-source row
-cannot reach this lane's write at all, which was established by measurement,
-not by reading: with both R19 guards removed
-(`persist_measured_have_spectral`'s and
-`persist_exact_current_spectral_from_attempt`'s), a generated preserved-source
-world still never called `persist_current_spectral_measurement`, on two
-disjoint branches. When such a row carries a usable current-generation grade
-it is *reusable*, so the worker passes `existing_detail` and
-`collect_release_attempt_spectral_audit` returns an EMPTY
-`ExistingSpectralAuditLookup` — no installed path, so nothing to persist
-against. When it is not reusable, its grade is unusable by definition, and
-the persist helper's own grade check declines. A clause no world can reach is
-unfalsifiable rather than satisfied, so R19 is patrolled where it IS
-falsifiable: `TestPersistMeasuredHaveSpectral
-.test_declines_for_a_preserved_lossless_source_row` (verified: dropping the
-caller-side guard turns it RED) and the callee's own R19 tests.
+- **V4 R19** — a preserved lossless-source row is never overwritten with a
+  scan of its own installed derivative. Such a row wears its SOURCE's
+  spectral; rescanning the lossy copy can rewrite a transcode-like source as
+  apparently genuine.
+
+**V4 is fail-closed legislation, not a satisfied guard — say so plainly.**
+No world this lane can build violates it, and that was established by
+measurement rather than by reading. R19 identity is pure lineage and says
+nothing about the carried grade, so the strategy now varies that grade on
+the preserved-source arm; before, it was hardcoded usable, which made every
+preserved-source world *reusable* and left the other branch unproducible and
+therefore unmeasurable. Both branches were then run with BOTH R19 guards
+removed (`persist_measured_have_spectral`'s and
+`persist_exact_current_spectral_from_attempt`'s), and the property stayed
+GREEN:
+
+- **Reusable** (a policy-usable carried grade): the worker passes
+  `existing_detail`, so `collect_release_attempt_spectral_audit` returns an
+  empty `ExistingSpectralAuditLookup` — no installed path, nothing to
+  persist against.
+- **Not reusable** (a non-policy carried grade): the audit's own preserve
+  branch (`lib/measurement.py`) hands back the CARRIED detail instead of
+  scanning the derivative, and the persist helper then declines on that
+  detail's unusable grade.
+
+The second branch holds only because the producible non-policy grades are
+exactly the closed set the evidence row admits. Widen `_POLICY_USABLE_
+SPECTRAL_GRADES`, or change what decides reuse, and V4 becomes reachable —
+which is the point of keeping it. Removing ONLY the caller-side guard is
+also GREEN; the callee's guard, and the audit above it, are the real floor.
+Deterministic siblings:
+`TestPersistMeasuredHaveSpectral.test_declines_for_a_preserved_lossless_source_row`
+and the callee's own R19 tests.
 """
 
 from __future__ import annotations
@@ -145,6 +162,11 @@ def reuse_lane_violations(world: HaveWorld, order: list[str]) -> list[str]:
         violations.append(
             f"V3: an authoritative absence persisted a HAVE fact: {order}"
         )
+    if world.preserve_source and world.has_row and persisted:
+        violations.append(
+            f"V4: a preserved lossless-source row was overwritten with an "
+            f"installed-derivative scan (R19): {order}"
+        )
     return violations
 
 
@@ -166,12 +188,24 @@ def _drive_world(world: HaveWorld) -> list[str]:
         db = _OrderRecordingDB()
         db.seed_request(make_request_row(id=42, mb_release_id="mbid-42"))
         if world.preserve_source:
+            # R19 identity is pure lineage — a recorded lossless source
+            # converted into one known lossy installed codec — and does not
+            # depend on the CARRIED GRADE. Varying that grade is what makes
+            # the NOT-reusable preserved-source arm producible at all: with
+            # a hardcoded usable grade every such world was reusable, so V4
+            # below could only ever be exercised on one of its two branches.
+            # A row carrying spectral markers must carry a grade (the
+            # evidence row rejects markers without one), so the strategy's
+            # `None` becomes the non-policy grade "error" here — still
+            # unusable, which is the property that decides reuse.
+            carried_grade = world.have_spectral_grade or "error"
             measurement = AudioQualityMeasurement(
                 min_bitrate_kbps=128,
                 avg_bitrate_kbps=128,
                 median_bitrate_kbps=128,
                 format="Opus",
-                spectral_grade="genuine",
+                spectral_grade=carried_grade,
+                spectral_bitrate_kbps=160,
                 spectral_subject=EVIDENCE_SUBJECT_SOURCE,
                 spectral_provenance="carried",
                 spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
@@ -359,6 +393,16 @@ class TestReuseLaneCheckerTripsOnViolations(unittest.TestCase):
         )
         self.assertTrue(
             any(v.startswith("V3:") for v in violations), violations,
+        )
+
+    def test_v4_trips_when_a_preserved_source_row_is_overwritten(self):
+        """Clause 4: earlier clauses all pass; only R19 is violated."""
+        world = dataclasses.replace(self.RESOLVED, preserve_source=True)
+        violations = reuse_lane_violations(
+            world, [PERSIST_HAVE, MARK_IMPORTABLE],
+        )
+        self.assertTrue(
+            any(v.startswith("V4:") for v in violations), violations,
         )
 
     def test_a_clean_world_trips_nothing(self):
