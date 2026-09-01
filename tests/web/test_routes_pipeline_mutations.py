@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import ClassVar
 from unittest.mock import patch
 
@@ -54,11 +55,12 @@ from lib.local_import_service import (
 from lib.transitions import TransitionConflict, TransitionConflictKind
 from tests.dispatch_helpers import handoff_automation_owner
 from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import make_request_row
+from tests.helpers import make_request_row, make_web_runtime
 from tests.web._harness import (
     _assert_required_fields,
     _FakeDbWebServerCase,
 )
+from web.runtime import install_runtime, runtime
 
 
 def _completed_beets_delete(request: BeetsDeleteRequest) -> BeetsDeleteCompleted:
@@ -395,8 +397,6 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
     def test_pipeline_add_replace_during_resolution_returns_409(
         self, mock_get_group_year, mock_get_release, mock_get_raw,
     ):
-        import web.server as srv
-
         release = {
             "release_group_id": "rg-race",
             "artist_id": "artist-race",
@@ -422,7 +422,7 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         mock_get_group_year.return_value = 2020
 
         racing_db = _RacingRequestFieldsDB()
-        with patch.object(srv, "db", racing_db):
+        with install_runtime(make_web_runtime(runtime(), db=racing_db)):
             status, data = self._post(
                 "/api/pipeline/add", {"mb_release_id": "add-race-source"},
             )
@@ -1149,7 +1149,6 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
     def test_pipeline_set_intent_vanished_row_cas_miss_404(self):
         """A row deleted mid-CAS classifies not_found -> 404 (the CLI twin
         exits 2 through the same shared classification)."""
-        import web.server as srv
 
         class _VanishingDB(FakePipelineDB):
             def update_request_fields(
@@ -1167,7 +1166,7 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         vanishing_db.seed_request(make_request_row(
             id=797, status="wanted", mb_release_id="vanish-intent",
         ))
-        with patch.object(srv, "db", vanishing_db):
+        with install_runtime(make_web_runtime(runtime(), db=vanishing_db)):
             status, data = self._post(
                 "/api/pipeline/set-intent", {"id": 797, "intent": "lossless"},
             )
@@ -1217,8 +1216,6 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["id"], 793)
 
     def test_pipeline_set_intent_reports_replace_race(self):
-        import web.server as srv
-
         racing_db = _RacingRequestFieldsDB()
         racing_db.seed_request(make_request_row(
             id=1710,
@@ -1226,7 +1223,7 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
             mb_release_id="intent-race-old",
             target_format=None,
         ))
-        with patch.object(srv, "db", racing_db):
+        with install_runtime(make_web_runtime(runtime(), db=racing_db)):
             status, data = self._post(
                 "/api/pipeline/set-intent",
                 {"id": 1710, "intent": "lossless"},
@@ -1265,8 +1262,6 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         self.assertIsNone(self.db.request(1712)["target_format"])
 
     def test_pipeline_set_quality_reports_replace_race(self):
-        import web.server as srv
-
         racing_db = _RacingRequestFieldsDB()
         racing_db.seed_request(make_request_row(
             id=1711,
@@ -1274,7 +1269,7 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
             mb_release_id="quality-race-old",
             min_bitrate=192,
         ))
-        with patch.object(srv, "db", racing_db):
+        with install_runtime(make_web_runtime(runtime(), db=racing_db)):
             status, data = self._post(
                 "/api/pipeline/set-quality",
                 {"mb_release_id": "quality-race-old", "min_bitrate": 320},
@@ -1317,20 +1312,15 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
 
     @patch("web.routes.pipeline_mutations.finalize_request")
     def test_pipeline_ban_source_contract(self, _mock_transition):
-        import web.server as srv
         release_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         self.db.seed_request(make_request_row(
             id=101, status="imported", mb_release_id=release_id,
         ))
-        old_beets = srv._beets
-        srv._beets = FakeBeetsDB()
-        try:
+        with install_runtime(make_web_runtime(runtime(), beets=FakeBeetsDB())):
             status, data = self._post(
                 "/api/pipeline/ban-source",
                 {"request_id": 101, "confirm": "BAN", "mb_release_id": release_id},
             )
-        finally:
-            srv._beets = old_beets
 
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.BAN_SOURCE_REQUIRED_FIELDS,
@@ -1341,20 +1331,15 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
     def test_pipeline_ban_source_reports_preserved_search_stop(
         self, _mock_transition,
     ):
-        import web.server as srv
         release_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         self.db.seed_request(make_request_row(
             id=102, status="unsearchable", mb_release_id=release_id,
         ))
-        old_beets = srv._beets
-        srv._beets = FakeBeetsDB()
-        try:
+        with install_runtime(make_web_runtime(runtime(), beets=FakeBeetsDB())):
             status, data = self._post(
                 "/api/pipeline/ban-source",
                 {"request_id": 102, "confirm": "BAN", "mb_release_id": release_id},
             )
-        finally:
-            srv._beets = old_beets
 
         self.assertEqual(status, 200)
         self.assertEqual(data["request_status"], "unsearchable")
@@ -1373,8 +1358,6 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         self.assertIn("confirm", data["error"])
 
     def test_pipeline_ban_source_processing_returns_exact_owner_conflict(self):
-        import web.server as srv
-
         release_id = "cccccccc-cccc-cccc-cccc-cccccccccccc"
         self.db.seed_request(make_request_row(
             id=103,
@@ -1382,9 +1365,7 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
             mb_release_id=release_id,
         ))
         owner = handoff_automation_owner(self.db, 103)
-        old_beets = srv._beets
-        srv._beets = FakeBeetsDB()
-        try:
+        with install_runtime(make_web_runtime(runtime(), beets=FakeBeetsDB())):
             status, data = self._post(
                 "/api/pipeline/ban-source",
                 {
@@ -1393,8 +1374,6 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
                     "mb_release_id": release_id,
                 },
             )
-        finally:
-            srv._beets = old_beets
 
         self.assertEqual(status, 409)
         self.assertEqual(data["error"], "transition_conflict")
@@ -1708,14 +1687,13 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         delete seeds the descendant then raises the FK violation). The
         violation surfaces as 409 rather than a 500, mirroring the
         pre-check shape."""
-        import web.server as srv
         racing = _RacingDeleteDB()
         racing.seed_request(make_request_row(
             id=100, status="imported", mb_release_id="abc-123"))
         # Re-bind self.db so any assertion in this test targets the
         # live fake, never setUp's now-shadowed one.
         self.db = racing
-        with patch.object(srv, "db", racing):
+        with install_runtime(make_web_runtime(runtime(), db=racing)):
             status, data = self._post("/api/pipeline/delete", {"id": 100})
         self.assertEqual(status, 409)
         self.assertIn("error", data)
@@ -1841,26 +1819,20 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
 
     def setUp(self) -> None:
         super().setUp()
-        import web.server as srv
-        self._srv = srv
-        self._orig_beets = srv._beets
-        self._orig_delete_fn = srv.beets_delete_fn
         self.delete_requests: list[BeetsDeleteRequest] = []
         # Beets fake: update() only hits this via album_exists / get_min_bitrate.
         # A live beets DB is the usual preceding state for a requeue.
         self.beets_db = FakeBeetsDB()
         self.beets_db.set_min_bitrate(self.RELEASE_ID, 320)
-        srv._beets = self.beets_db
 
         def completed_delete(request: BeetsDeleteRequest):
             self.delete_requests.append(request)
             return _completed_beets_delete(request)
 
-        srv.beets_delete_fn = completed_delete
-
-    def tearDown(self) -> None:
-        self._srv._beets = self._orig_beets
-        self._srv.beets_delete_fn = self._orig_delete_fn
+        self.enterContext(install_runtime(replace(
+            make_web_runtime(runtime(), beets=self.beets_db),
+            beets_delete_fn=completed_delete,
+        )))
 
     def _override_passed(self, mock_transition) -> object:
         """Extract the search override from the last routed transition."""
@@ -2035,12 +2007,15 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
             self, _mock_transition):
         """A typed pinned-delete failure retains current quality state.
         """
-        self._srv.beets_delete_fn = lambda request: BeetsDeleteFailed(
-            album_id=request.album_id,
-            reason="filesystem_error",
-            detail="isolated test: album retained",
-            album_still_present=True,
-        )
+        self.enterContext(install_runtime(replace(
+            runtime(),
+            beets_delete_fn=lambda request: BeetsDeleteFailed(
+                album_id=request.album_id,
+                reason="filesystem_error",
+                detail="isolated test: album retained",
+                album_still_present=True,
+            ),
+        )))
         self.db.seed_request(make_request_row(
             id=1704, status="imported", mb_release_id=self.RELEASE_ID,
             min_bitrate=320,
@@ -2189,12 +2164,7 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
 
     def setUp(self) -> None:
         super().setUp()
-        import web.server as srv
-        self._srv = srv
-        self._orig_beets = srv._beets
-        self._orig_delete_fn = srv.beets_delete_fn
         self.beets_db = FakeBeetsDB()
-        srv._beets = self.beets_db
         self.delete_requests: list[BeetsDeleteRequest] = []
 
         def remove_current_album(request: BeetsDeleteRequest):
@@ -2202,16 +2172,15 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
             self.beets_db.set_album_info(request.expected_release_id, None)
             return _completed_beets_delete(request)
 
-        srv.beets_delete_fn = remove_current_album
+        self.enterContext(install_runtime(replace(
+            make_web_runtime(runtime(), beets=self.beets_db),
+            beets_delete_fn=remove_current_album,
+        )))
 
         self.db.seed_request(make_request_row(
             id=1704, status="imported", mb_release_id=self.RELEASE_ID,
             min_bitrate=320,
         ))
-
-    def tearDown(self) -> None:
-        self._srv._beets = self._orig_beets
-        self._srv.beets_delete_fn = self._orig_delete_fn
 
     # AE1, AE2 — body-without-username, server resolves uploader, hashes recorded.
     @patch("lib.destructive_release_service.hash_audio_content")

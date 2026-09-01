@@ -27,7 +27,7 @@ from web.routes._registry import (
     pattern_route,
     route,
 )
-from web.routes._server_access import _server
+from web.runtime import runtime
 
 log = logging.getLogger(__name__)
 
@@ -123,10 +123,10 @@ def get_retag_divergence_audit(h: RouteHandler, params: dict[str, list[str]]) ->
     if not ok:
         h._error("after_album_id must be an integer")
         return
-    server = _server()
+    rt = runtime()
     try:
         def beets_factory():
-            beets = server._beets_db()
+            beets = rt.beets_db()
             if beets is None:
                 raise FileNotFoundError("Beets DB not configured")
             return beets
@@ -191,10 +191,10 @@ def get_retag_divergence_audit_album(
     if not is_valid_album_id(album_id):
         h._error(f"album id {album_id} is out of range")
         return
-    server = _server()
+    rt = runtime()
     try:
         def beets_factory():
-            beets = server._beets_db()
+            beets = rt.beets_db()
             if beets is None:
                 raise FileNotFoundError("Beets DB not configured")
             return beets
@@ -267,9 +267,9 @@ def post_retag_divergence_sync_tags(
     payload = parse_body(h, body, TagSyncBody)
     if payload is None:
         return
-    server = _server()
+    rt = runtime()
     try:
-        beets = server._beets_db()
+        beets = rt.beets_db()
     except Exception as exc:
         category = beets_authority_availability_category(exc)
         if category is None and not isinstance(exc, OSError):
@@ -286,7 +286,7 @@ def post_retag_divergence_sync_tags(
     try:
         result = sync_album_file_tags_from_borrowed_factory(
             lambda: beets,
-            server._db(),
+            rt.db(),
             album_id=album_id,
             expected_mb_albumid=payload.expected_mb_albumid,
         )

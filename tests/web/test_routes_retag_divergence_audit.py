@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import ClassVar
 from unittest.mock import patch
@@ -13,8 +14,10 @@ from mediafile import MediaFile
 
 from lib.beets_db import BeetsAlbumIdentityRow
 from tests.fakes import FakeBeetsDB
+from tests.helpers import make_web_runtime
 from tests.test_beets_retag import MERGED, SURVIVOR, _make_real_mp3
 from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
+from web.runtime import WebRuntime, install_runtime, runtime
 
 
 class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
@@ -22,8 +25,6 @@ class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
         """#1093 review round 4, finding 5 — 409, not 200: ``incomplete``
         means the world blocked a complete answer, so a caller must never
         read it as "no divergence" the way a plain 200 would suggest."""
-        from web import server
-
         beets = FakeBeetsDB()
         beets.set_album_mb_identities([
             BeetsAlbumIdentityRow(
@@ -32,7 +33,7 @@ class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
                 item_paths=("/nonexistent/library/Album/01.flac",),
             ),
         ])
-        with patch.object(server, "_beets_db", return_value=beets):
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, payload = self._get("/api/audit/retag-divergence")
 
         self.assertEqual(status, 409)
@@ -44,8 +45,6 @@ class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
         self.assertEqual(beets.close_calls, 0)
 
     def test_reports_a_genuine_divergence(self) -> None:
-        from web import server
-
         with tempfile.TemporaryDirectory() as tmpdir:
             track_path = Path(tmpdir) / "01.mp3"
             _make_real_mp3(track_path)
@@ -60,7 +59,7 @@ class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
                     item_paths=(str(track_path),),
                 ),
             ])
-            with patch.object(server, "_beets_db", return_value=beets):
+            with install_runtime(make_web_runtime(runtime(), beets=beets)):
                 status, payload = self._get("/api/audit/retag-divergence")
 
         self.assertEqual(status, 200)
@@ -69,10 +68,8 @@ class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
         self.assertEqual(payload["albums"][0]["album_class"], "diverges")
 
     def test_clean_report_lists_no_albums(self) -> None:
-        from web import server
-
         beets = FakeBeetsDB()
-        with patch.object(server, "_beets_db", return_value=beets):
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, payload = self._get("/api/audit/retag-divergence")
 
         self.assertEqual(status, 200)
@@ -83,9 +80,7 @@ class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
         """#1093 review round 3, finding 1 — 503, not 200: the audit
         never actually ran, so 200 would let a caller read "no
         divergence" from a report that answered nothing."""
-        from web import server
-
-        with patch.object(server, "_beets_db", return_value=None):
+        with install_runtime(replace(runtime(), shared_beets=None)):
             status, payload = self._get("/api/audit/retag-divergence")
 
         self.assertEqual(status, 503)
@@ -94,12 +89,10 @@ class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
         self.assertIsNotNone(payload["unavailable_detail"])
 
     def test_unexpected_failure_is_logged_and_returns_503(self) -> None:
-        from web import server
-
         with (
             patch.object(
-                server,
-                "_beets_db",
+                WebRuntime,
+                "beets_db",
                 side_effect=RuntimeError("programmer defect"),
             ),
             self.assertLogs(
@@ -117,11 +110,9 @@ class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
     def test_expected_open_failure_is_an_unavailable_report(self) -> None:
         """#1093 review round 3, finding 1 — 503, not 200 (see
         ``test_missing_beets_is_an_unavailable_report``)."""
-        from web import server
-
         failure = sqlite3.OperationalError("database is locked")
         failure.sqlite_errorcode = sqlite3.SQLITE_BUSY
-        with patch.object(server, "_beets_db", side_effect=failure):
+        with patch.object(WebRuntime, "beets_db", side_effect=failure):
             status, payload = self._get("/api/audit/retag-divergence")
 
         self.assertEqual(status, 503)
@@ -140,7 +131,6 @@ class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
         from lib.retag_divergence_audit import (
             scan_retag_divergence_from_borrowed_factory as real_scan,
         )
-        from web import server
         from web.routes import retag_divergence_audit as route_module
 
         recorded: dict[str, object] = {}
@@ -151,7 +141,7 @@ class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
 
         beets = FakeBeetsDB()
         with (
-            patch.object(server, "_beets_db", return_value=beets),
+            install_runtime(make_web_runtime(runtime(), beets=beets)),
             patch.object(
                 route_module,
                 "scan_retag_divergence_from_borrowed_factory",
@@ -169,8 +159,6 @@ class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
 
     def test_after_album_id_query_param_is_forwarded(self) -> None:
         """#1093 review round 4, finding 4."""
-        from web import server
-
         beets = FakeBeetsDB()
         beets.set_album_mb_identities([
             BeetsAlbumIdentityRow(
@@ -184,7 +172,7 @@ class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
                 item_paths=(),
             ),
         ])
-        with patch.object(server, "_beets_db", return_value=beets):
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, payload = self._get(
                 "/api/audit/retag-divergence?after_album_id=1",
             )
@@ -202,8 +190,6 @@ class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
         ``tests/test_retag_divergence_audit.py::TestCursorResume`` proves
         the deterministic invariant; this proves the SAME thing through
         the real HTTP route and status-code mapping."""
-        from web import server
-
         beets = FakeBeetsDB()
         beets.set_album_mb_identities([
             BeetsAlbumIdentityRow(
@@ -212,7 +198,7 @@ class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
                 item_paths=(),
             ),
         ])
-        with patch.object(server, "_beets_db", return_value=beets):
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, payload = self._get(
                 "/api/audit/retag-divergence?after_album_id=1",
             )
@@ -228,10 +214,8 @@ class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
         self.assertIsNone(payload["next_after_album_id"])
 
     def test_malformed_after_album_id_is_a_400(self) -> None:
-        from web import server
-
         beets = FakeBeetsDB()
-        with patch.object(server, "_beets_db", return_value=beets):
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, payload = self._get(
                 "/api/audit/retag-divergence?after_album_id=not-an-int",
             )
@@ -245,10 +229,8 @@ class TestRetagDivergenceAuditRoute(_FakeDbWebServerCase):
         """#1093 review round 5, finding 5 — Python's bare ``int()`` would
         silently accept ``"1_0"`` as ``10``; the API must refuse it rather
         than use a different cursor than the caller typed."""
-        from web import server
-
         beets = FakeBeetsDB()
-        with patch.object(server, "_beets_db", return_value=beets):
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, payload = self._get(
                 "/api/audit/retag-divergence?after_album_id=1_0",
             )
@@ -302,8 +284,6 @@ class TestRetagDivergenceAuditAlbumRoute(_FakeDbWebServerCase):
     the whole-library census, never the whole-library scan itself."""
 
     def test_agreeing_album_is_200_with_agrees_class(self) -> None:
-        from web import server
-
         with tempfile.TemporaryDirectory() as tmpdir:
             track_path = Path(tmpdir) / "01.mp3"
             _make_real_mp3(track_path)
@@ -318,7 +298,7 @@ class TestRetagDivergenceAuditAlbumRoute(_FakeDbWebServerCase):
                     item_paths=(str(track_path),),
                 ),
             ])
-            with patch.object(server, "_beets_db", return_value=beets):
+            with install_runtime(make_web_runtime(runtime(), beets=beets)):
                 status, payload = self._get(
                     "/api/audit/retag-divergence/album/1",
                 )
@@ -328,8 +308,6 @@ class TestRetagDivergenceAuditAlbumRoute(_FakeDbWebServerCase):
         self.assertEqual(payload["album_class"], "agrees")
 
     def test_diverging_album_is_200_with_diverges_class(self) -> None:
-        from web import server
-
         with tempfile.TemporaryDirectory() as tmpdir:
             track_path = Path(tmpdir) / "01.mp3"
             _make_real_mp3(track_path)
@@ -344,7 +322,7 @@ class TestRetagDivergenceAuditAlbumRoute(_FakeDbWebServerCase):
                     item_paths=(str(track_path),),
                 ),
             ])
-            with patch.object(server, "_beets_db", return_value=beets):
+            with install_runtime(make_web_runtime(runtime(), beets=beets)):
                 status, payload = self._get(
                     "/api/audit/retag-divergence/album/5",
                 )
@@ -353,10 +331,8 @@ class TestRetagDivergenceAuditAlbumRoute(_FakeDbWebServerCase):
         self.assertEqual(payload["album_class"], "diverges")
 
     def test_unknown_album_is_404(self) -> None:
-        from web import server
-
         beets = _PoisonedWholeLibraryBeetsDB()
-        with patch.object(server, "_beets_db", return_value=beets):
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, payload = self._get(
                 "/api/audit/retag-divergence/album/999",
             )
@@ -371,10 +347,8 @@ class TestRetagDivergenceAuditAlbumRoute(_FakeDbWebServerCase):
         CLIENT input, not a transient/retryable Beets-unavailable
         condition, so it must reject as 400 before ever reaching Beets —
         never a 503 with a swallowed traceback."""
-        from web import server
-
         beets = _PoisonedWholeLibraryBeetsDB()
-        with patch.object(server, "_beets_db", return_value=beets):
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, payload = self._get(
                 "/api/audit/retag-divergence/album/99999999999999999999999999999",
             )
@@ -395,12 +369,10 @@ class TestRetagDivergenceAuditAlbumRoute(_FakeDbWebServerCase):
         driven through the REAL route dispatch (not a mocked handler
         call), with no ERROR-level log from either logger the two
         failure paths use."""
-        from web import server
-
         digit_string = "9" * 4301
         beets = _PoisonedWholeLibraryBeetsDB()
         with (
-            patch.object(server, "_beets_db", return_value=beets),
+            install_runtime(make_web_runtime(runtime(), beets=beets)),
             self.assertNoLogs("web.server", level="ERROR"),
             self.assertNoLogs(
                 "web.routes.retag_divergence_audit", level="ERROR",
@@ -418,9 +390,7 @@ class TestRetagDivergenceAuditAlbumRoute(_FakeDbWebServerCase):
         path: a bare 503 + "error"-key assertion also passes when a
         deleted guard routes through the generic unexpected-failure
         except with a spurious traceback (#1264 mutant runner S2)."""
-        from web import server
-
-        with patch.object(server, "_beets_db", return_value=None):
+        with install_runtime(replace(runtime(), shared_beets=None)):
             status, payload = self._get(
                 "/api/audit/retag-divergence/album/1",
             )
@@ -434,11 +404,9 @@ class TestRetagDivergenceAuditAlbumRoute(_FakeDbWebServerCase):
     def test_expected_open_failure_is_503(self) -> None:
         """#1266 item 3 — same exact-copy pin for the classified SQLite
         lane (BUSY is primary code 5)."""
-        from web import server
-
         failure = sqlite3.OperationalError("database is locked")
         failure.sqlite_errorcode = sqlite3.SQLITE_BUSY
-        with patch.object(server, "_beets_db", side_effect=failure):
+        with patch.object(WebRuntime, "beets_db", side_effect=failure):
             status, payload = self._get(
                 "/api/audit/retag-divergence/album/1",
             )
@@ -450,12 +418,10 @@ class TestRetagDivergenceAuditAlbumRoute(_FakeDbWebServerCase):
         )
 
     def test_unexpected_failure_is_logged_and_returns_503(self) -> None:
-        from web import server
-
         with (
             patch.object(
-                server,
-                "_beets_db",
+                WebRuntime,
+                "beets_db",
                 side_effect=RuntimeError("programmer defect"),
             ),
             self.assertLogs(
@@ -476,13 +442,11 @@ class TestRetagDivergenceAuditAlbumRoute(_FakeDbWebServerCase):
         """The route mediates a server-owned handle (like the
         whole-library route) — it must not close the shared per-thread
         Beets connection."""
-        from web import server
-
         beets = _PoisonedWholeLibraryBeetsDB()
         beets.set_album_mb_identities([
             BeetsAlbumIdentityRow(album_id=1, mb_albumid="", item_paths=()),
         ])
-        with patch.object(server, "_beets_db", return_value=beets):
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, _payload = self._get(
                 "/api/audit/retag-divergence/album/1",
             )
@@ -512,8 +476,6 @@ class TestRetagDivergenceSyncTagsRoute(_FakeDbWebServerCase):
         )
 
     def test_agreeing_album_is_200_already_synced(self) -> None:
-        from web import server
-
         with tempfile.TemporaryDirectory() as tmpdir:
             track_path = Path(tmpdir) / "01.mp3"
             _make_real_mp3(track_path)
@@ -530,7 +492,7 @@ class TestRetagDivergenceSyncTagsRoute(_FakeDbWebServerCase):
                     album="RA.1000",
                 ),
             ])
-            with patch.object(server, "_beets_db", return_value=beets):
+            with install_runtime(make_web_runtime(runtime(), beets=beets)):
                 status, payload = self._post_sync(
                     1, {"expected_mb_albumid": SURVIVOR},
                 )
@@ -547,15 +509,13 @@ class TestRetagDivergenceSyncTagsRoute(_FakeDbWebServerCase):
         self.assertEqual(beets.close_calls, 0)
 
     def test_stale_authorized_identity_is_409(self) -> None:
-        from web import server
-
         beets = FakeBeetsDB()
         beets.set_album_mb_identities([
             BeetsAlbumIdentityRow(
                 album_id=1, mb_albumid=SURVIVOR, item_paths=(),
             ),
         ])
-        with patch.object(server, "_beets_db", return_value=beets):
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, payload = self._post_sync(
                 1, {"expected_mb_albumid": MERGED},
             )
@@ -565,10 +525,8 @@ class TestRetagDivergenceSyncTagsRoute(_FakeDbWebServerCase):
         self.assertEqual(payload["db_mb_albumid"], SURVIVOR)
 
     def test_unknown_album_is_404(self) -> None:
-        from web import server
-
         beets = FakeBeetsDB()
-        with patch.object(server, "_beets_db", return_value=beets):
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, payload = self._post_sync(
                 999, {"expected_mb_albumid": SURVIVOR},
             )
@@ -577,19 +535,15 @@ class TestRetagDivergenceSyncTagsRoute(_FakeDbWebServerCase):
         self.assertEqual(payload["outcome"], "not_found")
 
     def test_missing_body_field_is_400(self) -> None:
-        from web import server
-
         beets = FakeBeetsDB()
-        with patch.object(server, "_beets_db", return_value=beets):
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, _payload = self._post_sync(1, {})
 
         self.assertEqual(status, 400)
 
     def test_out_of_range_album_id_is_400(self) -> None:
-        from web import server
-
         beets = FakeBeetsDB()
-        with patch.object(server, "_beets_db", return_value=beets):
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, _payload = self._post_sync(
                 "9223372036854775808", {"expected_mb_albumid": SURVIVOR},
             )
@@ -597,9 +551,7 @@ class TestRetagDivergenceSyncTagsRoute(_FakeDbWebServerCase):
         self.assertEqual(status, 400)
 
     def test_missing_beets_is_503(self) -> None:
-        from web import server
-
-        with patch.object(server, "_beets_db", return_value=None):
+        with install_runtime(replace(runtime(), shared_beets=None)):
             status, payload = self._post_sync(
                 1, {"expected_mb_albumid": SURVIVOR},
             )
@@ -619,8 +571,6 @@ class TestRetagDivergenceSyncTagsRoute(_FakeDbWebServerCase):
         carries the merged-away tag, and the route reports the residual
         with the per-item detail."""
         import os
-
-        from web import server
 
         with tempfile.TemporaryDirectory() as tmpdir:
             track_path = Path(tmpdir) / "01.mp3"
@@ -643,7 +593,7 @@ class TestRetagDivergenceSyncTagsRoute(_FakeDbWebServerCase):
             # state — never the invoking user's ~/.config/beets.
             scratch_beetsdir = Path(tmpdir) / "scratch-beetsdir"
             scratch_beetsdir.mkdir()
-            with patch.object(server, "_beets_db", return_value=beets), \
+            with install_runtime(make_web_runtime(runtime(), beets=beets)), \
                     patch.dict(os.environ, {
                         "CRATEDIGGER_RUNTIME_CONFIG":
                             str(Path(tmpdir) / "nonexistent-config.ini"),

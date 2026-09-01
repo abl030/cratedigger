@@ -26,7 +26,7 @@ PR `feat/search-plan-dashboard` added `GET /api/pipeline/<id>/search-plan/histor
 
 > "GET /search-plan/history route 500s on real DB rows: datetime not JSON-serializable. The current mocked-rows-only tests cannot catch this regression."
 
-The route returned raw `search_log` rows from the DB. Each row's `created_at` is a `datetime.datetime`. `web/server.py::_json` does `json.dumps(data).encode()` with no `default=...` callable — so `datetime` raises `TypeError` and the route 500s. **Every other GET in `web/routes/pipeline.py` maps rows through `_server()._serialize_row(r)` first** (see `get_pipeline_recents`, `get_pipeline_all`, `get_pipeline_downloading`); this new route did not.
+The route returned raw `search_log` rows from the DB. Each row's `created_at` is a `datetime.datetime`. `web/server.py::_json` does `json.dumps(data).encode()` with no `default=...` callable — so `datetime` raises `TypeError` and the route 500s. **Every other GET in `web/routes/pipeline.py` maps rows through `web.overlay.serialize_row(r)` first** (see `get_pipeline_recents`, `get_pipeline_all`, `get_pipeline_downloading`); this new route did not.
 
 The contract test fixture looked like:
 
@@ -89,7 +89,7 @@ Skip the production-shape requirement only when:
 
 The fix in this PR was twofold:
 
-1. **Map `result.rows` through `_server()._serialize_row(r)` before assigning to the response payload.** This is the same pattern every other GET in `web/routes/pipeline.py` uses. See the neighbor routes for the canonical shape.
+1. **Map `result.rows` through `web.overlay.serialize_row(r)` before assigning to the response payload.** This is the same pattern every other GET in `web/routes/pipeline.py` uses. See the neighbor routes for the canonical shape.
 2. **Add a contract test scenario** `test_history_datetime_rows_are_serialized_to_strings` that injects a `datetime.datetime` into the mock row and asserts the response's `created_at` is a string AND the full payload round-trips through `json.loads(json.dumps(...))` cleanly.
 
 The first fix makes the production code correct. The second makes the regression impossible — any future change to the route that drops the `_serialize_row` call will fail the test before it ships. Without the second fix, a refactor of the route is one careless deletion away from re-introducing the bug.

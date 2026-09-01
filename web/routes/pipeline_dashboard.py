@@ -20,7 +20,7 @@ from lib.retag_divergence_census_snapshot import (
 )
 from web import cache as cache_api
 from web.routes._registry import RouteHandler, RouteRegistration, route
-from web.routes._server_access import _server
+from web.runtime import runtime
 
 log = logging.getLogger(__name__)
 
@@ -38,8 +38,8 @@ DASHBOARD_LIBRARY_COMPLETENESS_ALBUM_CAP = 50
 
 def get_pipeline_dashboard(h: RouteHandler, params: dict[str, list[str]]) -> None:
     """Return operational metrics for the Pipeline dashboard subtab."""
-    s = _server()
-    data = s._db().get_pipeline_dashboard_metrics()
+    rt = runtime()
+    data = rt.db().get_pipeline_dashboard_metrics()
     data["redis"] = cache_api.redis_metrics()
     data["disk_coverage"] = _dashboard_disk_coverage()
     data["retag_divergence_census"] = _dashboard_retag_divergence_census()
@@ -56,11 +56,11 @@ def _dashboard_disk_coverage() -> dict[str, object] | None:
     from Beets is the Lucksmiths-class out-of-band drift signal). Wanted,
     downloading, and unsearchable rows that are not uniquely present are
     lifecycle-normal, not drift."""
-    s = _server()
-    beets = s._beets_db()
+    rt = runtime()
+    beets = rt.beets_db()
     if beets is None:
         return None
-    result = disk_coverage(s._db(), beets, include_rows=True)
+    result = disk_coverage(rt.db(), beets, include_rows=True)
     return {
         "counts": msgspec.to_builtins(result.counts),
         "drift_rows": [
@@ -111,8 +111,8 @@ def _dashboard_retag_divergence_census() -> dict[str, object]:
     for ``missing``/``unreadable``) so the payload shape never branches
     on state.
     """
-    s = _server()
-    path = s.retag_census_snapshot_path
+    rt = runtime()
+    path = rt.retag_census_snapshot_path
     if path is None:
         return _empty_retag_divergence_census("missing")
     try:
@@ -152,8 +152,8 @@ def _empty_retag_divergence_census(state: str) -> dict[str, object]:
 
 def _dashboard_library_completeness() -> dict[str, object]:
     """Read the daily source/catalog/filesystem census without rescanning."""
-    s = _server()
-    path = s.library_completeness_snapshot_path
+    rt = runtime()
+    path = rt.library_completeness_snapshot_path
     if path is None:
         return _empty_library_completeness("missing")
     try:
@@ -181,7 +181,7 @@ def _dashboard_library_completeness() -> dict[str, object]:
     # must degrade that ONE album to actionless, never 500 the dashboard.
     for album in report["albums"]:
         try:
-            req = s._db().get_request_by_release_id(album.get("release_id"))
+            req = rt.db().get_request_by_release_id(album.get("release_id"))
         except Exception:
             log.exception(
                 "library completeness enrichment failed for release %r",
@@ -213,8 +213,8 @@ def post_library_census_refresh(
     derived from the configured snapshot path — both live in the
     module's ``stateDir``.
     """
-    s = _server()
-    snapshot_path = s.library_completeness_snapshot_path
+    rt = runtime()
+    snapshot_path = rt.library_completeness_snapshot_path
     if snapshot_path is None:
         h._json({
             "outcome": "unconfigured",

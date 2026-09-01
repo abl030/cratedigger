@@ -36,12 +36,13 @@ from lib.quality import (
 )
 from tests.dispatch_helpers import handoff_automation_owner
 from tests.fakes import FakeBeetsDB
-from tests.helpers import make_candidate_summary, make_request_row
+from tests.helpers import make_candidate_summary, make_request_row, make_web_runtime
 from tests.web._harness import (
     _assert_required_fields,
     _FakeDbWebServerCase,
     _fresh_triage_runner,
 )
+from web.runtime import install_runtime, runtime
 
 
 def _validation_result_blob(
@@ -682,8 +683,6 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
                 )
 
     def test_pipeline_log_beets_never_backfills_attempt_have(self):
-        import web.server as srv
-
         beets = FakeBeetsDB()
         beets.set_mbid_detail(
             "test-mbid-0100",
@@ -693,7 +692,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
                 "beets_avg_bitrate": 288,
             },
         )
-        with patch.object(srv, "_beets_db", return_value=beets):
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, data = self._get("/api/pipeline/log")
 
         self.assertEqual(status, 200)
@@ -774,8 +773,6 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertIsNone(item["existing_min_bitrate"])
 
     def test_pipeline_log_attempt_have_evidence_wins_over_current_beets(self):
-        import web.server as srv
-
         self.db.log_download(
             100,
             outcome="rejected",
@@ -800,7 +797,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         # Canonical request evidence is independently authoritative; the
         # route must not require Beets' lookup to return the album first.
         beets = FakeBeetsDB()
-        with patch.object(srv, "_beets_db", return_value=beets):
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, data = self._get("/api/pipeline/log")
 
         self.assertEqual(status, 200)
@@ -906,7 +903,6 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(item["summary"], f"Import error: {diagnostic} · testuser")
 
     def test_kept_would_import_uses_complete_canonical_current_have(self):
-        import web.server as srv
         from lib.quality import (
             AlbumQualityV0Metric,
             AudioQualityMeasurement,
@@ -999,7 +995,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
                 "beets_avg_bitrate": 124,
             },
         )
-        with patch.object(srv, "_beets_db", return_value=beets):
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, data = self._get("/api/pipeline/log")
 
         self.assertEqual(status, 200)
@@ -1026,7 +1022,6 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(item["target_contract_format"], "opus 128")
 
     def test_deleted_triage_uses_complete_canonical_current_have(self):
-        import web.server as srv
         from lib.quality import AlbumQualityV0Metric, AudioQualityMeasurement
         from tests.evidence_helpers import make_album_quality_evidence
 
@@ -1085,7 +1080,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
                 "beets_avg_bitrate": 129,
             },
         )
-        with patch.object(srv, "_beets_db", return_value=beets):
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, data = self._get("/api/pipeline/log")
 
         self.assertEqual(status, 200)
@@ -1103,7 +1098,6 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
 
     def test_deleted_triage_partial_v0_does_not_suppress_current_have(self):
         """Music for Qigong Dancing: a lone audit V0 is not a HAVE row."""
-        import web.server as srv
         from lib.quality import AlbumQualityV0Metric, AudioQualityMeasurement
         from tests.evidence_helpers import make_album_quality_evidence
 
@@ -1172,7 +1166,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
                 "beets_avg_bitrate": 320,
             },
         )
-        with patch.object(srv, "_beets_db", return_value=beets):
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, data = self._get("/api/pipeline/log")
 
         self.assertEqual(status, 200)
@@ -1191,7 +1185,6 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(item["existing_v0_probe_avg_bitrate"], 268)
 
     def test_kept_would_import_completes_have_from_explicit_successor(self):
-        import web.server as srv
         from lib.quality import AudioQualityMeasurement, ImportResult
 
         source_log_id = self.db.log_download(
@@ -1264,7 +1257,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
                 "beets_avg_bitrate": 128,
             },
         )
-        with patch.object(srv, "_beets_db", return_value=beets):
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, data = self._get("/api/pipeline/log")
 
         self.assertEqual(status, 200)
@@ -1282,7 +1275,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(item["materialized_min_bitrate"], 99)
         self.assertEqual(item["materialized_avg_bitrate"], 128)
 
-        with patch.object(srv, "_beets_db", return_value=beets):
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             filtered_status, filtered_data = self._get(
                 "/api/pipeline/log?outcome=rejected"
             )
@@ -1727,8 +1720,6 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         )
 
     def test_disk_coverage_contract(self):
-        import web.server as srv
-
         self.db.seed_request(make_request_row(
             id=9001, status="wanted",
             mb_release_id="00000000-0000-4000-8000-000000009001",
@@ -1736,7 +1727,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         ))
         beets = FakeBeetsDB()
 
-        with patch.object(srv, "_beets_db", return_value=beets):
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, data = self._get("/api/disk-coverage")
 
         self.assertEqual(status, 200)
@@ -1757,8 +1748,6 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         })
 
     def test_disk_coverage_inverse_contract(self):
-        import web.server as srv
-
         beets = FakeBeetsDB()
         beets.set_release_identities([
             {
@@ -1770,7 +1759,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
             },
         ])
 
-        with patch.object(srv, "_beets_db", return_value=beets):
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, data = self._get("/api/disk-coverage?inverse=1")
 
         self.assertEqual(status, 200)
@@ -2521,8 +2510,6 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
 
     def test_pipeline_detail_uses_fresh_typed_beets_path(self):
         """The request cache is never a current-library display authority."""
-        import web.server as srv
-
         self.db.request(100)["mb_release_id"] = (
             "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         )
@@ -2534,12 +2521,8 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
             "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             [(91, "/current/library/Moved/01 Track.flac")],
         )
-        prior_beets = srv._beets
-        srv._beets = beets
-        try:
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, data = self._get("/api/pipeline/100")
-        finally:
-            srv._beets = prior_beets
 
         self.assertEqual(status, 200)
         self.assertNotIn("imported_path", data["request"])
@@ -2553,18 +2536,12 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
 
     def test_pipeline_detail_exposes_missing_and_ambiguous_authority(self):
         """Missing and ambiguous are operator-visible, never empty paths."""
-        import web.server as srv
-
         self.db.request(100)["mb_release_id"] = (
             "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         )
         beets = FakeBeetsDB()
-        prior_beets = srv._beets
-        srv._beets = beets
-        try:
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, missing = self._get("/api/pipeline/100")
-        finally:
-            srv._beets = prior_beets
         self.assertEqual(status, 200)
         self.assertEqual(missing["current_library"]["state"], "missing")
         self.assertNotIn("path", missing["current_library"])
@@ -2572,12 +2549,8 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         beets.set_album_ids_for_release(
             "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", [7, 8],
         )
-        prior_beets = srv._beets
-        srv._beets = beets
-        try:
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, ambiguous = self._get("/api/pipeline/100")
-        finally:
-            srv._beets = prior_beets
         self.assertEqual(status, 200)
         self.assertEqual(ambiguous["current_library"], {
             "state": "ambiguous",
@@ -2589,19 +2562,13 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
 
     def test_pipeline_detail_conflicting_request_identity_is_unavailable(self):
         """Two distinct request identities require manual review."""
-        import web.server as srv
-
         self.db.request(100)["mb_release_id"] = (
             "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         )
         self.db.request(100)["discogs_release_id"] = "12856590"
         beets = FakeBeetsDB()
-        prior_beets = srv._beets
-        srv._beets = beets
-        try:
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, data = self._get("/api/pipeline/100")
-        finally:
-            srv._beets = prior_beets
         self.assertEqual(status, 200)
         self.assertEqual(data["current_library"], {
             "state": "unavailable",

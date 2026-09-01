@@ -33,6 +33,7 @@ from scripts.web_dev_server import (
     configure_live_db_metadata,
 )
 from tests.fakes import FakeBeetsDB
+from tests.helpers import make_web_runtime
 from tests.test_web_cache import FakeRedis
 from tests.test_web_dev_server import (
     _get_http_outcome,
@@ -42,6 +43,7 @@ from tests.test_web_dev_server import (
 from web import cache
 from web.api_bases import PUBLIC_MB_ORIGIN
 from web.routes.browse import get_artist_compare
+from web.runtime import install_runtime, runtime
 
 TEST_DSN = os.environ["TEST_DB_DSN"]
 
@@ -344,14 +346,15 @@ class TestLiveDbConcurrentReadsGenerated(unittest.TestCase):
     """Generated real-HTTP patrol for the singleton read-only DB session."""
 
     def setUp(self) -> None:
-        self.saved_server = (
-            web.server._db_dsn,
-            web.server.db,
-            web.server._try_reconnect_db,
-            web.server.beets_db_path,
-            web.server.beets_library_root,
-            web.server._beets,
-        )
+        # One installed WebRuntime replaces the six module globals this
+        # used to save and restore (#1313). Registered BEFORE the
+        # enterContext below so LIFO cleanup uninstalls the derived
+        # runtime first and this pops the live-db one underneath it —
+        # the reverse order leaves the live-db runtime installed with an
+        # already-closed handle for whatever runs next.
+        from scripts.web_dev_server import reset_live_db_runtime
+
+        self.addCleanup(reset_live_db_runtime)
         config = DevConfig(
             data="live-db",
             scenario="generated",
@@ -366,7 +369,9 @@ class TestLiveDbConcurrentReadsGenerated(unittest.TestCase):
         from scripts.web_dev_server import create_server
 
         self.server = create_server("127.0.0.1", 0, config)
-        web.server._beets = FakeBeetsDB()
+        self.enterContext(install_runtime(
+            make_web_runtime(runtime(), beets=FakeBeetsDB()),
+        ))
         self.thread = threading.Thread(
             target=self.server.serve_forever, daemon=True,
         )
@@ -377,19 +382,6 @@ class TestLiveDbConcurrentReadsGenerated(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=2)
-        if (
-            web.server.db is not None
-            and web.server.db is not self.saved_server[1]
-        ):
-            web.server.db.close()
-        (
-            web.server._db_dsn,
-            web.server.db,
-            web.server._try_reconnect_db,
-            web.server.beets_db_path,
-            web.server.beets_library_root,
-            web.server._beets,
-        ) = self.saved_server
 
     @settings(max_examples=30)
     @example(request_count=6)
@@ -397,7 +389,7 @@ class TestLiveDbConcurrentReadsGenerated(unittest.TestCase):
     def test_repeated_parallel_library_reads_all_complete(
         self, request_count: int,
     ) -> None:
-        shared = web.server.db
+        shared = runtime().shared_db
         self.assertIsNotNone(shared)
         assert shared is not None
         backend_pid = shared.conn.get_backend_pid()

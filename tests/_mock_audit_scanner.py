@@ -94,6 +94,12 @@ _ALIAS_TO_CANONICAL = {
     "dp_mod": "lib.download_processing",
     "srv": "web.server",
     "server": "web.server",
+    # ``patch.object(WebRuntime, "beets_db", ...)`` is the #1313 successor
+    # to ``patch.object(srv, "_beets_db", ...)``. Without this row the
+    # target resolves to a bare ``WebRuntime.beets_db``, which
+    # ``_is_repo_target`` rejects — every such site would silently leave
+    # the audit's view.
+    "WebRuntime": "web.runtime.WebRuntime",
 }
 
 # Leaf-seam allowlist. If a patch target matches any of these, the patch
@@ -128,7 +134,13 @@ _LEAF_SEAM_PATTERNS = [
     # MusicBrainz / Discogs client objects on the web side
     re.compile(r"^web\.(mb|discogs)\."),
     re.compile(r"^web\.routes\.\w+\.(mb_api|discogs_api)"),
-    re.compile(r"^web\.server\.(mb_api|discogs_api|_real_beets_db|check_beets_library|check_pipeline|get_library_artist|_beets_db|mb)"),
+    re.compile(r"^web\.server\.(mb_api|discogs_api|mb)"),
+    # The same overlay/handle family after #1313 moved it from module
+    # functions on web.server onto the frozen runtime.
+    re.compile(
+        r"^web\.runtime\.WebRuntime\.(beets_db|check_beets_library"
+        r"|check_beets_library_detail|check_pipeline|get_library_artist)$"
+    ),
     # Notifier helpers — fire-and-forget, no return value to mock meaningfully
     re.compile(r"lib\.util\.trigger_(plex|jellyfin)_scan$"),
     # NOTE: lib.library_delete_notifiers.notify_library_delete is
@@ -295,10 +307,6 @@ _LEAF_SEAM_PATTERNS = [
     # (album_exists, locate, search, etc.) are read-only query helpers
     # that can be exercised against a real test SQLite DB.
     re.compile(r"^lib\.beets_db\.BeetsDB$"),
-    # ``web.server._real_beets_db`` is already covered by the broader
-    # ``^web\.server\.(...|_real_beets_db|...)`` pattern higher up
-    # (MusicBrainz / Discogs / beets module-level boundaries).
-
     # PipelineDB class itself — patching the class replaces the
     # PostgreSQL boundary at the constructor. Per-method patches against
     # PipelineDB.<method> stay flagged (FakePipelineDB is the right
@@ -318,11 +326,6 @@ _LEAF_SEAM_PATTERNS = [
     # psycopg's connector is the database socket leaf. Startup placement tests
     # stop there after exercising the real contract and schema-gate code.
     re.compile(r"^lib\.migrator\.psycopg2\.connect$"),
-
-    # web.server.db — module-level pipeline DB connection cache.
-    # Tests patch.object(server, "db", fake) to inject a per-test DB.
-    # Equivalent to the constructor-replacement pattern.
-    re.compile(r"^web\.server\.db$"),
 
     # web.routes re-exports of allowlisted helpers. Same physical
     # function lives in lib.* and is allowlisted there; tests just
@@ -352,14 +355,6 @@ _LEAF_SEAM_PATTERNS = [
     # JSON fields, response summary). Patching the route-module binding
     # keeps those contract tests focused on the wire shape.
     re.compile(r"^web\.routes\.imports\.cleanup_all_wrong_matches$"),
-
-    # Web-server module-level swap, same pattern as ``web.server.db``.
-    # ``compute_library_rank`` is the in-library rank-badge producer
-    # (codec-aware tier label). Tests in ``tests/web/`` patch
-    # it via ``side_effect`` to stamp deterministic rank labels into
-    # browse / label / artist responses without setting up a real
-    # rank-config + beets album fixture for every contract test.
-    re.compile(r"^web\.server\.compute_library_rank$"),
 
     # Module-local DI seams for ``transitions.finalize_request``. Each
     # calling module binds ``finalize_request = transitions.finalize_request``
@@ -454,7 +449,7 @@ _LEAF_SEAM_PATTERNS = [
     # was removed in issue #123; tests patch it with create=True to
     # ensure it stays gone (the patch acts as a RED guard against
     # accidental reintroduction).
-    re.compile(r"^web\.server\.check_beets_by_artist_album$"),
+    re.compile(r"^web\.runtime\.WebRuntime\.check_beets_by_artist_album$"),
 
     # MusicBrainz / Discogs API fetch helpers — HTTP boundary.
     re.compile(r"^scripts\.pipeline_cli\.album_requests\.fetch_mb_release$"),
@@ -488,7 +483,7 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^scripts\.repair\._get_all_rows$"),
 
     # DB connection reconnect — network/socket boundary.
-    re.compile(r"^web\.server\._try_reconnect_db$"),
+    re.compile(r"^web\.runtime\.WebRuntime\.drop_thread_db$"),
 ]
 
 

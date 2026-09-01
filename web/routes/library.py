@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from lib import transitions
 from web.routes._pydantic import parse_body
 from web.routes._registry import RouteHandler, RouteRegistration, pattern_route, route
-from web.routes._server_access import _server
+from web.runtime import runtime
 
 
 def get_beets_album(
@@ -17,15 +17,15 @@ def get_beets_album(
     from web.library_album_row import AmbiguousLibraryRequestAttachmentError
 
     album_id = int(album_id_str)
-    srv = _server()
-    b = srv._beets_db()
+    rt = runtime()
+    b = rt.beets_db()
     if not b:
         h._error("Beets DB not available")
         return
     try:
         detail = load_library_album_detail(
             library_lookup=b,
-            pipeline_db=srv._db(),
+            pipeline_db=rt.db(),
             album_id=album_id,
         )
     except AmbiguousLibraryRequestAttachmentError as exc:
@@ -82,17 +82,17 @@ def post_beets_delete(h: RouteHandler, body: dict[str, object]) -> None:
         expected_pipeline_id=req_body.pipeline_id,
         expected_release_id=req_body.release_id or None,
     )
-    srv = _server()
-    beets = srv._beets_db()
+    rt = runtime()
+    beets = rt.beets_db()
     if beets is None:
         h._error("Beets DB not available", 503)
         return
     result = delete_release_from_library(
-        pipeline_db=srv._db(),
+        pipeline_db=rt.db(),
         beets_db=beets,
         request=request,
-        beets_delete_fn=srv.beets_delete_fn,
-        notify_fn=srv.delete_notify_fn,
+        beets_delete_fn=rt.beets_delete_fn,
+        notify_fn=rt.delete_notify_fn,
     )
 
     if isinstance(result, DeleteSuccess):

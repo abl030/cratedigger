@@ -22,6 +22,7 @@ from lib.release_identity import ConflictingReleaseIdentityError, ReleaseIdentit
 from tests.fakes import FakeBeetsDB
 from tests.test_beets_db import _create_test_db, _insert_album
 from web.routes._overlay import band_release_ids, overlay_release_rows_in_place
+from web.runtime import WebRuntime, install_runtime
 
 MB_RELEASE_1 = "00000000-0000-0000-0000-000000000001"
 MB_RELEASE_2 = "00000000-0000-0000-0000-000000000002"
@@ -29,6 +30,11 @@ MB_RELEASE_3 = "00000000-0000-0000-0000-000000000003"
 
 
 class TestOverlayReleaseRowsInPlace(unittest.TestCase):
+    def setUp(self) -> None:
+        # These tests drive the overlay helpers directly rather than
+        # through HTTP, so nothing else installs a runtime for them.
+        self.enterContext(install_runtime(WebRuntime()))
+
     def test_projects_request_convergence_on_the_exact_release_row(self):
         signal = ConvergenceSignal(
             request_id=21,
@@ -52,8 +58,8 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
             calls.append(request_ids)
             return {21: signal}
 
-        with patch("web.server.check_beets_library", return_value=set()), \
-                patch("web.server.check_pipeline", return_value={
+        with patch.object(WebRuntime, "check_beets_library", return_value=set()), \
+                patch.object(WebRuntime, "check_pipeline", return_value={
                     "queued": {
                         "id": 21,
                         "status": "wanted",
@@ -62,7 +68,7 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
                         "provisional_lossless": True,
                         "processing_owner": None,
                     },
-                }), patch("web.server._beets_db", return_value=None):
+                }), patch.object(WebRuntime, "beets_db", return_value=None):
             overlay_release_rows_in_place(
                 rows, ["queued"], convergence_fn=get_signals,
             )
@@ -93,9 +99,9 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
                             "beets_avg_bitrate": None},
         }
 
-        with patch("web.server.check_beets_library",
+        with patch.object(WebRuntime, "check_beets_library",
                    return_value={"held", "both", "bad-quality"}), \
-                patch("web.server.check_pipeline",
+                patch.object(WebRuntime, "check_pipeline",
                       return_value={
                           "queued": {"id": 21, "status": "wanted",
                                      "has_captured_history": False,
@@ -108,7 +114,7 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
                                    "provisional_lossless": False,
                                    "processing_owner": None},
                       }), \
-                patch("web.server._beets_db", return_value=mock_beets):
+                patch.object(WebRuntime, "beets_db", return_value=mock_beets):
             overlay_release_rows_in_place(rows, [str(r["id"]) for r in rows])
 
         by_id = {row["id"]: row for row in rows}
@@ -161,18 +167,18 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
         self.assertEqual(by_id["bad-quality"]["library_rank"], "unknown")
 
     def test_empty_inputs_do_not_touch_backends(self):
-        with patch("web.server.check_beets_library") as check_lib, \
-                patch("web.server.check_pipeline") as check_pipeline, \
-                patch("web.server._beets_db", return_value=None):
+        with patch.object(WebRuntime, "check_beets_library") as check_lib, \
+                patch.object(WebRuntime, "check_pipeline") as check_pipeline, \
+                patch.object(WebRuntime, "beets_db", return_value=None):
             overlay_release_rows_in_place([], [])
 
         check_lib.assert_not_called()
         check_pipeline.assert_not_called()
 
     def test_missing_row_id_raises_key_error(self):
-        with patch("web.server.check_beets_library", return_value=set()), \
-                patch("web.server.check_pipeline", return_value={}), \
-                patch("web.server._beets_db", return_value=None), self.assertRaises(KeyError):
+        with patch.object(WebRuntime, "check_beets_library", return_value=set()), \
+                patch.object(WebRuntime, "check_pipeline", return_value={}), \
+                patch.object(WebRuntime, "beets_db", return_value=None), self.assertRaises(KeyError):
             overlay_release_rows_in_place([{"title": "No ID"}], [])
 
     def test_pipeline_snapshot_precedes_beets_failure_and_rows_stay_unprojected(self):
@@ -196,8 +202,8 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
             calls.append(f"beets:{ids}")
             raise OSError("synthetic Beets read failure")
 
-        with patch("web.server.check_pipeline", side_effect=check_pipeline), \
-                patch("web.server.check_beets_library", side_effect=check_beets), \
+        with patch.object(WebRuntime, "check_pipeline", side_effect=check_pipeline), \
+                patch.object(WebRuntime, "check_beets_library", side_effect=check_beets), \
                 self.assertRaisesRegex(OSError, "Beets read failure"):
             overlay_release_rows_in_place(rows, ["captured"])
 
@@ -218,8 +224,8 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
                 "title": "Conflicting pressing",
             },
         ]
-        with patch("web.server.check_pipeline", return_value={}), patch(
-            "web.server.check_beets_library",
+        with patch.object(WebRuntime, "check_pipeline", return_value={}), patch.object(
+            WebRuntime, "check_beets_library",
             side_effect=ConflictingReleaseIdentityError(
                 "conflicting numeric Discogs release identities for: 12856590"
             ),
@@ -245,6 +251,11 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
 
 
 class TestBandReleaseIds(unittest.TestCase):
+    def setUp(self) -> None:
+        # These tests drive the overlay helpers directly rather than
+        # through HTTP, so nothing else installs a runtime for them.
+        self.enterContext(install_runtime(WebRuntime()))
+
     def test_unique_mixed_format_band_uses_canonical_precedence_not_item_order(
         self,
     ) -> None:
@@ -307,7 +318,7 @@ class TestBandReleaseIds(unittest.TestCase):
         beets = FakeBeetsDB()
         beets.set_album_ids_for_release(MB_RELEASE_1, [10, 11])
 
-        with patch("web.server._beets_db", return_value=beets), \
+        with patch.object(WebRuntime, "beets_db", return_value=beets), \
                 self.assertRaises(CurrentBeetsBandingAmbiguityError) as raised:
             band_release_ids([MB_RELEASE_1])
 
@@ -318,7 +329,7 @@ class TestBandReleaseIds(unittest.TestCase):
 
     def test_beets_error_never_degrades_to_missing(self):
         """A failed authority read is not evidence that every release is absent."""
-        with patch("web.server._beets_db",
+        with patch.object(WebRuntime, "beets_db",
                    side_effect=OSError("db locked")), self.assertRaisesRegex(
                        OSError, "db locked"):
             band_release_ids([MB_RELEASE_1, MB_RELEASE_2])
@@ -332,7 +343,7 @@ class TestBandReleaseIds(unittest.TestCase):
              "beets_avg_bitrate": 1100},
         )
         beets.set_album_exists(MB_RELEASE_2, True)
-        with patch("web.server._beets_db", return_value=beets):
+        with patch.object(WebRuntime, "beets_db", return_value=beets):
             out = band_release_ids([
                 MB_RELEASE_1,
                 MB_RELEASE_2,
@@ -363,8 +374,8 @@ class TestBandReleaseIds(unittest.TestCase):
                 [(1_100_000, "/music/legacy/01.flac")],
                 track_format="FLAC",
             )
-            with BeetsDB(db_path, library_root="/music") as beets, patch(
-                "web.server._beets_db", return_value=beets,
+            with BeetsDB(db_path, library_root="/music") as beets, patch.object(
+                WebRuntime, "beets_db", return_value=beets,
             ):
                 out = band_release_ids(["12856590", "5555555"])
 

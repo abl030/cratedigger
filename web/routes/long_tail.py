@@ -11,8 +11,9 @@ import logging
 import msgspec
 
 from lib.long_tail_service import classify_long_tail_failure
+from web.overlay import serialize_row
 from web.routes._registry import RouteHandler, RouteRegistration, route
-from web.routes._server_access import _server
+from web.runtime import runtime
 
 log = logging.getLogger(__name__)
 
@@ -63,8 +64,7 @@ def get_pipeline_long_tail(h: RouteHandler, params: dict[str, list[str]]) -> Non
     from lib.long_tail_service import band_one_long_tail, list_long_tail
     from web.routes._overlay import band_release_ids
 
-    s = _server()
-
+    rt = runtime()
     try:
         id_raw = params.get("id", [None])[0]
         if id_raw is not None and id_raw != "":
@@ -73,14 +73,14 @@ def get_pipeline_long_tail(h: RouteHandler, params: dict[str, list[str]]) -> Non
             except (TypeError, ValueError):
                 h._error("id must be an integer")
                 return
-            row = band_one_long_tail(s._db(), band_release_ids, request_id)
+            row = band_one_long_tail(rt.db(), band_release_ids, request_id)
             if row is None:
                 h._json(
                     {"error": "Not found", "id": request_id},
                     status=404,
                 )
                 return
-            serialized = s._serialize_row(msgspec.to_builtins(row))
+            serialized = serialize_row(msgspec.to_builtins(row))
             h._json({"result": serialized, "id": request_id})
             return
 
@@ -88,11 +88,11 @@ def get_pipeline_long_tail(h: RouteHandler, params: dict[str, list[str]]) -> Non
         if band == "":
             band = None
 
-        result = list_long_tail(s._db(), band_release_ids, band=band)
+        result = list_long_tail(rt.db(), band_release_ids, band=band)
 
         # Route the serialized rows through _serialize_row to convert any
         # datetime / UUID columns to JSON-safe values (datetime-500 guard).
-        rows = [s._serialize_row(r) for r in msgspec.to_builtins(result.rows)]
+        rows = [serialize_row(r) for r in msgspec.to_builtins(result.rows)]
         h._json({
             "results": rows,
             "band": result.band_filter,

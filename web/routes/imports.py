@@ -57,10 +57,11 @@ from lib.wrong_match_delete_service import (
     delete_wrong_match,
     delete_wrong_match_group,
 )
+from web.overlay import compute_library_rank
 from web.routes._pydantic import parse_body
 from web.routes._registry import RouteHandler, RouteRegistration, route
-from web.routes._server_access import _server
 from web.routes.pipeline import _serialize_import_job
+from web.runtime import runtime
 from web.triage_runner import TriageRunner
 from web.wrong_match_file_service import (
     WrongMatchSourceRefused,
@@ -97,11 +98,11 @@ def get_wrong_matches(h: RouteHandler, params: dict[str, list[str]]) -> None:
     include_replaced = (
         params.get("include_replaced", ["false"])[0].lower() == "true"
     )
-    srv = _server()
+    rt = runtime()
     h._json({"groups": build_wrong_match_groups(
-        db=srv._db(),
-        check_beets_library_detail=srv.check_beets_library_detail,
-        compute_library_rank=srv.compute_library_rank,
+        db=rt.db(),
+        check_beets_library_detail=rt.check_beets_library_detail,
+        compute_library_rank=compute_library_rank,
         include_replaced=include_replaced,
     )})
 
@@ -151,7 +152,7 @@ def get_wrong_match_explorer(h: RouteHandler, params: dict[str, list[str]]) -> N
         h._error(str(exc))
         return
 
-    entry = _server()._db().get_download_log_entry(log_id)
+    entry = runtime().db().get_download_log_entry(log_id)
     if not entry:
         h._error(f"Download log entry {log_id} not found", 404)
         return
@@ -216,7 +217,7 @@ def get_wrong_match_audio(
         h._error("Missing path")
         return
 
-    entry = _server()._db().get_download_log_entry(log_id)
+    entry = runtime().db().get_download_log_entry(log_id)
     if not entry:
         h._error(f"Download log entry {log_id} not found", 404)
         return
@@ -312,7 +313,7 @@ def post_wrong_match_delete(h: RouteHandler, body: dict[str, object]) -> None:
         return
     log_id = req_body.download_log_id
 
-    result = delete_wrong_match(_server()._db(), log_id, require_visible=True)
+    result = delete_wrong_match(runtime().db(), log_id, require_visible=True)
     if result.success:
         h._json({"status": "ok", **result.to_dict()})
         return
@@ -364,7 +365,7 @@ def post_wrong_match_delete_group(
         return
     request_id = req_body.request_id
 
-    summary = delete_wrong_match_group(_server()._db(), request_id)
+    summary = delete_wrong_match_group(runtime().db(), request_id)
     status = "ok" if summary.success else "partial"
     h._json(
         {"status": status, **summary.to_dict()},
@@ -446,8 +447,8 @@ def post_wrong_match_converge(h: RouteHandler, body: dict[str, object]) -> None:
     # leave high-distance leftovers behind.
     delete_unmatched = True
 
-    srv = _server()
-    pdb = srv._db()
+    rt = runtime()
+    pdb = rt.db()
     req = pdb.get_request(rid)
     if not req:
         h._error(f"Request {rid} not found", 404)
@@ -643,7 +644,7 @@ def post_import_preview(h: RouteHandler, body: dict[str, object]) -> None:
     else:
         assert request.download_log_id is not None
         preview = preview_import_from_download_log(
-            _server()._db(), request.download_log_id,
+            runtime().db(), request.download_log_id,
         )
     h._json(preview.to_dict())
 
@@ -677,14 +678,14 @@ def post_wrong_match_triage(h: RouteHandler, body: dict[str, object]) -> None:
     The sweep takes minutes when stale rows trigger re-measurement
     (#271); running it inline wedged the single-threaded server for the
     duration. The sweep thread opens its own DB connection via
-    ``_server()._new_db`` — psycopg2 handles are not thread-safe to
+    ``runtime().new_db`` — psycopg2 handles are not thread-safe to
     share with the request thread.
     """
     req_body = parse_body(h, body, WrongMatchTriageRequest)
     if req_body is None:
         return
     started = _triage_runner.start(
-        db_factory=_server()._new_db,
+        db_factory=runtime().new_db,
         cleanup_fn=cleanup_all_wrong_matches,
     )
     if not started:

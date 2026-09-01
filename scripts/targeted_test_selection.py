@@ -447,6 +447,31 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_web_dev_server",
         "tests.test_discogs_artist_concurrency",
     ),
+    # web/server.py resolves nothing on its own: no tests.test_server or
+    # tests.web.test_server exists, and no ROOT_COVERAGE_RULES row polices
+    # ``web/``, so an edit to the web entrypoint selected zero neighbours
+    # (found while moving its module globals onto WebRuntime, #1313). The
+    # named modules are the ones a solo change to this file most plausibly
+    # regresses: the Handler's dispatch/keep-alive/threading behaviour, the
+    # request-security envelope it applies before dispatch, and main()'s
+    # admission ordering.
+    "web/server.py": (
+        "tests.web.test_server_endpoints",
+        "tests.web.test_server_threading",
+        "tests.web.test_server_cache",
+        "tests.web.test_request_security",
+        "tests.web.test_runtime",
+        "tests.test_beets_config_startup",
+    ),
+    # web/runtime.py's own module IS probe-derivable
+    # (tests.web.test_runtime), but the runtime is what every route reads,
+    # so a solo change to it also regresses the per-thread handle contract
+    # and the HTTP-level boundary tests that drive real requests through it.
+    "web/runtime.py": (
+        "tests.web.test_runtime",
+        "tests.web.test_server_threading",
+        "tests.web.test_server_endpoints",
+    ),
     # cratedigger.py is a single top-level file (``len(path.parts) == 1``),
     # so ``_direct_test_candidates`` looks for ``tests.test_cratedigger`` —
     # which does not exist; the module's behavior is split across dozens of

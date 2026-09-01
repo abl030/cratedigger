@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -21,6 +21,7 @@ from web.request_security import (
     RequestSecurityError,
     authorize_request,
 )
+from web.runtime import install_runtime, runtime
 
 
 @dataclass(frozen=True)
@@ -289,8 +290,6 @@ class TestYoutubeResolverProvenanceGenerated(_WebServerCase):
         self,
         provenance: tuple[tuple[str, str], ...],
     ) -> None:
-        from web import server as srv
-
         class _ForbiddenDB:
             touches = 0
 
@@ -321,7 +320,9 @@ class TestYoutubeResolverProvenanceGenerated(_WebServerCase):
             headers=headers,
             method="POST",
         )
-        with patch.object(srv, "db", forbidden_db), patch(
+        with install_runtime(
+            replace(runtime(), shared_db=forbidden_db),
+        ), patch(
             "web.routes.youtube.resolve_youtube_album",
         ) as resolver:
             try:

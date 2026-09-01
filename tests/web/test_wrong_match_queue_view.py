@@ -29,7 +29,7 @@ _MBID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
 
 class _RankRecorder:
-    """Recorder standing in for web.server.compute_library_rank."""
+    """Recorder standing in for ``web.overlay.compute_library_rank``."""
 
     def __init__(self, result: str = "unknown") -> None:
         self.result = result
@@ -41,7 +41,7 @@ class _RankRecorder:
 
 
 class _BeetsDetailRecorder:
-    """Recorder standing in for web.server.check_beets_library_detail."""
+    """Recorder standing in for ``WebRuntime.check_beets_library_detail``."""
 
     def __init__(self, result: dict[str, dict[str, object]] | None = None) -> None:
         self.result = result or {}

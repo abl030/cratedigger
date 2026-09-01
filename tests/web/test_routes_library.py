@@ -6,8 +6,8 @@ tests/web/_harness.py.
 import os
 import sys
 import unittest
+from dataclasses import replace
 from typing import ClassVar
-from unittest.mock import patch
 
 import msgspec
 
@@ -20,12 +20,13 @@ from lib.beets_delete import (
 )
 from tests.dispatch_helpers import handoff_automation_owner
 from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import make_request_row
+from tests.helpers import make_request_row, make_web_runtime
 from tests.web._harness import (
     _assert_required_fields,
     _FakeDbWebServerCase,
 )
 from web.classify import ClassifiedEntry
+from web.runtime import install_runtime, runtime
 
 
 class _FailingDeleteDB(FakePipelineDB):
@@ -92,15 +93,7 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
 
     def setUp(self) -> None:
         super().setUp()
-        import web.server as srv
-
-        self._srv = srv
-        self._orig_beets = srv._beets
-        self._orig_beets_db_path = srv.beets_db_path
-        self._orig_delete_fn = srv.beets_delete_fn
-        self._orig_notify_fn = srv.delete_notify_fn
         self.beets_db = FakeBeetsDB()
-        srv._beets = self.beets_db
         self._delete_failure: BeetsDeleteFailed | None = None
         self.delete_requests: list[BeetsDeleteRequest] = []
 
@@ -125,8 +118,11 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
                 preserved_paths=(),
             )
 
-        srv.beets_delete_fn = fake_pinned_delete
-        srv.delete_notify_fn = lambda _path: ()
+        self.enterContext(install_runtime(replace(
+            make_web_runtime(runtime(), beets=self.beets_db),
+            beets_delete_fn=fake_pinned_delete,
+            delete_notify_fn=lambda _path: (),
+        )))
         self.db.seed_request(make_request_row(
             id=42,
             status="wanted",
@@ -142,12 +138,6 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
             actual_filetype="mp3", actual_min_bitrate=320,
             slskd_filetype="mp3", valid=True,
         )
-
-    def tearDown(self) -> None:
-        self._srv._beets = self._orig_beets
-        self._srv.beets_db_path = self._orig_beets_db_path
-        self._srv.beets_delete_fn = self._orig_delete_fn
-        self._srv.delete_notify_fn = self._orig_notify_fn
 
     def _album(self) -> dict:
         return {
@@ -384,7 +374,9 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         self.assertIsNone(data["tracks"][0]["format"])
 
     def test_beets_delete_contract(self):
-        self._srv.beets_db_path = "/tmp/beets.db"
+        self.enterContext(install_runtime(replace(
+            runtime(), beets_db_path="/tmp/beets.db",
+        )))
         self._configure_beets_delete_mock(None)
 
         status, data = self._post("/api/beets/delete", {"id": 7, "confirm": "DELETE"})
@@ -443,7 +435,9 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         self.assertIsNotNone(self.db.get_request(42))
 
     def test_beets_delete_purges_explicit_pipeline_request(self):
-        self._srv.beets_db_path = "/tmp/beets.db"
+        self.enterContext(install_runtime(replace(
+            runtime(), beets_db_path="/tmp/beets.db",
+        )))
         self.db.seed_request(make_request_row(
             id=42, status="imported", mb_release_id=self.RELEASE_ID,
         ))
@@ -485,7 +479,9 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(self.delete_requests, [])
 
     def test_beets_delete_purges_pipeline_request_by_release_id_fallback(self):
-        self._srv.beets_db_path = "/tmp/beets.db"
+        self.enterContext(install_runtime(replace(
+            runtime(), beets_db_path="/tmp/beets.db",
+        )))
         # Drop the setUp-seeded request 42 (same RELEASE_ID) so the
         # release-id fallback can only resolve to this test's row.
         self.db.delete_request(42)
@@ -507,7 +503,9 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         self.assertIsNone(self.db.get_request(99))
 
     def test_beets_delete_purges_pipeline_request_by_uppercase_release_id(self):
-        self._srv.beets_db_path = "/tmp/beets.db"
+        self.enterContext(install_runtime(replace(
+            runtime(), beets_db_path="/tmp/beets.db",
+        )))
         # Drop the setUp-seeded request 42 (same RELEASE_ID) so the
         # release-id fallback can only resolve to this test's row.
         self.db.delete_request(42)
@@ -529,7 +527,9 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         self.assertIsNone(self.db.get_request(98))
 
     def test_beets_delete_without_purge_pipeline_leaves_request_intact(self):
-        self._srv.beets_db_path = "/tmp/beets.db"
+        self.enterContext(install_runtime(replace(
+            runtime(), beets_db_path="/tmp/beets.db",
+        )))
         self.db.seed_request(make_request_row(
             id=42, status="imported", mb_release_id=self.RELEASE_ID,
         ))
@@ -546,7 +546,9 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         self.assertIsNotNone(self.db.get_request(42))
 
     def test_beets_delete_derives_pipeline_context_from_beets_identity(self):
-        self._srv.beets_db_path = "/tmp/beets.db"
+        self.enterContext(install_runtime(replace(
+            runtime(), beets_db_path="/tmp/beets.db",
+        )))
         self._configure_beets_delete_mock(None)
 
         status, data = self._post("/api/beets/delete", {
@@ -561,7 +563,9 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         self.assertIsNone(self.db.get_request(42))
 
     def test_beets_delete_purges_discogs_request_by_numeric_release_id_fallback(self):
-        self._srv.beets_db_path = "/tmp/beets.db"
+        self.enterContext(install_runtime(replace(
+            runtime(), beets_db_path="/tmp/beets.db",
+        )))
         self.db.seed_request(make_request_row(
             id=77,
             mb_release_id=None,
@@ -594,14 +598,16 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         self.assertIsNone(self.db.get_request(77))
 
     def test_beets_delete_pipeline_failure_is_explicit_after_album_delete(self):
-        self._srv.beets_db_path = "/tmp/beets.db"
+        self.enterContext(install_runtime(replace(
+            runtime(), beets_db_path="/tmp/beets.db",
+        )))
         self._configure_beets_delete_mock(None)
         failing_db = _FailingDeleteDB()
         failing_db.seed_request(make_request_row(
             id=42, status="imported", mb_release_id=self.RELEASE_ID,
         ))
 
-        with patch.object(self._srv, "db", failing_db):
+        with install_runtime(make_web_runtime(runtime(), db=failing_db)):
             status, data = self._post("/api/beets/delete", {
                 "id": 7,
                 "confirm": "DELETE",
@@ -617,7 +623,9 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         self.assertIsNone(self.beets_db.get_album_detail(7))
 
     def test_beets_delete_failure_retains_pipeline_for_retry(self):
-        self._srv.beets_db_path = "/tmp/beets.db"
+        self.enterContext(install_runtime(replace(
+            runtime(), beets_db_path="/tmp/beets.db",
+        )))
         self.db.seed_request(make_request_row(
             id=42, status="imported", mb_release_id=self.RELEASE_ID,
         ))
@@ -648,7 +656,9 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         self.assertIsNotNone(self.db.get_request(42))
 
     def test_beets_delete_ambiguous_current_identity_is_zero_mutation(self):
-        self._srv.beets_db_path = "/tmp/beets.db"
+        self.enterContext(install_runtime(replace(
+            runtime(), beets_db_path="/tmp/beets.db",
+        )))
         self._configure_beets_delete_mock(None)
         self.beets_db.set_album_ids_for_release(self.RELEASE_ID, [7, 8])
 

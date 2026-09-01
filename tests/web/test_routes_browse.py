@@ -21,9 +21,10 @@ from lib.artist_catalogue import ArtistCatalogueRow
 from lib.pipeline_db.rows import ArtistRequestRow
 from tests.dispatch_helpers import handoff_automation_owner
 from tests.fakes import FakeBeetsDB, FakePipelineDB
-from tests.helpers import make_request_row
+from tests.helpers import make_request_row, make_web_runtime
 from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
 from web.library_album_row import LibraryAlbumRow
+from web.runtime import WebRuntime, install_runtime, runtime
 
 
 def _catalogue(rows: list[dict]) -> list[ArtistCatalogueRow]:
@@ -88,7 +89,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
     RG_ID = "11111111-1111-1111-1111-111111111111"
 
     def test_artist_search_contract(self):
-        with patch("web.server.mb_api") as mock_mb:
+        with patch("web.routes.browse.mb_api") as mock_mb:
             mock_mb.search_artists.return_value = [
                 {"id": self.ARTIST_ID, "name": "Test Artist", "disambiguation": ""},
             ]
@@ -100,7 +101,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
                                 "artist search result")
 
     def test_release_search_contract(self):
-        with patch("web.server.mb_api") as mock_mb:
+        with patch("web.routes.browse.mb_api") as mock_mb:
             mock_mb.search_release_groups.return_value = [
                 {
                     "id": self.RG_ID,
@@ -137,7 +138,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "country": "US",
             "source": "musicbrainz",
         }
-        with patch("web.server.get_library_artist", return_value=[album]):
+        with patch.object(WebRuntime, "get_library_artist", return_value=[album]):
             status, data = self._get(
                 f"/api/library/artist?name=Test%20Artist&mbid={self.ARTIST_ID}"
             )
@@ -149,8 +150,6 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         self.assertNotIn("cd_rip_verification", data["albums"][0])
 
     def test_library_artist_route_includes_pipeline_only_requests(self):
-        import web.server as srv
-
         fake_db = FakePipelineDB()
         fake_db.seed_request(make_request_row(
             id=42,
@@ -173,8 +172,8 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             for i in range(10)
         ])
 
-        with patch.object(srv, "db", fake_db), \
-                patch("web.server.get_library_artist", return_value=[]):
+        with install_runtime(make_web_runtime(runtime(), db=fake_db)), \
+                patch.object(WebRuntime, "get_library_artist", return_value=[]):
             status, data = self._get(
                 f"/api/library/artist?name=Test%20Artist&mbid={self.ARTIST_ID}"
             )
@@ -206,7 +205,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         ))
         job = handoff_automation_owner(self.db, request_id)
 
-        with patch("web.server.get_library_artist", return_value=[]):
+        with patch.object(WebRuntime, "get_library_artist", return_value=[]):
             status, data = self._get(
                 f"/api/library/artist?name=Test%20Artist&mbid={self.ARTIST_ID}"
             )
@@ -220,8 +219,6 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         })
 
     def test_library_artist_route_dedups_pipeline_row_when_beets_row_has_same_release_id(self):
-        import web.server as srv
-
         fake_db = FakePipelineDB()
         fake_db.seed_request(make_request_row(
             id=42,
@@ -252,8 +249,8 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "source": "musicbrainz",
         }
 
-        with patch.object(srv, "db", fake_db), \
-                patch("web.server.get_library_artist", return_value=[beets_album]):
+        with install_runtime(make_web_runtime(runtime(), db=fake_db)), \
+                patch.object(WebRuntime, "get_library_artist", return_value=[beets_album]):
             status, data = self._get(
                 f"/api/library/artist?name=Test%20Artist&mbid={self.ARTIST_ID}"
             )
@@ -265,8 +262,6 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         self.assertTrue(data["albums"][0]["in_library"])
 
     def test_library_artist_route_dedups_discogs_pipeline_row_when_beets_row_has_same_discogs_id(self):
-        import web.server as srv
-
         fake_db = FakePipelineDB()
         fake_db.seed_request(make_request_row(
             id=55,
@@ -299,8 +294,8 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "source": "discogs",
         }
 
-        with patch.object(srv, "db", fake_db), \
-                patch("web.server.get_library_artist", return_value=[beets_album]):
+        with install_runtime(make_web_runtime(runtime(), db=fake_db)), \
+                patch.object(WebRuntime, "get_library_artist", return_value=[beets_album]):
             status, data = self._get(
                 f"/api/library/artist?name=Test%20Artist&mbid={self.ARTIST_ID}"
             )
@@ -343,7 +338,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "country": "AU",
         }
 
-        with patch("web.server.get_library_artist", return_value=[beets_album]):
+        with patch.object(WebRuntime, "get_library_artist", return_value=[beets_album]):
             status, data = self._get(
                 f"/api/library/artist?name=Test%20Artist&mbid={self.ARTIST_ID}"
             )
@@ -356,8 +351,6 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         })
 
     def test_library_artist_route_ignores_discogs_zero_sentinel_on_blank_row(self):
-        import web.server as srv
-
         beets_album = {
             "id": 10,
             "album": "Unknown Import",
@@ -378,8 +371,8 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "source": "unknown",
         }
 
-        with patch.object(srv, "db", FakePipelineDB()), \
-                patch("web.server.get_library_artist", return_value=[beets_album]):
+        with install_runtime(make_web_runtime(runtime(), db=FakePipelineDB())), \
+                patch.object(WebRuntime, "get_library_artist", return_value=[beets_album]):
             status, data = self._get(
                 f"/api/library/artist?name=Test%20Artist&mbid={self.ARTIST_ID}"
             )
@@ -390,8 +383,6 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         self.assertIsNone(data["albums"][0]["pipeline_id"])
 
     def test_library_artist_route_sorts_merged_rows_after_dedup(self):
-        import web.server as srv
-
         fake_db = FakePipelineDB()
         fake_db.seed_request(make_request_row(
             id=50,
@@ -423,8 +414,8 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "source": "musicbrainz",
         }
 
-        with patch.object(srv, "db", fake_db), \
-                patch("web.server.get_library_artist", return_value=[beets_album]):
+        with install_runtime(make_web_runtime(runtime(), db=fake_db)), \
+                patch.object(WebRuntime, "get_library_artist", return_value=[beets_album]):
             status, data = self._get(
                 f"/api/library/artist?name=Test%20Artist&mbid={self.ARTIST_ID}"
             )
@@ -463,7 +454,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "primary_artist_id": "3840",
             "is_appearance": False,
         }
-        with patch("web.server.mb_api") as mock_mb, \
+        with patch("web.routes.browse.mb_api") as mock_mb, \
                 patch("web.routes.browse.discogs_api") as mock_dg:
             mock_mb.search_artists.return_value = [{"id": self.ARTIST_ID, "name": "Radiohead"}]
             mock_mb.get_artist_release_groups.return_value = _catalogue([mb_rg])
@@ -512,7 +503,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "primary_types": ["Album"], "format_qualifiers": [],
             "provenance": [], "is_appearance": False,
         }
-        with patch("web.server.mb_api") as mock_mb, \
+        with patch("web.routes.browse.mb_api") as mock_mb, \
                 patch("web.routes.browse.discogs_api") as mock_dg:
             mock_mb.search_artists.return_value = [{"id": self.ARTIST_ID, "name": "Artist"}]
             mock_mb.get_artist_release_groups.return_value = _catalogue(
@@ -549,7 +540,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "primary_artist_id": self.ARTIST_ID,
             "is_appearance": False,
         }
-        with patch("web.server.mb_api") as mock_mb:
+        with patch("web.routes.browse.mb_api") as mock_mb:
             mock_mb.get_artist_release_groups.return_value = _catalogue(
                 [release_group]
             )
@@ -578,7 +569,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "primary_artist_id": "89ad4ac3-39f7-470e-963a-56509c546377",
             "is_appearance": True,
         }
-        with patch("web.server.mb_api") as mock_mb:
+        with patch("web.routes.browse.mb_api") as mock_mb:
             mock_mb.get_artist_release_groups.return_value = _catalogue(
                 [appearance]
             )
@@ -592,7 +583,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
 
     def test_artist_release_groups_transport_failure_is_clean_retryable_503(self):
         raw_reason = "[SSL: UNEXPECTED_EOF_WHILE_READING] private adapter detail"
-        with patch("web.server.mb_api") as mock_mb:
+        with patch("web.routes.browse.mb_api") as mock_mb:
             mock_mb.get_artist_release_groups.side_effect = URLError(raw_reason)
             status, data = self._get(f"/api/artist/{self.ARTIST_ID}")
 
@@ -612,7 +603,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             hdrs=email.message.Message(),
             fp=None,
         )
-        with patch("web.server.mb_api") as mock_mb:
+        with patch("web.routes.browse.mb_api") as mock_mb:
             mock_mb.get_artist_release_groups.side_effect = error
             status, data = self._get(f"/api/artist/{self.ARTIST_ID}")
 
@@ -638,8 +629,8 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "mb_releasegroupid": self.RG_ID,
             "album": "Owned Album",
         }
-        with patch("web.server.mb_api") as mock_mb, \
-                patch("web.server.get_library_artist", return_value=[owned_album]):
+        with patch("web.routes.browse.mb_api") as mock_mb, \
+                patch.object(WebRuntime, "get_library_artist", return_value=[owned_album]):
             mock_mb.get_artist_release_groups.return_value = _catalogue(
                 [release_group]
             )
@@ -670,8 +661,8 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             mb_release_group_id=self.RG_ID,
             status="wanted",
         ))
-        with patch("web.server.mb_api") as mock_mb, \
-                patch("web.server.get_library_artist", return_value=[]):
+        with patch("web.routes.browse.mb_api") as mock_mb, \
+                patch.object(WebRuntime, "get_library_artist", return_value=[]):
             mock_mb.get_artist_release_groups.return_value = _catalogue(
                 [release_group]
             )
@@ -710,8 +701,8 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             provisional_lossless=False,
         ))
         self.db.log_download(77, outcome="success")
-        with patch("web.server.mb_api") as mock_mb, \
-                patch("web.server.get_library_artist", return_value=[]):
+        with patch("web.routes.browse.mb_api") as mock_mb, \
+                patch.object(WebRuntime, "get_library_artist", return_value=[]):
             mock_mb.get_artist_release_groups.return_value = _catalogue(
                 [release_group]
             )
@@ -753,7 +744,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             mb_release_group_id=None,
             status="wanted",
         ))
-        with patch("web.server.mb_api") as mock_mb, \
+        with patch("web.routes.browse.mb_api") as mock_mb, \
                 patch("web.routes.browse.discogs_api") as mock_dg:
             mock_mb.search_artists.return_value = [{"id": self.ARTIST_ID, "name": "Deloris"}]
             mock_mb.get_artist_release_groups.return_value = []
@@ -819,9 +810,9 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "mb_albumid": "mb-release",
             "album": "Fraulein",
         }]
-        with patch("web.server.mb_api") as mock_mb, \
+        with patch("web.routes.browse.mb_api") as mock_mb, \
                 patch("web.routes.browse.discogs_api") as mock_dg, \
-                patch("web.server.get_library_artist", return_value=library):
+                patch.object(WebRuntime, "get_library_artist", return_value=library):
             mock_mb.search_artists.return_value = [{
                 "id": self.ARTIST_ID, "name": "Deloris",
             }]
@@ -878,7 +869,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             mb_release_group_id=None,
             status="wanted",
         ))
-        with patch("web.server.mb_api") as mock_mb, \
+        with patch("web.routes.browse.mb_api") as mock_mb, \
                 patch("web.routes.browse.discogs_api") as mock_dg:
             mock_mb.search_artists.return_value = []
             mock_mb.get_artist_release_groups.return_value = []
@@ -928,7 +919,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             mb_release_group_id="7434",
             status="imported",
         ))
-        with patch("web.server.mb_api") as mock_mb, \
+        with patch("web.routes.browse.mb_api") as mock_mb, \
                 patch("web.routes.browse.discogs_api") as mock_dg:
             mock_mb.search_artists.return_value = []
             mock_mb.get_artist_release_groups.return_value = []
@@ -969,10 +960,10 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             "beets_bitrate": 194,
             "beets_avg_bitrate": 288,
         })
-        with patch("web.server.mb_api") as mock_mb, \
-                patch("web.server.check_beets_library", return_value={self.RELEASE_ID}), \
-                patch("web.server._beets_db", return_value=beets_db), \
-                patch("web.server.check_pipeline",
+        with patch("web.routes.browse.mb_api") as mock_mb, \
+                patch.object(WebRuntime, "check_beets_library", return_value={self.RELEASE_ID}), \
+                install_runtime(make_web_runtime(runtime(), beets=beets_db)), \
+                patch.object(WebRuntime, "check_pipeline",
                       return_value={self.RELEASE_ID: {"id": 42, "status": "wanted", "has_captured_history": True, "verified_lossless": False, "provisional_lossless": True, "processing_owner": None}}):
             mock_mb.get_release_group_releases.return_value = {"releases": [release]}
             status, data = self._get(f"/api/release-group/{self.RG_ID}")
@@ -1014,9 +1005,9 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         self.db.seed_request(make_request_row(
             id=42, status="wanted", mb_release_id=self.RELEASE_ID,
         ))
-        with patch("web.server.mb_api") as mock_mb, \
-                patch("web.server.check_beets_library", return_value={self.RELEASE_ID}), \
-                patch("web.server._beets_db", return_value=beets_db):
+        with patch("web.routes.browse.mb_api") as mock_mb, \
+                patch.object(WebRuntime, "check_beets_library", return_value={self.RELEASE_ID}), \
+                install_runtime(make_web_runtime(runtime(), beets=beets_db)):
             mock_mb.get_release.return_value = release
             status, data = self._get(f"/api/release/{self.RELEASE_ID}")
 
@@ -1056,9 +1047,9 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         beets_db.set_album_ids_for_release(self.RELEASE_ID, [7])
         beets_db.set_mbid_detail(self.RELEASE_ID, {})
         beets_db.set_tracks_for_release(self.RELEASE_ID, [beets_track])
-        with patch("web.server.mb_api") as mock_mb, \
-                patch("web.server.check_beets_library", return_value={self.RELEASE_ID}), \
-                patch("web.server._beets_db", return_value=beets_db):
+        with patch("web.routes.browse.mb_api") as mock_mb, \
+                patch.object(WebRuntime, "check_beets_library", return_value={self.RELEASE_ID}), \
+                install_runtime(make_web_runtime(runtime(), beets=beets_db)):
             mock_mb.get_release.return_value = release
             status, data = self._get(f"/api/release/{self.RELEASE_ID}")
 
@@ -1087,9 +1078,9 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
                 },
             ],
         }
-        with patch("web.server.mb_api") as mock_mb, \
-                patch("web.server.check_beets_library", return_value={"12856590"}), \
-                patch("web.server._beets_db", return_value=beets_db):
+        with patch("web.routes.browse.mb_api") as mock_mb, \
+                patch.object(WebRuntime, "check_beets_library", return_value={"12856590"}), \
+                install_runtime(make_web_runtime(runtime(), beets=beets_db)):
             status, data = self._get("/api/release/0012856590")
 
         self.assertEqual(status, 200)
@@ -1131,10 +1122,10 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
                 },
             ],
         }
-        with patch("web.server.mb_api") as mock_mb, \
-                patch("web.server.check_beets_library", return_value={"21491"}), \
-                patch("web.server._beets_db", return_value=beets_db), \
-                patch("web.server.check_pipeline",
+        with patch("web.routes.browse.mb_api") as mock_mb, \
+                patch.object(WebRuntime, "check_beets_library", return_value={"21491"}), \
+                install_runtime(make_web_runtime(runtime(), beets=beets_db)), \
+                patch.object(WebRuntime, "check_pipeline",
                       return_value={"21491": {"id": 42, "status": "wanted", "has_captured_history": True, "verified_lossless": False, "provisional_lossless": False, "processing_owner": None}}):
             status, data = self._get("/api/release-group/0021491")
 
@@ -1172,9 +1163,9 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
                 }],
             },
         ]
-        with patch("web.server.mb_api") as mock_mb, \
-                patch("web.server.check_beets_library", return_value=set()), \
-                patch("web.server.check_pipeline", return_value={}):
+        with patch("web.routes.browse.mb_api") as mock_mb, \
+                patch.object(WebRuntime, "check_beets_library", return_value=set()), \
+                patch.object(WebRuntime, "check_pipeline", return_value={}):
             mock_mb.get_artist_releases_with_recordings.return_value = fake_releases
             mock_mb.get_artist_name.return_value = "Test Artist"
             status, data = self._get(f"/api/artist/{self.ARTIST_ID}/disambiguate")
@@ -1207,7 +1198,7 @@ class TestArtistFailureBoundary(_FakeDbWebServerCase):
     ARTIST_ID = "664c3e0e-42d8-48c1-b209-1efca19c0325"
 
     def test_downstream_db_overlay_failure_is_not_remapped_as_musicbrainz(self):
-        with patch("web.server.mb_api") as mock_mb:
+        with patch("web.routes.browse.mb_api") as mock_mb:
             mock_mb.get_artist_release_groups.return_value = []
             status, data = self._get(
                 f"/api/artist/{self.ARTIST_ID}?name=Test%20Artist"
@@ -1252,8 +1243,7 @@ class TestBeetsProjectionFailureBoundary(_FakeDbWebServerCase):
         self.assertEqual(request["status"], "wanted")
 
     def test_library_artist_failure_is_logged_and_not_rendered_as_missing(self) -> None:
-        with patch(
-            "web.server.get_library_artist",
+        with patch.object(WebRuntime, "get_library_artist",
             side_effect=OSError("synthetic Beets read failure"),
         ), self.assertLogs("cratedigger-web", level="ERROR") as logs:
             status, data = self._get(
@@ -1281,9 +1271,8 @@ class TestBeetsProjectionFailureBoundary(_FakeDbWebServerCase):
             "is_appearance": False,
         }
         with self.subTest(source="mb"), \
-                patch("web.server.mb_api") as mock_mb, \
-                patch(
-                    "web.server.get_library_artist",
+                patch("web.routes.browse.mb_api") as mock_mb, \
+                patch.object(WebRuntime, "get_library_artist",
                     side_effect=OSError("synthetic Beets read failure"),
                 ):
             mock_mb.get_artist_release_groups.return_value = _catalogue([mb_row])
@@ -1300,8 +1289,7 @@ class TestBeetsProjectionFailureBoundary(_FakeDbWebServerCase):
         })
         with self.subTest(source="discogs"), \
                 patch("web.routes.browse.discogs_api") as mock_discogs, \
-                patch(
-                    "web.server.get_library_artist",
+                patch.object(WebRuntime, "get_library_artist",
                     side_effect=OSError("synthetic Beets read failure"),
                 ):
             mock_discogs.get_artist_name.return_value = "Boundary Archivist"
@@ -1314,10 +1302,9 @@ class TestBeetsProjectionFailureBoundary(_FakeDbWebServerCase):
             self._assert_failed_without_request_mutation(status, data)
 
     def test_compare_catalogue_propagates_beets_failure(self) -> None:
-        with patch("web.server.mb_api") as mock_mb, \
+        with patch("web.routes.browse.mb_api") as mock_mb, \
                 patch("web.routes.browse.discogs_api") as mock_discogs, \
-                patch(
-                    "web.server.get_library_artist",
+                patch.object(WebRuntime, "get_library_artist",
                     side_effect=OSError("synthetic Beets read failure"),
                 ):
             mock_mb.search_artists.return_value = [{
@@ -1360,9 +1347,8 @@ class TestBeetsProjectionFailureBoundary(_FakeDbWebServerCase):
                 }],
             }],
         }
-        with patch("web.server.mb_api") as mock_mb, \
-                patch(
-                    "web.server.check_beets_library",
+        with patch("web.routes.browse.mb_api") as mock_mb, \
+                patch.object(WebRuntime, "check_beets_library",
                     side_effect=OSError("synthetic Beets read failure"),
                 ):
             mock_mb.get_artist_releases_with_recordings.return_value = [release]
@@ -1384,9 +1370,8 @@ class TestBeetsProjectionFailureBoundary(_FakeDbWebServerCase):
             "status": "Official",
         }
         with self.subTest(source="mb"), \
-                patch("web.server.mb_api") as mock_mb, \
-                patch(
-                    "web.server.check_beets_library",
+                patch("web.routes.browse.mb_api") as mock_mb, \
+                patch.object(WebRuntime, "check_beets_library",
                     side_effect=OSError("synthetic Beets read failure"),
                 ):
             mock_mb.get_release_group_releases.return_value = {"releases": [row]}
@@ -1397,8 +1382,7 @@ class TestBeetsProjectionFailureBoundary(_FakeDbWebServerCase):
         discogs_row["id"] = "83182"
         with self.subTest(source="discogs"), \
                 patch("web.routes.browse.discogs_api") as mock_discogs, \
-                patch(
-                    "web.server.check_beets_library",
+                patch.object(WebRuntime, "check_beets_library",
                     side_effect=OSError("synthetic Beets read failure"),
                 ):
             mock_discogs.get_master_releases.return_value = {
@@ -1417,9 +1401,8 @@ class TestBeetsProjectionFailureBoundary(_FakeDbWebServerCase):
             "tracks": [],
         }
         with self.subTest(source="mb"), \
-                patch("web.server.mb_api") as mock_mb, \
-                patch(
-                    "web.server.check_beets_library",
+                patch("web.routes.browse.mb_api") as mock_mb, \
+                patch.object(WebRuntime, "check_beets_library",
                     side_effect=OSError("synthetic Beets read failure"),
                 ):
             mock_mb.get_release.return_value = mb_release
@@ -1428,8 +1411,7 @@ class TestBeetsProjectionFailureBoundary(_FakeDbWebServerCase):
 
         with self.subTest(source="discogs"), \
                 patch("web.routes.browse.discogs_api") as mock_discogs, \
-                patch(
-                    "web.server.check_beets_library",
+                patch.object(WebRuntime, "check_beets_library",
                     side_effect=OSError("synthetic Beets read failure"),
                 ):
             mock_discogs.get_release.return_value = {
@@ -1568,7 +1550,7 @@ class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
             status="wanted",
         ))
         with patch("web.routes.browse.discogs_api") as mock_dg, \
-                patch("web.server.get_library_artist", return_value=[]):
+                patch.object(WebRuntime, "get_library_artist", return_value=[]):
             mock_dg.get_artist_name.return_value = "Deloris"
             mock_dg.get_artist_releases.return_value = _catalogue([
                 {
@@ -1605,7 +1587,7 @@ class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
             status="imported",
         ))
         with patch("web.routes.browse.discogs_api") as mock_dg, \
-                patch("web.server.get_library_artist", return_value=[]):
+                patch.object(WebRuntime, "get_library_artist", return_value=[]):
             mock_dg.get_artist_name.return_value = "Black Sabbath"
             mock_dg.get_artist_releases.return_value = _catalogue([{
                 "id": "7434",
@@ -1635,9 +1617,9 @@ class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
         beets_db.set_album_ids_for_release("83182", [9])
         beets_db.set_mbid_detail("83182", {})
         with patch("web.routes.browse.discogs_api") as mock_dg, \
-                patch("web.server.check_beets_library", return_value={"83182"}), \
-                patch("web.server._beets_db", return_value=beets_db), \
-                patch("web.server.check_pipeline", return_value={}):
+                patch.object(WebRuntime, "check_beets_library", return_value={"83182"}), \
+                install_runtime(make_web_runtime(runtime(), beets=beets_db)), \
+                patch.object(WebRuntime, "check_pipeline", return_value={}):
             mock_dg.get_master_releases.return_value = {
                 "title": "OK Computer",
                 "type": "Album",
@@ -1680,8 +1662,8 @@ class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
         ))
         self.db.log_download(83, outcome="success")
         with patch("web.routes.browse.discogs_api") as mock_dg, \
-                patch("web.server.check_beets_library", return_value={"83182"}), \
-                patch("web.server._beets_db", return_value=beets_db):
+                patch.object(WebRuntime, "check_beets_library", return_value={"83182"}), \
+                install_runtime(make_web_runtime(runtime(), beets=beets_db)):
             mock_dg.get_release.return_value = {
                 "id": "83182",
                 "title": "OK Computer",
@@ -1724,7 +1706,7 @@ class TestSearchByIdResolveContract(_FakeDbWebServerCase):
 
     def test_mb_release_resolved(self):
         """Happy path: ?source=mb&id=<mbid>&kind=release returns leaf shape."""
-        with patch("web.server.mb_api") as mock_mb:
+        with patch("web.routes.browse.mb_api") as mock_mb:
             mock_mb.get_release.return_value = {
                 "id": self.MB_RELEASE_ID,
                 "title": "Test Release",
@@ -1753,7 +1735,7 @@ class TestSearchByIdResolveContract(_FakeDbWebServerCase):
             "release%2F..%3Finc%3Devil",
             self.MB_RELEASE_ID.upper(),
         ):
-            with self.subTest(raw_id=raw_id), patch("web.server.mb_api") as mock_mb:
+            with self.subTest(raw_id=raw_id), patch("web.routes.browse.mb_api") as mock_mb:
                 status, data = self._get(
                     f"/api/browse/resolve?source=mb&id={raw_id}&kind=release"
                 )
@@ -1768,7 +1750,7 @@ class TestSearchByIdResolveContract(_FakeDbWebServerCase):
 
     def test_mb_release_group_resolved(self):
         """Happy path: ?source=mb&id=<mbid>&kind=release-group returns group shape."""
-        with patch("web.server.mb_api") as mock_mb:
+        with patch("web.routes.browse.mb_api") as mock_mb:
             mock_mb.get_release_group.return_value = {
                 "id": self.MB_RG_ID,
                 "title": "Test RG",
@@ -1898,7 +1880,7 @@ class TestSearchByIdResolveContract(_FakeDbWebServerCase):
 
     def test_mb_va_release(self):
         """MB release whose artist matches VA_MBID → is_va: true."""
-        with patch("web.server.mb_api") as mock_mb:
+        with patch("web.routes.browse.mb_api") as mock_mb:
             mock_mb.get_release.return_value = {
                 "id": self.MB_RELEASE_ID,
                 "title": "VA Comp",
@@ -1915,7 +1897,7 @@ class TestSearchByIdResolveContract(_FakeDbWebServerCase):
 
     def test_unknown_kind_falls_back_mb_release_to_rg(self):
         """kind=unknown: leaf endpoint 404 → falls back to release-group."""
-        with patch("web.server.mb_api") as mock_mb:
+        with patch("web.routes.browse.mb_api") as mock_mb:
             from urllib.error import HTTPError
             mock_mb.get_release.side_effect = HTTPError(
                 url="x", code=404, msg="Not Found", hdrs=email.message.Message(), fp=None)
@@ -1956,7 +1938,7 @@ class TestSearchByIdResolveContract(_FakeDbWebServerCase):
         Guards the URL-disambiguation optimisation from regressing into
         always-probe-both behaviour. If the URL said 'release', we trust it.
         """
-        with patch("web.server.mb_api") as mock_mb:
+        with patch("web.routes.browse.mb_api") as mock_mb:
             from urllib.error import HTTPError
             mock_mb.get_release.side_effect = HTTPError(
                 url="x", code=404, msg="Not Found", hdrs=email.message.Message(), fp=None)
@@ -1968,7 +1950,7 @@ class TestSearchByIdResolveContract(_FakeDbWebServerCase):
         self.assertEqual(mock_mb.get_release_group.call_count, 0)
 
     def test_not_found_both_endpoints(self):
-        with patch("web.server.mb_api") as mock_mb:
+        with patch("web.routes.browse.mb_api") as mock_mb:
             from urllib.error import HTTPError
             mock_mb.get_release.side_effect = HTTPError(
                 url="x", code=404, msg="Not Found", hdrs=email.message.Message(), fp=None)
@@ -2009,7 +1991,7 @@ class TestSearchByIdResolveContract(_FakeDbWebServerCase):
         )
         for source, raw_id, kind in cases:
             with self.subTest(source=source, kind=kind), \
-                    patch("web.server.mb_api") as mock_mb, \
+                    patch("web.routes.browse.mb_api") as mock_mb, \
                     patch("web.routes.browse.discogs_api") as mock_dg:
                 status, data = self._get(
                     f"/api/browse/resolve?source={source}&id={raw_id}&kind={kind}"
@@ -2029,7 +2011,7 @@ class TestSearchByIdResolveContract(_FakeDbWebServerCase):
     def test_resolver_transport_failure_does_not_leak_adapter_detail(self):
         raw_reason = "private mirror address and TLS failure"
         uncached_id = "22222222-2222-2222-2222-222222222222"
-        with patch("web.server.mb_api") as mock_mb:
+        with patch("web.routes.browse.mb_api") as mock_mb:
             mock_mb.get_release.side_effect = URLError(raw_reason)
             status, data = self._get(
                 f"/api/browse/resolve?source=mb&id={uncached_id}&kind=release"
@@ -2089,17 +2071,13 @@ class TestLibraryArtistContract(unittest.TestCase):
         """)
         conn.close()
 
-        # Patch the beets DB into server module
-        import web.server as srv
+        # Install the real Beets DB into the process runtime.
         from lib.beets_db import BeetsDB
         cls._beets = BeetsDB(cls._db_path)
-        cls._orig_beets = srv._beets
-        srv._beets = cls._beets
+        cls.enterClassContext(install_runtime(WebRuntime(shared_beets=cls._beets)))
 
     @classmethod
     def tearDownClass(cls):
-        import web.server as srv
-        srv._beets = cls._orig_beets
         import shutil
         shutil.rmtree(cls._tmpdir, ignore_errors=True)
 
@@ -2119,8 +2097,7 @@ class TestLibraryArtistContract(unittest.TestCase):
 
     def test_response_has_all_required_fields(self):
         """Every album dict must include all fields the frontend JS uses."""
-        import web.server as srv
-        albums = srv.get_library_artist("Mountain Goats", "dddd-eeee-ffff")
+        albums = runtime().get_library_artist("Mountain Goats", "dddd-eeee-ffff")
         self.assertEqual(len(albums), 2)
         for album in albums:
             missing = self.REQUIRED_FIELDS - set(album.keys())
@@ -2133,8 +2110,7 @@ class TestLibraryArtistContract(unittest.TestCase):
 
     def test_release_group_fields_populated(self):
         """mb_releasegroupid and release_group_title must have actual values."""
-        import web.server as srv
-        albums = srv.get_library_artist("Mountain Goats", "dddd-eeee-ffff")
+        albums = runtime().get_library_artist("Mountain Goats", "dddd-eeee-ffff")
         for album in albums:
             self.assertIsNotNone(album["mb_releasegroupid"])
             self.assertNotEqual(album["mb_releasegroupid"], "")
@@ -2142,16 +2118,14 @@ class TestLibraryArtistContract(unittest.TestCase):
 
     def test_releases_group_by_release_group_id(self):
         """Two pressings of same release group should share the same rgid."""
-        import web.server as srv
-        albums = srv.get_library_artist("Mountain Goats", "dddd-eeee-ffff")
+        albums = runtime().get_library_artist("Mountain Goats", "dddd-eeee-ffff")
         rg_ids = {a["mb_releasegroupid"] for a in albums}
         self.assertEqual(len(rg_ids), 1, "Both pressings should share one release group")
         self.assertEqual(rg_ids.pop(), "1111-2222-3333")
 
     def test_name_only_lookup(self):
         """Lookup by name only (no mbid) also returns all required fields."""
-        import web.server as srv
-        albums = srv.get_library_artist("Mountain Goats")
+        albums = runtime().get_library_artist("Mountain Goats")
         self.assertGreater(len(albums), 0)
         for album in albums:
             missing = self.REQUIRED_FIELDS - set(album.keys())

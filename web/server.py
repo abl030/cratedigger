@@ -35,7 +35,6 @@ import functools
 import json
 import logging
 import re
-import threading
 from collections.abc import Callable, Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -63,23 +62,19 @@ EXTERNAL_AUTH_NOTICE = (
 )
 
 # Ensure this module is importable as 'web.server' even when run as __main__,
-# so route modules can `from web import server` and get the same instance.
+# so `import web.server` elsewhere resolves to this same instance.
 if __name__ == "__main__" or "web.server" not in sys.modules:
     sys.modules["web.server"] = sys.modules[__name__]
 
-from lib.beets_db import BeetsDB, open_beets_db
 from lib.beets_startup import BeetsStartupError, enforce_beets_startup
 from lib.config import (
     resolve_startup_config_paths,
 )
-from lib.convergence_service import ConvergenceSignal
 from lib.json_narrow import is_str_object_dict as _is_str_object_dict
 from lib.pipeline_db import PipelineDB
-from lib.pipeline_db.rows import ArtistRequestRow
 from web import cache
 from web import discogs as _discogs
 from web import mb as mb_api
-from web import overlay as _overlay
 from web.index_document import render_index_document
 from web.request_security import (
     CHANNEL_HEADER,
@@ -114,6 +109,7 @@ from web.routes._registry import (
     build_post_routes,
     merge_registries,
 )
+from web.runtime import WebRuntime, install_runtime, runtime
 
 # Single merged registry (#496): each route module exports one
 # ``ROUTES: list[RouteRegistration]`` next to its handlers; this is the
@@ -139,62 +135,25 @@ ALL_ROUTES: list[RouteRegistration] = merge_registries(
     _retag_divergence_audit_routes,
 )
 
-_db_dsn = None
-canonical_origin: str | None = None
-insecure_mode = False
 
-# Globals set in main() / injected by the test harness and dev server.
-# With `_db_dsn` set (production), request threads NEVER touch these —
-# each threaded HTTP worker gets its own handles via
-# `_thread_state` below, because neither psycopg2 connections nor
-# sqlite3 handles are safe to share across threads. With `_db_dsn`
-# unset (tests, web_dev_server live-db mode), `db` is the injected
-# shared handle and the caller owns its thread-safety.
-db: PipelineDB | None = None
-# ``main()`` installs the admitted production library+directory pair here;
-# tests and the development server may inject the same pair before startup.
-beets_db_path: str | None = None
-beets_library_root: str = ""
-_beets: BeetsDB | None = None
-# The daily retag-divergence census (#1142) publishes its snapshot into
-# ``admitted_config.var_dir`` — this is that resolved file path, set
-# alongside beets_db_path in main(). Tests/dev inject it directly; unset
-# means "no runtime dir admitted" (never reached in production — routes
-# treat it exactly like a missing snapshot file).
-retag_census_snapshot_path: str | None = None
-# Daily library completeness snapshot. Set at startup from the same admitted
-# runtime directory as the writer; routes only read it.
-library_completeness_snapshot_path: str | None = None
-# Explicit test/dev dependency-injection seams for the pinned destructive
-# operation. Production leaves both unset and the service selects its real
-# subprocess/notifier implementations.
-beets_delete_fn = None
-delete_notify_fn = None
+def announce_insecure_mode(enabled: bool) -> None:
+    """Record the explicit insecure-authentication startup decision.
 
-# Per-thread DB handles. Threads are mostly long-lived: the Handler
-# speaks HTTP/1.1 keep-alive, so a browser's persistent connections
-# each pin one worker thread (and its handles) across many requests.
-# One-shot clients (curl, the importer's notify hooks) cost one
-# connect/teardown each — fine at single-operator scale.
-_thread_state = threading.local()
-
-
-def configure_insecure_mode(enabled: bool) -> None:
-    """Select insecure presentation and log the explicit startup decision."""
-    global insecure_mode
-
-    insecure_mode = enabled
+    Holds no state — the flag itself is ``WebRuntime.insecure_mode``,
+    read at render time. This is the startup record and nothing else,
+    the same shape :func:`announce_external_auth_mode` has always had.
+    """
     if enabled:
         log.critical(INSECURE_AUTH_WARNING)
 
 
-def configure_external_auth_mode(enabled: bool) -> None:
+def announce_external_auth_mode(enabled: bool) -> None:
     """Record that an external component owns browser authorization.
 
-    Deliberately holds no module state. External mode changes nothing this
-    process does — authentication is present, it just lives in front of the
-    gateway — so the startup record IS the whole behaviour, and a mode flag
-    nothing reads would be dead weight.
+    External mode changes nothing this process does — authentication is
+    present, it just lives in front of the gateway — so the startup
+    record IS the whole behaviour, and a mode flag nothing reads would
+    be dead weight.
     """
     if enabled:
         log.info(EXTERNAL_AUTH_NOTICE)
@@ -271,177 +230,6 @@ def _take_systemd_unix_listener(
     return listener
 
 
-def _try_reconnect_db():
-    """Drop the current thread's pipeline-DB handle so the next
-    `_db()` call opens a fresh connection.
-
-    Only request-handler threads call this (from the do_GET/do_POST
-    catch-alls), so the thread-local is the right scope; other
-    threads' healthy connections are left alone. PipelineDB also
-    self-heals via `_ensure_conn`, so this is belt-and-braces for
-    errors that escape it."""
-    if not _db_dsn:
-        return
-    handle = getattr(_thread_state, "db", None)
-    if handle is not None:
-        try:
-            handle.conn.close()
-        except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
-            pass
-        _thread_state.db = None
-        log.info("Dropped this thread's pipeline DB handle; next request reconnects")
-
-
-def _db() -> PipelineDB:
-    """Return this thread's pipeline DB, opening it on first use."""
-    if not _db_dsn:
-        # Injected shared handle (test harness / dev server).
-        if db is None:
-            raise RuntimeError("Pipeline DB not connected")
-        return db
-    handle = getattr(_thread_state, "db", None)
-    if handle is None:
-        handle = PipelineDB(_db_dsn)
-        _thread_state.db = handle
-    return handle
-
-
-def _new_db() -> PipelineDB:
-    """Open a fresh pipeline-DB connection for a background thread.
-
-    Background work that outlives a request (the bulk-triage sweep)
-    must not borrow a request thread's handle. Falls back to the shared
-    handle when no DSN is configured (test harness — the handler mock
-    stands in for both).
-    """
-    if _db_dsn:
-        return PipelineDB(_db_dsn)
-    return _db()
-
-
-def _beets_db() -> BeetsDB | None:
-    """Return this thread's BeetsDB, or None if not configured.
-
-    sqlite3 connections are bound to their opening thread
-    (`check_same_thread`), so each worker opens its own read-only
-    handle on first use. An injected `_beets` (tests) wins."""
-    if _beets is not None:
-        return _beets
-    # Startup installs the exact admitted pair. An absent pair is deliberate
-    # dependency injection (tests/dev) and must never trigger a second runtime
-    # config read after the one startup admission.
-    if beets_db_path is None:
-        return None
-    handle = getattr(_thread_state, "beets", None)
-    if handle is None:
-        try:
-            handle = open_beets_db(
-                db_path=beets_db_path,
-                library_root=beets_library_root,
-            )
-        except FileNotFoundError:
-            return None
-        _thread_state.beets = handle
-    return handle
-
-
-def _close_thread_handles() -> None:
-    """Close and drop this thread's DB handles.
-
-    Called from ``Handler.finish()`` — under either threaded HTTP server
-    one thread serves one connection, so connection-close IS
-    thread-death and this releases the psycopg2/sqlite handles
-    deterministically instead of waiting on GC (#435). Injected shared
-    handles (``db``/``_beets`` — tests, dev server) are never touched."""
-    handle = getattr(_thread_state, "db", None)
-    if handle is not None:
-        try:
-            handle.close()
-        except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
-            pass
-        _thread_state.db = None
-    beets_handle = getattr(_thread_state, "beets", None)
-    if beets_handle is not None:
-        try:
-            beets_handle.close()
-        except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
-            pass
-        _thread_state.beets = None
-
-
-# ── Overlay wiring ───────────────────────────────────────────────────
-#
-# The overlay/domain logic lives in web/overlay.py with explicit DB
-# parameters (#432). This module is the composition root: it binds the
-# per-thread handles and re-exports the bound names that route modules
-# (and test patch targets) consume via ``srv.X``.
-
-
-def _db_available() -> bool:
-    """True when `_db()` can return a handle — a DSN for per-thread
-    connections, or an injected shared handle (tests / dev server)."""
-    return bool(_db_dsn) or db is not None
-
-
-# Same nominal type, but this adapter is owned by the server composition root.
-def _db_or_none() -> PipelineDB | None:
-    """This thread's pipeline DB, or None when no DB is configured."""
-    return _db() if _db_available() else None
-
-
-# Pure helpers — re-bound so routes / tests keep their existing names.
-_serialize_row = _overlay.serialize_row
-compute_library_rank = _overlay.compute_library_rank
-
-
-def check_beets_library(mbids: list[str] | list[object]) -> set[str]:
-    return _overlay.check_beets_library(_beets_db(), mbids)
-
-
-def check_beets_library_detail(mbids: list[str] | list[object]) -> dict[str, dict[str, object]]:
-    return _overlay.check_beets_library_detail(_beets_db(), mbids)
-
-
-def get_library_artist(
-    artist_name: str,
-    mb_artist_id: str = "",
-) -> list[dict[str, object]]:
-    return _overlay.get_library_artist(_beets_db(), artist_name, mb_artist_id)
-
-
-def get_library_releases(
-    release_ids: list[str],
-) -> list[dict[str, object]]:
-    return _overlay.get_library_releases(_beets_db(), release_ids)
-
-
-def check_pipeline(
-    mbids: list[str] | list[object],
-) -> dict[str, dict[str, object]]:
-    return _overlay.check_pipeline(_db_or_none(), mbids)
-
-
-def get_convergence_signals(
-    request_ids: list[int],
-) -> dict[int, ConvergenceSignal]:
-    """Batch the observational signal for browse release overlays."""
-    db_handle = _db_or_none()
-    if db_handle is None or not request_ids:
-        return {}
-    return db_handle.get_convergence_signals(request_ids)
-
-
-def list_artist_requests(
-    artist_name: str,
-    mb_artist_id: str = "",
-) -> list[ArtistRequestRow]:
-    """One artist's request rows, for the rg-row badge overlay (#575)."""
-    db = _db_or_none()
-    if db is None or not artist_name:
-        return []
-    return db.list_requests_by_artist(artist_name, mb_artist_id)
-
-
 class Handler(BaseHTTPRequestHandler):
 
     # HTTP/1.1 keep-alive: a browser's persistent connections each pin
@@ -472,6 +260,27 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         log.info(format % args)
 
+    def setup(self) -> None:
+        """Bind this connection to the runtime it is served under.
+
+        Resolved once per connection rather than per call, for two
+        reasons. It keeps teardown total — ``finish()`` must never raise,
+        and a connection accepted with nothing installed (only reachable
+        in the shutdown window, since ``main()`` constructs the listener
+        *inside* its install block) would otherwise turn every teardown
+        into a logged server error. And it keeps ownership straight: the
+        handles ``drop_thread_db`` and ``close_thread_handles`` release
+        are the ones *this* connection's runtime opened, not whichever
+        runtime happens to be installed by the time it ends. Route
+        handlers deliberately still call ``runtime()`` themselves, so a
+        test that nests an install around a request sees the nested one.
+        """
+        super().setup()
+        try:
+            self._runtime: WebRuntime | None = runtime()
+        except RuntimeError:
+            self._runtime = None
+
     def parse_request(self) -> bool:
         """Apply the channel/origin boundary before method dispatch."""
         if not super().parse_request():
@@ -482,8 +291,12 @@ class Handler(BaseHTTPRequestHandler):
         )
         self._security_request_target = raw_request_target
         if is_exact_liveness_request(self.command, raw_request_target):
+            # Decided before the runtime is consulted, and teardown is
+            # total (see setup()), so liveness answers end to end with
+            # nothing configured at all.
             return True
-        if canonical_origin is None:
+        origin = self._runtime.canonical_origin if self._runtime else None
+        if origin is None:
             self.close_connection = True
             self._error("Request rejected", 403)
             return False
@@ -493,7 +306,7 @@ class Handler(BaseHTTPRequestHandler):
                 channel_values=self.headers.get_all(CHANNEL_HEADER, []),
                 origin_values=self.headers.get_all("Origin", []),
                 referer_values=self.headers.get_all("Referer", []),
-                canonical_origin=canonical_origin,
+                canonical_origin=origin,
             )
         except RequestSecurityError:
             # A rejected request may carry an unread body. Closing guarantees
@@ -513,7 +326,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _html(self, path: str) -> None:
         if path == "index.html":
-            body = _rendered_index_document(insecure_mode)
+            body = _rendered_index_document(runtime().insecure_mode)
         else:
             html_path = os.path.join(os.path.dirname(__file__), path)
             with open(html_path, "rb") as f:
@@ -652,7 +465,7 @@ class Handler(BaseHTTPRequestHandler):
             self._error("Not found", 404)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
             # Issue #233: client closed mid-response. The original wedge cause
-            # was the broad `except Exception` below firing _try_reconnect_db
+            # was the broad `except Exception` below firing the reconnect
             # on every disconnect, which compounded into a reconnect storm
             # under sustained client-disconnect traffic. Catch the disconnect
             # classes here first — single warning line, no DB churn, no second
@@ -666,7 +479,8 @@ class Handler(BaseHTTPRequestHandler):
             self._error(str(e), 503)
         except Exception:
             log.exception("GET %s failed", path)
-            _try_reconnect_db()
+            if self._runtime is not None:
+                self._runtime.drop_thread_db()
             # The handler may have already sent headers or a partial body;
             # under HTTP/1.1 keep-alive a follow-up response on the same
             # socket would desync the stream, so always close after.
@@ -730,7 +544,8 @@ class Handler(BaseHTTPRequestHandler):
             self._error(str(e), 503)
         except Exception:
             log.exception("POST %s failed", path)
-            _try_reconnect_db()
+            if self._runtime is not None:
+                self._runtime.drop_thread_db()
             # See do_GET: never reuse the socket after an error response.
             self.close_connection = True
             self._error("Internal server error", 500)
@@ -743,7 +558,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             super().finish()
         finally:
-            _close_thread_handles()
+            if self._runtime is not None:
+                self._runtime.close_thread_handles()
 
     def do_HEAD(self) -> None:
         request_target = getattr(
@@ -768,9 +584,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
-    global beets_db_path, beets_library_root, canonical_origin
-    global retag_census_snapshot_path, library_completeness_snapshot_path
-
     parser = argparse.ArgumentParser(description="Cratedigger Web UI")
     parser.add_argument(
         "--dev-port",
@@ -873,26 +686,33 @@ def main() -> int:
     from beets import config as active_beets_config
     active_beets_config.clear()
     active_beets_config.read(user=True, defaults=True)
-    canonical_origin = args.canonical_origin
     if args.insecure_mode and args.external_auth_mode:
         parser.error(
             "--insecure-mode and --external-auth-mode are mutually exclusive"
         )
-    configure_insecure_mode(args.insecure_mode)
-    configure_external_auth_mode(args.external_auth_mode)
-    beets_db_path = admitted_config.beets_library_db
-    beets_library_root = admitted_config.beets_directory
-    from lib.retag_divergence_census_snapshot import (
-        retag_divergence_census_snapshot_path,
-    )
-    retag_census_snapshot_path = retag_divergence_census_snapshot_path(
-        admitted_config.var_dir,
-    )
+    announce_insecure_mode(args.insecure_mode)
+    announce_external_auth_mode(args.external_auth_mode)
     from lib.library_completeness_snapshot import (
         library_completeness_snapshot_path as completeness_snapshot_path,
     )
-    library_completeness_snapshot_path = completeness_snapshot_path(
-        admitted_config.var_dir,
+    from lib.retag_divergence_census_snapshot import (
+        retag_divergence_census_snapshot_path,
+    )
+    # Everything this process's routes read, in one value, built once
+    # from the admitted config. Nothing before this point may read it;
+    # nothing after may rebind it.
+    web_runtime = WebRuntime(
+        canonical_origin=args.canonical_origin,
+        insecure_mode=args.insecure_mode,
+        db_dsn=args.dsn,
+        beets_db_path=admitted_config.beets_library_db,
+        beets_library_root=admitted_config.beets_directory,
+        retag_census_snapshot_path=retag_divergence_census_snapshot_path(
+            admitted_config.var_dir,
+        ),
+        library_completeness_snapshot_path=completeness_snapshot_path(
+            admitted_config.var_dir,
+        ),
     )
     inherited_listener: socket.socket | None = None
     if args.dev_port is None:
@@ -936,38 +756,45 @@ def main() -> int:
     from lib.mb_canonical import configure_canonical_release_lookup
     configure_canonical_release_lookup(admitted_config)
 
-    global _db_dsn
-    _db_dsn = args.dsn
     # Fail fast at boot if the DB is unreachable; request threads open
-    # their own handles via `_db()`, so this one is connect-check only.
+    # their own handles via ``WebRuntime.db``, so this is connect-check only.
     PipelineDB(args.dsn).close()
+    beets_db_path = admitted_config.beets_library_db
     if not os.path.exists(beets_db_path):
         log.warning("Beets DB not found at %s; library routes degrade", beets_db_path)
 
-    if inherited_listener is None:
-        dev_port = args.dev_port
-        if not isinstance(dev_port, int):
-            raise RuntimeError("development listener port was not selected")
-        log.critical(
-            "INSECURE DEVELOPMENT TCP listener enabled on 127.0.0.1:%s",
-            dev_port,
-        )
-        server = ThreadingHTTPServer(("127.0.0.1", dev_port), Handler)
-        listener_display = f"http://127.0.0.1:{dev_port}"
-    else:
-        server = ThreadingUnixHTTPServer(inherited_listener, Handler)
-        listener_display = f"unix:{inherited_listener.getsockname()}"
-    print(f"Cratedigger Web UI listening on {listener_display}")
-    print(f"  Pipeline DB: {args.dsn}")
-    print(f"  Beets DB: {beets_db_path}")
-    print(f"  MB API: {mb_api.MB_API_BASE}")
-    print(f"  Redis: {args.redis_host or 'disabled'}")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    server.server_close()
-    _db().close()
+    # Installed before the listener starts: ``Handler.parse_request``
+    # reads ``canonical_origin`` on the first byte of the first request.
+    with install_runtime(web_runtime):
+        if inherited_listener is None:
+            dev_port = args.dev_port
+            if not isinstance(dev_port, int):
+                raise RuntimeError("development listener port was not selected")
+            log.critical(
+                "INSECURE DEVELOPMENT TCP listener enabled on 127.0.0.1:%s",
+                dev_port,
+            )
+            server = ThreadingHTTPServer(("127.0.0.1", dev_port), Handler)
+            listener_display = f"http://127.0.0.1:{dev_port}"
+        else:
+            server = ThreadingUnixHTTPServer(inherited_listener, Handler)
+            listener_display = f"unix:{inherited_listener.getsockname()}"
+        print(f"Cratedigger Web UI listening on {listener_display}")
+        print(f"  Pipeline DB: {args.dsn}")
+        print(f"  Beets DB: {beets_db_path}")
+        print(f"  MB API: {mb_api.MB_API_BASE}")
+        print(f"  Redis: {args.redis_host or 'disabled'}")
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        server.server_close()
+        # Release whatever handles this (main) thread happens to hold.
+        # The old ``_db().close()`` here opened a brand-new connection
+        # purely to close it under a DSN, and closed the *caller's*
+        # injected handle without one — the opposite of the documented
+        # "injected handles are never touched" contract.
+        web_runtime.close_thread_handles()
     return 0
 
 

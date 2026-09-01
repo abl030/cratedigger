@@ -4,7 +4,7 @@ row pre-banded by on-disk quality (``Missing`` / a ``QualityRank`` band /
 
 This is the read backend for the Long-Tail Triage Console (U1). It is the
 first UI consumer of the existing beets-library banding machinery —
-``web.server.compute_library_rank`` via the beets-only banding core
+``web.overlay.compute_library_rank`` via the beets-only banding core
 factored out of ``web.routes._overlay`` — applied to the strict exact
 identity derived from each ``album_requests`` row's MusicBrainz and
 Discogs release fields.

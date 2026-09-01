@@ -399,12 +399,10 @@ class TestBeetsStartupAdapter(unittest.TestCase):
         )
         prior_runtime = os.environ.get("CRATEDIGGER_RUNTIME_CONFIG")
         prior_beetsdir = os.environ.get("BEETSDIR")
+        # See _exercise_real_rejection_and_restart: the web globals this
+        # used to save are now one installed WebRuntime, and a startup
+        # that fails installs none (#1313).
         prior_web_globals = (
-            server.beets_db_path,
-            server.beets_library_root,
-            server.canonical_origin,
-            server.insecure_mode,
-            server._db_dsn,
             server.mb_api.MB_API_BASE,
             server._discogs.DISCOGS_API_BASE,
         )
@@ -425,11 +423,6 @@ class TestBeetsStartupAdapter(unittest.TestCase):
             active_beets_config.clear()
             active_beets_config.read(user=True, defaults=True)
             (
-                server.beets_db_path,
-                server.beets_library_root,
-                server.canonical_origin,
-                server.insecure_mode,
-                server._db_dsn,
                 server.mb_api.MB_API_BASE,
                 server._discogs.DISCOGS_API_BASE,
             ) = prior_web_globals

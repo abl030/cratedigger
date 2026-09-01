@@ -8,9 +8,10 @@ the four load-bearing properties:
    blocking that made one wedged route a 9-hour outage in #233).
 2. Keep-alive works: one client connection serves multiple requests,
    and bodyless responses (OPTIONS) declare ``Content-Length: 0``.
-3. ``_db()`` hands each thread its own ``PipelineDB`` when a DSN is
-   configured, while the injected-handle path (this very harness)
-   keeps returning the shared object.
+3. Production wiring (a DSN, no injected handle) still overlays
+   pipeline status — the #427 P1. The per-thread handle-resolution
+   contract itself lives in ``tests/web/test_runtime.py`` now that it is
+   ``WebRuntime``'s (#1313).
 4. A client abort after becoming a metadata-flight leader cannot cancel
    the fill; the next HTTP request reads the completed cache entry.
 """
@@ -31,8 +32,10 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 import conftest  # noqa: F401 — sets TEST_DB_DSN for the per-thread test
 
 from tests.fakes import FakePipelineDB
+from tests.helpers import make_web_runtime
 from tests.web._harness import _WebServerCase
 from web.request_security import BROWSER_CHANNEL, CHANNEL_HEADER
+from web.runtime import WebRuntime, install_runtime, runtime
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
 
@@ -86,12 +89,10 @@ class TestInheritedUnixListener(unittest.TestCase):
 
         world = BeetsContractWorld(role="web")
         self.addCleanup(world.close)
-        prior_web_authority = (
-            srv.beets_db_path,
-            srv.beets_library_root,
-            srv.canonical_origin,
-            srv.insecure_mode,
-        )
+        # No save/restore of process state: `main()` builds one
+        # `WebRuntime` and installs it only for the duration of the serve
+        # block, so a startup that fails before that point leaves nothing
+        # behind for the next test to inherit.
         try:
             with (
                 _isolated_installed_authority(),
@@ -114,12 +115,6 @@ class TestInheritedUnixListener(unittest.TestCase):
         finally:
             active_beets_config.clear()
             active_beets_config.read(user=True, defaults=True)
-            (
-                srv.beets_db_path,
-                srv.beets_library_root,
-                srv.canonical_origin,
-                srv.insecure_mode,
-            ) = prior_web_authority
         self.assertEqual(exited.exception.code, 2)
 
     def test_hard_invalid_dev_startup_never_constructs_a_server(self) -> None:
@@ -243,12 +238,10 @@ class TestThreadingUnixHTTPServer(unittest.TestCase):
         from web import server as srv
 
         self._srv = srv
-        self._saved_db = srv.db
-        self._saved_dsn = srv._db_dsn
-        self._saved_origin = srv.canonical_origin
-        srv.db = FakePipelineDB()
-        srv._db_dsn = None
-        srv.canonical_origin = "https://music.ablz.au"
+        self.enterContext(install_runtime(make_web_runtime(
+            WebRuntime(canonical_origin="https://music.ablz.au"),
+            db=FakePipelineDB(),
+        )))
 
         self._temp_dir = tempfile.TemporaryDirectory()
         self.socket_path = os.path.join(self._temp_dir.name, "web.sock")
@@ -266,9 +259,6 @@ class TestThreadingUnixHTTPServer(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
-        self._srv.db = self._saved_db
-        self._srv._db_dsn = self._saved_dsn
-        self._srv.canonical_origin = self._saved_origin
         self._temp_dir.cleanup()
 
     def _connection(self) -> _UnixHTTPConnection:
@@ -413,10 +403,10 @@ class TestConcurrentRequests(_WebServerCase):
             return []
 
         try:
-            with patch("web.server.mb_api") as mock_mb, patch(
+            with patch("web.routes.browse.mb_api") as mock_mb, patch(
                 "web.routes.browse.discogs_api",
-            ) as mock_discogs, patch(
-                "web.server.get_library_artist", return_value=[],
+            ) as mock_discogs, patch.object(
+                WebRuntime, "get_library_artist", return_value=[],
             ):
                 mock_mb.get_artist_release_groups.side_effect = mb_releases
                 mock_mb.get_artist_name.return_value = "Test Artist"
@@ -489,10 +479,10 @@ class TestConcurrentRequests(_WebServerCase):
 
         cache._redis = SignallingRedis()
         try:
-            with patch("web.server.mb_api") as mock_mb, patch(
+            with patch("web.routes.browse.mb_api") as mock_mb, patch(
                 "web.routes.browse.discogs_api",
-            ) as mock_discogs, patch(
-                "web.server.get_library_artist", return_value=[],
+            ) as mock_discogs, patch.object(
+                WebRuntime, "get_library_artist", return_value=[],
             ), patch.object(
                 srv.log, "warning", side_effect=record_warning,
             ):
@@ -595,23 +585,15 @@ class TestProductionWiringOverlays(unittest.TestCase):
     injected-handle test harness kept passing."""
 
     def setUp(self):
-        from web import server as srv
-        self._srv = srv
-        self._saved_dsn = srv._db_dsn
-        self._saved_db = srv.db
-        srv._db_dsn = TEST_DSN
-        srv.db = None
+        self._runtime = self.enterContext(
+            install_runtime(WebRuntime(db_dsn=TEST_DSN)),
+        )
         from tests.test_pipeline_db import make_db
         self._pg = make_db()  # truncates tables for an isolated slate
 
     def tearDown(self):
         self._pg.close()
-        handle = getattr(self._srv._thread_state, "db", None)
-        if handle is not None:
-            handle.close()
-            self._srv._thread_state.db = None
-        self._srv._db_dsn = self._saved_dsn
-        self._srv.db = self._saved_db
+        self._runtime.close_thread_handles()
 
     def test_check_pipeline_finds_rows_without_db_global(self):
         rid = self._pg.add_request(
@@ -619,155 +601,23 @@ class TestProductionWiringOverlays(unittest.TestCase):
             source="request",
             mb_release_id="prod-wiring-mbid", status="wanted",
         )
-        info = self._srv.check_pipeline(["prod-wiring-mbid"])
+        info = self._runtime.check_pipeline(["prod-wiring-mbid"])
         self.assertIn("prod-wiring-mbid", info)
         self.assertEqual(info["prod-wiring-mbid"]["id"], rid)
         self.assertEqual(info["prod-wiring-mbid"]["status"], "wanted")
 
 
 
-class TestPerThreadDbHandles(unittest.TestCase):
-    """``_db()`` is thread-local with a DSN, shared when injected."""
+class TestProductionBootWiring(unittest.TestCase):
+    """``main()`` builds and installs the runtime before it serves.
 
-    def setUp(self):
-        from web import server as srv
-        self._srv = srv
-        self._saved_dsn = srv._db_dsn
-        self._saved_db = srv.db
-
-    def tearDown(self):
-        self._srv._db_dsn = self._saved_dsn
-        self._srv.db = self._saved_db
-
-    def test_each_thread_gets_its_own_connection(self):
-        srv = self._srv
-        srv._db_dsn = TEST_DSN
-        srv.db = None
-
-        handles: dict[str, object] = {}
-
-        def grab(label: str):
-            handle = srv._db()
-            # Same thread, same handle (cached in the thread-local).
-            assert srv._db() is handle
-            handles[label] = handle
-            handle.close()
-
-        t1 = threading.Thread(target=grab, args=("t1",))
-        t2 = threading.Thread(target=grab, args=("t2",))
-        t1.start(); t2.start()
-        t1.join(timeout=10); t2.join(timeout=10)
-
-        self.assertIn("t1", handles)
-        self.assertIn("t2", handles)
-        self.assertIsNot(handles["t1"], handles["t2"])
-
-    def test_reconnect_drops_only_this_threads_handle(self):
-        srv = self._srv
-        srv._db_dsn = TEST_DSN
-        srv.db = None
-
-        first = srv._db()
-        srv._try_reconnect_db()
-        second = srv._db()
-        try:
-            self.assertIsNot(first, second)
-        finally:
-            second.close()
-            # Drop the thread-local so later tests in this thread don't
-            # inherit a closed handle.
-            srv._thread_state.db = None
-
-    def test_finish_closes_this_threads_handles_deterministically(self):
-        """#435: connection teardown closes the thread-local psycopg2
-        handle instead of leaving it to GC. Injected shared handles are
-        out of scope (the dev server / harness own those)."""
-        srv = self._srv
-        srv._db_dsn = TEST_DSN
-        srv.db = None
-
-        handle = srv._db()
-        self.assertFalse(handle.conn.closed)
-        srv._close_thread_handles()
-        self.assertTrue(handle.conn.closed)
-        self.assertIsNone(getattr(srv._thread_state, "db", None))
-
-    def test_close_thread_handles_leaves_injected_handle_alone(self):
-        srv = self._srv
-        srv._db_dsn = None
-        sentinel = object()
-        srv.db = sentinel
-        srv._close_thread_handles()
-        self.assertIs(srv.db, sentinel)
-
-    def test_injected_handle_is_shared_across_threads(self):
-        srv = self._srv
-        srv._db_dsn = None
-        sentinel = object()
-        srv.db = sentinel
-
-        seen: list[object] = []
-
-        def grab():
-            seen.append(srv._db())
-
-        t = threading.Thread(target=grab)
-        t.start(); t.join(timeout=10)
-        self.assertEqual(seen, [sentinel])
-        self.assertIs(srv._db(), sentinel)
-
-
-class TestPerThreadBeetsHandles(unittest.TestCase):
-    """Production Beets handles carry the configured library root."""
-
-    def setUp(self):
-        from web import server as srv
-        self._srv = srv
-        self._saved_path = srv.beets_db_path
-        self._saved_root = srv.beets_library_root
-        self._saved_injected = srv._beets
-        self._saved_dsn = srv._db_dsn
-        self._saved_mb_api_base = srv.mb_api.MB_API_BASE
-        self._saved_discogs_api_base = srv._discogs.DISCOGS_API_BASE
-
-    def tearDown(self):
-        self._srv._close_thread_handles()
-        self._srv.beets_db_path = self._saved_path
-        self._srv.beets_library_root = self._saved_root
-        self._srv._beets = self._saved_injected
-        self._srv._db_dsn = self._saved_dsn
-        self._srv.mb_api.MB_API_BASE = self._saved_mb_api_base
-        self._srv._discogs.DISCOGS_API_BASE = self._saved_discogs_api_base
-
-    def test_constructor_receives_library_root(self):
-        srv = self._srv
-        with tempfile.NamedTemporaryFile() as db_file:
-            srv.beets_db_path = db_file.name
-            srv.beets_library_root = "/mnt/virtio/Music/Beets"
-            srv._beets = None
-
-            handle = srv._beets_db()
-
-            self.assertIsNotNone(handle)
-            assert handle is not None
-            self.assertEqual(
-                handle._library_root,
-                "/mnt/virtio/Music/Beets",
-            )
-
-    def test_production_uses_runtime_library_and_root_pair(self):
-        srv = self._srv
-        with tempfile.NamedTemporaryFile() as db_file:
-            srv.beets_db_path = db_file.name
-            srv.beets_library_root = "/runtime/Music/Beets"
-            srv._beets = None
-            srv._db_dsn = "postgresql://runtime-production"
-            handle = srv._beets_db()
-
-            self.assertIsNotNone(handle)
-            assert handle is not None
-            self.assertEqual(handle.library_db_path, db_file.name)
-            self.assertEqual(handle.library_root, "/runtime/Music/Beets")
+    The per-thread handle-resolution contract this file used to pin
+    against ``srv._db()`` / ``srv._beets_db()`` moved wholesale to
+    ``tests/web/test_runtime.py`` when those functions became
+    :class:`WebRuntime` methods (#1313); every assertion there is the
+    same one, against the method that replaced the function. What stays
+    here is the startup wiring, which is a server concern.
+    """
 
     def test_main_executes_runtime_root_wiring(self):
         """Production boot must load the root before opening the server."""
@@ -783,16 +633,25 @@ class TestPerThreadBeetsHandles(unittest.TestCase):
         class BootStop(Exception):
             pass
 
-        srv = self._srv
+        import web.server as srv
+
         world = BeetsContractWorld(role="web")
         self.addCleanup(world.close)
         events: list[str] = []
+        observed: list[WebRuntime] = []
         case = _RestartCase("web", srv.main)
 
         def observe_server(
             *_args: object,
             **_kwargs: object,
         ) -> None:
+            # Read the runtime from inside the server construction: it is
+            # installed for the duration of the serve block and restored
+            # on the way out, so this is the only moment `main()`'s own
+            # runtime is observable — and observing it here is what
+            # proves it was installed BEFORE the listener existed, which
+            # `Handler.parse_request` depends on.
+            observed.append(runtime())
             events.append("server")
             raise BootStop
 
@@ -828,8 +687,11 @@ class TestPerThreadBeetsHandles(unittest.TestCase):
             active_beets_config.clear()
             active_beets_config.read(user=True, defaults=True)
 
-        self.assertEqual(srv.beets_db_path, str(world.library_db))
-        self.assertEqual(srv.beets_library_root, str(world.library_root))
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0].beets_db_path, str(world.library_db))
+        self.assertEqual(observed[0].beets_library_root, str(world.library_root))
+        self.assertEqual(observed[0].db_dsn, str(TEST_DSN))
+        self.assertEqual(observed[0].canonical_origin, "https://music.ablz.au")
         self.assertEqual(events, ["admitted", "server"])
         tcp_server.assert_called_once_with(("127.0.0.1", 0), srv.Handler)
 

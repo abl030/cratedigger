@@ -20,9 +20,9 @@ from lib.artist_catalogue import (
     ArtistCompareSkeleton,
 )
 
-# VA constants are imported directly so that test patches of `discogs_api`
-# (web.routes.browse.discogs_api) and `mb_api` (web.server.mb_api) don't
-# replace the constants with auto-generated Mock attributes.
+# VA constants are imported directly so that test patches of the two
+# mirror modules (web.routes.browse.discogs_api, web.routes.browse.mb_api)
+# don't replace the constants with auto-generated Mock attributes.
 from lib.artist_compare import annotate_in_library, merge_discographies
 from lib.banding import current_library_bitrate
 from lib.json_narrow import is_object_list, is_str_object_dict
@@ -33,10 +33,12 @@ from lib.release_identity import (
 )
 from web import cache as _cache
 from web import discogs as discogs_api
+from web import mb as mb_api
 from web.discogs import VA_ARTIST_ID as _DISCOGS_VA_ARTIST_ID
 from web.library_album_row import AmbiguousLibraryRequestAttachmentError
 from web.library_artist_service import list_library_artist_rows
 from web.mb import VA_ARTIST_MBID as _MB_VA_ARTIST_MBID
+from web.overlay import compute_library_rank
 from web.routes._overlay import overlay_release_rows_in_place
 from web.routes._registry import (
     RouteHandler,
@@ -44,7 +46,7 @@ from web.routes._registry import (
     pattern_route,
     route,
 )
-from web.routes._server_access import _server
+from web.runtime import runtime
 
 
 def _parallel_results[Key, Result](
@@ -73,22 +75,21 @@ def _parallel_results[Key, Result](
 
 
 def get_search(h: RouteHandler, params: dict[str, list[str]]) -> None:
-    srv = _server()
     q = params.get("q", [""])[0].strip()
     if not q:
         h._error("Missing query parameter 'q'")
         return
     search_type = params.get("type", ["artist"])[0]
     if search_type == "release":
-        results = srv.mb_api.search_release_groups(q)
+        results = mb_api.search_release_groups(q)
         h._json({"release_groups": results})
     else:
-        artists = srv.mb_api.search_artists(q)
+        artists = mb_api.search_artists(q)
         h._json({"artists": artists})
 
 
 def get_library_artist(h: RouteHandler, params: dict[str, list[str]]) -> None:
-    srv = _server()
+    rt = runtime()
     name = params.get("name", [""])[0].strip()
     mbid = params.get("mbid", [""])[0].strip()
     if not name:
@@ -97,11 +98,11 @@ def get_library_artist(h: RouteHandler, params: dict[str, list[str]]) -> None:
 
     try:
         albums = list_library_artist_rows(
-            library_lookup=srv,
-            pipeline_db=srv._db(),
+            library_lookup=rt,
+            pipeline_db=rt.db(),
             artist_name=name,
             mb_artist_id=mbid,
-            rank_fn=srv.compute_library_rank,
+            rank_fn=compute_library_rank,
         )
     except AmbiguousLibraryRequestAttachmentError as exc:
         h._json({
@@ -183,7 +184,7 @@ def _artist_pipeline_map(name: str, mb_artist_id: str = "") -> ArtistPipelineMap
     key lets a work row receive its exact master overlay without allowing a
     numerically equal leaf release to badge it.
     """
-    srv = _server()
+    rt = runtime()
     by_identity: ArtistPipelineMap = {}
 
     def keep_best(key: ArtistPipelineKey, hit: _PipelineHit) -> None:
@@ -191,7 +192,7 @@ def _artist_pipeline_map(name: str, mb_artist_id: str = "") -> ArtistPipelineMap
         if current is None or hit["_prio"] < current["_prio"]:
             by_identity[key] = hit
 
-    for row in srv.list_artist_requests(name, mb_artist_id):
+    for row in rt.list_artist_requests(name, mb_artist_id):
         status = str(row["status"])
         prio = _PIPELINE_BADGE_PRIORITY.get(status, 9)
         owner = dict(row).get("processing_owner")
@@ -247,12 +248,11 @@ def _apply_rg_pipeline_overlay(
 
 
 def get_artist(h: RouteHandler, params: dict[str, list[str]], artist_id: str) -> None:
-    srv = _server()
     try:
-        rgs = srv.mb_api.get_artist_release_groups(artist_id)
+        rgs = mb_api.get_artist_release_groups(artist_id)
         name = params.get("name", [""])[0].strip()
         if not name:
-            name = srv.mb_api.get_artist_name(artist_id).strip()
+            name = mb_api.get_artist_name(artist_id).strip()
         if not name:
             raise ValueError("MusicBrainz artist response has no name")
     except urllib.error.HTTPError as exc:
@@ -288,8 +288,8 @@ def get_artist(h: RouteHandler, params: dict[str, list[str]], artist_id: str) ->
     # always annotate it. ``?name=`` avoids one MB lookup but never changes
     # whether overlays are projected.
     by_identity = _artist_pipeline_map(name, artist_id)
-    lib = srv.get_library_artist(name, artist_id)
-    annotate_in_library(rgs, [], lib, rank_fn=srv.compute_library_rank)
+    lib = runtime().get_library_artist(name, artist_id)
+    annotate_in_library(rgs, [], lib, rank_fn=compute_library_rank)
     _apply_rg_pipeline_overlay(rgs, by_identity)
     h._json({
         "release_groups": _catalogue_payload(rgs),
@@ -372,13 +372,12 @@ def _build_disambiguate_skeleton(artist_id: str) -> _DisambiguateSkeleton:
     request. The analysis is a pure function of pure-metadata inputs,
     so its output is semantically part of the metadata cache.
     """
-    srv = _server()
     from lib.artist_releases import (  # local to avoid heavy import at route-load
         analyse_artist_releases,
         filter_non_live,
     )
 
-    raw_releases = srv.mb_api.get_artist_releases_with_recordings(artist_id)
+    raw_releases = mb_api.get_artist_releases_with_recordings(artist_id)
     filtered = filter_non_live(raw_releases)
     rg_infos = analyse_artist_releases(filtered)
 
@@ -418,7 +417,7 @@ def _build_disambiguate_skeleton(artist_id: str) -> _DisambiguateSkeleton:
 
     return {
         "artist_id": artist_id,
-        "artist_name": srv.mb_api.get_artist_name(artist_id),
+        "artist_name": mb_api.get_artist_name(artist_id),
         "release_groups": rgs_skeleton,
     }
 
@@ -426,19 +425,19 @@ def _build_disambiguate_skeleton(artist_id: str) -> _DisambiguateSkeleton:
 def _overlay_disambiguate(skeleton: _DisambiguateSkeleton) -> _DisambiguateSkeleton:
     """Apply per-request pipeline / library overlay to the cached
     skeleton. Returns a new dict — does NOT mutate the cached value."""
-    srv = _server()
+    rt = runtime()
     response = copy.deepcopy(skeleton)
 
     all_mbids: list[str] = []
     for rg in response["release_groups"]:
         all_mbids.extend(rg["release_ids"])
     in_pipeline: dict[str, dict[str, object]] = (
-        srv.check_pipeline(all_mbids) if all_mbids else {}
+        rt.check_pipeline(all_mbids) if all_mbids else {}
     )
     in_library: set[str] = (
-        srv.check_beets_library(all_mbids) if all_mbids else set()
+        rt.check_beets_library(all_mbids) if all_mbids else set()
     )
-    b = srv._beets_db()
+    b = rt.beets_db()
 
     for rg in response["release_groups"]:
         rg["library_status"] = (
@@ -530,7 +529,7 @@ def _overlay_disambiguate(skeleton: _DisambiguateSkeleton) -> _DisambiguateSkele
                 p["library_format"] = fmt
                 p["library_min_bitrate"] = br
                 p["library_avg_bitrate"] = current_library_bitrate(pq)
-                p["library_rank"] = srv.compute_library_rank(
+                p["library_rank"] = compute_library_rank(
                     p["library_format"], p["library_avg_bitrate"])
 
         if rg_quality:
@@ -541,7 +540,7 @@ def _overlay_disambiguate(skeleton: _DisambiguateSkeleton) -> _DisambiguateSkele
             rg["library_format"] = fmt
             rg["library_min_bitrate"] = br
             rg["library_avg_bitrate"] = current_library_bitrate(rg_quality)
-            rg["library_rank"] = srv.compute_library_rank(
+            rg["library_rank"] = compute_library_rank(
                 rg["library_format"], rg["library_avg_bitrate"])
 
     return response
@@ -573,7 +572,6 @@ def _as_release_rows(value: object) -> TypeGuard[list[dict[str, object]]]:
 
 
 def get_release_group(h: RouteHandler, params: dict[str, list[str]], rg_id: str) -> None:
-    srv = _server()
     normalized_id = normalize_release_id(rg_id) or rg_id.strip()
     identity = ReleaseIdentity.from_id(normalized_id)
     if identity and identity.source == "discogs":
@@ -586,7 +584,7 @@ def get_release_group(h: RouteHandler, params: dict[str, list[str]], rg_id: str)
         get_discogs_master(h, params, identity.release_id)
         return
 
-    data = srv.mb_api.get_release_group_releases(normalized_id)
+    data = mb_api.get_release_group_releases(normalized_id)
     # Standard toolbar (Remove from beets) and badge renderer (in library
     # + codec-aware rank) read these overlay fields per row, so route
     # them through the shared helper.
@@ -597,18 +595,18 @@ def get_release_group(h: RouteHandler, params: dict[str, list[str]], rg_id: str)
 
 
 def get_release(h: RouteHandler, params: dict[str, list[str]], release_id: str) -> None:
-    srv = _server()
+    rt = runtime()
     normalized_id = normalize_release_id(release_id) or release_id.strip()
     identity = ReleaseIdentity.from_id(normalized_id)
     if identity and identity.source == "discogs":
         get_discogs_release(h, params, identity.release_id)
         return
 
-    data = srv.mb_api.get_release(normalized_id)
+    data = mb_api.get_release(normalized_id)
     overlay_release_rows_in_place([data], [normalized_id])
     # Include current Beets tracks after the shared overlay supplies presence,
     # album id, quality, lifecycle, history, and proof.
-    b = srv._beets_db()
+    b = rt.beets_db()
     if data["in_library"] and b:
         tracks = b.get_tracks_by_mb_release_id(normalized_id)
         if tracks is not None:
@@ -634,7 +632,7 @@ def get_discogs_search(h: RouteHandler, params: dict[str, list[str]]) -> None:
 
 
 def get_discogs_artist(h: RouteHandler, params: dict[str, list[str]], artist_id: str) -> None:
-    srv = _server()
+    rt = runtime()
     artist_name = discogs_api.get_artist_name(int(artist_id))
     catalogue = discogs_api.get_artist_releases(int(artist_id))
     # Row-level in-library badge: same pattern as MB. Frontend passes
@@ -642,8 +640,8 @@ def get_discogs_artist(h: RouteHandler, params: dict[str, list[str]], artist_id:
     name = params.get("name", [""])[0].strip() or artist_name
     if name:
         by_identity = _artist_pipeline_map(name)
-        lib = srv.get_library_artist(name, "")
-        annotate_in_library([], catalogue, lib, rank_fn=srv.compute_library_rank)
+        lib = rt.get_library_artist(name, "")
+        annotate_in_library([], catalogue, lib, rank_fn=compute_library_rank)
         _apply_rg_pipeline_overlay(catalogue, by_identity)
     works = [row for row in catalogue if row.identity_kind == "work"]
     ungrouped = [row for row in catalogue if row.identity_kind == "release"]
@@ -664,11 +662,11 @@ def get_discogs_master(h: RouteHandler, params: dict[str, list[str]], master_id:
 
 
 def get_discogs_release(h: RouteHandler, params: dict[str, list[str]], release_id: str) -> None:
-    srv = _server()
+    rt = runtime()
     normalized_id = normalize_release_id(release_id) or release_id.strip()
     data = discogs_api.get_release(int(normalized_id))
     overlay_release_rows_in_place([data], [normalized_id])
-    b = srv._beets_db()
+    b = rt.beets_db()
     if data["in_library"] and b:
         tracks = b.get_tracks_by_mb_release_id(normalized_id)
         if tracks is not None:
@@ -683,9 +681,8 @@ def _resolve_compare_artist_ids(name: str, mbid: str,
     are resolved separately from the canonical APIs — keeping them
     out of the cache key means a `?name=` typo doesn't produce a
     different cache entry for the same underlying artist pair."""
-    srv = _server()
     if not mbid:
-        mb_hits = srv.mb_api.search_artists(name)
+        mb_hits = mb_api.search_artists(name)
         for mb_hit in mb_hits:
             name_raw = mb_hit.get("name")
             hit_name = name_raw if isinstance(name_raw, str) else ""
@@ -726,12 +723,11 @@ def _build_compare_skeleton(
     Safe to cache under `meta:` — the output depends only on the
     resolved `(mbid, discogs_id)` pair and pure-metadata inputs.
     """
-    srv = _server()
     # The source catalogues have no dependency on each other.  Starting them
     # together removes a cold compare waterfall while each adapter retains its
     # own mirror-specific fan-out limits and cache/singleflight semantics.
     sources = _parallel_results({
-        **({"mb": lambda: srv.mb_api.get_artist_release_groups(mbid)} if mbid else {}),
+        **({"mb": lambda: mb_api.get_artist_release_groups(mbid)} if mbid else {}),
         **({"discogs": lambda: discogs_api.get_artist_releases(int(discogs_id))}
            if discogs_id else {}),
     }, max_workers=2)
@@ -756,10 +752,9 @@ def _canonical_artist_labels(mbid: str, discogs_id: str) -> tuple[
     the same across requests regardless of whatever `?name=` spelling
     a given client happened to use.
     """
-    srv = _server()
     mb_artist: dict[str, str] | None = None
     if mbid:
-        mb_artist = {"id": mbid, "name": srv.mb_api.get_artist_name(mbid) or ""}
+        mb_artist = {"id": mbid, "name": mb_api.get_artist_name(mbid) or ""}
     discogs_artist: dict[str, str] | None = None
     if discogs_id:
         discogs_artist = {
@@ -778,13 +773,13 @@ def _overlay_compare(
     annotate_in_library mutates typed rows in place. We deep-copy the
     skeleton first so the cached value stays clean for the next request.
     """
-    srv = _server()
+    rt = runtime()
     response = copy.deepcopy(skeleton)
     if not name:
         return response
 
     by_identity = _artist_pipeline_map(name, mbid)
-    lib = srv.get_library_artist(name, mbid)
+    lib = rt.get_library_artist(name, mbid)
 
     # Reconstruct flat MB / Discogs lists that reference the row instances
     # inside each bucket, so annotate_in_library mutates them in place.
@@ -798,7 +793,7 @@ def _overlay_compare(
     discogs_groups.extend(response.discogs_ungrouped_releases)
 
     annotate_in_library(mb_groups, discogs_groups, lib,
-                        rank_fn=srv.compute_library_rank)
+                        rank_fn=compute_library_rank)
     _apply_rg_pipeline_overlay(mb_groups, by_identity)
     _apply_rg_pipeline_overlay(discogs_groups, by_identity)
     return response
@@ -881,10 +876,9 @@ def _resolve_mb(raw_id: str, kind: str) -> dict[str, object]:
     surfaces the 404 to the caller (the URL path said 'release', trust it).
     Raises HTTPError for the caller to translate to HTTP status.
     """
-    srv = _server()
     if kind in ("release", "unknown"):
         try:
-            data = srv.mb_api.get_release(raw_id)
+            data = mb_api.get_release(raw_id)
             artist_id = data.get("artist_id") or ""
             return {
                 "source": "mb",
@@ -901,7 +895,7 @@ def _resolve_mb(raw_id: str, kind: str) -> dict[str, object]:
                 raise
 
     # kind == 'release-group' OR (kind=='unknown' and release attempt 404'd)
-    rg = srv.mb_api.get_release_group(raw_id)
+    rg = mb_api.get_release_group(raw_id)
     artist_id = rg.get("artist_id") or ""
     return {
         "source": "mb",

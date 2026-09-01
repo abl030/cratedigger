@@ -295,6 +295,22 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
         "tests.test_deploy_pin_script",
         "tests.test_deploy_pin_generated",
     ),
+    # No rule polices web/ at all, so nothing catches these deletions.
+    "web/server.py": (
+        "tests.web.test_server_endpoints",
+        "tests.web.test_server_threading",
+        "tests.web.test_server_cache",
+        "tests.web.test_request_security",
+        "tests.web.test_runtime",
+        "tests.test_beets_config_startup",
+    ),
+    # The basename probe still resolves tests.web.test_runtime, masking
+    # the loss of the two HTTP-boundary modules.
+    "web/runtime.py": (
+        "tests.web.test_runtime",
+        "tests.web.test_server_threading",
+        "tests.web.test_server_endpoints",
+    ),
     # No rule polices web/ at all.
     "web/discogs.py": (
         "tests.test_discogs_api",

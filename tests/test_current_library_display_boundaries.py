@@ -7,6 +7,7 @@ import io
 import unittest
 from collections.abc import Callable
 from contextlib import redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -18,6 +19,7 @@ from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
 from tests.web._harness import _FakeDbWebServerCase
 from web.library_artist_service import build_library_artist_rows
+from web.runtime import install_runtime, runtime
 
 REPO = Path(__file__).resolve().parent.parent
 MB_TARGET = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -314,16 +316,15 @@ class TestLibraryFactsRealBeets(unittest.TestCase):
 
 class TestCurrentLibraryApiRealBeets(_FakeDbWebServerCase):
     def _get_detail(self, world: BeetsWorld, request_id: int) -> tuple[int, dict]:
-        import web.server as srv
-
-        prior = (srv._beets, srv.beets_db_path, srv.beets_library_root)
-        srv._beets = None
-        srv.beets_db_path = str(world.library_db)
-        srv.beets_library_root = str(world.library_root)
-        try:
+        # No injected handle plus a real admitted pair: the route opens
+        # its own per-thread sqlite handle, exactly as production does.
+        with install_runtime(replace(
+            runtime(),
+            shared_beets=None,
+            beets_db_path=str(world.library_db),
+            beets_library_root=str(world.library_root),
+        )):
             return self._get(f"/api/pipeline/{request_id}")
-        finally:
-            srv._beets, srv.beets_db_path, srv.beets_library_root = prior
 
     def test_api_returns_fresh_path_and_tracks_without_request_cache(self) -> None:
         with BeetsWorld(REPO) as world:
@@ -389,33 +390,27 @@ class TestCurrentLibraryApiRealBeets(_FakeDbWebServerCase):
         self.assertNotIn("beets_tracks", ambiguous)
 
     def test_api_open_and_resolver_failures_return_503_without_a_row(self) -> None:
-        import web.server as srv
-
         self.db.seed_request(_request(40, MB_TARGET))
-        prior = (srv._beets, srv.beets_db_path, srv.beets_library_root)
-        with TemporaryDirectory() as invalid_database_path:
-            srv._beets = None
-            srv.beets_db_path = invalid_database_path
-            srv.beets_library_root = invalid_database_path
-            try:
-                with self.assertLogs("web.routes.pipeline", level="ERROR"):
-                    status, open_failure = self._get("/api/pipeline/40")
-            finally:
-                srv._beets, srv.beets_db_path, srv.beets_library_root = prior
+        with TemporaryDirectory() as invalid_database_path, install_runtime(
+            replace(
+                runtime(),
+                shared_beets=None,
+                beets_db_path=invalid_database_path,
+                beets_library_root=invalid_database_path,
+            ),
+        ), self.assertLogs("web.routes.pipeline", level="ERROR"):
+            status, open_failure = self._get("/api/pipeline/40")
 
         self.assertEqual(status, 503)
         self.assertEqual(open_failure, {
             "error": "Current Beets authority is unavailable; retry later.",
         })
 
-        prior_beets = srv._beets
         failing_beets = _FailingResolverBeets()
-        srv._beets = failing_beets
-        try:
-            with self.assertLogs("web.routes.pipeline", level="ERROR"):
-                status, read_failure = self._get("/api/pipeline/40")
-        finally:
-            srv._beets = prior_beets
+        with install_runtime(replace(
+            runtime(), shared_beets=failing_beets,
+        )), self.assertLogs("web.routes.pipeline", level="ERROR"):
+            status, read_failure = self._get("/api/pipeline/40")
 
         self.assertEqual(status, 503)
         self.assertEqual(read_failure, {
@@ -425,17 +420,12 @@ class TestCurrentLibraryApiRealBeets(_FakeDbWebServerCase):
         self.assertEqual(self.db.request(40)["status"], "imported")
 
     def test_api_resolver_defects_remain_internal_errors(self) -> None:
-        import web.server as srv
-
         self.db.seed_request(_request(41, MB_TARGET))
-        prior_beets = srv._beets
         defective_beets = _DefectiveResolverBeets()
-        srv._beets = defective_beets
-        try:
-            with self.assertLogs("cratedigger-web", level="ERROR"):
-                status, failure = self._get("/api/pipeline/41")
-        finally:
-            srv._beets = prior_beets
+        with install_runtime(replace(
+            runtime(), shared_beets=defective_beets,
+        )), self.assertLogs("cratedigger-web", level="ERROR"):
+            status, failure = self._get("/api/pipeline/41")
 
         self.assertEqual(status, 500)
         self.assertEqual(failure, {"error": "Internal server error"})
@@ -444,8 +434,6 @@ class TestCurrentLibraryApiRealBeets(_FakeDbWebServerCase):
         self.assertEqual(self.db.request(41)["status"], "imported")
 
     def test_api_projects_one_snapshot_for_every_request_layout(self) -> None:
-        import web.server as srv
-
         layouts = (
             ("musicbrainz", MB_TARGET, None),
             ("modern_discogs", DISCOGS_TARGET, DISCOGS_TARGET),
@@ -460,12 +448,8 @@ class TestCurrentLibraryApiRealBeets(_FakeDbWebServerCase):
                     discogs_release_id=discogs_id,
                 ))
                 beets = _snapshot_beets(release_id)
-                prior_beets = srv._beets
-                srv._beets = beets
-                try:
+                with install_runtime(replace(runtime(), shared_beets=beets)):
                     status, data = self._get("/api/pipeline/50")
-                finally:
-                    srv._beets = prior_beets
 
                 self.assertEqual(status, 200)
                 self.assertEqual(data["beets_tracks"], EXPECTED_SNAPSHOT_TRACKS)

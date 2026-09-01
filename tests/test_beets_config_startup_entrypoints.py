@@ -48,22 +48,10 @@ class TestEntrypointStartupPlacement(unittest.TestCase):
             runtime_config_module._admitted_runtime_config = prior_admitted
 
         self.addCleanup(restore_runtime_config)
-        prior_web_globals = (
-            server.canonical_origin,
-            server.insecure_mode,
-            server.beets_db_path,
-            server.beets_library_root,
-        )
-
-        def restore_web_globals() -> None:
-            (
-                server.canonical_origin,
-                server.insecure_mode,
-                server.beets_db_path,
-                server.beets_library_root,
-            ) = prior_web_globals
-
-        self.addCleanup(restore_web_globals)
+        # No web globals to save: `web/server.py::main` builds one
+        # `WebRuntime` and installs it only around its serve block, so a
+        # rejected startup leaves no process state of that kind behind
+        # (#1313).
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.config_path = os.path.join(self.tmp.name, "runtime.ini")

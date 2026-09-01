@@ -3,9 +3,9 @@
 Starts a real HTTP server on a random port; the ``tests/web/test_*.py``
 modules verify response codes, JSON structure, and error handling
 against it. One harness, no per-class copies, no MagicMock DB: every
-test runs against a fresh, bare :class:`FakePipelineDB` installed as
-``web.server.db`` (the same module-global swap production uses for
-DSN-less handles), so assertions hit the fake's real query semantics.
+test runs against a fresh, bare :class:`FakePipelineDB` injected as the
+runtime's ``shared_db`` (the same seam production uses for DSN-less
+handles), so assertions hit the fake's real query semantics.
 """
 
 import json
@@ -14,17 +14,18 @@ import sys
 import threading
 import unittest
 from http.server import HTTPServer, ThreadingHTTPServer
-from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from tests.fakes import FakeBeetsDB, FakePipelineDB
+from tests.helpers import make_web_runtime
 from web.request_security import (
     BROWSER_CHANNEL,
     CHANNEL_HEADER,
 )
+from web.runtime import WebRuntime, install_runtime, runtime
 
 CANONICAL_ORIGIN = "https://music.ablz.au"
 
@@ -71,6 +72,14 @@ class _WebServerCase(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        # One runtime for the class, uninstalled by enterClassContext on
+        # tearDownClass — the six hand-set module globals this replaced
+        # had no teardown at all and leaked into whatever ran next.
+        cls.enterClassContext(install_runtime(make_web_runtime(
+            WebRuntime(canonical_origin=CANONICAL_ORIGIN),
+            db=FakePipelineDB(),
+            beets=FakeBeetsDB(),
+        )))
         cls.server, cls.port = _make_server()
         cls.base = f"http://127.0.0.1:{cls.port}"
 
@@ -131,12 +140,18 @@ class _WebServerCase(unittest.TestCase):
 class _FakeDbWebServerCase(_WebServerCase):
     """Contract-test base with a bare per-test :class:`FakePipelineDB`.
 
-    ``setUp`` installs a fresh fake as ``web.server.db`` (the same
-    module-global swap production uses for DSN-less handles — ``_db()``
+    ``setUp`` derives a runtime carrying a fresh fake as ``shared_db``
+    (the same seam production uses for DSN-less handles — ``db()``
     returns it directly), so every test starts from empty typed state.
     Tests seed what they need (``self.db.seed_request(...)``,
     ``self.db.log_download(...)``, ``self.db.update_status(...)``) and
     assertions hit the fake's real query semantics.
+
+    A test that needs to vary one more collaborator derives again from
+    the installed one, e.g.::
+
+        with install_runtime(replace(runtime(), shared_beets=seeded)):
+            ...
     """
 
     db: FakePipelineDB
@@ -148,14 +163,10 @@ class _FakeDbWebServerCase(_WebServerCase):
 
     def setUp(self) -> None:
         super().setUp()
-        import web.server as srv
         self.db = self.DB_FACTORY()
-        patcher = patch.object(srv, "db", self.db)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        previous_beets = srv._beets
-        srv._beets = FakeBeetsDB()
-        self.addCleanup(setattr, srv, "_beets", previous_beets)
+        self.enterContext(install_runtime(make_web_runtime(
+            runtime(), db=self.db, beets=FakeBeetsDB(),
+        )))
 
 
 def _fresh_triage_runner(case: unittest.TestCase):
@@ -174,19 +185,15 @@ def _fresh_triage_runner(case: unittest.TestCase):
 def _make_server():
     """Create a test server on a random port.
 
-    The boot-time ``web.server.db`` is an empty :class:`FakePipelineDB`
-    — :class:`_FakeDbWebServerCase` shadows it with a fresh fake per
-    test, so the boot fake only serves requests issued outside a test
-    body (there are none in practice).
+    The runtime is already installed by the caller
+    (:meth:`_WebServerCase.setUpClass`); its class-scoped
+    :class:`FakePipelineDB` only serves requests issued outside a test
+    body, since :class:`_FakeDbWebServerCase` derives a fresh one per
+    test. Everything this used to hand-set — a beets path, two snapshot
+    paths — is simply absent from that runtime, which is what "not
+    configured in tests" now means.
     """
     import web.server as srv
-
-    srv.db = FakePipelineDB()
-    srv.beets_db_path = None  # No beets DB in tests
-    srv._beets = FakeBeetsDB()
-    srv.retag_census_snapshot_path = None  # No census snapshot in tests
-    srv.library_completeness_snapshot_path = None  # No completeness snapshot in tests
-    srv.canonical_origin = CANONICAL_ORIGIN
 
     # Mirror production: ThreadingHTTPServer + the same Handler.
     server = ThreadingHTTPServer(("127.0.0.1", 0), srv.Handler)

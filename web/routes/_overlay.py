@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING
 
 import msgspec
 
+from web.runtime import runtime
+
 if TYPE_CHECKING:
     from lib.convergence_service import ConvergenceSignal
 
@@ -79,12 +81,11 @@ def band_release_ids(release_ids: Iterable[str]) -> dict[str, str]:
         resolve_current_release_bands,
     )
     from web import overlay
-    from web import server as srv
 
     ids_list = [str(rid) for rid in release_ids]
     if not ids_list:
         return {}
-    b = srv._beets_db()
+    b = runtime().beets_db()
     if b is None:
         raise CurrentBeetsBandingUnavailableError(
             "current Beets authority is unavailable"
@@ -123,22 +124,20 @@ def overlay_release_rows_in_place(
         Typically `[r["id"] for r in rows]`; passed in so callers that
         need to filter (e.g. skip empty ids) control the input.
     """
-    # Local import keeps the routes._overlay → server.py edge consistent
-    # with the rest of routes/* (which all use the lazy `_server()` shim).
     from lib.banding import current_library_bitrate
-    from web import server as srv
 
+    rt = runtime()
     ids_list = list(release_ids)
     in_pipeline: dict[str, dict[str, object]] = (
-        srv.check_pipeline(ids_list) if ids_list else {}
+        rt.check_pipeline(ids_list) if ids_list else {}
     )
     request_ids = [_pipeline_request_id(row) for row in in_pipeline.values()]
-    get_convergence = convergence_fn or srv.get_convergence_signals
+    get_convergence = convergence_fn or rt.get_convergence_signals
     convergence = get_convergence(request_ids)
     in_library: set[str] = (
-        srv.check_beets_library(ids_list) if ids_list else set()
+        rt.check_beets_library(ids_list) if ids_list else set()
     )
-    b = srv._beets_db()
+    b = rt.beets_db()
     beets_ids: dict[str, int] = (
         b.get_album_ids_by_mbids(list(in_library)) if in_library and b else {}
     )

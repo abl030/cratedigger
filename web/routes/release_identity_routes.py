@@ -37,7 +37,7 @@ from web import discogs as discogs_api
 from web import mb as mb_api
 from web.routes._pydantic import parse_body
 from web.routes._registry import RouteHandler, RouteRegistration, pattern_route
-from web.routes._server_access import _server
+from web.runtime import runtime
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +128,7 @@ def post_pipeline_resolve_rg(
         h._error("Invalid request id")
         return
 
-    db = _server()._db()
+    db = runtime().db()
     row = db.get_request(request_id)
     if row is None:
         h._json({
@@ -362,7 +362,7 @@ def post_pipeline_replace(
         }, status=400)
         return
 
-    db = _server()._db()
+    db = runtime().db()
     cfg = read_runtime_config()
     svc = MbidReplaceService(db=db, config=cfg)
     result = svc.replace_request_mbid(
@@ -463,9 +463,9 @@ def post_pipeline_merge_rekey(
               resolution) outcomes both carry ``outcome`` in the payload;
               a route-level bare 503 with NO ``outcome`` field fires
               either when OPENING the database itself raises that same
-              classified failure (this call — ``s._beets_db()`` — sits
+              classified failure (this call — ``rt.beets_db()`` — sits
               BEFORE the service exists, so that failure can never carry a
-              service outcome), or when ``s._beets_db()`` returns ``None``
+              service outcome), or when ``rt.beets_db()`` returns ``None``
               WITHOUT raising at all (``"Beets DB not available"`` — a
               plain fallback, not a classified exception; #1089 MINOR-G
               review round 3)
@@ -478,7 +478,7 @@ def post_pipeline_merge_rekey(
         h._error("Invalid request id")
         return
 
-    s = _server()
+    rt = runtime()
     # Classified exactly like web/routes/pipeline.py's own boundary
     # (~pipeline.py:373-388) — this call must be INSIDE the try, not before
     # it: a locked/IO/permission failure opening the database is exactly
@@ -486,7 +486,7 @@ def post_pipeline_merge_rekey(
     # a route that classifies only the later reads still 500s on an open
     # failure with no outcome at all (#1089 MAJOR-1 review round 2).
     try:
-        beets = s._beets_db()
+        beets = rt.beets_db()
     except Exception as exc:
         category = beets_authority_availability_category(exc)
         if category is None and not isinstance(exc, OSError):
@@ -502,7 +502,7 @@ def post_pipeline_merge_rekey(
         h._error("Beets DB not available", 503)
         return
 
-    service = MergeRekeyService(s._db(), beets)
+    service = MergeRekeyService(rt.db(), beets)
     result = service.rekey_request(request_id)
 
     payload: dict[str, object] = {

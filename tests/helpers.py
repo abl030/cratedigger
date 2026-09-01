@@ -13,6 +13,7 @@ claim/handoff lifecycle helpers, and dispatch seam stubs.
 from __future__ import annotations
 
 import configparser
+import dataclasses
 import json
 import os
 import stat
@@ -30,8 +31,11 @@ import requests
 if TYPE_CHECKING:
     # Import-time cycle: ``tests.fakes`` does not import this module, but
     # keeping the reference type-only preserves that independence.
+    from lib.beets_db import BeetsDB
     from lib.context import CratediggerContext
-    from tests.fakes import FakePipelineDB
+    from lib.pipeline_db import PipelineDB
+    from tests.fakes import FakeBeetsDB, FakePipelineDB
+    from web.runtime import WebRuntime
 
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.pipeline_db._shared import TransferLedgerRow
@@ -805,6 +809,53 @@ def make_ctx_with_fake_db(
         cfg=cfg if cfg is not None else MagicMock(),
         slskd=slskd if slskd is not None else MagicMock(),
         pipeline_db_source=source,
+    )
+
+
+def make_web_runtime(
+    base: WebRuntime | None = None,
+    *,
+    db: FakePipelineDB | None = None,
+    beets: FakeBeetsDB | None = None,
+) -> WebRuntime:
+    """Build a :class:`WebRuntime` carrying the two DB fakes (#1313).
+
+    The runtime's two handle fields are declared as the production types
+    its routes hand onward — ``rt.db()`` reaches services annotated
+    ``PipelineDB``, ``rt.beets_db()`` services annotated ``BeetsDB`` — so
+    neither fake is nominally assignable to them. This is the one place
+    that gap is crossed, and the two scoped ignores below are where it is
+    visible; same shape as :func:`make_ctx_with_fake_db` above, fakes in,
+    a real runtime out.
+
+    Both ignores are load-bearing because the assignments are *annotated
+    locals*, which Pyright does check. ``dataclasses.replace`` itself
+    checks nothing — measured 2026-09-01 against pyright 1.1.412: it
+    rejects neither an unknown field name nor a wrong-typed value nor a
+    fake for a production-typed field. So passing the fakes straight to
+    ``replace`` would have been silently accepted, which is precisely the
+    kind of unchecked seam this whole change exists to remove; routing
+    them through a typed local keeps the one real gap declared rather
+    than laundered.
+
+    ``base`` derives from an already-installed runtime; omit it for a
+    bare one. A ``None`` argument means "leave that field as it is" — to
+    clear a handle (the "no Beets configured" world) pass
+    ``shared_beets=None`` to ``dataclasses.replace`` directly.
+    """
+    from web.runtime import WebRuntime
+
+    runtime = base if base is not None else WebRuntime()
+    shared_db: PipelineDB | None = (
+        db  # pyright: ignore[reportAssignmentType]
+        if db is not None else runtime.shared_db
+    )
+    shared_beets: BeetsDB | None = (
+        beets  # pyright: ignore[reportAssignmentType]
+        if beets is not None else runtime.shared_beets
+    )
+    return dataclasses.replace(
+        runtime, shared_db=shared_db, shared_beets=shared_beets,
     )
 
 

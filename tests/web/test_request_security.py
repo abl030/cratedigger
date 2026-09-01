@@ -7,6 +7,7 @@ import json
 import socket
 import threading
 import unittest
+from dataclasses import replace
 from http.server import ThreadingHTTPServer
 from typing import override
 from unittest.mock import patch
@@ -23,6 +24,7 @@ from web.request_security import (
     authorize_request,
     is_exact_liveness_request,
 )
+from web.runtime import install_runtime, runtime
 
 CANONICAL_ORIGIN = "https://music.ablz.au"
 
@@ -294,7 +296,6 @@ class TestRequestSecurityHTTP(_WebServerCase):
         self,
     ) -> None:
         """The cache-writing resolver cannot cross the browser guard."""
-        from web import server as srv
 
         class _ForbiddenDB:
             def __getattribute__(self, name: str) -> object:
@@ -312,8 +313,8 @@ class TestRequestSecurityHTTP(_WebServerCase):
                 "Content-Type": "application/json",
                 **provenance_headers,
             }
-            with self.subTest(label=label), patch.object(
-                srv, "db", _ForbiddenDB(),
+            with self.subTest(label=label), install_runtime(
+                replace(runtime(), shared_db=_ForbiddenDB()),
             ), patch(
                 "web.routes.youtube.resolve_youtube_album",
             ) as resolver:
@@ -418,29 +419,26 @@ class TestRequestSecurityHTTP(_WebServerCase):
             route_calls.append(object())
 
         original = srv.Handler._FUNC_GET_ROUTES.get("/healthz")
-        original_db = srv.db
-        original_beets = srv._beets
         srv.Handler._FUNC_GET_ROUTES["/healthz"] = unexpected_route
-        srv.db = None
-        srv._beets = None
         try:
-            for method in ("GET", "HEAD"):
-                with self.subTest(method=method):
-                    status, body, headers = self._raw_request(
-                        method, "/healthz",
-                    )
-                    self.assertEqual(status, 204)
-                    self.assertEqual(body, b"")
-                    self.assertIsNone(headers.get("Content-Length"))
-                    self.assertIsNone(headers.get("Server"))
-                    self.assertIsNone(headers.get("Date"))
+            with install_runtime(
+                replace(runtime(), shared_beets=None, shared_db=None),
+            ):
+                for method in ("GET", "HEAD"):
+                    with self.subTest(method=method):
+                        status, body, headers = self._raw_request(
+                            method, "/healthz",
+                        )
+                        self.assertEqual(status, 204)
+                        self.assertEqual(body, b"")
+                        self.assertIsNone(headers.get("Content-Length"))
+                        self.assertIsNone(headers.get("Server"))
+                        self.assertIsNone(headers.get("Date"))
         finally:
             if original is None:
                 srv.Handler._FUNC_GET_ROUTES.pop("/healthz", None)
             else:
                 srv.Handler._FUNC_GET_ROUTES["/healthz"] = original
-            srv.db = original_db
-            srv._beets = original_beets
         self.assertEqual(route_calls, [])
 
     def test_liveness_variants_are_not_anonymous(self) -> None:

@@ -32,7 +32,9 @@ from scripts.web_dev_server import (
     create_server,
 )
 from tests.fakes import FakeBeetsDB
+from tests.helpers import make_web_runtime
 from tests.test_web_cache import FakeRedis
+from web.runtime import install_runtime, runtime
 
 INSECURE_AUTH_WARNING_COPY = (
     "Authentication is disabled for this Cratedigger instance."
@@ -772,15 +774,18 @@ class WebDevServerLiveDbMetadataIntegrationTest(unittest.TestCase):
             web.mb.MB_API_BASE,
             web.discogs.DISCOGS_API_BASE,
         )
-        self.saved_server = (
-            web.server._db_dsn,
-            web.server.db,
-            web.server._try_reconnect_db,
-            web.server.beets_db_path,
-            web.server.beets_library_root,
-            web.server._beets,
-        )
+        # `configure_live_db` installs one WebRuntime on a process-lived
+        # ExitStack instead of writing six module globals (#1313), so the
+        # save/restore this used to do is one call. Registered before any
+        # per-test `enterContext(install_runtime(...))` so LIFO cleanup
+        # uninstalls the derived runtime first and this closes the base.
+        self.addCleanup(self._close_live_db_runtime)
         self.running: list[tuple[ThreadingHTTPServer, threading.Thread]] = []
+
+    def _close_live_db_runtime(self) -> None:
+        from scripts.web_dev_server import reset_live_db_runtime
+
+        reset_live_db_runtime()
 
     def tearDown(self) -> None:
         for server, thread in reversed(self.running):
@@ -788,19 +793,6 @@ class WebDevServerLiveDbMetadataIntegrationTest(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
-        if (
-            self.web_server.db is not None
-            and self.web_server.db is not self.saved_server[1]
-        ):
-            self.web_server.db.close()
-        (
-            self.web_server._db_dsn,
-            self.web_server.db,
-            self.web_server._try_reconnect_db,
-            self.web_server.beets_db_path,
-            self.web_server.beets_library_root,
-            self.web_server._beets,
-        ) = self.saved_server
         (
             self.web_mb.MB_API_BASE,
             self.web_discogs.DISCOGS_API_BASE,
@@ -830,7 +822,9 @@ class WebDevServerLiveDbMetadataIntegrationTest(unittest.TestCase):
 
     def _start_live_server(self, config: DevConfig) -> str:
         server = create_server("127.0.0.1", 0, config)
-        self.web_server._beets = FakeBeetsDB()
+        self.enterContext(install_runtime(
+            make_web_runtime(runtime(), beets=FakeBeetsDB()),
+        ))
         self._start(server)
         return f"http://127.0.0.1:{server.server_port}"
 
@@ -942,7 +936,7 @@ class WebDevServerLiveDbMetadataIntegrationTest(unittest.TestCase):
             _get_http_outcome(base, compare_path),
         ])
 
-        shared = self.web_server.db
+        shared = runtime().shared_db
         self.assertIsNotNone(shared)
         assert shared is not None
         backend_pid = shared.conn.get_backend_pid()
@@ -996,26 +990,11 @@ class ConfigureLiveDbReadOnlyTest(unittest.TestCase):
     def setUp(self) -> None:
         import os
         self.dsn = os.environ.get("TEST_DB_DSN")
-        import web.server as web_server
-        self.web_server = web_server
-        self._saved = (
-            web_server._db_dsn, web_server.db, web_server._try_reconnect_db,
-            web_server.beets_db_path, web_server.beets_library_root,
-            web_server._beets, web_server.retag_census_snapshot_path,
-            web_server.library_completeness_snapshot_path,
-        )
 
     def tearDown(self) -> None:
-        ws = self.web_server
-        if ws.db is not None and ws.db is not self._saved[1]:
-            try:
-                ws.db.close()
-            except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
-                pass
-        (ws._db_dsn, ws.db, ws._try_reconnect_db,
-         ws.beets_db_path, ws.beets_library_root, ws._beets,
-         ws.retag_census_snapshot_path,
-         ws.library_completeness_snapshot_path) = self._saved
+        from scripts.web_dev_server import reset_live_db_runtime
+
+        reset_live_db_runtime()
 
     def test_live_db_session_rejects_writes_through_db_accessor(self):
         import psycopg2
@@ -1035,17 +1014,17 @@ class ConfigureLiveDbReadOnlyTest(unittest.TestCase):
             beets_directory="/tmp/dev-library",
         )
         configure_live_db(config)
-        ws = self.web_server
+        rt = runtime()
 
-        # _db_dsn must stay unset so _db() returns the injected
-        # read-only handle instead of opening per-thread connections.
-        self.assertEqual(ws._db_dsn, self._saved[0])
-        self.assertIs(ws._db(), ws.db)
-        self.assertEqual(ws.beets_db_path, "/tmp/dev-beets.db")
-        self.assertEqual(ws.beets_library_root, "/tmp/dev-library")
+        # db_dsn must stay unset so db() returns the injected read-only
+        # handle instead of opening per-thread connections.
+        self.assertIsNone(rt.db_dsn)
+        self.assertIs(rt.db(), rt.shared_db)
+        self.assertEqual(rt.beets_db_path, "/tmp/dev-beets.db")
+        self.assertEqual(rt.beets_library_root, "/tmp/dev-library")
 
         with self.assertRaises(psycopg2.Error):
-            ws._db()._execute(
+            rt.db()._execute(
                 "INSERT INTO album_requests (artist_name, album_title, source)"
                 " VALUES ('ro', 'ro', 'request')"
             )
@@ -1062,11 +1041,11 @@ class ConfigureLiveDbReadOnlyTest(unittest.TestCase):
         )
         configure_live_db(configured)
         self.assertEqual(
-            self.web_server.library_completeness_snapshot_path,
+            runtime().library_completeness_snapshot_path,
             library_completeness_snapshot_path("/tmp/completeness"),
         )
         configure_live_db(replace(configured, library_completeness_runtime_dir=None))
-        self.assertIsNone(self.web_server.library_completeness_snapshot_path)
+        self.assertIsNone(runtime().library_completeness_snapshot_path)
 
     def test_internal_reconnect_restores_read_only_session_default(self):
         from scripts.web_dev_server import configure_live_db
@@ -1083,8 +1062,7 @@ class ConfigureLiveDbReadOnlyTest(unittest.TestCase):
             redis_port=6379,
         )
         configure_live_db(config)
-        ws = self.web_server
-        configured = ws._db()
+        configured = runtime().db()
         original_connection = configured.conn
 
         original_connection.close()
@@ -1099,6 +1077,59 @@ class ConfigureLiveDbReadOnlyTest(unittest.TestCase):
                 "INSERT INTO album_requests (artist_name, album_title, source)"
                 " VALUES ('reconnected-ro', 'reconnected-ro', 'request')"
             )
+
+    def _live_db_config(self) -> DevConfig:
+        return DevConfig(
+            data="live-db", scenario="peers",
+            prod_base_url="https://music.ablz.au", dsn=self.dsn,
+            beets_db=None, mb_api=None, discogs_api=None,
+            redis_host=None, redis_port=6379,
+        )
+
+    def test_reconfiguring_closes_the_connection_it_replaces(self):
+        """A dev/test process must not leak one backend per reconfigure.
+
+        The module-global predecessor closed the handle it replaced inline;
+        `reset_live_db_runtime` owns that now, and this is what makes a
+        no-op reset observable rather than merely tidy.
+        """
+        from scripts.web_dev_server import configure_live_db
+
+        configure_live_db(self._live_db_config())
+        first = runtime().db()
+        self.assertFalse(first.conn.closed)
+
+        configure_live_db(self._live_db_config())
+
+        second = runtime().db()
+        self.assertIsNot(second, first)
+        self.assertTrue(first.conn.closed)
+        self.assertFalse(second.conn.closed)
+
+    def test_dropping_a_wedged_connection_leaves_the_handle_installed(self):
+        """`_drop_live_db_connection` is the dev server's request-failure
+        reconnect — the branch `DevHandler.do_GET`'s catch-all reaches.
+
+        It must close the wedged connection WITHOUT replacing the shared
+        handle, so the next request self-heals read-only through
+        `_ReadOnlyDevPipelineDB._connect` rather than losing the session.
+        """
+        from scripts.web_dev_server import (
+            _drop_live_db_connection,
+            configure_live_db,
+        )
+
+        configure_live_db(self._live_db_config())
+        handle = runtime().db()
+        original_connection = handle.conn
+
+        _drop_live_db_connection()
+
+        self.assertTrue(original_connection.closed)
+        self.assertIs(runtime().db(), handle)
+        row = handle._execute("SHOW default_transaction_read_only").fetchone()
+        self.assertIsNot(handle.conn, original_connection)
+        self.assertEqual(row["default_transaction_read_only"], "on")
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from lib.artist_catalogue import ArtistCatalogueRow
 from tests.helpers import make_request_row
 from tests.web._harness import _FakeDbWebServerCase, _WebServerCase
+from web.runtime import WebRuntime
 
 
 def _catalogue_row(
@@ -131,8 +132,8 @@ class TestReleaseEndpointReflectsPipelineWrite(_CachedServerCase):
         fake._store.clear()
 
     def _call_release_detail(self) -> dict:
-        with patch("web.server.mb_api") as mock_mb, \
-                patch("web.server.check_beets_library", return_value=set()):
+        with patch("web.routes.browse.mb_api") as mock_mb, \
+                patch.object(WebRuntime, "check_beets_library", return_value=set()):
             mock_mb.get_release.return_value = {
                 "id": self.RELEASE_ID,
                 "title": "Test Album",
@@ -168,16 +169,16 @@ class TestReleaseEndpointReflectsPipelineWrite(_CachedServerCase):
         self.db.seed_request(make_request_row(
             id=42, status="imported", mb_release_id=self.RELEASE_ID,
         ))
-        with patch("web.server.mb_api") as mock_mb, \
-                patch("web.server.check_beets_library", return_value=set()):
+        with patch("web.routes.browse.mb_api") as mock_mb, \
+                patch.object(WebRuntime, "check_beets_library", return_value=set()):
             mock_mb.get_release.return_value = {
                 "id": self.RELEASE_ID, "title": "T", "tracks": [],
             }
             _s, first = self._get(f"/api/release/{self.RELEASE_ID}")
         self.assertFalse(first["in_library"])
 
-        with patch("web.server.mb_api") as mock_mb, \
-                patch("web.server.check_beets_library",
+        with patch("web.routes.browse.mb_api") as mock_mb, \
+                patch.object(WebRuntime, "check_beets_library",
                       return_value={self.RELEASE_ID}):
             mock_mb.get_release.return_value = {
                 "id": self.RELEASE_ID, "title": "T", "tracks": [],
@@ -249,9 +250,9 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
         fake = self._cache._redis
         assert isinstance(fake, FakeRedis)
 
-        with patch("web.server.mb_api") as mock_mb, \
-                patch("web.server.check_beets_library", return_value=set()), \
-                patch("web.server.check_pipeline", return_value={}):
+        with patch("web.routes.browse.mb_api") as mock_mb, \
+                patch.object(WebRuntime, "check_beets_library", return_value=set()), \
+                patch.object(WebRuntime, "check_pipeline", return_value={}):
             mock_mb.get_artist_releases_with_recordings.return_value = \
                 self._RAW_RELEASES
             mock_mb.get_artist_name.return_value = "Test Artist"
@@ -283,9 +284,9 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
             self) -> None:
         """Skeleton cache is warm; change live DB state; next GET must
         still reflect the new pipeline_status via overlay."""
-        with patch("web.server.mb_api") as mock_mb, \
-                patch("web.server.check_beets_library", return_value=set()), \
-                patch("web.server.check_pipeline",
+        with patch("web.routes.browse.mb_api") as mock_mb, \
+                patch.object(WebRuntime, "check_beets_library", return_value=set()), \
+                patch.object(WebRuntime, "check_pipeline",
                       return_value={self.RELEASE_ID: {
                           "id": 42,
                           "status": "wanted",
@@ -305,9 +306,9 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
 
         # External DB write — status flips to 'downloading'. No POST
         # invalidation (same bug class as the release-detail test).
-        with patch("web.server.mb_api") as mock_mb, \
-                patch("web.server.check_beets_library", return_value=set()), \
-                patch("web.server.check_pipeline",
+        with patch("web.routes.browse.mb_api") as mock_mb, \
+                patch.object(WebRuntime, "check_beets_library", return_value=set()), \
+                patch.object(WebRuntime, "check_pipeline",
                       return_value={self.RELEASE_ID: {
                           "id": 42,
                           "status": "downloading",
@@ -334,9 +335,9 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
     def test_disambiguate_overlay_reflects_library_flip(self) -> None:
         """Same guarantee for in_library — beets state flips, overlay must
         see it without invalidating the skeleton cache."""
-        with patch("web.server.mb_api") as mock_mb, \
-                patch("web.server.check_beets_library", return_value=set()), \
-                patch("web.server.check_pipeline", return_value={}):
+        with patch("web.routes.browse.mb_api") as mock_mb, \
+                patch.object(WebRuntime, "check_beets_library", return_value=set()), \
+                patch.object(WebRuntime, "check_pipeline", return_value={}):
             mock_mb.get_artist_releases_with_recordings.return_value = \
                 self._RAW_RELEASES
             mock_mb.get_artist_name.return_value = "Test Artist"
@@ -345,10 +346,10 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
         self.assertFalse(
             first["release_groups"][0]["pressings"][0]["in_library"])
 
-        with patch("web.server.mb_api") as mock_mb, \
-                patch("web.server.check_beets_library",
+        with patch("web.routes.browse.mb_api") as mock_mb, \
+                patch.object(WebRuntime, "check_beets_library",
                       return_value={self.RELEASE_ID}), \
-                patch("web.server.check_pipeline", return_value={}):
+                patch.object(WebRuntime, "check_pipeline", return_value={}):
             mock_mb.get_artist_releases_with_recordings.return_value = \
                 self._RAW_RELEASES
             mock_mb.get_artist_name.return_value = "Test Artist"
@@ -375,9 +376,9 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
             source="discogs", row_id="21491", primary_artist_id="3840",
         )
 
-        with patch("web.server.mb_api") as mock_mb, \
+        with patch("web.routes.browse.mb_api") as mock_mb, \
                 patch("web.routes.browse.discogs_api") as mock_dg, \
-                patch("web.server.get_library_artist", return_value=[]):
+                patch.object(WebRuntime, "get_library_artist", return_value=[]):
             mock_mb.search_artists.return_value = [
                 {"id": self.ARTIST_ID, "name": "Radiohead"}]
             mock_mb.get_artist_release_groups.return_value = [mb_rg]
@@ -420,9 +421,9 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
         )
 
         # First request — misspelled name. Skeleton gets cached.
-        with patch("web.server.mb_api") as mock_mb, \
+        with patch("web.routes.browse.mb_api") as mock_mb, \
                 patch("web.routes.browse.discogs_api") as mock_dg, \
-                patch("web.server.get_library_artist", return_value=[]):
+                patch.object(WebRuntime, "get_library_artist", return_value=[]):
             mock_mb.search_artists.return_value = [
                 {"id": self.ARTIST_ID, "name": "Radiohead"}]
             mock_mb.get_artist_release_groups.return_value = [mb_rg]
@@ -445,9 +446,9 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
         # Second request — different (correct) name. Must STILL return
         # the canonical Radiohead, and the skeleton cache must have been
         # reused (no re-fetch of the release-group metadata).
-        with patch("web.server.mb_api") as mock_mb, \
+        with patch("web.routes.browse.mb_api") as mock_mb, \
                 patch("web.routes.browse.discogs_api") as mock_dg, \
-                patch("web.server.get_library_artist", return_value=[]):
+                patch.object(WebRuntime, "get_library_artist", return_value=[]):
             mock_mb.search_artists.return_value = [
                 {"id": self.ARTIST_ID, "name": "Radiohead"}]
             mock_mb.get_artist_release_groups.return_value = [mb_rg]
@@ -478,9 +479,9 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
         )
 
         def _run(lib_albums: list[dict]) -> dict:
-            with patch("web.server.mb_api") as mock_mb, \
+            with patch("web.routes.browse.mb_api") as mock_mb, \
                     patch("web.routes.browse.discogs_api") as mock_dg, \
-                    patch("web.server.get_library_artist",
+                    patch.object(WebRuntime, "get_library_artist",
                           return_value=lib_albums):
                 mock_mb.search_artists.return_value = [
                     {"id": self.ARTIST_ID, "name": "Radiohead"}]
