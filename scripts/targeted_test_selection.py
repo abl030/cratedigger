@@ -1407,11 +1407,6 @@ LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
         "tests.test_post_import does not exist and no EXACT_PATH_"
         "NEIGHBOURS/prefix rule covers it (issue #1199)"
     ),
-    "lib/dispatch/quality_gate.py": (
-        "measured 2026-08-19: zero neighbours -- basename-derived "
-        "tests.test_quality_gate does not exist and no EXACT_PATH_"
-        "NEIGHBOURS/prefix rule covers it (issue #1199)"
-    ),
 
     "lib/download_materialization.py": (
         "measured 2026-08-19: zero neighbours -- "
