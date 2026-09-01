@@ -795,6 +795,31 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
         self.assertEqual(summary.phases[0].state, "infrastructure-failure")
         self.assertIn("ValidationError", summary.phases[0].failures[0].detail)
 
+    def test_a_parser_defect_outside_the_contract_is_not_swallowed(self) -> None:
+        """`PARSER_ERRORS` is a declared surface, not a catch-all.
+
+        A parser raising something outside it is a defect in the parser,
+        not a misbehaving tool, so it propagates instead of being written
+        into the bundle as a tidy infrastructure failure. Widening the
+        tuple to bare `Exception` is the mutant this refuses; nothing
+        constrained it before (#1313 review, runner mutant M7).
+        """
+
+        def exploding(_log: PhaseLog) -> PhaseFailures:
+            raise KeyError("parser defect")
+
+        with self.assertRaises(KeyError):
+            self._run(
+                (
+                    PhaseSpec(
+                        "python",
+                        _python_command("ok", 0),
+                        "python3 scripts/run_python_tests.py",
+                        exploding,
+                    ),
+                )
+            )
+
     def test_bundle_creation_rejects_a_non_private_runtime_before_work(self) -> None:
         with tempfile.TemporaryDirectory(
             prefix="cratedigger-public-runtime-"

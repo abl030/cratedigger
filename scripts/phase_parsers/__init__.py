@@ -84,6 +84,14 @@ PhaseFailureParser = Callable[[PhaseLog], PhaseFailures]
 #: them; a dialect needing a new one adds it HERE. The alternative is
 #: the coordinator growing a bare `except Exception`, which would
 #: swallow a real defect in a parser as if the tool had misbehaved.
+#:
+#: The two msgspec entries are redundant by subclassing —
+#: `ValidationError` ⊂ `DecodeError` ⊂ `MsgspecError` ⊂ `ValueError` —
+#: and are spelled anyway, because they are the names a reader meets in
+#: the traceback and in the failure detail the coordinator writes.
+#: Removing either changes nothing, which a review mutant confirmed;
+#: what does change behaviour is WIDENING the tuple, so the pin that
+#: matters is that an exception outside it still propagates.
 PARSER_ERRORS: tuple[type[Exception], ...] = (
     OSError,
     ValueError,

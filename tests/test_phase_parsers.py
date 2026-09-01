@@ -360,6 +360,23 @@ class TestVultureDialect(unittest.TestCase):
         self.assertEqual(failure.owner, "lib/quality/filetypes.py")
         self.assertEqual(failure.detail, "CODEC_TO_EXT: unused variable")
 
+    def test_a_line_without_a_confidence_suffix_is_not_a_finding(self) -> None:
+        """`owner:line: message` alone is half of vulture's shape.
+
+        The finding pattern requires the trailing `(NN% confidence)`, and
+        only positive worlds tested it — dropping that requirement made
+        the dialect claim any `path:line: text` line, including ruff's
+        concise format, and survived (#1313 runner mutant M25).
+        """
+        parsed = dead_code.parse_failures(
+            _log(
+                "lib/lint.py:9:2: F821 Undefined name `missing`\n"
+                "lib/dead.py:12: unused function 'orphan'"
+            )
+        )
+
+        self.assertEqual(parsed.failures, ())
+
     def test_a_removed_whitelist_line_is_not_a_finding(self) -> None:
         """Only additions to the candidate baseline are indexed."""
         parsed = dead_code.parse_failures(
@@ -521,7 +538,12 @@ class TestEveryParserSelectsThisModule(unittest.TestCase):
                     changed_paths=(f"scripts/phase_parsers/{name}",),
                     repo_root=repo_root,
                 )
+                # Both of the row's named modules, not just the first:
+                # dropping `tests.test_suite_coordinator` from it leaves
+                # the parsers' one real composition seam unselected, and
+                # survived every test before this (#1313 runner mutant M9).
                 self.assertIn("tests.test_phase_parsers", selected)
+                self.assertIn("tests.test_suite_coordinator", selected)
 
 
 class TestDialectsDoNotOverlap(unittest.TestCase):
