@@ -29,8 +29,8 @@ from __future__ import annotations
 
 import threading
 import unittest
-from collections.abc import Callable
-from contextlib import AbstractContextManager, closing
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 
 from hypothesis import example, given
 from hypothesis import strategies as st
@@ -62,14 +62,65 @@ class _FakeClock:
 
 
 class _ClosableDB:
+    def __init__(self) -> None:
+        self.closed = 0
+
     def close(self) -> None:
-        return None
+        self.closed += 1
 
 
-def _db_session() -> AbstractContextManager[object]:
-    """Stands in for ``WebRuntime.open_background_db``: yield a handle,
-    close it when the sweep's block ends."""
-    return closing(_ClosableDB())
+class _SessionLedger:
+    """Records every sweep-DB scope the runner opens.
+
+    Stands in for ``WebRuntime.open_background_db``, including the part
+    that matters most here: the session owns the handle. It yields one
+    and does NOT close it, exactly as the DSN-less production branch
+    hands over the injected handle it must leave open — so anything
+    closing a handle was the runner, not the session.
+    """
+
+    def __init__(self) -> None:
+        self.entered = 0
+        self.exited = 0
+        self.handles: list[_ClosableDB] = []
+
+    @contextmanager
+    def __call__(self) -> Generator[object]:
+        handle = _ClosableDB()
+        self.handles.append(handle)
+        self.entered += 1
+        try:
+            yield handle
+        finally:
+            self.exited += 1
+
+
+def session_ledger_violations(
+    ledger: _SessionLedger, *, admitted: int,
+) -> list[str]:
+    """Every way the runner can mishandle the sweep's DB session.
+
+    Accumulates rather than short-circuits, so a run breaking several
+    clauses reports all of them.
+    """
+    violations: list[str] = []
+    if ledger.entered != admitted:
+        violations.append(
+            f"the runner entered {ledger.entered} sessions for "
+            f"{admitted} admitted sweeps",
+        )
+    if ledger.exited != ledger.entered:
+        violations.append(
+            f"the runner left {ledger.entered - ledger.exited} session(s) "
+            "open",
+        )
+    closed_by_the_runner = sum(handle.closed for handle in ledger.handles)
+    if closed_by_the_runner:
+        violations.append(
+            "the runner closed a handle the session owns "
+            f"({closed_by_the_runner} time(s))",
+        )
+    return violations
 
 
 def _cleanup_fn(
@@ -180,6 +231,8 @@ _STEP_STRATEGY = st.one_of(
 def _run_steps(steps: list[tuple[str, float, bool]]) -> None:
     clock = _FakeClock()
     runner = TriageRunner(now_fn=clock)
+    session = _SessionLedger()
+    admitted = 0
     model_time = 0.0
     # The model of the ARMED pending-cancel slot: None when nothing is
     # armed, else the model-time of the LATEST armed cancel (#1106 F1 --
@@ -201,8 +254,9 @@ def _run_steps(steps: list[tuple[str, float, bool]]) -> None:
                 <= PENDING_CANCEL_WINDOW_SECONDS
             )
             started = runner.start(
-                db_session=_db_session, cleanup_fn=_cleanup_fn,
+                db_session=session, cleanup_fn=_cleanup_fn,
             )
+            admitted += 1
             if not started:
                 raise AssertionError(
                     "start() refused while joined-idle -- every prior "
@@ -227,8 +281,9 @@ def _run_steps(steps: list[tuple[str, float, bool]]) -> None:
         elif kind == "cancel_while_running":
             cleanup_fn, entered, release = _blocking_cleanup_fn_factory()
             started = runner.start(
-                db_session=_db_session, cleanup_fn=cleanup_fn,
+                db_session=session, cleanup_fn=cleanup_fn,
             )
+            admitted += 1
             if not started:
                 raise AssertionError(
                     "cancel_while_running: start() refused while "
@@ -254,6 +309,10 @@ def _run_steps(steps: list[tuple[str, float, bool]]) -> None:
         else:
             raise AssertionError(f"unknown generated step kind: {kind}")
 
+    violations = session_ledger_violations(session, admitted=admitted)
+    if violations:
+        raise AssertionError("; ".join(violations))
+
 
 class TriageRunnerStickyCancelGeneratedTest(unittest.TestCase):
     def test_checker_rejects_a_pending_cancel_that_did_not_stop_the_sweep(
@@ -275,6 +334,36 @@ class TriageRunnerStickyCancelGeneratedTest(unittest.TestCase):
             assert_pending_cancel_outcome(
                 pending_valid=False, state=STATE_CANCELLED, processed=0,
             )
+
+    def test_ledger_checker_rejects_a_sweep_that_opened_no_session(
+        self,
+    ) -> None:
+        self.assertIn(
+            "the runner entered 0 sessions for 1 admitted sweeps",
+            session_ledger_violations(_SessionLedger(), admitted=1),
+        )
+
+    def test_ledger_checker_rejects_a_session_left_open(self) -> None:
+        ledger = _SessionLedger()
+        scope = ledger()
+        scope.__enter__()
+
+        self.assertIn(
+            "the runner left 1 session(s) open",
+            session_ledger_violations(ledger, admitted=1),
+        )
+
+    def test_ledger_checker_rejects_a_handle_the_runner_closed(self) -> None:
+        ledger = _SessionLedger()
+        with ledger():
+            # The session owns the handle; a close from inside the block
+            # is the runner reaching past that ownership.
+            ledger.handles[-1].close()
+
+        self.assertIn(
+            "the runner closed a handle the session owns (1 time(s))",
+            session_ledger_violations(ledger, admitted=1),
+        )
 
     def test_checker_rejects_a_running_cancel_that_did_not_stop_the_sweep(
         self,

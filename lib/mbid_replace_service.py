@@ -249,6 +249,7 @@ BeetsDBFactory = Callable[[], ReplaceBeetsDB]
 """Zero-arg callable returning a ``BeetsDB`` instance. Default uses
 ``lib.beets_db.BeetsDB`` against the configured library path."""
 
+
 def _default_mb_lookup(mbid: str, *, fresh: bool = False) -> dict[str, Any]:
     """Default MB-mirror lookup. Imported lazily so the service module
     doesn't pull in ``web.mb``'s urllib transport at import time."""

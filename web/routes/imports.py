@@ -677,11 +677,13 @@ def post_wrong_match_triage(h: RouteHandler, body: dict[str, object]) -> None:
 
     The sweep takes minutes when stale rows trigger re-measurement
     (#271); running it inline wedged the single-threaded server for the
-    duration. The sweep thread opens and releases its own DB connection
-    through ``runtime().open_background_db`` — one handle is one
-    PostgreSQL session, so sharing the request thread's would put both
-    threads inside the same session-level advisory locks. The runtime,
-    not the runner, owns that handle's lifetime.
+    duration. The sweep thread gets its handle by entering
+    ``runtime().open_background_db`` — under a DSN that is a connection
+    of its own, because one handle is one PostgreSQL session and sharing
+    the request thread's would put both threads inside the same
+    session-level advisory locks. A DSN-less runtime (the dev server,
+    the test harness) has only the injected handle and does share it.
+    Either way the runtime, not the runner, owns that handle's lifetime.
     """
     req_body = parse_body(h, body, WrongMatchTriageRequest)
     if req_body is None:

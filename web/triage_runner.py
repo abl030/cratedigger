@@ -141,10 +141,15 @@ class TriageRunner:
         running. ``db_session`` is entered ON the sweep thread so the
         connection is opened, used, and released by one thread only, and
         it is exited on every terminal path, a raising ``cleanup_fn``
-        included. When a pending cancel (#1106) is still within its
-        window, the sweep is still admitted (still True, still starts a
-        thread) but its token is pre-cancelled before ``cleanup_fn``
-        ever runs.
+        included. The exit happens BEFORE the terminal state is
+        recorded, so a session whose own exit raises marks the sweep
+        failed rather than completed; production's session
+        (``WebRuntime.open_background_db``) swallows its own close
+        errors, so it cannot reach that, but an injected one can.
+
+        When a pending cancel (#1106) is still within its window, the
+        sweep is still admitted (still True, still starts a thread) but
+        its token is pre-cancelled before ``cleanup_fn`` ever runs.
         """
         with self._lock:
             if self._state == STATE_RUNNING:
@@ -275,10 +280,23 @@ class TriageRunner:
             )
         except Exception as exc:
             logger.exception("wrong_match_triage_sweep.failed")
-            with self._lock:
-                self._state = STATE_FAILED
-                self._error = f"{type(exc).__name__}: {exc}"
-                self._finished_at = _utcnow_iso()
+            self._record_failure(exc)
+        except BaseException as exc:
+            # A KeyboardInterrupt or SystemExit reaching this thread
+            # used to leave the runner at RUNNING for the life of the
+            # process: every later start() refused, the only way out a
+            # web restart. That is the parked state invariant 11
+            # forbids, so record the same terminal outcome before
+            # letting it propagate.
+            logger.exception("wrong_match_triage_sweep.failed")
+            self._record_failure(exc)
+            raise
+
+    def _record_failure(self, exc: BaseException) -> None:
+        with self._lock:
+            self._state = STATE_FAILED
+            self._error = f"{type(exc).__name__}: {exc}"
+            self._finished_at = _utcnow_iso()
 
 
 def _utcnow_iso() -> str:

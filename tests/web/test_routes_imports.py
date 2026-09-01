@@ -2162,6 +2162,12 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
 
         _status, data = self._get("/api/wrong-matches/triage/status")
         self.assertEqual(data["state"], "completed")
+        # The handle the sweep actually received, not merely "some fake
+        # went unclosed": with cleanup_all_wrong_matches mocked, nothing
+        # else in this test touches it, so a session yielding the wrong
+        # accessor entirely would otherwise pass here.
+        mock_cleanup.assert_called_once()
+        self.assertIs(mock_cleanup.call_args.args[0], self.db)
         self.assertFalse(self.db.closed, "the sweep closed the injected handle")
         self.assertEqual(self.db.close_calls, 0)
 

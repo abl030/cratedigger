@@ -92,9 +92,16 @@ class WebRuntime:
     #: speaks HTTP/1.1 keep-alive, so a browser's persistent connections
     #: each pin one worker thread (and its handles) across many requests.
     #: One-shot clients (curl, the importer's notify hooks) cost one
-    #: connect/teardown each — fine at single-operator scale. Neither
-    #: psycopg2 connections nor sqlite3 handles are safe to share across
-    #: threads, which is why this exists at all.
+    #: connect/teardown each — fine at single-operator scale. A
+    #: ``PipelineDB`` is not safe to share across threads (``_ensure_conn``
+    #: replaces ``self.conn`` in place, under whichever caller happens to
+    #: be mid-statement, and one handle is one session, so both threads
+    #: would sit inside the same session-level advisory locks), and a
+    #: sqlite3 handle is bound to its opening thread outright
+    #: (``check_same_thread``). That is why this exists at all. Note
+    #: psycopg2 itself reports ``threadsafety == 2``: sharing a raw
+    #: connection is allowed and it is the wrapper's semantics, not
+    #: libpq's, that make it wrong here.
     _threads: threading.local = field(
         init=False,
         default_factory=threading.local,
@@ -130,10 +137,11 @@ class WebRuntime:
         ended.
 
         Under a DSN this opens a connection nothing else holds and
-        closes it on the way out, best-effort in the same sense
-        :meth:`close_thread_handles` is: a failing close is logged, not
-        raised at the caller, whose own work already succeeded or failed
-        on its own terms.
+        closes it on the way out. A failing close is swallowed rather
+        than raised at the caller, whose own work already succeeded or
+        failed on its own terms — the same best-effort teardown
+        :meth:`close_thread_handles` performs, though that one swallows
+        silently and this one logs.
 
         With no DSN it yields the injected shared handle and leaves it
         OPEN. The dev server and the test harness own that one, so the

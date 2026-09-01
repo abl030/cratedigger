@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import time
 import unittest
-from contextlib import closing
+from contextlib import closing, contextmanager
 from unittest.mock import patch
 
 from lib.import_execution import CancellationToken
@@ -203,6 +203,59 @@ class TriageRunnerTest(unittest.TestCase):
         status = self.runner.status()
         self.assertEqual(status["state"], STATE_FAILED)
         self.assertIn("no dsn", str(status["error"]))
+        # The status endpoint renders finished_at on every terminal
+        # state, so the failure path owes one too.
+        self.assertIsNotNone(status["finished_at"])
+
+    def test_a_session_whose_exit_fails_marks_the_sweep_failed(self) -> None:
+        """The exit runs before the terminal state is written.
+
+        Production's session swallows its own close errors, so it cannot
+        reach this; an injected session can, and the contract should be
+        the one ``start`` documents rather than an accident of ordering.
+        """
+        @contextmanager
+        def exit_fails():
+            yield self.db
+            raise RuntimeError("close blew up")
+
+        def cleanup_fn(db, *, confirm_all_wrong_matches, cancellation_token=None):
+            return WrongMatchCleanupSummary(processed=7, deleted=0)
+
+        self.assertTrue(self.runner.start(
+            db_session=exit_fails, cleanup_fn=cleanup_fn,
+        ))
+        self.runner.join(timeout=5)
+
+        status = self.runner.status()
+        self.assertEqual(status["state"], STATE_FAILED)
+        self.assertIn("close blew up", str(status["error"]))
+        self.assertIsNotNone(status["finished_at"])
+
+    def test_a_base_exception_still_records_a_terminal_state(self) -> None:
+        """Nothing is parked: a sweep killed by a KeyboardInterrupt on
+        its own thread must not leave the runner RUNNING forever, which
+        would refuse every later start until the web process restarted.
+        """
+        def cleanup_fn(db, *, confirm_all_wrong_matches, cancellation_token=None):
+            raise KeyboardInterrupt("operator interrupted the sweep thread")
+
+        self.assertTrue(self.runner.start(
+            db_session=self._session, cleanup_fn=cleanup_fn,
+        ))
+        self.runner.join(timeout=5)
+
+        status = self.runner.status()
+        self.assertEqual(status["state"], STATE_FAILED)
+        self.assertIn("KeyboardInterrupt", str(status["error"]))
+        self.assertIsNotNone(status["finished_at"])
+        # And the runner is usable again rather than wedged.
+        self.assertTrue(self.runner.start(
+            db_session=self._session,
+            cleanup_fn=lambda db, **kwargs: WrongMatchCleanupSummary(processed=0),
+        ))
+        self.runner.join(timeout=5)
+        self.assertEqual(self.runner.status()["state"], STATE_COMPLETED)
 
 
 class TriageRunnerCancellationTest(unittest.TestCase):
