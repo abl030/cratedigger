@@ -6,9 +6,7 @@ quality monolith into submodules and kept a package-level re-export so
 one shim the single-operator rule tolerates. A shim earns that tolerance
 only while it carries names something asks for, and nothing re-checked
 that. It had grown to 288 names, 75 of which no module outside the
-package imported through the package at all — every one of those 75
-already imported straight from its own submodule somewhere, so the
-package entry was pure redundancy a reader has to walk past.
+package reached through the package at all.
 
 This audit is the guard, not the cleanup. It asks one question per
 exported name: does any `.py` file outside `lib/quality/` reach that name
@@ -16,7 +14,7 @@ THROUGH the package? A name nobody reaches that way is a re-export with
 no caller, and the fix is to delete the entry, not to invent a caller.
 
 **Grammar.** Three spellings count as a reference, all read off the AST
-of every tracked `.py` file outside `lib/quality/`:
+of every `.py` file in this checkout outside `lib/quality/`:
 
 * `from lib.quality import NAME` (absolute, `level == 0`; an `as` alias
   does not change which name was asked for)
@@ -45,7 +43,6 @@ own message instead of silently marking all 288 names live.
 from __future__ import annotations
 
 import ast
-import subprocess
 import tempfile
 import unittest
 from collections.abc import Iterable, Iterator
@@ -58,20 +55,30 @@ PACKAGE = "lib.quality"
 PACKAGE_DIR = "lib/quality/"
 
 
-def _tracked_python_files(repo_root: Path) -> tuple[Path, ...]:
-    """Every tracked `.py` file, from git rather than a tree walk.
+#: Directories under the repository root that hold a DIFFERENT checkout's
+#: Python, not this one's: agent worktrees, mutmut's mutated copy, Nix build
+#: results. Walking into any of them answers the demand question about
+#: somebody else's source.
+_FOREIGN_TREES = frozenset({".claude", "mutants", "result", ".git", ".direnv"})
 
-    A tree walk under this repository also finds `.claude/worktrees/`
-    copies of it and mutmut's `mutants/` tree, so it would answer the
-    question about a different checkout's source.
+
+def _python_sources(repo_root: Path) -> tuple[Path, ...]:
+    """Every `.py` file belonging to this checkout.
+
+    A tree walk rather than `git ls-files`, deliberately: mutmut runs the
+    suite from inside an untracked `mutants/` copy, where `git ls-files`
+    returns nothing at all and this audit would pass on an empty file set
+    while reporting all 213 exports orphaned. Issue #1329 hit the same
+    trap and recorded it — a test that shells out to git is invisible to
+    the catalog by construction.
     """
-    listing = subprocess.run(
-        ["git", "-C", str(repo_root), "ls-files", "-z", "*.py"],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    return tuple(repo_root / name for name in listing.split("\0") if name)
+    return tuple(
+        path
+        for path in repo_root.rglob("*.py")
+        if not (
+            set(path.relative_to(repo_root).parts) & _FOREIGN_TREES
+        )
+    )
 
 
 def _package_bindings(tree: ast.Module) -> set[str]:
@@ -177,7 +184,7 @@ class TestQualityReexportHasCallers(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.files = tuple(
             path
-            for path in _tracked_python_files(REPO_ROOT)
+            for path in _python_sources(REPO_ROOT)
             if not path.relative_to(REPO_ROOT).as_posix().startswith(PACKAGE_DIR)
         )
 
@@ -210,6 +217,45 @@ class TestQualityReexportHasCallers(unittest.TestCase):
             missing,
             [],
             "__all__ names something the import block does not bind",
+        )
+
+    def test_the_scan_finds_a_real_population(self) -> None:
+        """A file set this audit cannot read must not read as a clean pass.
+
+        The first draft enumerated files with `git ls-files`, which returns
+        nothing from inside mutmut's untracked `mutants/` copy. Per-name
+        emptiness makes that loud rather than silent — zero files means
+        every name is an orphan — but the failure then blames the export
+        list for a broken walk. This pins the walk itself.
+        """
+        self.assertGreater(len(self.files), 500)
+        self.assertIn(
+            "lib/dispatch/core.py",
+            {path.relative_to(REPO_ROOT).as_posix() for path in self.files},
+        )
+
+    def test_the_walk_stops_at_other_checkouts(self) -> None:
+        """A sibling agent worktree's copy of this repo is not a caller.
+
+        Against a synthetic root, not this one. Asserting the real walk
+        returned nothing foreign passes whether or not the filter exists,
+        because this checkout happens to hold no `.py` under any of those
+        directories — a pin no mutant can reach, which is how the first
+        version of it survived dropping the filter outright.
+        """
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        for relative in (
+            "lib/mine.py",
+            ".claude/worktrees/agent-x/lib/theirs.py",
+            "mutants/lib/mutated.py",
+            "result/lib/built.py",
+        ):
+            target = root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("from lib.quality import quality_rank\n")
+        self.assertEqual(
+            [path.relative_to(root).as_posix() for path in _python_sources(root)],
+            ["lib/mine.py"],
         )
 
 
