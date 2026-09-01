@@ -1383,45 +1383,72 @@ t.section('long_tail.js pure helpers');
 
   // --- renderLongTailRow: sanity (clickable + detail container) ---
   const rowHtml = renderLongTailRow(cohort[1]);
-  t.ok(
-    rowHtml.includes('window.toggleLongTailDetail(2)'),
+  t.contains(
+    rowHtml,
+    'window.toggleLongTailDetail(2)',
     'renderLongTailRow wires the row click to toggleLongTailDetail',
   );
-  t.ok(
-    rowHtml.includes('id="lt-detail-2"'),
+  t.contains(
+    rowHtml,
+    'id="lt-detail-2"',
     'renderLongTailRow emits the per-row detail container',
   );
-  t.ok(
-    rowHtml.includes('badge-wanted') && rowHtml.includes('Missing'),
-    'renderLongTailRow renders a Missing band chip for a missing row',
+  t.contains(
+    rowHtml,
+    'badge-wanted',
+    'renderLongTailRow gives a missing row the wanted badge class',
+  );
+  t.contains(
+    rowHtml,
+    'Missing',
+    'renderLongTailRow labels that chip Missing',
   );
   // Meta row = year · MB/Discogs · N tracks. cohort[1] carries a numeric
   // (Discogs) release id + 14 tracks.
-  t.ok(
-    rowHtml.includes('Discogs') && rowHtml.includes('14 tracks'),
-    'renderLongTailRow meta shows the Discogs mirror label + track count',
+  t.contains(
+    rowHtml,
+    'Discogs',
+    'renderLongTailRow meta shows the Discogs mirror label',
+  );
+  t.contains(
+    rowHtml,
+    '14 tracks',
+    'renderLongTailRow meta shows that release\u2019s track count',
   );
   // The low-signal pipeline `source` chip and unfindable_category chip are
   // gone — meta is now the pressing-disambiguation triple.
-  t.ok(
-    !rowHtml.includes('lt-meta-chip" title="unfindable category"'),
+  t.excludes(
+    rowHtml,
+    'lt-meta-chip" title="unfindable category"',
     'renderLongTailRow no longer renders the unfindable_category chip',
   );
   // An on-disk-band row gets the rank colour class + capitalised label, and
   // a UUID (MusicBrainz) release id surfaces the MusicBrainz label.
   const transparentRow = renderLongTailRow(cohort[0]);
-  t.ok(
-    transparentRow.includes('badge-rank-transparent') && transparentRow.includes('Transparent'),
-    'renderLongTailRow renders a rank-coloured chip for an on-disk band',
+  t.contains(
+    transparentRow,
+    'badge-rank-transparent',
+    'renderLongTailRow colours an on-disk row by its rank',
   );
-  t.ok(
-    transparentRow.includes('MusicBrainz') && transparentRow.includes('9 tracks'),
-    'renderLongTailRow meta shows the MusicBrainz mirror label + track count',
+  t.contains(
+    transparentRow,
+    'Transparent',
+    'renderLongTailRow names that rank on the chip',
+  );
+  t.contains(
+    transparentRow,
+    'MusicBrainz',
+    'renderLongTailRow meta shows the MusicBrainz mirror label for a UUID release id',
+  );
+  t.contains(
+    transparentRow,
+    '9 tracks',
+    'renderLongTailRow meta shows that release\u2019s track count',
   );
   // Singular track label for a single-track pressing.
-  t.ok(
+  t.contains(
     renderLongTailRow({ id: 9, artist_name: 'A', album_title: 'B', band: 'missing',
-      mb_release_id: '123', track_count: 1 }).includes('1 track<'),
+      mb_release_id: '123', track_count: 1 }), '1 track<',
     'renderLongTailRow renders singular "1 track"',
   );
 
@@ -1429,20 +1456,27 @@ t.section('long_tail.js pure helpers');
   // Empty cohort -> empty-cohort affordance, never blank.
   state.longTail = { rows: [], band: null, query: '' };
   const emptyCohort = renderLongTailBody();
-  t.ok(
-    emptyCohort.includes('No wanted releases in the long tail'),
+  t.contains(
+    emptyCohort,
+    'No wanted releases in the long tail',
     'renderLongTailBody empty cohort shows the empty-cohort affordance',
   );
   // Populated cohort -> tab strip + rows for the default (Missing) band.
   state.longTail = { rows: cohort, band: null, query: '' };
   const populated = renderLongTailBody();
-  t.ok(
-    populated.includes('lt-band-tabs') && populated.includes('lt-search-input'),
-    'renderLongTailBody renders band tabs + search box for a populated cohort',
+  t.contains(
+    populated,
+    'lt-band-tabs',
+    'renderLongTailBody renders band tabs for a populated cohort',
   );
-  t.ok(
-    populated.includes(
-      `lt-band-tab active-status" type="button" onclick="window.setLongTailBand('missing')`),
+  t.contains(
+    populated,
+    'lt-search-input',
+    'renderLongTailBody renders the search box for a populated cohort',
+  );
+  t.contains(
+    populated, 
+      `lt-band-tab active-status" type="button" onclick="window.setLongTailBand('missing')`,
     'renderLongTailBody renders Missing as the default active tab',
   );
   t.equal(
@@ -1453,12 +1487,14 @@ t.section('long_tail.js pure helpers');
   // affordance + cross-band hint show, never a blank area.
   state.longTail = { rows: cohort, band: 'missing', query: 'hecker' };
   const emptyBand = renderLongTailBody();
-  t.ok(
-    emptyBand.includes('No Missing releases match'),
+  t.contains(
+    emptyBand,
+    'No Missing releases match',
     'renderLongTailBody empty-band shows the per-band no-match affordance',
   );
-  t.ok(
-    emptyBand.includes('1 match in other bands'),
+  t.contains(
+    emptyBand,
+    '1 match in other bands',
     'renderLongTailBody empty-band surfaces the cross-band match hint',
   );
   // Reset shared state so later tests are not affected.
@@ -1911,10 +1947,12 @@ t.section('long_tail_console.js pure helpers (U6 secondary actions)');
     '',
     'acceptDisabledReason: enabled → empty string');
   t.contains(
-    acceptDisabledReason({ source: 'discogs' }, 'rg-1').toLowerCase(), 'discogs',
+    acceptDisabledReason({ source: 'discogs' }, 'rg-1').toLowerCase(),
+    'discogs',
     'acceptDisabledReason: Discogs reason mentions Discogs');
   t.contains(
-    acceptDisabledReason({ source: 'request' }, null).toLowerCase(), 'release group',
+    acceptDisabledReason({ source: 'request' }, null).toLowerCase(),
+    'release group',
     'acceptDisabledReason: no-rg reason mentions the missing release group');
 
   // --- intentToggleTarget: lossless ⇄ default toggle ---

@@ -308,10 +308,15 @@ t.section('renderWrongMatches() shows threshold controls and green state');
   t.contains(dom.wrongMatches.innerHTML, 'Cleanup Wrong Matches (3)', 'renders full-queue cleanup action');
   t.contains(dom.wrongMatches.innerHTML, 'Delete All (3)', 'renders per-group delete-all action');
   t.contains(dom.wrongMatches.innerHTML, 'deleteWrongMatch(100', 'renders per-entry delete action');
-  t.ok(
-    dom.wrongMatches.innerHTML.includes('data-pipeline-request-id="42"')
-      && dom.wrongMatches.innerHTML.includes('forceImportWrongMatch(100, this)'),
-    'force-import controls carry exact request identity and initiating control',
+  t.contains(
+    dom.wrongMatches.innerHTML,
+    'data-pipeline-request-id="42"',
+    'force-import controls carry the exact request identity',
+  );
+  t.contains(
+    dom.wrongMatches.innerHTML,
+    'forceImportWrongMatch(100, this)',
+    'force-import controls pass their own initiating control',
   );
 
   setWrongMatchConvergeThreshold(42, 230);
@@ -1249,8 +1254,9 @@ t.section('renderWrongMatchExplorer() distinguishes a containment refusal from a
       bitrate_kbps: 989, size_bytes: 4300000, tags: {},
     }],
   });
-  t.ok(
-    containmentHtml.includes('1 entry was refused (not read) as a containment decision'),
+  t.contains(
+    containmentHtml,
+    '1 entry was refused (not read) as a containment decision',
     'containment refusal leads with the containment sentence',
   );
   t.excludes(containmentHtml, 'could not be read', 'containment refusal never says "could not be read"');
@@ -1272,14 +1278,16 @@ t.section('renderWrongMatchExplorer() distinguishes a containment refusal from a
       bitrate_kbps: 989, size_bytes: 4300000, tags: {},
     }],
   });
-  t.ok(
-    worldFailureHtml.includes('1 entry could not be read'),
+  t.contains(
+    worldFailureHtml,
+    '1 entry could not be read',
     'world-failure refusal leads with the "could not be read" sentence',
   );
   t.excludes(worldFailureHtml, 'refused (not read)', 'world-failure refusal never uses the containment wording');
   t.contains(worldFailureHtml, 'Retry', 'world-failure refusal offers Retry — the world might have cleared');
-  t.ok(
-    worldFailureHtml.includes('window.reloadWrongMatchExplorer(901)'),
+  t.contains(
+    worldFailureHtml,
+    'window.reloadWrongMatchExplorer(901)',
     'Retry targets the exact entry id',
   );
 }
@@ -1306,8 +1314,9 @@ t.section('renderWrongMatchExplorer() empty-state (status:"unavailable") also ho
   t.excludes(containmentEmpty, 'could not be read', 'containment-refused empty state never says "could not be read"');
   t.contains(containmentEmpty, 'refused (not read)', 'containment-refused empty state uses the containment wording');
   t.excludes(containmentEmpty, 'Retry', 'containment-refused empty state offers no Retry');
-  t.ok(
-    containmentEmpty.includes('NOT evidence that the folder is empty'),
+  t.contains(
+    containmentEmpty,
+    'NOT evidence that the folder is empty',
     'still denies the folder is confidently empty',
   );
 
@@ -1324,8 +1333,9 @@ t.section('renderWrongMatchExplorer() empty-state (status:"unavailable") also ho
   t.contains(worldFailureEmpty, 'could not be read', 'world-failure empty state still says "could not be read"');
   t.excludes(worldFailureEmpty, 'refused (not read)', 'world-failure empty state never uses the containment wording');
   t.contains(worldFailureEmpty, 'Retry', 'world-failure empty state still offers Retry');
-  t.ok(
-    worldFailureEmpty.includes('NOT evidence that the folder is empty'),
+  t.contains(
+    worldFailureEmpty,
+    'NOT evidence that the folder is empty',
     'still denies the folder is confidently empty',
   );
 }
@@ -2529,8 +2539,9 @@ t.section('a follower skips terminal handling when its poll result names a DIFFE
 
   await refreshWrongMatches();
   await flushMicrotasks(50);
-  t.ok(
-    !dom.toast.textContent.includes('the DIFFERENT sweep genuinely failed'),
+  t.excludes(
+    dom.toast.textContent,
+    'the DIFFERENT sweep genuinely failed',
     'a poll result naming a different started_at is never toasted as this follower\'s own outcome',
   );
   globals.restore();

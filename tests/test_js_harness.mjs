@@ -277,7 +277,8 @@ t.section('contains and excludes refuse a non-string haystack');
   t.contains(run.stdout, 't.excludes needs a string haystack, got array',
     'excludes refuses it too, rather than accusing a correct assertion');
 
-  // Must still work: the string haystacks all 974 existing call sites pass.
+  // Must still work: a string haystack, which is what every one of the
+  // other suites' 1,485 call sites passes.
   const ok = runFixture(
     "t.contains('abc', 'b', 'a string haystack still matches');\n"
     + "t.excludes('abc', 'z', 'and still excludes');\n"
@@ -511,8 +512,11 @@ t.section('element() gives the fields render code touches');
 
 t.section('element() tracks connection, children and focus');
 {
-  // These four fields are why the factory had no callers: every suite that
-  // needed a button hand-rolled them beside the attribute map.
+  // `isConnected`, `children` and `focused` are three of the four fields the
+  // factory was missing (`id` is the fourth), and their absence is why it had
+  // no callers: every suite that needed a button hand-rolled them beside the
+  // attribute map. `removed` was already here and is asserted alongside them
+  // because `remove()` now writes both.
   const parent = element({ isConnected: true });
   const child = element();
   t.equal(child.isConnected, false, 'a fresh node is disconnected, as in a real DOM');
@@ -528,8 +532,7 @@ t.section('element() tracks connection, children and focus');
   t.equal(child.removed, true, 'remove() flags the child');
   t.equal(child.isConnected, false, 'and disconnects it');
   t.deepEqual(parent.children, [child],
-    'remove() does not reach into the parent, which is what the DOM detach '
-    + 'assertions in test_js_release_actions.mjs read isConnected for');
+    'remove() flags the child rather than splicing it out of its parent');
 }
 
 t.section('element() attributes live beside the element, never on it');

@@ -462,13 +462,18 @@ export function stubGlobals(values) {
  * A minimal stand-in DOM element: the fields production render code
  * touches, plus whatever the caller seeds.
  *
- * The field list is not a guess. It is the union of what the suites
- * hand-rolled before adopting this factory (`test_js_release_actions.mjs`'s
+ * The field list is not a guess. It is what the suites hand-rolled in common
+ * before adopting this factory (`test_js_release_actions.mjs`'s
  * `fakeDomElement`, `test_js_discography.mjs`'s local `element(tag)`, the
  * processing-lock button in `test_js_analysis.mjs` /
- * `test_js_long_tail_console.mjs`, and `test_js_wrong_matches.mjs`'s
- * `fakeElement`), which is why `isConnected`, `children`, `focused` and the
- * attribute map all live here rather than at five call sites.
+ * `test_js_long_tail_console.mjs`, `test_js_wrong_matches.mjs`'s
+ * `fakeElement`, `test_js_util.mjs`'s session-overlay node and
+ * `test_js_convergence.mjs`'s button), which is why `isConnected`,
+ * `children`, `focused` and the attribute map live here rather than in seven
+ * files. It is deliberately not their UNION: `insertAdjacentElement` stays
+ * hand-rolled at 12 sites because each closes over that test's own
+ * `inserted` array, and `append`, `tag`, `type`, `listeners` and `closest`
+ * have one caller each. Seed them through `initial`.
  *
  * A fresh node is `isConnected: false`, as in a real DOM: it is connected
  * by `appendChild`, by a caller's `insertAdjacentElement`, or by seeding
