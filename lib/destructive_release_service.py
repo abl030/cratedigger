@@ -33,7 +33,7 @@ from lib.beets_delete import (
     BeetsDeleteCompleted,
     BeetsDeleteFailed,
     BeetsDeleteFailureReason,
-    BeetsDeleteOutcome,
+    BeetsDeleteFn,
     BeetsDeleteRequest,
     run_beets_delete,
 )
@@ -105,9 +105,6 @@ class FinalizeRequestFn(Protocol):
         request_id: int,
         transition: transitions.RequestTransition,
     ) -> transitions.TransitionResult: ...
-
-
-BeetsDeleteFn = Callable[[BeetsDeleteRequest], BeetsDeleteOutcome]
 
 
 def _request_identity(row: Mapping[str, Any]) -> ReleaseIdentity | None:

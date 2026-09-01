@@ -616,8 +616,14 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     # (tests.web.test_runtime), but the runtime is what every route reads,
     # so a solo change to it also regresses the per-thread handle contract
     # and the HTTP-level boundary tests that drive real requests through it.
+    # tests.test_web_runtime_generated is named because the sibling
+    # pairing cannot find it: expand_test_selection derives the
+    # _generated name from the deterministic module it pairs with, and
+    # this module's deterministic tests live at tests/web/test_runtime.py
+    # while the property lives at the tests/ root (#1313 batch A).
     "web/runtime.py": (
         "tests.web.test_runtime",
+        "tests.test_web_runtime_generated",
         "tests.web.test_server_threading",
         "tests.web.test_server_endpoints",
     ),

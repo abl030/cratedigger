@@ -23,6 +23,7 @@ import unittest
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import conftest  # noqa: F401 — sets TEST_DB_DSN for the per-thread tests
 
+from lib.pipeline_db import PipelineDB
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_web_runtime
 from web.runtime import WebRuntime, install_runtime, runtime
@@ -183,26 +184,66 @@ class TestPipelineHandleResolution(unittest.TestCase):
         self.assertIn("second", handles)
         self.assertIsNot(handles["first"], handles["second"])
 
-    def test_new_db_opens_a_connection_the_request_thread_does_not_own(
-        self,
-    ) -> None:
-        """Background work outliving a request never borrows its handle."""
+    def test_background_session_owns_the_connection_it_opens(self) -> None:
+        """Background work outliving a request never borrows its handle.
+
+        Under a DSN the session opens its own connection and closes it
+        at the end of the block, so the sweep's handle lifetime belongs
+        to the runtime rather than to whoever entered the block.
+        """
         rt = WebRuntime(db_dsn=TEST_DSN)
         self.addCleanup(rt.close_thread_handles)
-
         request_handle = rt.db()
-        background = rt.new_db()
-        try:
-            self.assertIsNot(background, request_handle)
-        finally:
-            background.close()
 
-    def test_new_db_falls_back_to_the_injected_handle_without_a_dsn(
+        with rt.open_background_db() as background:
+            self.assertIsNot(background, request_handle)
+            self.assertFalse(background.conn.closed)
+
+        self.assertTrue(background.conn.closed)
+        # The request thread's own handle is untouched by the sweep's.
+        self.assertFalse(request_handle.conn.closed)
+
+    def test_background_session_closes_its_connection_after_a_raise(
         self,
     ) -> None:
+        rt = WebRuntime(db_dsn=TEST_DSN)
+        self.addCleanup(rt.close_thread_handles)
+        opened: list[PipelineDB] = []
+
+        with (
+            self.assertRaises(ValueError),
+            rt.open_background_db() as background,
+        ):
+            opened.append(background)
+            raise ValueError("the sweep blew up")
+
+        self.assertTrue(opened[0].conn.closed)
+
+    def test_background_session_never_closes_an_injected_handle(self) -> None:
+        """The dev server and the harness own the handle they inject.
+
+        The bulk-triage sweep used to close whatever the runtime handed
+        it, which under a DSN-less runtime is the one shared connection
+        those two callers keep for every request — the same handle
+        ``close_thread_handles`` already refuses to touch.
+        """
         sentinel = FakePipelineDB()
         rt = make_web_runtime(db=sentinel)
-        self.assertIs(rt.new_db(), sentinel)
+
+        with rt.open_background_db() as background:
+            self.assertIs(background, sentinel)
+
+        self.assertFalse(sentinel.closed)
+        self.assertEqual(sentinel.close_calls, 0)
+
+    def test_background_session_fails_closed_with_nothing_configured(
+        self,
+    ) -> None:
+        with (
+            self.assertRaisesRegex(RuntimeError, "Pipeline DB not connected"),
+            WebRuntime().open_background_db(),
+        ):
+            pass
 
     def test_drop_thread_db_drops_only_this_threads_handle(self) -> None:
         rt = WebRuntime(db_dsn=TEST_DSN)

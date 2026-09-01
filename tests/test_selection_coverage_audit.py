@@ -375,6 +375,7 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
     # the loss of the two HTTP-boundary modules.
     "web/runtime.py": (
         "tests.web.test_runtime",
+        "tests.test_web_runtime_generated",
         "tests.web.test_server_threading",
         "tests.web.test_server_endpoints",
     ),
