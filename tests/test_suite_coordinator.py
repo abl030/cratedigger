@@ -26,11 +26,14 @@ from scripts.run_python_tests import (
 from scripts.run_targeted_tests import targeted_phases
 from scripts.run_test_suite import (
     FAILURE_MARKER_PREFIX,
+    CheckFailure,
     CheckFailureMarker,
     CheckSummary,
+    ParserKind,
     PhaseSpec,
     _active_processes_lock,
     _default_phases,
+    _parse_failures,
     dirty_state_fingerprint,
     run_suite,
 )
@@ -2563,6 +2566,138 @@ class JsCheckHelperTestCase(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(len(self.record.read_text().splitlines()), 2)
         self.assertEqual(result.stdout.count("CRATEDIGGER_JS_FAILURE"), 2)
+
+    def _fake_node_emitting(self, script: str) -> None:
+        """Replace the fake node with one printing `script` and exiting 1."""
+        fake_node = Path(self.fake_bin.name) / "node"
+        fake_node.write_text(
+            "#!/usr/bin/env bash\n"
+            'printf \'%s\\n\' "$*" >> "$CRATEDIGGER_NODE_RECORD"\n'
+            f"{script}\n"
+            "exit 1\n",
+            encoding="utf-8",
+        )
+        fake_node.chmod(0o755)
+
+    def test_a_suite_reporting_its_own_failures_gets_no_file_level_marker(
+        self,
+    ) -> None:
+        """The harness owns per-assertion reporting once it reaches done().
+
+        `tests/js_harness.mjs` prints one marker per failed assertion and
+        then a `CRATEDIGGER_JS_DONE` line. The wrapper must not append its
+        own file-level marker on top of those, or every real JS failure is
+        reported twice -- once usefully, once as "the file failed".
+        """
+        (Path(self.root.name) / "tests" / "test_js_a.mjs").write_text(
+            "x", encoding="utf-8"
+        )
+        self._fake_node_emitting(
+            "printf 'CRATEDIGGER_JS_FAILURE\\ttests/test_js_a.mjs::sec::one\\tboom\\n'\n"
+            "printf 'CRATEDIGGER_JS_FAILURE\\ttests/test_js_a.mjs::sec::two\\tbang\\n'\n"
+            "printf 'CRATEDIGGER_JS_DONE\\ttests/test_js_a.mjs\\t5\\t2\\n'"
+        )
+
+        result = self._run("unit")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout.count("CRATEDIGGER_JS_FAILURE"), 2)
+        self.assertIn("tests/test_js_a.mjs::sec::one", result.stdout)
+        self.assertNotIn("suite exited before reaching", result.stdout)
+
+    def test_a_suite_that_dies_after_reporting_owes_both_findings(self) -> None:
+        """A crash is its own finding, not one the earlier failures absorb.
+
+        The fallback is keyed on the ABSENCE of the done marker rather than
+        on the absence of failure markers, precisely so a suite that failed
+        two assertions and THEN threw reports the throw as well.
+        """
+        (Path(self.root.name) / "tests" / "test_js_a.mjs").write_text(
+            "x", encoding="utf-8"
+        )
+        self._fake_node_emitting(
+            "printf 'CRATEDIGGER_JS_FAILURE\\ttests/test_js_a.mjs::sec::one\\tboom\\n'"
+        )
+
+        result = self._run("unit")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout.count("CRATEDIGGER_JS_FAILURE"), 2)
+        self.assertIn("tests/test_js_a.mjs::sec::one", result.stdout)
+        self.assertIn("suite exited before reaching", result.stdout)
+
+
+class TestJavaScriptFailureIdentityIsPerAssertion(unittest.TestCase):
+    """A per-assertion identity still yields a runnable per-FILE rerun.
+
+    `tests/js_harness.mjs` names one failed assertion per marker, as
+    `<file>::<section>::<message>`. `_parse_failures` therefore takes the
+    owner and the rerun command from the file half -- the index entry stays
+    specific while `node <owner>` stays something you can actually paste.
+    """
+
+    def _failures(
+        self, parser: ParserKind, marker: str
+    ) -> tuple[CheckFailure, ...]:
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "phase.log"
+            log.write_text(marker + "\n", encoding="utf-8")
+            phase = PhaseSpec(
+                parser,
+                ("true",),
+                f"bash scripts/run_js_checks.sh {parser}",
+                parser,
+            )
+            failures, _metrics = _parse_failures(phase, log)
+        return failures
+
+    def test_owner_and_rerun_come_from_the_file_half_of_the_identity(
+        self,
+    ) -> None:
+        (failure,) = self._failures(
+            "js-unit",
+            "CRATEDIGGER_JS_FAILURE\t"
+            "tests/test_js_recents.mjs::renderRecents()::badge is escaped\t"
+            "expected 'a', got 'b'",
+        )
+
+        self.assertEqual(
+            failure.identity,
+            "tests/test_js_recents.mjs::renderRecents()::badge is escaped",
+        )
+        self.assertEqual(failure.owner, "tests/test_js_recents.mjs")
+        self.assertEqual(
+            failure.rerun_command, "node tests/test_js_recents.mjs"
+        )
+        self.assertEqual(failure.detail, "expected 'a', got 'b'")
+
+    def test_two_assertions_in_one_file_are_two_distinct_index_entries(
+        self,
+    ) -> None:
+        first, second = self._failures(
+            "js-unit",
+            "CRATEDIGGER_JS_FAILURE\ttests/test_js_a.mjs::s::one\tboom\n"
+            "CRATEDIGGER_JS_FAILURE\ttests/test_js_a.mjs::s::two\tbang",
+        )
+
+        self.assertNotEqual(first.identity, second.identity)
+        self.assertEqual(first.owner, second.owner)
+        self.assertEqual(first.rerun_command, second.rerun_command)
+
+    def test_a_syntax_marker_carries_a_bare_path_and_is_unaffected(
+        self,
+    ) -> None:
+        (failure,) = self._failures(
+            "js-syntax",
+            "CRATEDIGGER_JS_FAILURE\tweb/js/bad.js\tnode --check failed",
+        )
+
+        self.assertEqual(failure.identity, "web/js/bad.js")
+        self.assertEqual(failure.owner, "web/js/bad.js")
+        self.assertEqual(
+            failure.rerun_command,
+            "node --check --input-type=module < web/js/bad.js",
+        )
 
 
 class TestCoordinatorRunsAsAScript(unittest.TestCase):
