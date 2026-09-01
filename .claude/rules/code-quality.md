@@ -459,7 +459,20 @@ without it, and every entry whose deletion no fail-closed rule would catch
 because no rule polices that root and suffix) carries an explicit
 `MASKABLE_ENTRY_PINS` pin — single-place deletion can never be silent,
 while deleting an entry AND its pin together stays review-owned, the same
-boundary the typing ratchet has. This is development feedback; the full
+boundary the typing ratchet has.
+
+The basename conventions and the directory prefix rules are themselves one
+table since issue #1313, `SELECTION_RULES` (5 basename rows read by
+`_direct_test_candidates`, 9 directory rows read by the resolver), so the
+modules they name are ordinary data that contract A checks like any
+`EXACT_PATH_NEIGHBOURS` entry — they were inline literals inside two
+if-chains, and a nonexistent one failed only downstream at the first
+selection that hit the rule. Before adding a hand-authored entry, ask what
+the path already resolves:
+`nix-shell --run "python3 scripts/targeted_test_selection.py explain <path>"`
+names the mechanism behind every selected module, every module a rule
+looked for and did not find on disk, and whether any root rule polices the
+path. This is development feedback; the full
 suite remains the exhaustive pre-review boundary.
 
 Always use `nix-shell --run` for Python (`.claude/rules/nix-shell.md`). Direct
