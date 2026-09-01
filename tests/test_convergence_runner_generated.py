@@ -412,8 +412,10 @@ class TestRegisteredStepFailureMessagesReachable(unittest.TestCase):
     each row here injects a failure at the sweep's PROPAGATING
     pipeline-DB seam and proves the registered message is what the
     operator sees. The sweep-internal cells (what each swallows, and
-    with what degradation) are pinned in
-    ``tests/test_slskd_sweep_exception_contracts.py``.
+    with what degradation) are stated — with each cell mapped to the
+    module that pins it — in
+    ``tests/test_slskd_sweep_exception_contracts.py``, which also pins
+    the pipeline-DB propagate/degrade cells directly.
 
     One row is fail-closed LEGISLATION rather than reachability proof:
     ``log_cycle_summary``'s world (``ctx.cycle_start = None``) is not

@@ -206,6 +206,13 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
         "tests.test_slskd_searches",
         "tests.test_search_exec",
     ),
+    # The basename probe resolves tests.test_download regardless,
+    # masking the loss of the harvest DB-propagation coverage (#1312).
+    "lib/download.py": (
+        "tests.test_download",
+        "tests.test_slskd_sweep_exception_contracts",
+        "tests.test_convergence_runner_generated",
+    ),
     # The basename probe resolves tests.test_slskd_searches regardless,
     # masking the loss of the sweep-exception-contract module (#1312).
     "lib/slskd_searches.py": (

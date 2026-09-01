@@ -144,6 +144,18 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_transfer_ledger_generated",
         "tests.test_slskd_sweep_exception_contracts",
     ),
+    "lib/download.py": (
+        # The basename probe resolves tests.test_download on its own;
+        # this entry adds the two modules that pin
+        # harvest_terminal_transfer_evidence's DB-propagation contract —
+        # the sweep-internal pin and the composed reachability row
+        # (issue #1312 round-2 reader finding R2: without them a solo
+        # lib/download.py diff that swallows harvest's seam runs green).
+        # Maskable — pinned in MASKABLE_ENTRY_PINS.
+        "tests.test_download",
+        "tests.test_slskd_sweep_exception_contracts",
+        "tests.test_convergence_runner_generated",
+    ),
     "lib/download_ownership.py": (
         # Was an admitted zero-neighbour gap (issue #1199): no
         # tests.test_download_ownership. The ownership writer/reader

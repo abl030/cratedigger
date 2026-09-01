@@ -39,15 +39,19 @@ evidence                        the pass            continue
 purge_completed_transfers       noop summary        count failed,         propagates
 ==============================  ==================  ====================  =======================
 
-The slskd and per-item cells were already pinned where each sweep's
+Most slskd and per-item cells were already pinned where each sweep's
 tests live: ``tests/test_download.py`` (``TestConvergeSlskdOrphans``'s
 snapshot-failure and cancel-error pins; ``TestPurgeCompletedTransfers``'s
 snapshot-failure and removal-error pins;
 ``TestHarvestTerminalTransferEvidence``'s snapshot-noop and per-row
-isolation pins), ``tests/test_slskd_searches.py`` (fetch-failure and
-per-id delete-failure pins), and ``tests/test_disk_reaper_generated.py``
-(the fail-closed protected-set abort pins). This module pins the
-pipeline-DB cells those homes did not: the propagate/degrade column.
+isolation pins) and ``tests/test_slskd_searches.py`` (fetch-failure and
+per-id delete-failure pins); ``tests/test_disk_reaper_generated.py``
+holds the reaper's fail-closed protected-set abort pins (a pipeline-DB
+cell, pinned at its home). This module pins the cells those homes did
+not: the pipeline-DB propagate/degrade column, plus the reaper's
+per-item removal-failure cell, which no home had pinned at all
+(``TestDiskReaperDbFailureSeams.
+test_removal_failure_is_logged_and_the_sweep_continues``).
 
 One bonus row rides along: ``prune_transfer_ledger_cycle`` was NOT one
 of the deferred five — the reachability table has composed its
@@ -72,9 +76,10 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 import unittest
 from datetime import UTC, datetime, timedelta
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -90,6 +95,7 @@ from lib.slskd_searches import (
 )
 from lib.slskd_transfer_ledger import prune_transfer_ledger_cycle
 from lib.slskd_transfers import (
+    ORPHAN_MIN_AGE_DAYS,
     converge_slskd_orphans,
     purge_completed_transfers,
     reap_disk_orphans,
@@ -259,6 +265,57 @@ class TestDiskReaperDbFailureSeams(unittest.TestCase):
             ctx = self._ctx(root, _OwnedPathsReadRaises())
             with self.assertRaises(psycopg2.OperationalError):
                 reap_disk_orphans(ctx)
+
+    def _seed_stamped_file(
+        self, db: FakePipelineDB, root: str, name: str, *, request_id: int,
+    ) -> str:
+        """One ledger-owned, completion-stamped, age-eligible file on disk."""
+        album_dir = os.path.join(root, "Album")
+        os.makedirs(album_dir, exist_ok=True)
+        path = os.path.join(album_dir, name)
+        with open(path, "wb") as f:
+            f.write(b"flac-bytes")
+        aged = time.time() - (ORPHAN_MIN_AGE_DAYS + 1) * 86400
+        os.utime(path, (aged, aged))
+        remote = f"Music\\Album\\{name}"
+        db.record_transfer_enqueue([TransferLedgerRow(
+            request_id=request_id, username="p0", filename=remote)])
+        db.confirm_transfer_enqueue("p0", remote, request_id=request_id)
+        db.stamp_transfer_completion("p0", remote, path)
+        return path
+
+    def test_removal_failure_is_logged_and_the_sweep_continues(self):
+        """The reaper's per-item cell: one file's failed unlink is logged
+        and the remaining eligible files are still reaped — never an
+        aborted sweep, never an exception."""
+        with tempfile.TemporaryDirectory() as root:
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(id=1, status="imported"))
+            poisoned = self._seed_stamped_file(
+                db, root, "01 - Poisoned.flac", request_id=1)
+            healthy = self._seed_stamped_file(
+                db, root, "02 - Healthy.flac", request_id=1)
+
+            real_remove = os.remove
+
+            def _selective_remove(path: str) -> None:
+                if path == poisoned:
+                    raise OSError("injected: unlink refused")
+                real_remove(path)
+
+            with (
+                patch("os.remove", side_effect=_selective_remove),
+                self.assertLogs("cratedigger", level="WARNING") as logs,
+            ):
+                summary = reap_disk_orphans(self._ctx(root, db))
+
+            self.assertFalse(summary.aborted)
+            self.assertEqual(summary.removed, 1)
+            self.assertTrue(os.path.exists(poisoned))
+            self.assertFalse(os.path.exists(healthy))
+            self.assertTrue(
+                any("failed to remove" in line for line in logs.output),
+                f"expected the removal-failure warning, got: {logs.output}")
 
     def test_abandoned_read_failure_degrades_to_ordinary_age_threshold(self):
         with tempfile.TemporaryDirectory() as root:
