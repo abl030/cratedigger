@@ -30,6 +30,7 @@ from lib.context import CratediggerContext
 from lib.pipeline_db import TransferLedgerRow
 from lib.slskd_transfers import purge_completed_transfers
 from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
+from tests.helpers import make_cycle_collaborators
 
 _LIVE_STATES = ("InProgress", "Queued, Remotely", "Queued, Locally", "")
 _TERMINAL_STATES = (
@@ -97,9 +98,11 @@ def _ctx(
     slskd: FakeSlskdAPI,
 ) -> CratediggerContext:
     return CratediggerContext(
-        cfg=CratediggerConfig.from_ini(configparser.ConfigParser()),
-        slskd=slskd,
-        pipeline_db_source=FakePipelineDBSource(db),
+        collaborators=make_cycle_collaborators(
+            cfg=CratediggerConfig.from_ini(configparser.ConfigParser()),
+            slskd=slskd,
+            pipeline_db_source=FakePipelineDBSource(db),
+        ),
     )
 
 

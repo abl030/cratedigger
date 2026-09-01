@@ -48,7 +48,11 @@ from lib.enqueue import EnqueueAttempt, try_multi_enqueue
 from lib.grab_list import DownloadFile
 from lib.slskd_transfers import SlskdEnqueueOutcome
 from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
-from tests.helpers import make_request_row
+from tests.helpers import (
+    make_cycle_collaborators,
+    make_request_row,
+    rebind_collaborators,
+)
 
 
 @dataclass(frozen=True)
@@ -100,12 +104,17 @@ def _build_harness(world: MultiDiscWorld):
     db = FakePipelineDB()
     db.seed_request(make_request_row(id=1, status="wanted"))
     ctx = CratediggerContext(
-        cfg=cfg,
-        slskd=FakeSlskdAPI(),
-        pipeline_db_source=FakePipelineDBSource(db),
+        collaborators=make_cycle_collaborators(
+            cfg=cfg,
+            slskd=FakeSlskdAPI(),
+            pipeline_db_source=FakePipelineDBSource(db),
+        ),
         user_upload_speed={"peer": 10_000},
     )
-    ctx.download_ownership = DownloadOwnershipWriter(db_factory=lambda: db)
+    rebind_collaborators(
+        ctx,
+        download_ownership=DownloadOwnershipWriter(db_factory=lambda: db),
+    )
     ctx.current_album_cache[1] = SimpleNamespace(
         id=1, db_request_id=1,
         title="The Complete Radio Series",

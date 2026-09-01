@@ -214,6 +214,7 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
     "cratedigger.py": (
         "tests.test_slskd_searches",
         "tests.test_search_exec",
+        "tests.test_cycle_startup",
     ),
     # The basename probe resolves tests.test_download regardless,
     # masking the loss of the harvest DB-propagation coverage (#1312).

@@ -42,6 +42,7 @@ from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
 from lib.slskd_searches import SEARCH_LEDGER_SWEEP_GRACE_S, converge_slskd_searches
 from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
+from tests.helpers import make_cycle_collaborators
 
 _RESIDENT_STATES = (
     "Completed, TimedOut",
@@ -133,7 +134,12 @@ def _build_world_fakes(world: SweepWorld) -> tuple[FakePipelineDB, FakeSlskdAPI]
 
 def _ctx(db: FakePipelineDB, slskd: FakeSlskdAPI) -> CratediggerContext:
     return CratediggerContext(
-        cfg=_cfg(), slskd=slskd, pipeline_db_source=FakePipelineDBSource(db))
+        collaborators=make_cycle_collaborators(
+            cfg=_cfg(),
+            slskd=slskd,
+            pipeline_db_source=FakePipelineDBSource(db),
+        ),
+    )
 
 
 # --- Invariant checkers (module-level so the known-bad self-tests can

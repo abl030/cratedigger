@@ -65,6 +65,14 @@ wrappers are gone — `main()` builds one `CratediggerContext` and hands off to
 `tests/test_convergence_runner_generated.py::TestRunCycleExecutable` is
 exactly the full-cycle integration test this item said was impossible.
 
+**Deepened (issue #1313 candidate 3, 2026-09-01)**: the context's wired-in
+collaborators moved into a frozen, all-required `CycleCollaborators` (and its
+slskd-less sibling `WorkerCollaborators`), built by
+`cratedigger.build_cycle_collaborators`; `main()`'s tail is
+`run_startup_and_cycle`, which a test drives. Forgetting a collaborator at a
+construction site is now a type error, so the 888-line hand-registered AST
+audit that used to hold the set of construction sites is gone.
+
 ## 5. Configurable/injectable `time.sleep` in `slskd_do_enqueue`
 
 **Problem**: `slskd_do_enqueue()` has a hardcoded `time.sleep(5)` between enqueue and status check. Every test path that exercises re-enqueue (retry logic in `poll_active_downloads`, the old `_handle_download_problems`) pays this 5-second tax per call. The poll test suite takes ~35 seconds, mostly from `time.sleep`.

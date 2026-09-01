@@ -46,6 +46,10 @@ import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.download_ownership import DownloadOwnershipWriter
 from lib.pipeline_db import TransferLedgerRow
 from tests.fakes import FakePipelineDB, FakeSlskdAPI
+from tests.helpers import (
+    make_cycle_collaborators,
+    rebind_collaborators,
+)
 
 _USERNAMES = ("peer0", "peer1", "péer♪2")
 _FILENAMES = (
@@ -123,12 +127,17 @@ def _run_enqueue(world: EnqueueWorld) -> tuple[list[str], FakePipelineDB]:
     slskd.transfers.enqueue = recording_enqueue  # type: ignore[method-assign]
 
     ctx = CratediggerContext(
-        cfg=CratediggerConfig.from_ini(configparser.ConfigParser()),
-        slskd=slskd,
-        pipeline_db_source=FakePipelineDBSource(FakePipelineDB()),
+        collaborators=make_cycle_collaborators(
+            cfg=CratediggerConfig.from_ini(configparser.ConfigParser()),
+            slskd=slskd,
+            pipeline_db_source=FakePipelineDBSource(FakePipelineDB()),
+        ),
     )
     if world.has_download_ownership:
-        ctx.download_ownership = DownloadOwnershipWriter(db_factory=lambda: db)
+        rebind_collaborators(
+            ctx,
+            download_ownership=DownloadOwnershipWriter(db_factory=lambda: db),
+        )
 
     files = [{"filename": f, "size": 1} for f in world.filenames]
     with patch("time.sleep"):

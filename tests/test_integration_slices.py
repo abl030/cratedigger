@@ -80,12 +80,14 @@ from tests.helpers import (
     delete_all_rows,
     hermetic_beets_config_defaults,
     make_ctx_with_fake_db,
+    make_cycle_collaborators,
     make_download_file,
     make_grab_list_entry,
     make_import_result,
     make_request_row,
     make_requests_http_error,
     make_validation_result,
+    rebind_collaborators,
 )
 
 _HERMETIC_BEETS_DEFAULTS: AbstractContextManager[tuple[str, str]] | None = None
@@ -448,8 +450,11 @@ class TestDownloadOwnershipPreclaimRecoverySlice(unittest.TestCase):
         enqueue_ctx = make_ctx_with_fake_db(db, cfg=cfg, slskd=FakeSlskdAPI())
         enqueue_ctx.current_album_cache[1] = album
         enqueue_ctx.user_upload_speed = {"u00": 1000}
-        enqueue_ctx.download_ownership = DownloadOwnershipWriter(
+        rebind_collaborators(
+            enqueue_ctx,
+            download_ownership=DownloadOwnershipWriter(
             db_factory=lambda: db,
+        ),
         )
         file_dir = "Music\\u00\\Album"
         tracks: list[TrackRecord] = [
@@ -541,8 +546,11 @@ class TestAmbiguousEnqueueReasonPropagationSlice(unittest.TestCase):
         enqueue_ctx = make_ctx_with_fake_db(db, cfg=cfg, slskd=FakeSlskdAPI())
         enqueue_ctx.current_album_cache[1] = album
         enqueue_ctx.user_upload_speed = {"u00": 1000}
-        enqueue_ctx.download_ownership = DownloadOwnershipWriter(
+        rebind_collaborators(
+            enqueue_ctx,
+            download_ownership=DownloadOwnershipWriter(
             db_factory=lambda: db,
+        ),
         )
         file_dir = "Music\\u00\\Album"
         tracks: list[TrackRecord] = [
@@ -626,7 +634,10 @@ class TestPeerOnlineProbeAtEnqueueSlice(unittest.TestCase):
         ctx = make_ctx_with_fake_db(db, cfg=cfg, slskd=slskd)
         ctx.current_album_cache[1] = self._make_album(1)
         ctx.user_upload_speed = speeds
-        ctx.download_ownership = DownloadOwnershipWriter(db_factory=lambda: db)
+        rebind_collaborators(
+            ctx,
+            download_ownership=DownloadOwnershipWriter(db_factory=lambda: db),
+        )
         return ctx
 
     def _wave_match_side_effect(self):
@@ -4577,7 +4588,11 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         source = FakePipelineDBSource(db)
 
         ctx = CratediggerContext(
-            cfg=cfg, slskd=slskd, pipeline_db_source=source,
+            collaborators=make_cycle_collaborators(
+                cfg=cfg,
+                slskd=slskd,
+                pipeline_db_source=source,
+            ),
         )
         # search_for_album / find_download read the album from the cache.
         ctx.current_album_cache[album.id] = album
@@ -5293,8 +5308,14 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         # Locally wired on THIS test's ctx only -- _wire() itself stays
         # untouched so every other test in this class keeps its existing
         # (unclaimed) behaviour.
-        ctx.download_ownership = DownloadOwnershipWriter(db_factory=lambda: db)
-        ctx.claimed_queue_keys_registry = ClaimedQueueKeysRegistry()
+        rebind_collaborators(
+            ctx,
+            download_ownership=DownloadOwnershipWriter(db_factory=lambda: db),
+        )
+        rebind_collaborators(
+            ctx,
+            claimed_queue_keys_registry=ClaimedQueueKeysRegistry(),
+        )
 
         result = cratedigger.search_for_album(album, ctx)
         find_result = find_download(album, ctx)
@@ -5334,8 +5355,11 @@ class TestSearchExhaustionResetsCounterSlice(unittest.TestCase):
         from lib.context import CratediggerContext
         source = FakePipelineDBSource(db)
         ctx = CratediggerContext(
-            cfg=CratediggerConfig.from_ini(configparser.ConfigParser()),
-            pipeline_db_source=source, slskd=MagicMock(),
+            collaborators=make_cycle_collaborators(
+                cfg=CratediggerConfig.from_ini(configparser.ConfigParser()),
+                slskd=FakeSlskdAPI(),
+                pipeline_db_source=source,
+            ),
         )
         return ctx
 
@@ -6161,7 +6185,11 @@ class TestU5PlanDrivenExecutorSlice(unittest.TestCase):
         from lib.context import CratediggerContext
         source = FakePipelineDBSource(db)
         ctx = CratediggerContext(
-            cfg=cfg, slskd=slskd, pipeline_db_source=source,
+            collaborators=make_cycle_collaborators(
+                cfg=cfg,
+                slskd=slskd,
+                pipeline_db_source=source,
+            ),
         )
         return ctx
 
@@ -6459,8 +6487,12 @@ class TestU5PlanDrivenExecutorSlice(unittest.TestCase):
 
         writer = DownloadOwnershipWriter(db_factory=lambda: db)
         worker_ctx = CratediggerContext(
-            cfg=cfg, slskd=MagicMock(), pipeline_db_source=MagicMock(),
-            download_ownership=writer,
+            collaborators=make_cycle_collaborators(
+                cfg=cfg,
+                slskd=FakeSlskdAPI(),
+                pipeline_db_source=MagicMock(),
+                download_ownership=writer,
+            ),
             active_plan_execution=old_exec,
         )
         album = self._make_album(request_id=rid)
@@ -6534,7 +6566,11 @@ class TestU5RegressionExecutorDoesNotUseLegacyVariantPicker(unittest.TestCase):
         )
         source = FakePipelineDBSource(db)
         ctx = CratediggerContext(
-            cfg=cfg, slskd=slskd, pipeline_db_source=source,
+            collaborators=make_cycle_collaborators(
+                cfg=cfg,
+                slskd=slskd,
+                pipeline_db_source=source,
+            ),
         )
         ctx.current_album_cache[album.id] = album
 
@@ -8562,9 +8598,11 @@ class TestProcessingOwnerPostgresFilesystemSlice(unittest.TestCase):
                 borrowed_db=self.db,
             )
             runtime_context = CratediggerContext(
-                cfg=cfg,
-                slskd=FakeSlskdAPI(),
-                pipeline_db_source=source,
+                collaborators=make_cycle_collaborators(
+                    cfg=cfg,
+                    slskd=FakeSlskdAPI(),
+                    pipeline_db_source=source,
+                ),
             )
 
             def validated_handler(

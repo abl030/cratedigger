@@ -84,7 +84,12 @@ from lib.wrong_match_policy import (
     WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS,
 )
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_download_file, make_grab_list_entry, make_request_row
+from tests.helpers import (
+    make_cycle_collaborators,
+    make_download_file,
+    make_grab_list_entry,
+    make_request_row,
+)
 
 _KNOWN_SCENARIOS = (
     *DELETE_ELIGIBLE_REJECTION_SCENARIOS,
@@ -240,7 +245,13 @@ def _run_lane_a(
         cfg = CratediggerConfig(
             beets_tracking_file=os.path.join(tmpdir, "tracking.jsonl"),
         )
-        ctx = CratediggerContext(cfg=cfg, slskd=None, pipeline_db_source=source)
+        ctx = CratediggerContext(
+            collaborators=make_cycle_collaborators(
+                cfg=cfg,
+                slskd=None,
+                pipeline_db_source=source,
+            ),
+        )
         files = (
             [make_download_file(username=username) for username in contributors]
             if contributors

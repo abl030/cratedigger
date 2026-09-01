@@ -9,6 +9,7 @@ from lib.config import CratediggerConfig
 from lib.context import CratediggerContext
 from lib.peer_cache import PeerCache, PeerCacheStats, connect_from_config
 from lib.search import SearchResult
+from tests.helpers import make_cycle_collaborators
 
 
 class FakeRedis:
@@ -223,10 +224,12 @@ class TestPeerCacheConnection(unittest.TestCase):
 class TestSearchResultScalarMerge(unittest.TestCase):
     def _ctx(self, cache: PeerCache) -> CratediggerContext:
         return CratediggerContext(
-            cfg=CratediggerConfig(),
-            slskd=object(),
-            pipeline_db_source=MagicMock(),
-            peer_cache=cache,
+            collaborators=make_cycle_collaborators(
+                cfg=CratediggerConfig(),
+                slskd=object(),
+                pipeline_db_source=MagicMock(),
+                peer_cache=cache,
+            ),
         )
 
     def test_merge_search_result_fills_missing_scalars_from_redis(self) -> None:

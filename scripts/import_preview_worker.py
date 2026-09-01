@@ -443,7 +443,7 @@ def _materialize_automation_authority(
     materialize_fn: Callable[..., object] | None = None,
 ) -> str:
     """Resume only the persisted exact manifest into its persisted path."""
-    from lib.context import CratediggerContext
+    from lib.context import CratediggerContext, WorkerCollaborators
     from lib.download_materialization import (
         Materialized,
         _materialize_processing_dir,
@@ -465,10 +465,14 @@ def _materialize_automation_authority(
         authority.canonical_path
     ):
         raise RuntimeError("persisted automation path is not canonical")
+    # WorkerCollaborators: the preview worker holds no slskd client, so no
+    # destructive slskd path is reachable and the ownership writer that
+    # gates one is structurally absent rather than defaulted away (#1313).
     ctx = CratediggerContext(
-        cfg=cfg,
-        slskd=None,
-        pipeline_db_source=_PreviewDBSource(db),
+        collaborators=WorkerCollaborators(
+            cfg=cfg,
+            pipeline_db_source=_PreviewDBSource(db),
+        ),
     )
     materialize = materialize_fn or _materialize_processing_dir
     materialized = materialize(

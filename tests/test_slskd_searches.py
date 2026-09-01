@@ -38,7 +38,10 @@ from lib.slskd_searches import (
     converge_slskd_searches,
 )
 from tests.fakes import FakePipelineDB, FakePipelineDBSource, FakeSlskdAPI
-from tests.helpers import make_requests_http_error
+from tests.helpers import (
+    make_cycle_collaborators,
+    make_requests_http_error,
+)
 
 
 def _cfg(**overrides: Any) -> CratediggerConfig:
@@ -50,8 +53,11 @@ def _cfg(**overrides: Any) -> CratediggerConfig:
 
 def _ctx(db: FakePipelineDB, slskd: FakeSlskdAPI) -> CratediggerContext:
     return CratediggerContext(
-        cfg=_cfg(), slskd=slskd,
-        pipeline_db_source=FakePipelineDBSource(db),
+        collaborators=make_cycle_collaborators(
+            cfg=_cfg(),
+            slskd=slskd,
+            pipeline_db_source=FakePipelineDBSource(db),
+        ),
     )
 
 
