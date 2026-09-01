@@ -251,7 +251,7 @@ def assert_failure_v1_refresh_phases(
     final_lineage: int | None,
 ) -> None:
     """Failure preparation refreshes identity before later enrichment."""
-    if outcome is not HavePreparation.READY:
+    if outcome != HavePreparation.READY:
         raise AssertionError("installed current evidence was not prepared")
     if (initial_lineage == 1
             and prepared_lineage != CURRENT_EVIDENCE_LINEAGE_VERSION):
@@ -710,7 +710,7 @@ class TestQualityLineagePins(unittest.TestCase):
                 )
 
         current = db.load_album_quality_evidence_by_id(current_id)
-        self.assertIs(enriched, HaveEnrichment.ENRICHED)
+        self.assertEqual(enriched, HaveEnrichment.ENRICHED)
         assert_failure_v1_refresh_phases(
             outcome=prepared,
             initial_lineage=1,

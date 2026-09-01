@@ -1105,7 +1105,7 @@ def _handle_measurement_failed(
     )
 
     if (
-        prepared_outcome is HavePreparation.READY
+        prepared_outcome == HavePreparation.READY
         and configured_runtime is not None
     ):
         enrich_fn = (

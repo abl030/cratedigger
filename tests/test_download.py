@@ -8765,7 +8765,7 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
             prepare_fn=prepare,
         )
 
-        self.assertIs(outcome, HavePreparation.READY)
+        self.assertEqual(outcome, HavePreparation.READY)
         self.assertEqual(received["request_id"], 42)
         self.assertEqual(received["mb_release_id"], "mb-exact-release")
         self.assertIs(received["quality_ranks"], cfg.quality_ranks)
@@ -8898,7 +8898,7 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
             prepare_fn=lambda *_args, **_kwargs: HavePreparation.FAILED,
         )
 
-        self.assertIs(outcome, HavePreparation.FAILED)
+        self.assertEqual(outcome, HavePreparation.FAILED)
         self.assertEqual(ctx.evidence_enrichment_budget, 1)
 
     def test_absent_have_preparation_does_not_consume_budget(self):
@@ -8913,7 +8913,7 @@ class TestFailureEvidenceEnrichmentHook(unittest.TestCase):
             prepare_fn=lambda *_args, **_kwargs: HavePreparation.NO_CURRENT_EVIDENCE,
         )
 
-        self.assertIs(outcome, HavePreparation.NO_CURRENT_EVIDENCE)
+        self.assertEqual(outcome, HavePreparation.NO_CURRENT_EVIDENCE)
         self.assertEqual(ctx.evidence_enrichment_budget, 2)
 
     def test_timeout_album_default_enrichment_marks_v0_attempted(self):

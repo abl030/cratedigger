@@ -136,7 +136,7 @@ class HavePreparation(enum.Enum):
 
     @property
     def charges_budget(self) -> bool:
-        return self is HavePreparation.FAILED
+        return self == HavePreparation.FAILED
 
 
 class HaveEnrichment(enum.Enum):

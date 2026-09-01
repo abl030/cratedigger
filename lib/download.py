@@ -361,7 +361,7 @@ def _enrich_have_evidence_after_failure(
     Never lets an enrichment error disturb failure bookkeeping.
     """
     if (
-        prepared_outcome is not HavePreparation.READY
+        prepared_outcome != HavePreparation.READY
         or ctx.evidence_enrichment_budget <= 0
     ):
         return

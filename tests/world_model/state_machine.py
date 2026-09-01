@@ -812,7 +812,7 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
                     [request_id],
                 )
 
-                self.assertIs(
+                self.assertEqual(
                     world.enrich_current_evidence(request_id),
                     HaveEnrichment.ENRICHED,
                 )

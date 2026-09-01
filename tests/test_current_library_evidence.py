@@ -437,7 +437,7 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
 
         outcome = self._enrich(db, analyzer, probe)
 
-        self.assertIs(outcome, HaveEnrichment.COMPLETE)
+        self.assertEqual(outcome, HaveEnrichment.COMPLETE)
         self.assertEqual(spectral_calls, [])
         self.assertEqual(probe_calls, [])
 
@@ -467,7 +467,7 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
         )
 
         current_id = db.get_request_current_evidence_id(42)
-        self.assertIs(outcome, HavePreparation.READY)
+        self.assertEqual(outcome, HavePreparation.READY)
         self.assertEqual(calls, [before])
         self.assertEqual(current_id, before.id)
         self.assertEqual(
@@ -525,7 +525,7 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
                 beets_library_root=source,
             )
 
-        self.assertIs(prepared, HavePreparation.READY)
+        self.assertEqual(prepared, HavePreparation.READY)
         current_id = db.get_request_current_evidence_id(42)
         self.assertEqual(current_id, before.id)
         current = db.load_album_quality_evidence_by_id(current_id)
@@ -545,7 +545,7 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
                 probe_fn=lambda _path: None,
             )
 
-        self.assertIs(enriched, HaveEnrichment.ENRICHED)
+        self.assertEqual(enriched, HaveEnrichment.ENRICHED)
         self.assertEqual(db.request(42)["status"], "wanted")
         current = db.load_album_quality_evidence_by_id(current_id)
         assert current is not None
@@ -563,7 +563,7 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
 
         outcome = self._enrich(db, analyzer, probe)
 
-        self.assertIs(outcome, HaveEnrichment.ENRICHED)
+        self.assertEqual(outcome, HaveEnrichment.ENRICHED)
         self.assertEqual(spectral_calls, [source])
         self.assertEqual(probe_calls, [source])
         persisted = db.load_album_quality_evidence_by_id(stored.id)
@@ -583,7 +583,7 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
 
         outcome = self._enrich(db, analyzer, probe)
 
-        self.assertIs(outcome, HaveEnrichment.ENRICHED)
+        self.assertEqual(outcome, HaveEnrichment.ENRICHED)
         self.assertEqual(spectral_calls, [])
         self.assertEqual(probe_calls, [source])
 
@@ -598,7 +598,7 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
 
         outcome = self._enrich(db, analyzer, probe)
 
-        self.assertIs(outcome, HaveEnrichment.ENRICHED)
+        self.assertEqual(outcome, HaveEnrichment.ENRICHED)
         self.assertEqual(spectral_calls, [source])
         self.assertEqual(probe_calls, [])
 
@@ -613,7 +613,7 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
 
         outcome = self._enrich(db, analyzer, probe)
 
-        self.assertIs(outcome, HaveEnrichment.STALE)
+        self.assertEqual(outcome, HaveEnrichment.STALE)
         self.assertEqual(spectral_calls, [])
         self.assertEqual(probe_calls, [])
 
@@ -624,7 +624,7 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
 
         outcome = self._enrich(db, analyzer, probe)
 
-        self.assertIs(outcome, HaveEnrichment.NO_CURRENT_EVIDENCE)
+        self.assertEqual(outcome, HaveEnrichment.NO_CURRENT_EVIDENCE)
         self.assertEqual(spectral_calls, [])
         self.assertEqual(probe_calls, [])
 
@@ -644,7 +644,7 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
             ),
         )
 
-        self.assertIs(outcome, HavePreparation.FAILED)
+        self.assertEqual(outcome, HavePreparation.FAILED)
 
     def test_backfill_exception_is_not_classified_as_absent_library_copy(self):
         db = self._db()
@@ -661,7 +661,7 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
             load_fn=broken_loader,
         )
 
-        self.assertIs(outcome, HavePreparation.FAILED)
+        self.assertEqual(outcome, HavePreparation.FAILED)
 
     def test_failed_download_backfills_unlinked_seabear_have(self):
         """We Built a Fire: an installed album cannot stay HAVE-less."""
@@ -702,8 +702,8 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
                 probe_fn=probe,
             )
 
-        self.assertIs(prepared, HavePreparation.READY)
-        self.assertIs(outcome, HaveEnrichment.ENRICHED)
+        self.assertEqual(prepared, HavePreparation.READY)
+        self.assertEqual(outcome, HaveEnrichment.ENRICHED)
         self.assertEqual(spectral_calls, [source])
         self.assertEqual(probe_calls, [source])
         evidence_id = db.get_request_current_evidence_id(42)
@@ -730,7 +730,7 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
 
         outcome = self._enrich(db, analyzer, probe)
 
-        self.assertIs(outcome, HaveEnrichment.PARTIAL)
+        self.assertEqual(outcome, HaveEnrichment.PARTIAL)
         self.assertEqual(spectral_calls, [source])
         self.assertEqual(probe_calls, [])
         persisted = db.load_album_quality_evidence_by_id(stored.id)
