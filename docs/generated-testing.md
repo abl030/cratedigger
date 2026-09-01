@@ -942,7 +942,11 @@ one: the classification layer, now covered by
 "Does this suite actually constrain the code?" is an empirical question,
 answered the way hardware verification qualifies a testbench: **plant
 mutants in production code and count kills** against the generated tests
-only. How to pick mutants:
+only. This section is the AIMED procedure — hand-picked mutants at named
+subjects. The separate catalog breadth pass (mutmut, implementer-side,
+run during convergence via the committed `nix/mutmut-shell.nix`) is
+`docs/mutation-testing.md`; its generic operators discharge none of the
+aimed obligations below. How to pick aimed mutants:
 
 - revert a real past bug fix (the strongest single check);
 - break each adapter derivation the parity property claims to pin;
@@ -956,11 +960,14 @@ Interpret results per mutant: **killed** = the property works; **killed only at
 fuzz entropy** = the deterministic suite budget misses the decisive world, so
 pin it as an `@example`; **survived both tiers** = either a missing invariant
 (add it, with a known-bad self-test) or a world the strategies rarely make
-decisive (again, pin the decisive world). The mutation driver is an
-operator/agent one-shot — never committed (`.claude/rules/scope.md`); record
+decisive (again, pin the decisive world). The AIMED mutation driver is an
+operator/agent one-shot — never committed (`.claude/rules/scope.md`; the
+committed mutmut shell serves only the catalog pass); record
 what you tried and what happened in the PR's Fault injection section
 (`.github/pull_request_template.md`) — name the mutant and the test, not just
-"planted a mutant, confirmed RED". That section used to be a mandatory
+"planted a mutant, confirmed RED" — alongside the mutmut breadth-pass tally
+and survivor dismissals when the diff has mutable Python production surface
+(`docs/mutation-testing.md`). That section used to be a mandatory
 per-diff-site table; it is a short account now — one sentence, or a short
 list for per-clause proof against a many-clause checker
 (`.claude/rules/code-quality.md` § "Testing — Red/Green TDD" has the
