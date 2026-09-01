@@ -343,18 +343,19 @@ class TestTargetedTestSelection(unittest.TestCase):
     ) -> None:
         """Regression pin for issue #1081 / PR #1075's exact failure.
 
-        ``tests/fakes/pipeline_db.py`` is not a discoverable test module — it
-        must never yield itself (``tests.fakes.pipeline_db``) as a selector.
-        The existing ``tests/fakes/`` prefix rule still rescues the change
-        with the real consumer, ``tests.test_fakes``.
+        ``tests/fakes/pipeline_db/import_jobs.py`` is not a discoverable test
+        module, so it must never yield itself
+        (``tests.fakes.pipeline_db.import_jobs``) as a selector. The
+        ``tests/fakes/`` prefix rule still rescues the change with the real
+        consumer, ``tests.test_fakes``.
         """
         selected = expand_test_selection(
             (),
-            changed_paths=("tests/fakes/pipeline_db.py",),
+            changed_paths=("tests/fakes/pipeline_db/import_jobs.py",),
             repo_root=REPO_ROOT,
         )
 
-        self.assertNotIn("tests.fakes.pipeline_db", selected)
+        self.assertNotIn("tests.fakes.pipeline_db.import_jobs", selected)
         self.assertIn("tests.test_fakes", selected)
 
     def test_every_shared_tests_module_yields_an_accepted_selector(self) -> None:
@@ -689,7 +690,7 @@ class TestTargetedSuiteWiring(unittest.TestCase):
         """
         selectors = expand_test_selection(
             (),
-            changed_paths=("tests/fakes/pipeline_db.py",),
+            changed_paths=("tests/fakes/pipeline_db/import_jobs.py",),
             repo_root=REPO_ROOT,
         )
         python_phase = targeted_phases(selectors)[-1]

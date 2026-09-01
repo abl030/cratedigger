@@ -1805,11 +1805,11 @@ class TestFakePipelineDB(unittest.TestCase):
 
     def test_assert_log_failure_message_names_the_real_field(self):
         """Issue #1211 review F4 regression pin: assert_log's f-string used
-        to interpolate ``{field}`` (``dataclasses.field``, imported at
-        module scope in ``tests/fakes/pipeline_db.py``) instead of
-        ``{field_name}``, so every failure printed the function's repr
-        instead of the actual column name. Assert the real field name
-        appears in the message, not just that it raises."""
+        to interpolate ``{field}`` instead of ``{field_name}``. ``field``
+        resolved to the module-scope ``dataclasses.field`` import the fake
+        carried at the time, so every failure printed that function's repr
+        instead of the column name. Assert the real field name appears in
+        the message, not just that it raises."""
         db = FakePipelineDB()
         db.log_download(42, outcome="success", beets_distance=None)
 
@@ -5649,7 +5649,7 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
 
         db.record_peer_observations(["alice"], observed_at=observed_at)
 
-        with patch("tests.fakes.pipeline_db._utcnow") as fake_now:
+        with patch("tests.fakes.pipeline_db.dashboard._utcnow") as fake_now:
             fake_now.return_value = datetime(
                 2026, 5, 9, 5, 0, tzinfo=UTC,
             )  # 2026-05-09 13:00 Perth

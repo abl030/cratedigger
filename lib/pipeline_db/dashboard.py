@@ -78,7 +78,7 @@ class UnfindableRunMetricsPresentation(TypedDict):
 
 
 #: Everything below this banner is a pure post-fetch derivation the real
-#: adapter and ``tests/fakes/pipeline_db.py`` BOTH call.
+#: adapter and ``tests/fakes/pipeline_db/dashboard.py`` BOTH call.
 #:
 #: Much of the dashboard IS computed in SQL — the search/cycle windows, the
 #: coverage summary and the match-rate series are all server-side

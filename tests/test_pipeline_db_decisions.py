@@ -2,7 +2,7 @@
 
 These four rules used to be written twice — once by production inside a SQL
 transaction (or the Python tail of one) and once by hand in
-``tests/fakes/pipeline_db.py``. ``lib/pipeline_db/decisions.py`` is now the
+``tests/fakes/pipeline_db/``. ``lib/pipeline_db/decisions.py`` is now the
 one spelling; this module pins every arm of every rule directly, and
 ``tests/test_pipeline_db_decisions_generated.py`` patrols the world space
 around them through the same typed worlds defined here.

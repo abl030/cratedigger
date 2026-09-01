@@ -2,7 +2,7 @@
 
 The write side has ``.claude/rules/test-fidelity.md`` Rule A: every
 ``PipelineDB`` write method carries a real-PG round-trip test. The READ
-side has the mirror problem — ``FakePipelineDB`` (``tests/fakes/pipeline_db.py``)
+side has the mirror problem — ``FakePipelineDB`` (``tests/fakes/pipeline_db/``)
 hand-mirrors production ``SELECT`` projections across ~62 ``get_*`` /
 ``list_*`` methods. When the fake's projection drifts from production's
 (a column the fake returns that production doesn't, or vice-versa),
