@@ -35,7 +35,7 @@ export const BIG_LABEL_THRESHOLD = 1000;
  * to 100 today; if the upstream ever exceeds this we render the first
  * `MAX_RENDERED` and surface a hint.
  */
-export const MAX_RENDERED = 100;
+const MAX_RENDERED = 100;
 
 const LABEL_YEAR_FILTER_DEBOUNCE_MS = 300;
 let labelYearFilterTimer = 0;

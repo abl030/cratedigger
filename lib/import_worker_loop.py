@@ -65,6 +65,23 @@ class GracefulShutdown:
     preview worker has no SIGTERM handling at all, which is why this flag
     lives beside the shared loop rather than being shared itself.
 
+    That asymmetry is the design, not an omission (issue #1313 residual).
+    An importer claim can be mid-Beets-mutation, which is irreversible and
+    has to either finish or be cleaned up on the recovery side — so its unit
+    buys drain time with ``KillMode = "mixed"`` and ``TimeoutStopSec =
+    "10min"``. A preview only measures and persists evidence; it never
+    mutates Beets. Killing one costs a re-measurement, and the claim it was
+    holding comes back: ``recover_running_preview_jobs`` requeues legacy
+    force/local/YouTube rows at the next worker start and requeues an
+    automation row once the shared probe proves its exact persisted lease
+    dead, while ``recover_abandoned_preview_jobs`` sweeps stale legacy rows
+    every minute. It does normalise an owned album in place before
+    measuring (``prepare_preview_media``), so "nothing to drain" is exact
+    only in the sense that matters here: a restart re-derives all of it, and
+    the evidence sidecar is a tempfile outside the album dir (#859), so a
+    kill mid-write cannot poison the manifest. Restarting is what invariant
+    11 asks for, so the preview unit deliberately carries neither override.
+
     Best-effort drain (issue #1089): a deploy switch's SIGTERM no longer has
     to kill an in-flight import mid-flight. The importer's ``run_once`` never
     returns until its own at-most-one claimed job reaches a terminal write,

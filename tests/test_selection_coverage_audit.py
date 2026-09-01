@@ -293,6 +293,21 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
         "tests.test_pipeline_db_decisions",
         "tests.test_pipeline_db_decisions_generated",
     ),
+    # Basename probes resolve tests.test_current_library_evidence and its
+    # generated sibling, masking the loss of the other nine importers.
+    "lib/current_library_evidence.py": (
+        "tests.test_current_library_evidence",
+        "tests.test_current_library_evidence_generated",
+        "tests.test_download",
+        "tests.test_import_preview",
+        "tests.test_import_queue",
+        "tests.test_preview_failure_evidence_generated",
+        "tests.test_quality_evidence_fingerprint",
+        "tests.test_quality_evidence_fingerprint_generated",
+        "tests.test_quality_lineage_generated",
+        "tests.test_spectral_attempt_audit_generated",
+        "tests.test_terminal_outcome_callers",
+    ),
     # Basename probe resolves tests.test_surface_outcomes.
     "lib/surface_outcomes.py": (
         "tests.test_surface_outcomes",

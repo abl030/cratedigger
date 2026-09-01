@@ -178,6 +178,29 @@ function errorMatches(thrown, expected) {
   return thrown instanceof expected;
 }
 
+/**
+ * Refuse a non-string haystack for `contains`/`excludes`, or return `''`.
+ *
+ * These two used to read `String(haystack).includes(needle)`, which is
+ * silently WRONG for an array: `['ab', 'cd'].includes('a')` is `false`,
+ * while `String(['ab', 'cd']).includes('a')` is `true`. So the obvious
+ * mechanical sweep of the several hundred remaining `t.ok(x.includes(y))`
+ * sites — and the ~95 negated `t.ok(!x.includes(y))` ones, which map to
+ * `excludes` and are exposed the same way — would have flipped every array
+ * one from correct-failing to passing, with no test anywhere to notice
+ * (issue #1319's residual 1, the reason that sweep was left undone).
+ *
+ * Refusing the type makes the sweep fail loudly instead. An array site
+ * keeps `t.ok(x.includes(y), …)`; there is deliberately no `t.includes`
+ * for collections, because nothing calls one today and a harness method
+ * with no callers is how this file grows shapes nobody reads.
+ */
+function nonStringHaystack(method, haystack) {
+  if (typeof haystack === 'string') return '';
+  const kind = Array.isArray(haystack) ? 'array' : typeof haystack;
+  return `t.${method} needs a string haystack, got ${kind}: ${show(haystack)}`;
+}
+
 function errorMismatchDetail(thrown, expected) {
   const got = thrown && thrown.constructor && thrown.constructor.name;
   return expected instanceof RegExp
@@ -268,16 +291,25 @@ export function suite(moduleUrl) {
         `expected ${show(expected)}, got ${show(actual)}`,
       );
     },
+    /**
+     * Substring containment. The haystack must be a STRING — see
+     * `nonStringHaystack`; an array is refused rather than stringified.
+     */
     contains(haystack, needle, message) {
+      const refusal = nonStringHaystack('contains', haystack);
+      if (refusal) return record(false, message, refusal);
       return record(
-        String(haystack).includes(needle),
+        haystack.includes(needle),
         message,
         `${show(needle)} not in ${show(haystack)}`,
       );
     },
+    /** The negation of `contains`, with the same string-only haystack rule. */
     excludes(haystack, needle, message) {
+      const refusal = nonStringHaystack('excludes', haystack);
+      if (refusal) return record(false, message, refusal);
       return record(
-        !String(haystack).includes(needle),
+        !haystack.includes(needle),
         message,
         `${show(needle)} unexpectedly present in ${show(haystack)}`,
       );

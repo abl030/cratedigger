@@ -64,7 +64,7 @@ export function buildSessionExpiredOverlay(doc) {
  * @param {Document} doc
  * @returns {boolean} true when this call created the overlay
  */
-export function showSessionExpired(doc) {
+function showSessionExpired(doc) {
   if (doc.getElementById(OVERLAY_ID)) return false;
   doc.body.appendChild(buildSessionExpiredOverlay(doc));
   return true;

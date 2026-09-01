@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger("cratedigger")
 
 
-def _delete_rejected_source_cancellable(
+def _checkpoint_then_delete_rejected_source(
     path: str,
     *,
     processing_dir: str,
@@ -329,7 +329,7 @@ def _handle_rejected_result(
         # delete — the opposite of restart-on-failure. Cancellation is a
         # distinct interruption, not a delete failure, and still propagates.
         try:
-            _delete_rejected_source_cancellable(
+            _checkpoint_then_delete_rejected_source(
                 staged_album.current_path,
                 processing_dir=ctx.cfg.processing_dir,
                 beets_staging_dir=ctx.cfg.beets_staging_dir,
