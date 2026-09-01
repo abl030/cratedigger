@@ -1,7 +1,7 @@
 /** Frontend convergence prompt/action contract (#978). */
 import { readFileSync } from 'node:fs';
 
-import { suite } from './js_harness.mjs';
+import { element, suite } from './js_harness.mjs';
 
 // Assigned BEFORE the dynamic import below: web/js/convergence.js reads
 // `document` at module-evaluation time, so this ordering is load-bearing.
@@ -113,19 +113,11 @@ function response(status, body, { raw = null } = {}) {
 }
 
 function buttonFixture() {
-  const prompt = {
-    innerHTML: '',
-    removed: false,
-    remove() { this.removed = true; },
-  };
-  const button = {
-    dataset: {},
-    disabled: false,
+  const prompt = element();
+  const button = element({
     textContent: 'Stop searching',
-    attributes: {},
-    setAttribute(name, value) { this.attributes[name] = value; },
     closest(selector) { return selector === '.convergence-prompt' ? prompt : null; },
-  };
+  });
   return { button, prompt };
 }
 
@@ -169,7 +161,7 @@ const second = await stopConvergedSearch(signal, doubleFixture.button, 'recents'
 t.equal(second, null, 'a second activation returns without an outcome');
 t.equal(fetchCount, 1, 'a second activation submits no second request');
 t.equal(doubleFixture.button.disabled, true, 'the in-flight button is disabled');
-t.equal(doubleFixture.button.attributes['aria-busy'], 'true',
+t.equal(doubleFixture.button.getAttribute('aria-busy'), 'true',
   'the in-flight button reports aria-busy');
 releaseFetch(response(200, { outcome: 'stopped' }));
 await first;
@@ -193,7 +185,7 @@ const network = await stopConvergedSearch(signal, networkFixture.button, 'recent
 t.equal(network.outcome, 'unavailable', 'a transport failure reports unavailable');
 t.equal(networkFixture.button.disabled, false,
   'a transport failure re-enables the button');
-t.equal(networkFixture.button.attributes['aria-busy'], 'false',
+t.equal(networkFixture.button.getAttribute('aria-busy'), 'false',
   'a transport failure clears aria-busy');
 t.equal(networkFixture.button.textContent, 'Stop searching',
   'a transport failure restores the button label');

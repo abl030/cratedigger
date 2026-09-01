@@ -758,7 +758,7 @@ resetWorld();
 {
   state.browseSearchType = 'artist';
   globalThis.fetch = async url => {
-    t.ok(url.includes('/api/search?q='), 'artist search hits the MB search endpoint');
+    t.contains(url, '/api/search?q=', 'artist search hits the MB search endpoint');
     return response(200, {
       artists: [{ id: 'a1', name: 'ArtName', disambiguation: '' }],
     });

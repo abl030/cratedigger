@@ -112,9 +112,9 @@ t.section('renderLabelDetail() composes header, filters, rows and pagination wit
   t.contains(container.innerHTML, 'onchange="window.onLabelFilterChange()"', 'format/hide-held controls wire the filter handler');
   t.contains(container.innerHTML, 'window.goToLabelPage(1)', 'prev button targets page 1');
   t.contains(container.innerHTML, 'window.goToLabelPage(3)', 'next button targets page 3');
-  t.ok(!container.innerHTML.includes('toggleLabelIncludeSublabels'),
+  t.excludes(container.innerHTML, 'toggleLabelIncludeSublabels',
     'a label under BIG_LABEL_THRESHOLD renders no include-sublabels toggle');
-  t.ok(!container.innerHTML.includes('Sub-labels unavailable'),
+  t.excludes(container.innerHTML, 'Sub-labels unavailable',
     'no dropped-sublabels banner when sub_labels_dropped is absent');
   // Rows really render through renderLabelRows into the body slot.
   t.contains(body.innerHTML, 'Pristine Christine', 'release rows render into #browse-label-rows');
@@ -147,11 +147,11 @@ t.section('renderLabelDetail() big-label + dropped-sublabels arms');
   // `checked` renders BEFORE the onchange attribute, so pin the substring
   // that actually distinguishes the arms (reader finding: the original
   // pin quoted a string neither arm produces and was inert both ways).
-  t.ok(!container.innerHTML.includes('label-include-sublabels" checked'),
+  t.excludes(container.innerHTML, 'label-include-sublabels" checked',
     'include_sublabels=false renders the toggle unchecked');
   t.contains(container.innerHTML, 'Sub-labels unavailable',
     'sub_labels_dropped renders the degraded-catalogue banner');
-  t.ok(!container.innerHTML.includes('Page 1 of 1'),
+  t.excludes(container.innerHTML, 'Page 1 of 1',
     'single-page world renders no page-position note');
   t.ok(container._includeSub === false, 'include_sublabels=false stashes false');
   // The positive arm: re-render with include_sublabels on and the same
@@ -182,7 +182,7 @@ t.section('renderLabelDetail() falls back to the entity count when pagination is
   });
   t.contains(container.innerHTML, '4 releases', 'missing pagination falls back to label.release_count');
   t.ok(container._totalCount === 4, 'stash carries the fallback total');
-  t.ok(!container.innerHTML.includes('goToLabelPage'),
+  t.excludes(container.innerHTML, 'goToLabelPage',
     'no pagination controls without a pagination payload');
 }
 
