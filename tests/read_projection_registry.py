@@ -673,7 +673,8 @@ ALLOWLIST: dict[str, str] = {
     "get_owned_transfer_keys":
         "set[tuple[str,str]] (username, filename) membership keys — "
         "scalar set, no row projection; fake<->PG semantics pinned by "
-        "mirrored tests in test_fakes.py + test_pipeline_db.py",
+        "mirrored tests in test_fakes_transfer_ledger.py + "
+        "test_pipeline_db.py",
     "get_retained_failure_paths":
         "set[str] retained paths — scalar set, no row projection; "
         "measurement-failure and quarantine semantics are pinned by mirrored "

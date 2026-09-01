@@ -21,7 +21,7 @@ Two properties over generated worlds:
 The deterministic pins for these same invariants live in
 ``tests/test_download.py::TestTransferLedgerWriteAheadOrdering`` (T1), and
 ``tests/test_pipeline_db.py::TestTransferLedgerRoundTrip`` /
-``tests/test_fakes.py::TestFakePipelineDBTransferLedger`` (T3).
+``tests/test_fakes_transfer_ledger.py::TestFakePipelineDBTransferLedger`` (T3).
 
 Profiles and promotion policy: tests/_hypothesis_profiles.py and
 docs/generated-testing.md.
