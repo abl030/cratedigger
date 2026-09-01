@@ -9,13 +9,14 @@ One cluster module per ``lib/pipeline_db`` concern, composed in
 ``lib/pipeline_db/_db.py`` (#1313). Shared state and the cross-cluster
 contract live in ``_base.py``.
 
-``__all__`` below is the package's whole importable surface, and it is
-the four names the flat module deliberately exported. Incidental
-module-level bindings the flat file happened to expose (``_utcnow``,
-``_jsonb_column``, ``_FakeTerminalTransitionsDB``, and ~160 others it
-had imported or defined) do NOT resolve on the package: they live in
-the cluster module that uses them. That matters most for ``patch``,
-whose target must be the module whose code reads the name.
+``__all__`` below is the package's deliberate export surface, and it is
+the four names the flat module deliberately exported. The flat file also
+bound about 200 other names at module scope (measured by AST over
+``0c81190e:tests/fakes/pipeline_db.py``), every one of them reachable as
+``tests.fakes.pipeline_db.<name>``. Those do NOT resolve on the package:
+``_utcnow``, ``_jsonb_column``, ``_FakeTerminalTransitionsDB`` and the
+rest now live in the cluster module that uses them. That matters most
+for ``patch``, whose target must be the module whose code reads the name.
 """
 from tests.fakes.pipeline_db._db import FakePipelineDB
 from tests.fakes.pipeline_db.search_plan import (
