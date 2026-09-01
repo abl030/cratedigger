@@ -32,7 +32,6 @@ from lib.config import CratediggerConfig
 from lib.dispatch.manifest_guard import _guard_force_import_audio_manifest
 from lib.dispatch.types import DispatchOutcome, ImportAttemptResult
 from lib.import_execution import CancellationToken, OwnerSessionIdentity
-from lib.import_preview import LOCAL_IMPORT_ACTION_PREFIX, force_action_copy_path
 from lib.import_queue import (
     IMPORT_JOB_FORCE,
     IMPORT_JOB_LOCAL,
@@ -45,6 +44,7 @@ from lib.import_queue import (
     youtube_import_dedupe_key,
     youtube_import_payload,
 )
+from lib.preview_snapshot import LOCAL_IMPORT_ACTION_PREFIX, force_action_copy_path
 from scripts import importer
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row

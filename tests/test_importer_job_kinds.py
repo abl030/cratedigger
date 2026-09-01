@@ -23,7 +23,6 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 from lib.dispatch import DispatchOutcome, _record_rejection_and_maybe_requeue
-from lib.import_preview import ACTION_COPY_PREFIX_BY_JOB_TYPE
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
@@ -41,6 +40,7 @@ from lib.import_queue import (
     local_import_dedupe_key,
     local_import_payload,
 )
+from lib.preview_snapshot import ACTION_COPY_PREFIX_BY_JOB_TYPE
 from lib.quality import DownloadInfo, ValidationResult
 from lib.terminal_outcomes import PendingImportTerminalOutcome
 from scripts import importer

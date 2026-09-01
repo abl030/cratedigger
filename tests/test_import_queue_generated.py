@@ -165,7 +165,7 @@ class TestGeneratedImportPreviewRequeue(unittest.TestCase):
         preview_attempts: int,
         reason: str,
     ) -> None:
-        from lib.import_preview import force_action_copy_path
+        from lib.preview_snapshot import force_action_copy_path
         from scripts import importer
 
         with tempfile.TemporaryDirectory() as root:

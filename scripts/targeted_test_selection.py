@@ -202,6 +202,24 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_measurement",
         "tests.test_measurement_observability",
     ),
+    "lib/preview_snapshot.py": (
+        # Issue #1313 split the private-preview snapshot and job-scoped
+        # action-copy lifecycles out of lib/import_preview.py. There is no
+        # tests.test_preview_snapshot: this code has always been covered by
+        # modules named for the boundary it guards rather than for the file
+        # it lived in. Path authority owns the bounded-copy limits and the
+        # refusals; processing cancellation owns the fail-stop checkpoints;
+        # the import-queue and local-import lanes own action-copy naming and
+        # terminal cleanup. Zero-neighbour without this entry, so deleting
+        # it fails closed on the lib/ root rule rather than silently
+        # under-selecting — no MASKABLE_ENTRY_PINS pin needed.
+        "tests.test_path_authority",
+        "tests.test_path_authority_generated",
+        "tests.test_processing_cancellation",
+        "tests.test_processing_cancellation_generated",
+        "tests.test_import_queue",
+        "tests.test_local_import_lane",
+    ),
     "lib/startup_reconciliation.py": (
         # Was an admitted zero-neighbour gap (issue #1199, measured
         # 2026-08-19): there is no tests.test_startup_reconciliation, so

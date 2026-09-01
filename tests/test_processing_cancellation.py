@@ -20,10 +20,10 @@ from lib.import_execution import (
     CancellationToken,
     ExecutionCancelled,
 )
-from lib.import_preview import (
-    _remove_preview_tree,
-    _snapshot_authorized_directory,
-    measure_and_persist_candidate_evidence,
+from lib.import_preview import measure_and_persist_candidate_evidence
+from lib.preview_snapshot import (
+    remove_preview_snapshot,
+    snapshot_authorized_directory,
 )
 from lib.processing_paths import canonical_folder_for_row, processing_albums_dir
 from lib.quality import ValidationResult
@@ -239,7 +239,7 @@ class TestPreviewCancellation(unittest.TestCase):
                 ExecutionCancelled,
                 "lost_before_copy_write",
             ):
-                _snapshot_authorized_directory(
+                snapshot_authorized_directory(
                     source,
                     cfg,  # pyright: ignore[reportArgumentType] - minimal path config
                     copy_fn=cancel_copy,
@@ -323,7 +323,7 @@ class TestPreviewCancellation(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ExecutionCancelled, "lost_before_cleanup"):
-                _remove_preview_tree(
+                remove_preview_snapshot(
                     snapshot,
                     cfg,  # pyright: ignore[reportArgumentType] - minimal path config
                     cancellation_token=token,

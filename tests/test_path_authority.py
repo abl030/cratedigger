@@ -45,10 +45,10 @@ from lib.fs_authority import (
     unreadable_reason_text,
 )
 from lib.grab_list import DownloadFile
-from lib.import_preview import (
+from lib.preview_snapshot import (
     PreviewSnapshotLimits,
-    _snapshot_authorized_directory,
     remove_preview_snapshot,
+    snapshot_authorized_directory,
 )
 from lib.processing_paths import (
     canonical_folder_for_row,
@@ -1436,7 +1436,7 @@ class TestPrivatePreviewCopyBounds(unittest.TestCase):
             preview = os.path.join(processing, "preview")
             lock = os.path.join(processing, ".preview-snapshot.lock")
             with self.assertRaisesRegex(FilesystemAuthorityError, "insufficient private preview space"):
-                _snapshot_authorized_directory(
+                snapshot_authorized_directory(
                     source,
                     cfg,
                     limits=PreviewSnapshotLimits(free_reserve_bytes=3),
@@ -1477,7 +1477,7 @@ class TestPrivatePreviewCopyBounds(unittest.TestCase):
                 )
 
             with self.assertRaisesRegex(FilesystemAuthorityError, "source grew beyond copy limit"):
-                _snapshot_authorized_directory(
+                snapshot_authorized_directory(
                     source,
                     cfg,
                     copy_fn=grow_before_real_copy,
@@ -1496,7 +1496,7 @@ class TestPrivatePreviewCopyBounds(unittest.TestCase):
             with open(os.path.join(source, "track.mp3"), "wb") as handle:
                 handle.write(b"audio")
             lock = os.path.join(processing, ".preview-snapshot.lock")
-            snapshot = _snapshot_authorized_directory(source, cfg)
+            snapshot = snapshot_authorized_directory(source, cfg)
             lock_inode = os.stat(lock).st_ino
             try:
                 copied = os.path.join(snapshot, "track.mp3")

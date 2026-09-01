@@ -2379,8 +2379,8 @@ class TestImportJobQueueAPI(unittest.TestCase):
         from unittest.mock import patch
 
         from lib.config import CratediggerConfig
-        from lib.import_preview import force_action_copy_path
         from lib.pipeline_db.import_jobs import _default_force_action_copy_path
+        from lib.preview_snapshot import force_action_copy_path
 
         cfg = CratediggerConfig(processing_dir="/tmp/cratedigger-processing")
         with patch(

@@ -870,7 +870,7 @@ class TestGeneratedImportOperationFence(unittest.TestCase):
         interrupted_after_terminal: bool,
         file_count: int,
     ) -> None:
-        from lib.import_preview import force_action_copy_path
+        from lib.preview_snapshot import force_action_copy_path
         from scripts import importer
 
         downloads = os.path.join(root, "downloads")

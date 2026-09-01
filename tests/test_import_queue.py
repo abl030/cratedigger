@@ -879,7 +879,7 @@ class TestImporterWorker(unittest.TestCase):
     ):
         payload = preview_result or {"verdict": "would_import"}
         if job.job_type == IMPORT_JOB_FORCE:
-            from lib.import_preview import force_action_copy_path
+            from lib.preview_snapshot import force_action_copy_path
 
             action_path = force_action_copy_path(self._force_cfg, job.id)
             raw_path = job.payload.failed_path
@@ -920,7 +920,7 @@ class TestImporterWorker(unittest.TestCase):
         *,
         dedupe_key: str,
     ) -> tuple[ImportJob, str]:
-        from lib.import_preview import force_action_copy_path
+        from lib.preview_snapshot import force_action_copy_path
 
         db.seed_request(make_request_row(
             id=42,
@@ -957,7 +957,7 @@ class TestImporterWorker(unittest.TestCase):
         self,
     ) -> None:
         """Both force lanes re-read ownership before any stage effect."""
-        from lib.import_preview import force_action_copy_path
+        from lib.preview_snapshot import force_action_copy_path
         from scripts import import_preview_worker, importer
 
         for lane in ("preview", "import"):
@@ -2083,7 +2083,7 @@ class TestImporterWorker(unittest.TestCase):
                 ),
             )
             self._mark_importable(db, job)
-            from lib.import_preview import force_action_copy_path
+            from lib.preview_snapshot import force_action_copy_path
 
             action_path = force_action_copy_path(self._force_cfg, job.id)
             claimed = claim_next_import_job(db, worker_id="worker")
@@ -3771,8 +3771,8 @@ class TestCleanupTerminalForceActionFailsClosed(unittest.TestCase):
     def test_unmapped_job_types_skip_cleanup_instead_of_using_force_prefix(
         self,
     ) -> None:
-        from lib.import_preview import ACTION_COPY_PREFIX_BY_JOB_TYPE
         from lib.import_queue import IMPORT_JOB_TYPES
+        from lib.preview_snapshot import ACTION_COPY_PREFIX_BY_JOB_TYPE
         from scripts import importer
 
         # Derive exhaustiveness rather than asserting it in prose: a
@@ -3813,8 +3813,8 @@ class TestCleanupTerminalForceActionFailsClosed(unittest.TestCase):
         tests/test_integration_slices.py's F5 slice and its
         force_import sibling; this only pins the lookup the guard itself
         depends on."""
-        from lib.import_preview import ACTION_COPY_PREFIX_BY_JOB_TYPE
         from lib.import_queue import IMPORT_JOB_FORCE, IMPORT_JOB_LOCAL
+        from lib.preview_snapshot import ACTION_COPY_PREFIX_BY_JOB_TYPE
 
         # Derive, not assert in prose: the mapped half is EXACTLY these
         # two -- no more, no fewer. Paired with the unmapped test's own
@@ -4573,7 +4573,7 @@ class TestImportPreviewWorker(unittest.TestCase):
 
     def test_terminal_force_preview_failure_reclaims_unpublished_stale_action(self):
         """A failed preview owns and removes a stale action left by its retry."""
-        from lib.import_preview import force_action_copy_path
+        from lib.preview_snapshot import force_action_copy_path
         from scripts import import_preview_worker
 
         with _force_preview_source() as (source, cfg):

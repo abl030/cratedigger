@@ -271,7 +271,7 @@ class _ActionCopyLane:
         name and raises ``FilesystemAuthorityError`` before ever touching
         the filesystem.
         """
-        from lib.import_preview import ACTION_COPY_PREFIX_BY_JOB_TYPE
+        from lib.preview_snapshot import ACTION_COPY_PREFIX_BY_JOB_TYPE
 
         return ACTION_COPY_PREFIX_BY_JOB_TYPE[self.job_type]
 
@@ -654,7 +654,7 @@ def _cleanup_terminal_force_action(job: ImportJob) -> dict[str, object] | None:
         return None
     try:
         from lib.config import read_runtime_config
-        from lib.import_preview import cleanup_force_action_copy_for_job
+        from lib.preview_snapshot import cleanup_force_action_copy_for_job
 
         cfg = read_runtime_config()
         # issue #1176 PR3 F5: this call used to hardcode force's own
@@ -959,7 +959,7 @@ def _execute_action_copy_dispatch(
     force_dispatch = force_dispatch_fn or dispatch_import_from_db
 
     from lib.config import read_runtime_config
-    from lib.import_preview import force_action_copy_path
+    from lib.preview_snapshot import force_action_copy_path
 
     # F9 (issue #1176 PR3 review round): this helper serves BOTH lanes, but
     # its two operator-facing strings below were hardcoded to "force" even

@@ -2927,7 +2927,7 @@ class TestLocalImportSlice(unittest.TestCase):
         # cleanup call this test drives has something real to (attempt to)
         # remove.
         with tempfile.TemporaryDirectory() as parent:
-            from lib.import_preview import LOCAL_IMPORT_ACTION_PREFIX
+            from lib.preview_snapshot import LOCAL_IMPORT_ACTION_PREFIX
 
             processing_dir = os.path.join(parent, "processing")
             albums_dir = os.path.join(processing_dir, "albums")
@@ -3057,8 +3057,8 @@ class TestLocalImportSlice(unittest.TestCase):
         relaxed-threshold escape hatch. The reject names the action copy,
         never the operator's folder (Hazard B)."""
         from lib.dispatch import dispatch_import_from_db
-        from lib.import_preview import LOCAL_IMPORT_ACTION_PREFIX
         from lib.import_queue import IMPORT_JOB_LOCAL
+        from lib.preview_snapshot import LOCAL_IMPORT_ACTION_PREFIX
         from lib.quality import AudioQualityMeasurement
         from lib.quality_evidence import snapshot_audio_files
 
