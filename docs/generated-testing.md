@@ -997,10 +997,12 @@ makes that clause fire, and plant a mutant that only that world kills. A
 clause with no such world is either fail-closed legislation or decoration,
 and you must say which.
 
-Two questions per clause, in order. Q1 is cheap and deterministic; Q2 is
-the one that catches the #1063 shape. A clause can pass Q1 and fail Q2, but
-there is no point asking Q2 about a clause that would not fire if the world
-arrived.
+Three questions per clause, in order. Q1 and Q3 are cheap and
+deterministic; Q2 is the one that catches the #1063 shape. A clause can pass
+Q1 and fail Q2, but there is no point asking Q2 about a clause that would
+not fire if the world arrived. Q1 and Q2 both push in the firing direction;
+Q3 asks the opposite question and is the only one of the three that can
+catch a clause accusing correct production code.
 
 **Q1 — does the clause trip at all?** Build the minimal world that makes
 that clause's condition true *while every earlier clause in the same
@@ -1026,6 +1028,36 @@ generated properties, and record KILLED or SURVIVED. Revert every mutant
 before you finish; a left-behind mutant is the worst outcome this procedure
 can produce. Target one module at a time —
 `nix-shell --run "python3 scripts/run_fuzz_tests.py <module> --jobs N"`.
+
+**Q3 — does the clause stay quiet where production is right?** A clause
+reads some of the world's dimensions and ignores the rest, and every ignored
+dimension is somewhere production may legitimately answer differently from
+what the clause demands. So name a world where the clause's condition looks
+true and production is nonetheless correct, feed it straight to the checker,
+and assert it returns no violation. Deterministic, like Q1; there is no
+mutant to plant, because the defect is in the checker, not in production.
+
+This is the #1332 shape (issue #1313's residual sweep), and it is the one
+that reaches the nightly gate rather than the PR. Two clauses in
+`tests/test_beets_tag_sync_generated.py` held Beets to its own answer about
+a release — an ambiguous resolution must refuse `not_unique`, a missing one
+`not_found` — by reading `world.resolution`. Neither read
+`world.authority_raises`, a dimension the same commit added, so when the
+authority failed at the factory or at the resolution, production correctly
+returned `beets_unavailable` while the clause went on demanding `not_found`.
+Four producible cells, every one of them accusing correct code. Q1 passed
+for both clauses: their self-tests hand-built `authority_raises=0`, so they
+could not have seen it.
+
+Two things make Q3 worth its minute. The tell is usually already in the
+file — `_write_authorized`, written for the same world in the same sitting,
+read `authority_raises` for exactly this reason, and the asymmetry between
+the two functions was visible without running anything. And the failure mode
+is not a green property but a property that reds on a draw nobody chose: 37
+violating draws in 500 at fuzz depth, while the suite tier stayed green
+because the `@example` pins happened to shift the derandomized sweep off
+them. Adding a pin, removing one, or bumping `max_examples` would have
+flipped it red at a moment nobody was looking, on someone else's PR.
 
 **Record which tier killed it.** A mutant that dies only under `fuzz` is not
 killed for gating purposes: `suite` is `derandomize=True`, so a world the

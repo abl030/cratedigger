@@ -286,7 +286,7 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
 - **Every invariant checker owes a known-bad self-test — per CLAUSE, not
   per checker.** A property that has never failed anything is unfalsifiable
   until proven otherwise, and a checker with eight `raise` sites and one
-  self-test has proven exactly one of them. Two questions per clause, in
+  self-test has proven exactly one of them. Three questions per clause, in
   order. **Q1: does the clause trip at all?** Build the minimal world that
   makes that clause's condition true while every EARLIER clause passes,
   feed it straight to the checker, and assert **that clause's message**
@@ -298,7 +298,19 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   require the generated property to fail. A survivor means the world set
   cannot produce a counterexample — the guard is unfalsifiable rather than
   satisfied, which is how four defects shipped green in the #1063 series.
-  Keep checkers as module-level functions so the self-test can call them
+  **Q3: does the clause stay quiet where production is right?** Q1 and Q2
+  both push in the firing direction. A clause reads some of the world's
+  dimensions and ignores the rest, and every ignored dimension is somewhere
+  production may legitimately answer differently from what the clause
+  demands — so name a world where the condition looks true and production
+  is correct anyway, feed it to the checker, and assert no violation.
+  Deterministic like Q1, no mutant: the defect is in the checker. This is
+  the shape #1332 shipped and had to correct (two clauses read
+  `world.resolution` and neither read `world.authority_raises`, so four
+  producible cells accused correct code), and it fails as a nightly-gate
+  red on someone else's PR rather than as a green property — 37 violating
+  draws in 500 at fuzz depth while the suite tier stayed green by draw
+  luck. Keep checkers as module-level functions so the self-test can call them
   directly (pattern: `TestInvariantCheckersTripOnViolations` in
   `tests/test_quality_generated.py`). The remedy for a survivor is to
   **widen the strategy, not delete the clause**: a guard legislates for
