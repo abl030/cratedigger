@@ -20,7 +20,12 @@ from lib.import_execution import (
     ExecutionLeaseSnapshot,
     ExecutionLivenessDecision,
 )
-from lib.import_job_lane import IMPORT_LANE, PREVIEW_LANE, JobLane
+from lib.import_job_lane import (
+    CLAIM_ASSIGNMENT_TEMPLATES,
+    IMPORT_LANE,
+    PREVIEW_LANE,
+    JobLane,
+)
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
@@ -90,9 +95,10 @@ _RECOVERABLE_OWNER_STAGES: frozenset[tuple[str, str | None]] = frozenset({
 #: job would then fail at Beets launch with a misleading
 #: ``launch_authority_conflict`` instead of a clear processing-locked
 #: refusal). ``local_import`` gets ``force_import``'s exact guard shape: it
-#: never takes the ``processing`` pointer either (CLAUDE.md decision 5 for
-#: #1176), so a request an automation job currently owns must refuse a
-#: local-import candidate the same way it refuses a force one.
+#: never takes the ``processing`` pointer either (issue #1176's own
+#: local-import decision — CLAUDE.md carries no numbered "decisions"), so
+#: a request an automation job currently owns must refuse a local-import
+#: candidate the same way it refuses a force one.
 #:
 #: It is ONE fragment because #1176 PR3 had to land that fix in two
 #: byte-identical copies of it; the single ``%s`` is the caller's execution
@@ -124,23 +130,24 @@ _CLAIM_EXECUTION_LEASE_SQL = """execution_invocation_id = %s,
                     execution_beets_start_ticks = NULL,"""
 
 
-def _claim_assignments_sql(lane: JobLane) -> str:
+def _claim_assignments_sql(lane: JobLane, *, indent: int) -> str:
     """Render one lane's claim ``SET`` fragment from the lane value.
 
     Every token but the single ``%s`` worker-id placeholder is a column name
-    taken from ``lane``, so the two lanes cannot render different claim
-    shapes — which is exactly how they drifted while each lane spelled its
-    own ``UPDATE`` out by hand.
+    taken from ``lane.claim_columns``, paired positionally with
+    ``CLAIM_ASSIGNMENT_TEMPLATES`` — so the two lanes cannot render different claim shapes, which
+    is exactly how they drifted while each spelled its own ``UPDATE`` by
+    hand. ``indent`` is the column the caller's own continuation lines sit
+    at; it changes nothing but whitespace.
     """
     assignments = [
-        f"{lane.status_column} = 'running'",
-        f"{lane.attempts_column} = {lane.attempts_column} + 1",
-        f"{lane.worker_id_column} = %s",
-        f"{lane.started_at_column} = COALESCE({lane.started_at_column}, NOW())",
-        f"{lane.heartbeat_at_column} = NOW()",
-        *(f"{column} = NULL" for column in lane.cleared_columns),
+        template.format(column=column)
+        for column, template in zip(
+            lane.claim_columns, CLAIM_ASSIGNMENT_TEMPLATES, strict=True,
+        )
     ]
-    return ",\n                    ".join(assignments)
+    assignments.extend(f"{column} = NULL" for column in lane.cleared_columns)
+    return (",\n" + " " * indent).join(assignments)
 
 
 def _recovery_stage_is_recoverable(job: ImportJob) -> bool:
@@ -972,7 +979,7 @@ class _ImportJobsMixin(
         """
         cur = self._execute(f"""
             UPDATE import_jobs
-            SET {_claim_assignments_sql(lane)},
+            SET {_claim_assignments_sql(lane, indent=16)},
                 updated_at = NOW()
             WHERE id = %s
               AND job_type = %s
@@ -994,17 +1001,17 @@ class _ImportJobsMixin(
         job_id: int,
         *,
         lane: JobLane,
-        job_type: str,
+        job_type: Literal["force_import", "local_import"],
         request_id: int,
         worker_id: str | None,
     ) -> ImportJob | None:
         """Claim one request-scoped job while the caller retains pinned IMPORT.
 
         Force and local imports share this exactly (issue #1176 PR3): neither
-        ever takes the ``processing`` pointer (CLAUDE.md decision 5), so a
-        request an automation job currently owns refuses both under the
-        identical guard, and the job row must still carry the request's own
-        current status as its ``expected_request_status``.
+        ever takes the ``processing`` pointer, so a request an automation job
+        currently owns refuses both under the identical guard, and the job
+        row must still carry the request's own current status as its
+        ``expected_request_status``.
         """
         with self._atomic():
             request_cur = self._execute("""
@@ -1041,7 +1048,7 @@ class _ImportJobsMixin(
                 return None
             claimed_cur = self._execute(f"""
                 UPDATE import_jobs
-                SET {_claim_assignments_sql(lane)},
+                SET {_claim_assignments_sql(lane, indent=20)},
                     updated_at = NOW()
                 WHERE id = %s
                 RETURNING *
@@ -1097,7 +1104,7 @@ class _ImportJobsMixin(
                 return None
             claimed_cur = self._execute(f"""
                 UPDATE import_jobs
-                SET {_claim_assignments_sql(lane)},
+                SET {_claim_assignments_sql(lane, indent=20)},
                     {_CLAIM_EXECUTION_LEASE_SQL}
                     updated_at = NOW()
                 WHERE id = %s

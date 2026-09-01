@@ -221,23 +221,29 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
     # frozen column names on ``lib/import_job_lane.py``'s two ``JobLane``
     # values; the worker id is the only bound value it emits, no slot takes
     # caller input, and every statement updates ``import_jobs`` alone. The
-    # rendered text is byte-identical to the literals it replaced, pinned by
-    # ``tests/test_import_job_lane.py::TestClaimAssignmentsSql``.
-    ("lib/pipeline_db/import_jobs.py", "bc684eb1d33bd476"): (
+    # rendered SET clause is SEMANTICALLY identical to the literals it
+    # replaced — same columns, same assignments, same single placeholder —
+    # but NOT byte-identical: the three preview request-scoped/automation
+    # claims previously wrapped ``COALESCE(preview_started_at, NOW())``
+    # across four lines and the renderer emits it on one.
+    # ``tests/test_import_job_lane.py::TestClaimAssignmentsSql`` pins the
+    # rendered text per lane against a literal in the test; nothing compares
+    # it to the pre-#1313 statements, which no longer exist.
+    ("lib/pipeline_db/import_jobs.py", "8680520d87d8ab14"): (
         (
             "unguarded YouTube claim: the lane renders the SET clause; the "
             "WHERE gate binds job id, job type and the lane's entry "
             "preview_status as parameters"
         ),
     ),
-    ("lib/pipeline_db/import_jobs.py", "ba256663da27d93a"): (
+    ("lib/pipeline_db/import_jobs.py", "ac3ef11e608f7018"): (
         (
             "request-scoped force/local claim: the lane renders the SET "
             "clause inside an already-locked transaction whose request and "
             "job guards are both fixed literal WHERE clauses"
         ),
     ),
-    ("lib/pipeline_db/import_jobs.py", "63404999d22d9897"): (
+    ("lib/pipeline_db/import_jobs.py", "06aa673d447c4aab"): (
         (
             "automation owner claim: the lane renders the SET clause and the "
             "execution-lease stamp is a fixed literal fragment identical in "

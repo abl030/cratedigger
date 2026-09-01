@@ -12,7 +12,6 @@ generated worlds.
 from __future__ import annotations
 
 import os
-import re
 import sys
 import unittest
 from dataclasses import dataclass
@@ -87,8 +86,13 @@ ColumnSnapshot = dict[str, object]
 
 _LANES_BY_NAME = {lane.name: lane for lane in JOB_LANES}
 #: Every column either lane's claim writes, read back to prove isolation.
-_LANE_COLUMNS = tuple(
-    column for lane in JOB_LANES for column in lane.stamped_columns
+_LANE_COLUMNS = (
+    *(column for lane in JOB_LANES for column in lane.stamped_columns),
+    # Not a lane column — both lanes write it identically — but every claim
+    # must advance it, and nothing else in the suite asserts that
+    # (issue #1313 review, mutant 17: dropping it from the unguarded claim
+    # survived every other test).
+    "updated_at",
 )
 
 
@@ -101,11 +105,6 @@ def _attempts(columns: ColumnSnapshot, lane: JobLane) -> int:
     """
     value = columns[lane.attempts_column]
     return value if isinstance(value, int) else -1
-
-
-def _exact_clause(message: str) -> str:
-    """Anchor a clause message so no sibling clause can satisfy the regex."""
-    return "^" + re.escape(message) + "$"
 
 
 @dataclass(frozen=True)
@@ -168,6 +167,15 @@ def lane_claim_violations(
             and _attempts(columns_after, lane) == _attempts(columns_before, lane) + 1
             and columns_after[lane.heartbeat_at_column] is not None
             and columns_after[lane.started_at_column] is not None
+            # COALESCE: a re-claim never re-dates the first claim.
+            and (
+                columns_before[lane.started_at_column] is None
+                or columns_after[lane.started_at_column]
+                == columns_before[lane.started_at_column]
+            )
+            # Every claim advances the queue-timeline clock.
+            and columns_after["updated_at"]
+            != columns_before["updated_at"]
         )
         if not stamped:
             violations.append(CLAUSE_LANE_NOT_STAMPED)
@@ -304,7 +312,12 @@ class TestImportJobLaneParityGenerated(unittest.TestCase):
             self._preview_claim(job, "parking-preview-worker"),
             "parking preview claim refused",
         )
-        moved = self.db.mark_import_job_preview_importable(job.id)
+        moved = self.db.mark_import_job_preview_importable(
+            # A message the import-lane claim must leave alone: without it
+            # every preview column is already NULL in an import-claimable
+            # world and CLAUSE_OTHER_LANE_MUTATED has nothing to observe.
+            job.id, message="parked for import",
+        )
         self.assertIsNotNone(moved, "preview-importable producer refused")
 
     def _columns(self, job_id: int) -> ColumnSnapshot:
@@ -371,6 +384,7 @@ class TestImportJobLaneParityGenerated(unittest.TestCase):
         row_lane="import",
         request_state="processing_owned",
         prior_attempt="none",
+        already_running=False,
     )
     @example(
         job_type=IMPORT_JOB_LOCAL,
@@ -378,6 +392,7 @@ class TestImportJobLaneParityGenerated(unittest.TestCase):
         row_lane="preview",
         request_state="processing_owned",
         prior_attempt="none",
+        already_running=False,
     )
     # The only worlds that can fire CLAUSE_REFUSED_ITS_OWN_LANE and
     # CLAUSE_ADMISSIBLE_CANDIDATE_INVISIBLE: lane matches and the guard admits.
@@ -387,6 +402,7 @@ class TestImportJobLaneParityGenerated(unittest.TestCase):
         row_lane="import",
         request_state="current",
         prior_attempt="none",
+        already_running=False,
     )
     # The only world that can fire CLAUSE_CLEARED_COLUMN_SURVIVED: a preview
     # claim over a row a restart left carrying the previous attempt's message.
@@ -396,6 +412,7 @@ class TestImportJobLaneParityGenerated(unittest.TestCase):
         row_lane="preview",
         request_state="current",
         prior_attempt="preview_restart",
+        already_running=False,
     )
     # A preview claim over a row the importer handed back: ``attempts`` is
     # non-zero, so an import-lane column a preview claim wrongly reset is
@@ -406,6 +423,7 @@ class TestImportJobLaneParityGenerated(unittest.TestCase):
         row_lane="preview",
         request_state="current",
         prior_attempt="import_requeued",
+        already_running=False,
     )
     # A Replace superseded the request while its force job was still queued.
     @example(
@@ -414,6 +432,7 @@ class TestImportJobLaneParityGenerated(unittest.TestCase):
         row_lane="import",
         request_state="replaced",
         prior_attempt="none",
+        already_running=False,
     )
     # The only world that isolates the guard's ``replaced`` clause: a job
     # enqueued against an already-frozen row, so its own
@@ -426,6 +445,25 @@ class TestImportJobLaneParityGenerated(unittest.TestCase):
         row_lane="preview",
         request_state="replaced_before_enqueue",
         prior_attempt="none",
+        already_running=False,
+    )
+    # The only worlds that isolate every claim's ``status = 'queued'``
+    # conjunct: a row a worker already holds, offered to each lane in turn.
+    @example(
+        job_type=IMPORT_JOB_FORCE,
+        claim_lane="import",
+        row_lane="import",
+        request_state="current",
+        prior_attempt="none",
+        already_running=True,
+    )
+    @example(
+        job_type=IMPORT_JOB_YOUTUBE,
+        claim_lane="preview",
+        row_lane="import",
+        request_state="current",
+        prior_attempt="none",
+        already_running=True,
     )
     @given(
         job_type=st.sampled_from(
@@ -445,6 +483,7 @@ class TestImportJobLaneParityGenerated(unittest.TestCase):
         prior_attempt=st.sampled_from(
             ("none", "preview_restart", "import_requeued"),
         ),
+        already_running=st.booleans(),
     )
     def test_real_pg_request_scoped_and_youtube_lanes_are_one_claim(
         self,
@@ -453,7 +492,11 @@ class TestImportJobLaneParityGenerated(unittest.TestCase):
         row_lane: str,
         request_state: RequestState,
         prior_attempt: PriorAttempt,
+        already_running: bool,
     ) -> None:
+        # Only an import claim moves ``status`` off ``queued``, and only a row
+        # parked in the import lane can take one.
+        assume(not already_running or row_lane == "import")
         # A row enqueued against an already-frozen request can never reach
         # the import lane: parking it there needs a preview claim, and the
         # same guard refuses that too. The world exists in the preview lane
@@ -473,6 +516,12 @@ class TestImportJobLaneParityGenerated(unittest.TestCase):
         )
         self._leave_a_prior_attempt(job, prior_attempt)
         self._park_in_lane(job, _LANES_BY_NAME[row_lane])
+        if already_running:
+            # A worker already holds this row. Nothing may claim it again in
+            # either lane until a terminal write or a recovery releases it.
+            self.assertTrue(
+                self._claim(job, IMPORT_LANE), "pre-claim left the row queued",
+            )
 
         if request_state == "status_drifted":
             self.assertTrue(
@@ -508,14 +557,19 @@ class TestImportJobLaneParityGenerated(unittest.TestCase):
         preview_backoff_pending = (
             lane is PREVIEW_LANE and _attempts(before, IMPORT_LANE) > 0
         )
+        # Measured, not assumed: every claim and both scans gate on
+        # ``status = 'queued'``, so a row a worker already holds is neither
+        # claimable nor on offer, in either lane.
+        row_is_running = before["status"] == "running"
         world = LaneWorld(
             job_type=job_type,
             claim_lane=claim_lane,
             row_lane=row_lane,
-            guard_admits=guard_admits,
+            guard_admits=guard_admits and not row_is_running,
             scan_admits=(
                 claim_lane == row_lane
                 and guard_admits
+                and not row_is_running
                 and not preview_backoff_pending
             ),
         )
@@ -635,6 +689,7 @@ def _columns(**overrides: object) -> ColumnSnapshot:
         "preview_heartbeat_at": None,
         "preview_message": None,
         "preview_error": None,
+        "updated_at": "2026-09-01T00:00:00+00:00",
     }
     snapshot.update(overrides)
     return snapshot
@@ -647,7 +702,8 @@ def _stamped(lane: JobLane, base: ColumnSnapshot) -> ColumnSnapshot:
     after[lane.attempts_column] = _attempts(base, lane) + 1
     after[lane.worker_id_column] = "lane-worker"
     after[lane.started_at_column] = "2026-09-01T00:00:00+00:00"
-    after[lane.heartbeat_at_column] = "2026-09-01T00:00:00+00:00"
+    after[lane.heartbeat_at_column] = "2026-09-01T00:00:01+00:00"
+    after["updated_at"] = "2026-09-01T00:00:01+00:00"
     for column in lane.cleared_columns:
         after[column] = None
     return after
@@ -835,9 +891,6 @@ class TestLaneClaimClausesTripOnViolations(unittest.TestCase):
             CLAUSE_ADMISSIBLE_CANDIDATE_INVISIBLE,
         )
         self.assertEqual(len(set(messages)), len(messages))
-        for message in messages:
-            with self.subTest(message=message):
-                self.assertTrue(re.fullmatch(_exact_clause(message), message))
 
 
 if __name__ == "__main__":

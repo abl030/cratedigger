@@ -9,7 +9,13 @@ import unittest
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401  (boots and migrates ephemeral PostgreSQL)
 
-from lib.import_job_lane import IMPORT_LANE, JOB_LANES, PREVIEW_LANE, JobLane
+from lib.import_job_lane import (
+    CLAIM_ASSIGNMENT_TEMPLATES,
+    IMPORT_LANE,
+    JOB_LANES,
+    PREVIEW_LANE,
+    JobLane,
+)
 from lib.import_queue import (
     IMPORT_JOB_PREVIEW_EVIDENCE_READY,
     IMPORT_JOB_PREVIEW_WAITING,
@@ -17,6 +23,7 @@ from lib.import_queue import (
 from lib.pipeline_db import PipelineDB
 from lib.pipeline_db.import_jobs import (
     _CANDIDATE_JOB_TYPE_ROUTING,
+    _CLAIM_EXECUTION_LEASE_SQL,
     _claim_assignments_sql,
 )
 
@@ -63,6 +70,44 @@ class TestJobLaneValues(unittest.TestCase):
             PREVIEW_LANE.cleared_columns,
             ("preview_message", "preview_error"),
         )
+
+    def test_a_lane_whose_columns_outnumber_its_templates_is_refused(
+        self,
+    ) -> None:
+        """The pairing guard: a sixth claim column with no assignment.
+
+        Unreachable through ``JobLane`` itself — ``claim_columns`` names
+        exactly five fields — so the known-bad world overrides it, which is
+        the shape a future edit that adds a column without adding its
+        assignment would take.
+        """
+        class _SixColumnLane(JobLane):
+            @property
+            def claim_columns(self) -> tuple[str, ...]:
+                return (*super().claim_columns, "importable_at")
+
+        with self.assertRaisesRegex(ValueError, "pair one to one"):
+            _SixColumnLane(
+                name="probe",
+                entry_preview_status="waiting",
+                status_column="status",
+                attempts_column="attempts",
+                worker_id_column="worker_id",
+                started_at_column="started_at",
+                heartbeat_at_column="heartbeat_at",
+                cleared_columns=(),
+            )
+
+    def test_the_real_lanes_pair_their_columns_with_their_templates(
+        self,
+    ) -> None:
+        """Must-still-work: neither shipped lane trips the pairing guard."""
+        for lane in JOB_LANES:
+            with self.subTest(lane=lane.name):
+                self.assertEqual(
+                    len(lane.claim_columns),
+                    len(CLAIM_ASSIGNMENT_TEMPLATES),
+                )
 
     def test_stamped_columns_are_the_lane_columns_and_nothing_else(
         self,
@@ -129,7 +174,7 @@ class TestClaimAssignmentsSql(unittest.TestCase):
 
     def test_import_lane_renders_the_unprefixed_claim(self) -> None:
         self.assertEqual(
-            _claim_assignments_sql(IMPORT_LANE),
+            _claim_assignments_sql(IMPORT_LANE, indent=20),
             "status = 'running',\n"
             "                    attempts = attempts + 1,\n"
             "                    worker_id = %s,\n"
@@ -139,7 +184,7 @@ class TestClaimAssignmentsSql(unittest.TestCase):
 
     def test_preview_lane_renders_the_prefixed_claim_and_clears(self) -> None:
         self.assertEqual(
-            _claim_assignments_sql(PREVIEW_LANE),
+            _claim_assignments_sql(PREVIEW_LANE, indent=20),
             "preview_status = 'running',\n"
             "                    preview_attempts = preview_attempts + 1,\n"
             "                    preview_worker_id = %s,\n"
@@ -150,6 +195,16 @@ class TestClaimAssignmentsSql(unittest.TestCase):
             "                    preview_error = NULL",
         )
 
+    def test_indent_places_every_continuation_line(self) -> None:
+        """The caller's own SET column; nothing else may depend on it."""
+        rendered = _claim_assignments_sql(IMPORT_LANE, indent=16)
+        continuations = rendered.split(",\n")[1:]
+        self.assertTrue(continuations)
+        for line in continuations:
+            with self.subTest(line=line):
+                self.assertTrue(line.startswith(" " * 16))
+                self.assertFalse(line.startswith(" " * 17))
+
     def test_exactly_one_placeholder_regardless_of_lane(self) -> None:
         """The worker id is the only bound value in the fragment.
 
@@ -159,7 +214,9 @@ class TestClaimAssignmentsSql(unittest.TestCase):
         """
         for lane in JOB_LANES:
             with self.subTest(lane=lane.name):
-                self.assertEqual(_claim_assignments_sql(lane).count("%s"), 1)
+                self.assertEqual(
+                    _claim_assignments_sql(lane, indent=20).count("%s"), 1,
+                )
 
     def test_a_lane_with_no_cleared_columns_renders_no_trailing_comma(
         self,
@@ -175,8 +232,40 @@ class TestClaimAssignmentsSql(unittest.TestCase):
                 heartbeat_at_column="heartbeat_at",
                 cleared_columns=(),
             ),
+            indent=20,
         )
         self.assertFalse(rendered.rstrip().endswith(","))
+
+
+class TestClaimExecutionLeaseSql(unittest.TestCase):
+    """The lease stamp an automation claim writes, identical in both lanes."""
+
+    def test_it_writes_every_worker_field_and_clears_the_beets_child(
+        self,
+    ) -> None:
+        """A re-claim must not inherit the previous attempt's child identity.
+
+        ``record_import_job_beets_child`` and
+        ``authorize_import_job_launch``'s automation arm both gate on
+        ``execution_beets_pid IS NULL``, so a claim that left a stale child
+        pid behind would permanently refuse the next launch (issue #1313
+        review, mutant 8: dropping this NULL survived every behavioural test).
+        """
+        for column in (
+            "execution_invocation_id",
+            "execution_host_boot_id",
+            "execution_systemd_unit",
+            "execution_worker_pid",
+            "execution_worker_start_ticks",
+        ):
+            with self.subTest(column=column):
+                self.assertIn(f"{column} = %s", _CLAIM_EXECUTION_LEASE_SQL)
+        for column in ("execution_beets_pid", "execution_beets_start_ticks"):
+            with self.subTest(column=column):
+                self.assertIn(f"{column} = NULL", _CLAIM_EXECUTION_LEASE_SQL)
+
+    def test_it_binds_exactly_the_five_worker_lease_values(self) -> None:
+        self.assertEqual(_CLAIM_EXECUTION_LEASE_SQL.count("%s"), 5)
 
 
 class TestSharedCandidateRouting(unittest.TestCase):

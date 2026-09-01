@@ -2,9 +2,16 @@
 
 One row is claimed twice in its life, by two different workers, at two
 different stages — and until this module existed the lane was a naming
-convention rather than a value, so every queue method, fake stub and worker
-loop existed twice under a ``preview_`` prefix and stayed in step only by
-docstring prose.
+convention rather than a value, so the eight claim statements (four routes
+x two lanes) were eight hand-written copies of one transaction, differing
+only in the two things a ``JobLane`` now says. They stayed in step by
+docstring prose, which is how issue #1176 PR3 came to need the same fix
+twice.
+
+Scope, precisely: a lane describes the CLAIM. The other ``preview_*``
+writers — the evidence-ready mark, the requeues, the heartbeats — still
+spell their own columns, deliberately, because what they write is not one
+shape wearing two prefixes.
 """
 
 from __future__ import annotations
@@ -15,6 +22,21 @@ from typing import Final
 from lib.import_queue import (
     IMPORT_JOB_PREVIEW_EVIDENCE_READY,
     IMPORT_JOB_PREVIEW_WAITING,
+)
+
+#: How a claim writes each of ``JobLane.claim_columns``, positionally: row
+#: *i* here is the assignment for column *i* there. Two ordered lists rather
+#: than one mapping so the lane's fields stay ordinary attribute reads (a
+#: reflective lookup would hide them from the dead-code sweep), and
+#: ``JobLane.__post_init__`` refuses any lane whose column count disagrees
+#: with this — so a lane that grows a sixth stamped column cannot silently
+#: grow it in only one of the two places.
+CLAIM_ASSIGNMENT_TEMPLATES: Final[tuple[str, ...]] = (
+    "{column} = 'running'",
+    "{column} = {column} + 1",
+    "{column} = %s",
+    "{column} = COALESCE({column}, NOW())",
+    "{column} = NOW()",
 )
 
 
@@ -30,8 +52,11 @@ class JobLane:
     the positive ``job_type`` routing table — so a lane says only which stage
     is being taken and which columns that claim writes.
 
-    Both the production queue methods and ``FakePipelineDB`` read their columns
-    from this one value, so the two lanes cannot drift apart in either.
+    Both the production claim statements and ``FakePipelineDB``'s claim read
+    their columns from this one value, so the CLAIM cannot drift apart
+    between the two lanes or between production and the fake. It says
+    nothing about the lanes' other writers, which still spell their own
+    columns (see the module docstring).
     """
 
     #: Operator-facing lane name; also the discriminator in test parameters.
@@ -53,6 +78,25 @@ class JobLane:
     #: ``message``/``error`` for its terminal writer, so it clears nothing.
     cleared_columns: tuple[str, ...]
 
+    def __post_init__(self) -> None:
+        if len(self.claim_columns) != len(CLAIM_ASSIGNMENT_TEMPLATES):
+            raise ValueError(
+                "a lane's claim columns and their assignment templates must "
+                f"pair one to one: {len(self.claim_columns)} columns against "
+                f"{len(CLAIM_ASSIGNMENT_TEMPLATES)} templates"
+            )
+
+    @property
+    def claim_columns(self) -> tuple[str, ...]:
+        """The columns a claim writes, in ``CLAIM_ASSIGNMENT_TEMPLATES`` order."""
+        return (
+            self.status_column,
+            self.attempts_column,
+            self.worker_id_column,
+            self.started_at_column,
+            self.heartbeat_at_column,
+        )
+
     @property
     def stamped_columns(self) -> tuple[str, ...]:
         """Every ``import_jobs`` column one claim in this lane writes.
@@ -60,15 +104,11 @@ class JobLane:
         Excludes ``updated_at`` and the execution-lease columns, which both
         lanes write identically and which therefore say nothing about lane
         identity.
+
+        Derived from ``claim_columns`` rather than re-listed, so this and the
+        rendered SQL can never disagree about which columns a claim touches.
         """
-        return (
-            self.status_column,
-            self.attempts_column,
-            self.worker_id_column,
-            self.started_at_column,
-            self.heartbeat_at_column,
-            *self.cleared_columns,
-        )
+        return (*self.claim_columns, *self.cleared_columns)
 
 
 IMPORT_LANE: Final = JobLane(
