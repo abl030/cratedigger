@@ -1,10 +1,15 @@
-"""Generated candidate-size admission contract for issue #1301."""
+"""Generated contracts on what ``try_enqueue`` returns.
+
+Two, both driving the real entry point: a selected manifest is admitted iff
+every advertised size is positive (issue #1301), and whatever the outcome,
+the returned attempt reports every match result it consumed (issue #1313).
+"""
 
 from __future__ import annotations
 
 import unittest
 from collections.abc import Sequence
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from hypothesis import example, given
 from hypothesis import strategies as st
@@ -21,7 +26,12 @@ from tests.test_enqueue_fanout import (
     _const_match,
     _ctx_with_download_ownership,
     _make_cfg,
+    _make_ctx,
+    _make_results,
     _make_tracks,
+    _ranked_users,
+    _scored_match,
+    _upload_speeds,
 )
 
 
@@ -118,3 +128,127 @@ class TestAdvertisedSizeAdmissionProperty(unittest.TestCase):
         )
         if not should_admit:
             self.assertEqual(db.record_transfer_enqueue_calls, [])
+
+
+def forensics_violations(
+    attempt: EnqueueAttempt,
+    consumed: list[tuple[int, int]],
+) -> list[str]:
+    """Every way a returned attempt can under-report what matching cost.
+
+    ``consumed`` is one ``(candidates, skips)`` pair per ``check_for_match``
+    the attempt actually made — recorded by the injected ``match_fn``, so
+    the expectation follows the real iteration rather than assuming the
+    attempt walked every peer. Accumulating rather than short-circuiting so
+    a candidate-count violation cannot hide a skip-count one.
+    """
+    violations: list[str] = []
+    expected_candidates = sum(candidates for candidates, _ in consumed)
+    expected_skips = sum(skips for _, skips in consumed)
+    if len(attempt.candidates) != expected_candidates:
+        violations.append(
+            f"candidate scores dropped: reported {len(attempt.candidates)}, "
+            f"consumed {expected_candidates}"
+        )
+    if attempt.pre_filter_skip_count != expected_skips:
+        violations.append(
+            f"pre-filter skips dropped: reported "
+            f"{attempt.pre_filter_skip_count}, consumed {expected_skips}"
+        )
+    if attempt.matched and attempt.enqueue_failed:
+        violations.append("an attempt cannot both keep a candidate and fail")
+    return violations
+
+
+def _run_forensics_world(
+    plan: list[tuple[bool, int, int]],
+    *,
+    enqueue_succeeds: bool,
+) -> tuple[EnqueueAttempt, list[tuple[int, int]]]:
+    cfg = _make_cfg(browse_top_k=20)
+    users = _ranked_users(len(plan))
+    ctx = _make_ctx(cfg, user_upload_speed=_upload_speeds(users))
+    results = _make_results(users)
+    specs = dict(zip(users, plan, strict=True))
+    consumed: list[tuple[int, int]] = []
+
+    def match_fn(_tracks, _ft, _dirs, username, _ctx):
+        matched, candidates, skips = specs[username]
+        consumed.append((candidates, skips))
+        return _scored_match(
+            username, matched=matched, candidates=candidates, skips=skips,
+        )
+
+    with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+         patch(
+             "lib.enqueue.slskd_do_enqueue",
+             return_value=[MagicMock()] if enqueue_succeeds else None,
+         ):
+        attempt = try_enqueue(
+            _make_tracks(), results, "flac", ctx, match_fn=match_fn,
+        )
+    return attempt, consumed
+
+
+class TestAttemptForensicsProperty(unittest.TestCase):
+    """An attempt reports every match result it consumed, whatever it decides."""
+
+    @given(
+        plan=st.lists(
+            st.tuples(
+                st.booleans(),
+                st.integers(min_value=0, max_value=3),
+                st.integers(min_value=0, max_value=3),
+            ),
+            min_size=1,
+            max_size=5,
+        ),
+        enqueue_succeeds=st.booleans(),
+    )
+    # The world the deterministic pin names: a peer walked past before the
+    # one that matched, whose skips would vanish if any return read the
+    # winner's counters instead of the attempt's.
+    @example(plan=[(False, 2, 3), (True, 1, 1)], enqueue_succeeds=True)
+    # Nothing matches at all: the whole walk is forensics and nothing else.
+    @example(plan=[(False, 1, 2), (False, 3, 0)], enqueue_succeeds=True)
+    # A match whose enqueue is refused — the failure return path.
+    @example(plan=[(True, 2, 5)], enqueue_succeeds=False)
+    def test_every_consumed_match_is_reported(
+        self, *, plan: list[tuple[bool, int, int]], enqueue_succeeds: bool,
+    ) -> None:
+        attempt, consumed = _run_forensics_world(
+            plan, enqueue_succeeds=enqueue_succeeds,
+        )
+        self.assertEqual(forensics_violations(attempt, consumed), [])
+
+
+class TestForensicsCheckerTripsOnViolations(unittest.TestCase):
+    """Known-bad self-test per clause: each one fires, with its own message."""
+
+    _CLEAN = EnqueueAttempt(
+        matched=False, candidates=(), pre_filter_skip_count=0,
+    )
+
+    def test_dropped_candidate_scores_trip_their_own_clause(self) -> None:
+        violations = forensics_violations(self._CLEAN, [(2, 0)])
+        self.assertEqual(len(violations), 1)
+        self.assertIn("candidate scores dropped", violations[0])
+
+    def test_dropped_skips_trip_their_own_clause(self) -> None:
+        violations = forensics_violations(self._CLEAN, [(0, 3)])
+        self.assertEqual(len(violations), 1)
+        self.assertIn("pre-filter skips dropped", violations[0])
+
+    def test_matched_and_failed_trips_its_own_clause(self) -> None:
+        violations = forensics_violations(
+            EnqueueAttempt(
+                matched=True, enqueue_failed=True,
+                candidates=(), pre_filter_skip_count=0,
+            ),
+            [],
+        )
+        self.assertEqual(len(violations), 1)
+        self.assertIn("cannot both keep a candidate and fail", violations[0])
+
+    def test_a_clean_attempt_trips_nothing(self) -> None:
+        self.assertEqual(forensics_violations(self._CLEAN, [(0, 0)]), [])

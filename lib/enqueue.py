@@ -8,7 +8,7 @@ import threading
 import time
 from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from lib.browse import _fanout_browse_users, download_filter, get_browse_coordinator
@@ -466,6 +466,68 @@ class DownloadOwnershipClaim:
     attempted: bool
     claimed: bool
     enqueued_at: str | None = None
+
+
+@dataclass
+class _AttemptTally:
+    """What one enqueue attempt accumulates and owes back either way.
+
+    The single-album and multi-disc lanes have almost nothing in common —
+    per-peer fallback versus first-match-only per disc, measured at 13 of
+    72 and 112 statements shared in order (issue #1313). What they DO share
+    is this: whatever happens, the attempt owes the caller every candidate
+    score it collected and every dir the pre-filter skipped, because
+    ``search_log`` persists both as the request's search forensics whether
+    or not anything matched.
+
+    That used to be a convention spelled out at nineteen separate
+    ``EnqueueAttempt(...)`` sites, each repeating ``candidates=`` and
+    ``pre_filter_skip_count=``, with the skip count carried in a
+    one-element list so a generator could mutate it through the caller's
+    reference. A return that forgot either would blank a request's search
+    history and nothing would fail. Now the shape carries them and the call
+    sites say only what is different about that particular outcome.
+    """
+
+    candidates: list[CandidateScore] = field(
+        default_factory=list[CandidateScore])
+    pre_filter_skips: int = 0
+    conflicting_request_ids: set[int] = field(default_factory=set[int])
+
+    def record_match(self, match_result: MatchResult) -> None:
+        """Absorb one ``check_for_match`` result, matched or not."""
+        self.candidates.extend(match_result.candidates)
+        self.pre_filter_skips += match_result.pre_filter_skip_count
+
+    def matched(self, downloads: list[DownloadFile] | None) -> EnqueueAttempt:
+        """The attempt found and kept a candidate.
+
+        ``downloads`` is ``None`` on the poll-recovery paths, where the claim
+        outlives an ambiguous slskd answer and the next poll re-derives what
+        actually landed.
+        """
+        return self._attempt(matched=True, downloads=downloads)
+
+    def unmatched(self, *, enqueue_failed: bool = False) -> EnqueueAttempt:
+        """The attempt kept nothing. ``enqueue_failed`` separates "we tried
+        and slskd or the claim refused" from "nothing matched at all"."""
+        return self._attempt(matched=False, enqueue_failed=enqueue_failed)
+
+    def _attempt(
+        self,
+        *,
+        matched: bool,
+        downloads: list[DownloadFile] | None = None,
+        enqueue_failed: bool = False,
+    ) -> EnqueueAttempt:
+        return EnqueueAttempt(
+            matched=matched,
+            downloads=downloads,
+            enqueue_failed=enqueue_failed,
+            candidates=tuple(self.candidates),
+            pre_filter_skip_count=self.pre_filter_skips,
+            conflicting_request_ids=frozenset(self.conflicting_request_ids),
+        )
 
 
 def _album_request_id(album: Any) -> int | None:
@@ -1277,8 +1339,7 @@ def _iter_wave_matches(
     user_dirs: dict[str, list[str]],
     allowed_filetype: str,
     ctx: CratediggerContext,
-    accumulated: list[CandidateScore],
-    pre_filter_skips: list[int] | None = None,
+    tally: _AttemptTally,
     *,
     match_fn: MatchFn = check_for_match,
 ) -> Iterator[tuple[str, MatchResult, int]]:
@@ -1299,9 +1360,10 @@ def _iter_wave_matches(
     per-peer TCP read timeout bounds wave wall-time. The previous client
     deadlines were starving the pipeline (see 2026-05-02 regression).
 
-    Side effects: appends per-dir ``CandidateScore`` entries into
-    ``accumulated`` (caller-owned), bumps primary fan-out browse timing and
-    ``ctx.fanout_waves`` / ``ctx.peers_browsed``.
+    Side effects: records every ``check_for_match`` result into the caller's
+    ``tally`` — matched or not, since a skipped dir is forensics too — and
+    bumps primary fan-out browse timing and ``ctx.fanout_waves`` /
+    ``ctx.peers_browsed``.
 
     Caller is responsible for stopping iteration (``break``) once a match is
     enqueued; the generator stops fan-out work as soon as iteration stops.
@@ -1355,9 +1417,7 @@ def _iter_wave_matches(
             match_result = match_fn(
                 tracks, allowed_filetype, file_dirs, username, ctx,
             )
-            accumulated.extend(match_result.candidates)
-            if pre_filter_skips is not None:
-                pre_filter_skips[0] += match_result.pre_filter_skip_count
+            tally.record_match(match_result)
             if match_result.matched:
                 yield username, match_result, wave_idx
 
@@ -1410,18 +1470,15 @@ def _try_enqueue_impl(
     waves_before = ctx.fanout_waves
 
     had_enqueue_failure = False
-    accumulated: list[CandidateScore] = []
-    pre_filter_skips: list[int] = [0]
-    # Issue #1196 item 2: union of every candidate skipped for a
-    # cross-request conflict during this whole call -- carried on
-    # EVERY returned EnqueueAttempt (matched or not) so the caller can
-    # surface the marker regardless of whether a LATER candidate went
-    # on to match.
-    conflicting_ids: set[int] = set()
+    # Issue #1196 item 2: the tally's conflicting ids are the union of every
+    # candidate skipped for a cross-request conflict during this whole call,
+    # and every return path carries them (matched or not) so the caller can
+    # surface the marker regardless of whether a LATER candidate matched.
+    tally = _AttemptTally()
     match_wave: int | None = None
     for username, match_result, wave_idx in _iter_wave_matches(
-        all_tracks, eligible, user_dirs, allowed_filetype, ctx, accumulated,
-        pre_filter_skips, match_fn=match_fn,
+        all_tracks, eligible, user_dirs, allowed_filetype, ctx, tally,
+        match_fn=match_fn,
     ):
         if match_wave is None:
             match_wave = wave_idx
@@ -1456,7 +1513,7 @@ def _try_enqueue_impl(
             check_cross_cycle=check_cross_cycle,
         )
         if conflicting_requests:
-            conflicting_ids |= conflicting_requests
+            tally.conflicting_request_ids |= conflicting_requests
             logger.info(
                 "cross-request enqueue conflict (issue #1178): skipping "
                 "%s for album %s from %s -- queue keys already held by "
@@ -1514,13 +1571,7 @@ def _try_enqueue_impl(
                     peers=ctx.peers_browsed - peers_before,
                     waves=ctx.fanout_waves - waves_before,
                 )
-                return EnqueueAttempt(
-                    matched=True,
-                    downloads=downloads,
-                    candidates=tuple(accumulated),
-                    pre_filter_skip_count=pre_filter_skips[0],
-                    conflicting_request_ids=frozenset(conflicting_ids),
-                )
+                return tally.matched(downloads)
             if resolution.status == "poll_recovery":
                 _log_album_browse(
                     artist_name, album_name, allowed_filetype, "single",
@@ -1529,13 +1580,7 @@ def _try_enqueue_impl(
                     peers=ctx.peers_browsed - peers_before,
                     waves=ctx.fanout_waves - waves_before,
                 )
-                return EnqueueAttempt(
-                    matched=True,
-                    downloads=resolution.downloads,
-                    candidates=tuple(accumulated),
-                    pre_filter_skip_count=pre_filter_skips[0],
-                    conflicting_request_ids=frozenset(conflicting_ids),
-                )
+                return tally.matched(resolution.downloads)
             if resolution.status == "verified_no_acceptance":
                 # Verified no acceptance: the claim was reset and confirmed
                 # no transfer landed, so this attempt now owns nothing --
@@ -1583,13 +1628,7 @@ def _try_enqueue_impl(
                         peers=ctx.peers_browsed - peers_before,
                         waves=ctx.fanout_waves - waves_before,
                     )
-                    return EnqueueAttempt(
-                        matched=True,
-                        downloads=recovery.downloads,
-                        candidates=tuple(accumulated),
-                        pre_filter_skip_count=pre_filter_skips[0],
-                        conflicting_request_ids=frozenset(conflicting_ids),
-                    )
+                    return tally.matched(recovery.downloads)
                 had_enqueue_failure = True
                 break
             had_enqueue_failure = True
@@ -1606,13 +1645,7 @@ def _try_enqueue_impl(
         peers=ctx.peers_browsed - peers_before,
         waves=ctx.fanout_waves - waves_before,
     )
-    return EnqueueAttempt(
-        matched=False,
-        enqueue_failed=had_enqueue_failure,
-        candidates=tuple(accumulated),
-        pre_filter_skip_count=pre_filter_skips[0],
-        conflicting_request_ids=frozenset(conflicting_ids),
-    )
+    return tally.unmatched(enqueue_failed=had_enqueue_failure)
 
 
 def try_multi_enqueue(
@@ -1680,8 +1713,7 @@ def _try_multi_enqueue_impl(
     album_name = album.title
     artist_name = album.artist_name
     eligible, user_dirs = _eligible_user_dirs(results, allowed_filetype, album_id, ctx)
-    accumulated: list[CandidateScore] = []
-    pre_filter_skips: list[int] = [0]
+    tally = _AttemptTally()
     # #550 defect #1: a peer's per-disc sibling folders can cross-match —
     # disc N's tracks strict-accept an EARLIER disc's folder (radio-series
     # titles restart per disc; a 0.5 filename ratio even tolerates
@@ -1703,8 +1735,7 @@ def _try_multi_enqueue_impl(
         first_match = next(
             _iter_wave_matches(
                 disk["tracks"], eligible, remaining_user_dirs,
-                allowed_filetype, ctx,
-                accumulated, pre_filter_skips, match_fn=match_fn,
+                allowed_filetype, ctx, tally, match_fn=match_fn,
             ),
             None,
         )
@@ -1717,11 +1748,7 @@ def _try_multi_enqueue_impl(
                 peers=ctx.peers_browsed - peers_before,
                 waves=ctx.fanout_waves - waves_before,
             )
-            return EnqueueAttempt(
-                matched=False,
-                candidates=tuple(accumulated),
-                pre_filter_skip_count=pre_filter_skips[0],
-            )
+            return tally.unmatched()
         username, match_result, match_wave = first_match
         directory = download_filter(
             allowed_filetype, match_result.directory, ctx.cfg,
@@ -1746,11 +1773,7 @@ def _try_multi_enqueue_impl(
                 peers=ctx.peers_browsed - peers_before,
                 waves=ctx.fanout_waves - waves_before,
             )
-            return EnqueueAttempt(
-                matched=False,
-                candidates=tuple(accumulated),
-                pre_filter_skip_count=pre_filter_skips[0],
-            )
+            return tally.unmatched()
         _log_album_browse(
             artist_name, album_name, allowed_filetype,
             f"multi-disc{disk['disk_no']}",
@@ -1788,11 +1811,7 @@ def _try_multi_enqueue_impl(
                     username,
                     allowed_filetype,
                 )
-                return EnqueueAttempt(
-                    matched=False,
-                    candidates=tuple(accumulated),
-                    pre_filter_skip_count=pre_filter_skips[0],
-                )
+                return tally.unmatched()
             disk_planned = _planned_downloads(
                 username=username,
                 file_dir=file_dir,
@@ -1820,16 +1839,13 @@ def _try_multi_enqueue_impl(
                 len(planned_downloads),
                 len(unique_transfer_keys),
             )
-            return EnqueueAttempt(
-                matched=False,
-                candidates=tuple(accumulated),
-                pre_filter_skip_count=pre_filter_skips[0],
-            )
+            return tally.unmatched()
         conflicting_requests = _cross_request_conflict_ids(
             planned_downloads, _album_request_id(album), ctx,
             check_cross_cycle=check_cross_cycle,
         )
         if conflicting_requests:
+            tally.conflicting_request_ids |= conflicting_requests
             logger.warning(
                 "MULTI-DISC CROSS-REQUEST CONFLICT (issue #1178): "
                 "request=%s queue keys already held by request(s) %s; "
@@ -1837,12 +1853,7 @@ def _try_multi_enqueue_impl(
                 _album_request_id(album),
                 sorted(conflicting_requests),
             )
-            return EnqueueAttempt(
-                matched=False,
-                candidates=tuple(accumulated),
-                pre_filter_skip_count=pre_filter_skips[0],
-                conflicting_request_ids=frozenset(conflicting_requests),
-            )
+            return tally.unmatched()
         claim = _claim_initial_download_ownership(
             album,
             planned_downloads,
@@ -1854,12 +1865,7 @@ def _try_multi_enqueue_impl(
             # its same-cycle registry claim (#1178 PR2 review F5).
             _release_claimed_queue_keys(
                 planned_downloads, _album_request_id(album), ctx)
-            return EnqueueAttempt(
-                matched=False,
-                enqueue_failed=True,
-                candidates=tuple(accumulated),
-                pre_filter_skip_count=pre_filter_skips[0],
-            )
+            return tally.unmatched(enqueue_failed=True)
 
         all_downloads: list[DownloadFile] = []
         enqueued = 0
@@ -1904,12 +1910,7 @@ def _try_multi_enqueue_impl(
                         f"{artist_name} - {album_name} from {username}"
                     )
                     if resolution.status == "poll_recovery":
-                        return EnqueueAttempt(
-                            matched=True,
-                            downloads=resolution.downloads,
-                            candidates=tuple(accumulated),
-                            pre_filter_skip_count=pre_filter_skips[0],
-                        )
+                        return tally.matched(resolution.downloads)
                     if resolution.status == "verified_no_acceptance":
                         # Verified no acceptance: the claim was reset and
                         # confirmed no transfer landed -- release the
@@ -1918,12 +1919,7 @@ def _try_multi_enqueue_impl(
                         # sibling for the rest of the cycle.
                         _release_claimed_queue_keys(
                             planned_downloads, claim.request_id, ctx)
-                    return EnqueueAttempt(
-                        matched=False,
-                        enqueue_failed=True,
-                        candidates=tuple(accumulated),
-                        pre_filter_skip_count=pre_filter_skips[0],
-                    )
+                    return tally.unmatched(enqueue_failed=True)
             except Exception:
                 logger.exception("Exception enqueueing tracks")
                 logger.info(
@@ -1947,20 +1943,10 @@ def _try_multi_enqueue_impl(
                         reason=reason,
                     )
                     if recovery.status == "poll_recovery":
-                        return EnqueueAttempt(
-                            matched=True,
-                            downloads=recovery.downloads,
-                            candidates=tuple(accumulated),
-                            pre_filter_skip_count=pre_filter_skips[0],
-                        )
+                        return tally.matched(recovery.downloads)
                 elif all_downloads:
                     cancel_and_delete(all_downloads, ctx)
-                return EnqueueAttempt(
-                    matched=False,
-                    enqueue_failed=True,
-                    candidates=tuple(accumulated),
-                    pre_filter_skip_count=pre_filter_skips[0],
-                )
+                return tally.unmatched(enqueue_failed=True)
         logger.info(
             "MANIFEST-TRACE multidisc-enqueue request=%s enqueued_discs=%s/%s "
             "planned_files=%s accepted_files=%s",
@@ -1972,18 +1958,8 @@ def _try_multi_enqueue_impl(
         )
         if enqueued == total:
             if not _persist_claimed_download_state(claim, all_downloads, ctx):
-                return EnqueueAttempt(
-                    matched=False,
-                    enqueue_failed=True,
-                    candidates=tuple(accumulated),
-                    pre_filter_skip_count=pre_filter_skips[0],
-                )
-            return EnqueueAttempt(
-                matched=True,
-                downloads=all_downloads,
-                candidates=tuple(accumulated),
-                pre_filter_skip_count=pre_filter_skips[0],
-            )
+                return tally.unmatched(enqueue_failed=True)
+            return tally.matched(all_downloads)
         if len(all_downloads) > 0:
             recovery = _handle_claimed_partial_failure(
                 claim,
@@ -1991,26 +1967,12 @@ def _try_multi_enqueue_impl(
                 ctx,
             )
             if recovery.status == "poll_recovery":
-                return EnqueueAttempt(
-                    matched=True,
-                    downloads=recovery.downloads,
-                    candidates=tuple(accumulated),
-                    pre_filter_skip_count=pre_filter_skips[0],
-                )
+                return tally.matched(recovery.downloads)
             if not claim.claimed:
                 cancel_and_delete(all_downloads, ctx)
-        return EnqueueAttempt(
-            matched=False,
-            enqueue_failed=True,
-            candidates=tuple(accumulated),
-            pre_filter_skip_count=pre_filter_skips[0],
-        )
+        return tally.unmatched(enqueue_failed=True)
 
-    return EnqueueAttempt(
-        matched=False,
-        candidates=tuple(accumulated),
-        pre_filter_skip_count=pre_filter_skips[0],
-    )
+    return tally.unmatched()
 
 
 def _try_filetype(

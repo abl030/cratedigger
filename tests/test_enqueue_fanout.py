@@ -50,7 +50,7 @@ from lib.grab_list import DownloadFile, GrabListEntry
 from lib.matching import MatchResult
 from lib.pipeline_db import TransferLedgerRow
 from lib.processing_paths import attempt_fingerprint_of_files
-from lib.quality import ActiveDownloadState
+from lib.quality import ActiveDownloadState, CandidateScore
 from lib.slskd_transfers import SlskdEnqueueOutcome
 from tests.fakes import (
     DenylistEntry,
@@ -935,6 +935,128 @@ class TestEnqueueFailureTracking(unittest.TestCase):
 
         self.assertFalse(attempt.matched)
         self.assertTrue(attempt.enqueue_failed)
+
+
+def _candidate_score(username: str, dir_: str) -> CandidateScore:
+    """One forensic score row, in the cheap sub-count-gate shape."""
+    return CandidateScore(
+        username=username, dir=dir_, filetype="flac",
+        matched_tracks=0, total_tracks=1, avg_ratio=0.0,
+        missing_titles=[], file_count=0,
+    )
+
+
+def _scored_match(
+    username: str,
+    *,
+    matched: bool,
+    candidates: int,
+    skips: int,
+) -> MatchResult:
+    """A MatchResult carrying forensics, matched or not."""
+    file_dir = f"Music\\{username}\\Album"
+    return MatchResult(
+        matched=matched,
+        directory=(
+            {
+                "directory": file_dir,
+                "files": [{"filename": "01 - Track.flac", "size": 123}],
+            }
+            if matched else {}
+        ),
+        file_dir=file_dir if matched else "",
+        candidates=[
+            _candidate_score(username, f"{file_dir}\\{i}")
+            for i in range(candidates)
+        ],
+        pre_filter_skip_count=skips,
+    )
+
+
+class TestAttemptReportsItsForensics(unittest.TestCase):
+    """Whatever the outcome, an attempt reports what matching cost it.
+
+    ``search_log.candidates`` and ``search_log.pre_filter_skip_count`` are
+    the request's search history, and both are populated from the returned
+    ``EnqueueAttempt`` regardless of whether anything matched. Before issue
+    #1313 every one of the two impls' nineteen return sites repeated the two
+    keyword arguments by hand and no test asserted either of them, so a
+    return that dropped one would blank a request's forensics silently.
+    """
+
+    def _run(self, plan, *, enqueue_succeeds: bool = True):
+        cfg = _make_cfg(browse_top_k=20)
+        users = _ranked_users(len(plan))
+        ctx = _make_ctx(cfg, user_upload_speed=_upload_speeds(users))
+        results = _make_results(users)
+        matches = {
+            user: _scored_match(user, **spec)
+            for user, spec in zip(users, plan, strict=True)
+        }
+        asked: list[str] = []
+
+        def match_fn(_tracks, _ft, _dirs, username, _ctx):
+            asked.append(username)
+            return matches[username]
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch(
+                 "lib.enqueue.slskd_do_enqueue",
+                 return_value=[MagicMock()] if enqueue_succeeds else None,
+             ):
+            attempt = try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=match_fn,
+            )
+        return attempt, asked, plan
+
+    def _assert_reports_every_visit(self, attempt, asked, plan):
+        visited = plan[:len(asked)]
+        self.assertEqual(
+            len(attempt.candidates),
+            sum(spec["candidates"] for spec in visited),
+        )
+        self.assertEqual(
+            attempt.pre_filter_skip_count,
+            sum(spec["skips"] for spec in visited),
+        )
+
+    def test_a_match_still_reports_the_peers_it_walked_past(self):
+        """The decisive world: matching on the second peer must not throw
+        away the first peer's skipped dirs, which is the whole reason the
+        skip count is accumulated rather than read off the winner."""
+        attempt, asked, plan = self._run([
+            {"matched": False, "candidates": 2, "skips": 3},
+            {"matched": True, "candidates": 1, "skips": 1},
+        ])
+
+        self.assertTrue(attempt.matched)
+        self.assertEqual(len(asked), 2)
+        self.assertEqual(len(attempt.candidates), 3)
+        self.assertEqual(attempt.pre_filter_skip_count, 4)
+        self._assert_reports_every_visit(attempt, asked, plan)
+
+    def test_an_attempt_that_matches_nothing_still_reports_them_all(self):
+        attempt, asked, plan = self._run([
+            {"matched": False, "candidates": 1, "skips": 2},
+            {"matched": False, "candidates": 3, "skips": 0},
+        ])
+
+        self.assertFalse(attempt.matched)
+        self.assertEqual(len(attempt.candidates), 4)
+        self.assertEqual(attempt.pre_filter_skip_count, 2)
+        self._assert_reports_every_visit(attempt, asked, plan)
+
+    def test_a_failed_enqueue_reports_them_too(self):
+        attempt, asked, plan = self._run(
+            [{"matched": True, "candidates": 2, "skips": 5}],
+            enqueue_succeeds=False,
+        )
+
+        self.assertFalse(attempt.matched)
+        self.assertTrue(attempt.enqueue_failed)
+        self.assertEqual(len(attempt.candidates), 2)
+        self.assertEqual(attempt.pre_filter_skip_count, 5)
+        self._assert_reports_every_visit(attempt, asked, plan)
 
 
 class TestDownloadOwnershipPreclaim(unittest.TestCase):
