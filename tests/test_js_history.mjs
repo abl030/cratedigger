@@ -6,17 +6,19 @@
 import {
   renderDownloadHistoryItem as renderDownloadHistoryFixture,
   renderEvidenceStrip as renderEvidenceFixture,
-  __test__,
+  formatV0Probe,
+  formatSpectral,
+  spectralChip,
+  spectralStripCell,
+  storageFormatLabel,
+  withWas,
 } from '../web/js/history.js';
+import { spectralGradeIsAdmissible } from '../web/js/quality_palette.js';
 import { validDualProviderProof } from './fixtures/cd_rip_proof.mjs';
 import { esc } from '../web/js/util.js';
 import { readFileSync } from 'node:fs';
 
 import { suite } from './js_harness.mjs';
-const {
-  formatV0Probe, formatSpectral, spectralChip, spectralGradeIsAdmissible,
-  spectralStripCell, withWas, storageFormatLabel,
-} = __test__;
 
 const t = suite(import.meta.url);
 

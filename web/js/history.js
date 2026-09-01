@@ -27,7 +27,7 @@ import { cdRipProofPresentation } from './cd_rip_proof.js';
  * @param {number|string|undefined} min
  * @returns {string}
  */
-function formatV0Probe(avg, kind, min = undefined) {
+export function formatV0Probe(avg, kind, min = undefined) {
   const floor = min !== null && min !== undefined ? ` · min ${esc(min)}kbps` : '';
   const base = `${esc(avg)}kbps avg${floor}`;
   if (!kind || kind === 'lossless_source_v0') {
@@ -63,7 +63,7 @@ function stripV0Phrase(avg, min = undefined) {
  * @param {string} grade
  * @param {number|string|undefined} bitrate
  */
-function formatSpectral(grade, bitrate) {
+export function formatSpectral(grade, bitrate) {
   // Show the spectral floor whenever it's present — even when the album's
   // rollup grade is `genuine`, a non-null spectral_bitrate means at least
   // one track triggered a cliff and the min-across-tracks is this value
@@ -85,7 +85,7 @@ function formatSpectral(grade, bitrate) {
  * @param {string|undefined} withheld - ProofGateProjection reason token
  * @returns {string}
  */
-function spectralChip(grade, bitrate, admissible, withheld = undefined) {
+export function spectralChip(grade, bitrate, admissible, withheld = undefined) {
   if (spectralGradeIsAdmissible(grade, admissible)) {
     return formatSpectral(grade, bitrate);
   }
@@ -110,7 +110,7 @@ function spectralChip(grade, bitrate, admissible, withheld = undefined) {
  * @param {string|undefined} withheld - ProofGateProjection reason token
  * @returns {string}
  */
-function spectralStripCell(grade, floor, admissible, withheld = undefined) {
+export function spectralStripCell(grade, floor, admissible, withheld = undefined) {
   if (spectralGradeIsAdmissible(grade, admissible)) {
     return `<span class="${spectralGradeClass(grade)}">${floor}${esc(spectralGradeLabel(grade))}</span>`;
   }
@@ -133,7 +133,7 @@ function spectralStripCell(grade, floor, admissible, withheld = undefined) {
  * @param {string} value - already-escaped candidate value (HTML)
  * @param {string|null} wasValue - already-escaped existing value (HTML), or null
  */
-function withWas(value, wasValue) {
+export function withWas(value, wasValue) {
   if (wasValue === null || wasValue === undefined) return value;
   return `${value} <span class="p-hist-was">(was ${wasValue})</span>`;
 }
@@ -256,7 +256,13 @@ function isLosslessSource(format) {
   );
 }
 
-function storageFormatLabel(h, fallback) {
+/**
+ * Name the format a row is stored as, preferring the target contract.
+ * @param {any} h - a download-history row
+ * @param {string} fallback - format to use when the row names none
+ * @returns {string}
+ */
+export function storageFormatLabel(h, fallback) {
   const contract = String(h.target_contract_format || '').toLowerCase();
   if (/\bv0\b/.test(contract)) return 'V0';
   if (contract.includes('opus')) return 'Opus';
@@ -835,13 +841,3 @@ export function renderDownloadHistoryItem(h) {
 
   return `<div class="p-hist-item">${html}</div>`;
 }
-
-export const __test__ = {
-  formatV0Probe,
-  formatSpectral,
-  spectralChip,
-  spectralGradeIsAdmissible,
-  spectralStripCell,
-  storageFormatLabel,
-  withWas,
-};
