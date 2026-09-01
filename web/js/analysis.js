@@ -24,7 +24,7 @@ import {
 } from './release_action_state.js';
 
 /** @type {string[]} */
-const _PRESSING_COLORS =['#6af','#fa6','#6d6','#f6a','#af6','#6ff','#ff6','#a6f'];
+const _PRESSING_COLORS = ['#6af','#fa6','#6d6','#f6a','#af6','#6ff','#ff6','#a6f'];
 
 /**
  * The per-release-group analysis chip: unique-track count or coverage.

@@ -1042,24 +1042,26 @@ that reaches the nightly gate rather than the PR. Two clauses in
 `tests/test_beets_tag_sync_generated.py` held Beets to its own answer about
 a release — an ambiguous resolution must refuse `not_unique`, a missing one
 `not_found` — by reading `world.resolution`. Neither read
-`world.authority_raises`, a dimension the same commit added, so when the
-authority failed at the factory or at the resolution, production correctly
-returned `beets_unavailable` while the clause went on demanding `not_found`.
+`run.authority_raises`, the counter the same commit added to record whether
+the injected `world.authority_failure` actually fired, so when the authority
+failed at the factory or at the resolution, production correctly returned
+`beets_unavailable` while the clause went on demanding `not_found`.
 Four producible cells, every one of them accusing correct code. Q1 passed
 for both clauses: their self-tests hand-built `authority_raises=0`, so they
-could not have seen it.
+could not have seen it. Read that file for the shape and you will find the
+corrected version — `10fc9f74` fixed both clauses the day after they landed.
 
 Two things make Q3 worth its minute. The tell is usually already in the
 file — `_write_authorized`, written for the same world in the same sitting,
-read `authority_raises` for exactly this reason, and the asymmetry between
-the two functions was visible without running anything. And the failure mode
+read `run.authority_raises` for exactly this reason, and the asymmetry
+between the two functions was visible without running anything. And the failure mode
 is not a green property but a property that reds on a draw nobody chose: 37
 violating draws in 500 at fuzz depth, while the suite tier stayed green
 because the `@example` pins happened to shift the derandomized sweep off
 them. Adding a pin, removing one, or bumping `max_examples` would have
 flipped it red at a moment nobody was looking, on someone else's PR.
 
-**Record which tier killed it.** A mutant that dies only under `fuzz` is not
+**Record which tier killed Q2's mutant.** A mutant that dies only under `fuzz` is not
 killed for gating purposes: `suite` is `derandomize=True`, so a world the
 deterministic budget misses is missed on every machine, forever. Pin that
 world as an `@example` and re-measure. The #1094 first pass shipped this

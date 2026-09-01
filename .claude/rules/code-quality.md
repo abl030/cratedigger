@@ -305,9 +305,9 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   demands — so name a world where the condition looks true and production
   is correct anyway, feed it to the checker, and assert no violation.
   Deterministic like Q1, no mutant: the defect is in the checker. This is
-  the shape #1332 shipped and had to correct (two clauses read
-  `world.resolution` and neither read `world.authority_raises`, so four
-  producible cells accused correct code), and it fails as a nightly-gate
+  the shape #1332 shipped and had to correct in `10fc9f74`: two clauses
+  read `world.resolution` and neither read `run.authority_raises`, so four
+  producible cells accused correct code. It fails as a nightly-gate
   red on someone else's PR rather than as a green property — 37 violating
   draws in 500 at fuzz depth while the suite tier stayed green by draw
   luck. Keep checkers as module-level functions so the self-test can call them

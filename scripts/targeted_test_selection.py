@@ -255,7 +255,7 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         # over tests/. Re-derive it the same way. One deliberate omission,
         # the same one lib/preview_snapshot.py's entry makes:
         # tests/world_model/support.py and state_machine.py import
-        # HaveEnrichment and three sibling names, but their only drivers are
+        # HaveEnrichment and two sibling names, but their only drivers are
         # the world-model state machine and mirror harness, whose target is
         # the world-model burst rather than an ordinary selection.
         "tests.test_current_library_evidence",

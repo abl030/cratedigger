@@ -75,8 +75,12 @@ class GracefulShutdown:
     force/local/YouTube rows at the next worker start and requeues an
     automation row once the shared probe proves its exact persisted lease
     dead, while ``recover_abandoned_preview_jobs`` sweeps stale legacy rows
-    every minute. Restarting is what invariant 11 asks for, so the preview
-    unit deliberately carries neither override — there is nothing to drain.
+    every minute. It does normalise an owned album in place before
+    measuring (``prepare_preview_media``), so "nothing to drain" is exact
+    only in the sense that matters here: a restart re-derives all of it, and
+    the evidence sidecar is a tempfile outside the album dir (#859), so a
+    kill mid-write cannot poison the manifest. Restarting is what invariant
+    11 asks for, so the preview unit deliberately carries neither override.
 
     Best-effort drain (issue #1089): a deploy switch's SIGTERM no longer has
     to kill an in-flight import mid-flight. The importer's ``run_once`` never

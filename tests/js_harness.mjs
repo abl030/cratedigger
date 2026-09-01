@@ -184,10 +184,11 @@ function errorMatches(thrown, expected) {
  * These two used to read `String(haystack).includes(needle)`, which is
  * silently WRONG for an array: `['ab', 'cd'].includes('a')` is `false`,
  * while `String(['ab', 'cd']).includes('a')` is `true`. So the obvious
- * mechanical sweep of the ~350 remaining `t.ok(x.includes(y))` sites would
- * have flipped every array one from correct-failing to passing, with no
- * test anywhere to notice (issue #1319's residual 1, the reason that sweep
- * was left undone).
+ * mechanical sweep of the several hundred remaining `t.ok(x.includes(y))`
+ * sites — and the ~95 negated `t.ok(!x.includes(y))` ones, which map to
+ * `excludes` and are exposed the same way — would have flipped every array
+ * one from correct-failing to passing, with no test anywhere to notice
+ * (issue #1319's residual 1, the reason that sweep was left undone).
  *
  * Refusing the type makes the sweep fail loudly instead. An array site
  * keeps `t.ok(x.includes(y), …)`; there is deliberately no `t.includes`
