@@ -1122,6 +1122,23 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_deploy_pin_script",
         "tests.test_deploy_pin_generated",
     ),
+    "tests/js_harness.mjs": (
+        # The shared JavaScript test harness (issue #1313 candidate 6).
+        # No ROOT_COVERAGE_RULES row polices `.mjs` -- the `tests/` row
+        # covers `.py` only -- and there is no basename probe that could
+        # reach a `.mjs` file, so without this entry editing the harness
+        # selects nothing but the always-discovered audits. The two named
+        # modules are the ones a solo harness change really regresses:
+        # test_js_suite_audit parses every suite for the harness idiom,
+        # and test_suite_coordinator owns the CRATEDIGGER_JS_FAILURE
+        # marker contract this module emits (identity -> owner + rerun
+        # derivation, and the done-marker fallback rule). The harness's
+        # own behaviour tests live in tests/test_js_harness.mjs, which the
+        # js-unit phase runs unconditionally.
+        # Maskable -- pinned in MASKABLE_ENTRY_PINS.
+        "tests.test_js_suite_audit",
+        "tests.test_suite_coordinator",
+    ),
     "scripts/run_js_checks.sh": (
         # tests.test_js_suite_audit parses this file's source to prove
         # every tests/test_js_*.mjs suite is actually reached.

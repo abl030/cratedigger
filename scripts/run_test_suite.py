@@ -478,16 +478,22 @@ def _parse_failures(
             if len(fields) != 3:
                 raise ValueError(f"malformed JavaScript failure marker: {line}")
             identity, detail = fields[1:]
+            # `tests/js_harness.mjs` names one FAILED ASSERTION per marker,
+            # as `<file>::<section>::<message>`; the file is everything
+            # before the first `::`. Owner and rerun therefore stay the
+            # runnable suite while the index entry stays per-assertion.
+            # A `js-syntax` marker carries a bare path and is unaffected.
+            owner = identity.split("::", 1)[0]
             rerun = (
                 "node --check --input-type=module "
-                f"< {shlex.quote(identity)}"
+                f"< {shlex.quote(owner)}"
                 if phase.parser == "js-syntax"
-                else f"node {shlex.quote(identity)}"
+                else f"node {shlex.quote(owner)}"
             )
             failures.append(
                 _indexed_failure(
                     identity=identity,
-                    owner=identity,
+                    owner=owner,
                     detail=detail,
                     rerun_command=rerun,
                     log=log_path.name,

@@ -144,6 +144,27 @@ class TestPinnedSourceDispatch(unittest.TestCase):
         path = self._write("x.json", '{\n  // "reportShadowedImports": "error",\n}\n')
         self.assertNotIn("reportShadowedImports", pinned_source(path))
 
+    def test_mjs_strips_slash_slash_and_not_hash(self) -> None:
+        """The JS test suites and their shared harness (#1313).
+
+        Only the entry's PRESENCE was load-bearing before -- giving `.mjs`
+        the wrong prefix left every test green (independent review, mutant
+        B6). What the entry is FOR is
+        `tests/test_js_suite_audit.py::harness_violations`, which must not
+        credit a suite whose `const t = suite(import.meta.url);` has been
+        commented out with `//`.
+        """
+        path = self._write(
+            "x.mjs",
+            "import { suite } from './js_harness.mjs';\n"
+            "// const t = suite(import.meta.url);\n"
+            "# not a JavaScript comment\n",
+        )
+        stripped = pinned_source(path)
+        self.assertNotIn("suite(import.meta.url)", stripped)
+        self.assertIn("import { suite }", stripped)
+        self.assertIn("# not a JavaScript comment", stripped)
+
     def test_an_undeclared_suffix_fails_closed(self) -> None:
         """Returning raw source for an unknown format would reinstate the very
         defect this module removes, so it raises instead."""

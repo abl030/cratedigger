@@ -2,18 +2,11 @@
 
 import { renderLibraryBadgeCorpusRow } from '../scripts/render_library_badges.mjs';
 
-let passed = 0;
-let failed = 0;
+import { suite } from './js_harness.mjs';
 
-function assert(condition, message) {
-  if (condition) passed += 1;
-  else {
-    failed += 1;
-    console.error(`  FAIL: ${message}`);
-  }
-}
+const t = suite(import.meta.url);
 
-console.log('renderLibraryBadgeCorpusRow() uses the production Library badge path');
+t.section('renderLibraryBadgeCorpusRow() uses the production Library badge path');
 {
   const row = {
     _corpus_id: 17,
@@ -28,21 +21,21 @@ console.log('renderLibraryBadgeCorpusRow() uses the production Library badge pat
   const before = JSON.stringify(row);
   const rendered = renderLibraryBadgeCorpusRow(row);
 
-  assert(rendered.id === 17, 'synthetic corpus identity is retained');
-  assert(Object.keys(rendered.fields).join(',') === 'row_html',
+  t.ok(rendered.id === 17, 'synthetic corpus identity is retained');
+  t.ok(Object.keys(rendered.fields).join(',') === 'row_html',
     'the differential watches the complete production row HTML');
-  assert(rendered.fields.row_html.includes('>captured<'),
+  t.ok(rendered.fields.row_html.includes('>captured<'),
     'captured history renders through production');
-  assert(rendered.fields.row_html.includes('>missing<'),
+  t.ok(rendered.fields.row_html.includes('>missing<'),
     'captured current absence renders through production');
-  assert(rendered.fields.row_html.includes('>verified<'),
+  t.ok(rendered.fields.row_html.includes('>verified<'),
     'carried proof renders through production');
-  assert(rendered.fields.row_html.includes('>wanted<'),
+  t.ok(rendered.fields.row_html.includes('>wanted<'),
     'current acquisition lifecycle renders through production');
-  assert(JSON.stringify(row) === before, 'rendering does not mutate the corpus row');
+  t.ok(JSON.stringify(row) === before, 'rendering does not mutate the corpus row');
 }
 
-console.log('renderLibraryBadgeCorpusRow() fails closed without integer corpus identity');
+t.section('renderLibraryBadgeCorpusRow() fails closed without integer corpus identity');
 {
   let rejected = false;
   try {
@@ -51,8 +44,7 @@ console.log('renderLibraryBadgeCorpusRow() fails closed without integer corpus i
     rejected = error instanceof Error
       && error.message.includes('integer _corpus_id');
   }
-  assert(rejected, 'known-bad string identity is rejected');
+  t.ok(rejected, 'known-bad string identity is rejected');
 }
 
-console.log(`\n${passed} passed, ${failed} failed`);
-if (failed > 0) process.exit(1);
+t.done();
