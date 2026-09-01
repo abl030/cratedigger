@@ -18973,6 +18973,28 @@ class TestReadProjectionRegistryParity(unittest.TestCase):
 
 
 @requires_postgres
+class TestEphemeralPostgresClockFrame(unittest.TestCase):
+    """The disposable cluster's session timezone is pinned to UTC.
+
+    ``lib/ephemeral_postgres.py`` passes ``-c timezone=UTC`` because
+    initdb inherits the HOST timezone, under which
+    ``date_trunc('day', NOW())`` buckets in local time while the fakes'
+    dense-bucket mirrors truncate in UTC — the value-parity gate below
+    then fails only inside two one-hour UTC wall-clock windows per day
+    (reproduced on pristine main 2026-09-01 00:04 UTC). Without this pin,
+    removing that option goes green everywhere except inside those
+    windows.
+    """
+
+    def test_session_timezone_is_utc(self):
+        db = make_db()
+        try:
+            cur = db._execute("SELECT current_setting('TimeZone') AS tz")
+            self.assertEqual(cur.fetchone()["tz"], "UTC")
+        finally:
+            db.close()
+
+
 class TestReadProjectionValueParity(unittest.TestCase):
     """#1278 item 7 — registry-driven read-projection VALUE parity gate.
 

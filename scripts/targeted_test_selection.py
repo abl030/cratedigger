@@ -156,6 +156,17 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_slskd_sweep_exception_contracts",
         "tests.test_convergence_runner_generated",
     ),
+    "lib/ephemeral_postgres.py": (
+        # Was an admitted zero-neighbour gap (issue #1199) caused by a
+        # basename mismatch: the module's real coverage has always lived
+        # in tests/test_ephemeral_pg.py (server-option argv pins,
+        # transition-seed refusal), which the tests.test_ephemeral_postgres
+        # probe cannot derive. tests.test_pipeline_db carries the live
+        # session clock-frame pin (TestEphemeralPostgresClockFrame) plus
+        # every real-PG round trip this cluster exists to host.
+        "tests.test_ephemeral_pg",
+        "tests.test_pipeline_db",
+    ),
     "lib/download_ownership.py": (
         # Was an admitted zero-neighbour gap (issue #1199): no
         # tests.test_download_ownership. The ownership writer/reader
@@ -1272,11 +1283,6 @@ LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
     "lib/download_validation.py": (
         "measured 2026-08-19: zero neighbours -- "
         "tests.test_download_validation does not exist and no EXACT_PATH_"
-        "NEIGHBOURS/prefix rule covers it (issue #1199)"
-    ),
-    "lib/ephemeral_postgres.py": (
-        "measured 2026-08-19: zero neighbours -- "
-        "tests.test_ephemeral_postgres does not exist and no EXACT_PATH_"
         "NEIGHBOURS/prefix rule covers it (issue #1199)"
     ),
     "lib/evidence_action_file.py": (

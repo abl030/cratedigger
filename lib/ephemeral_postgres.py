@@ -81,6 +81,20 @@ class EphemeralPostgres:
         return (
             f"-k {self._socket_dir}",
             "-c listen_addresses=''",
+            # Deterministic clock frame. initdb inherits the HOST timezone
+            # (Australia/Perth on doc1), so date_trunc('day'/'hour', NOW())
+            # buckets in local time while FakePipelineDB's dense-bucket
+            # mirrors truncate in UTC — the fake↔real value-parity gate
+            # (tests/test_pipeline_db.py::TestReadProjectionValueParity,
+            # get_pipeline_dashboard_metrics' match_rate_series_28d) then
+            # fails in two one-hour UTC wall-clock windows per day
+            # (00:00-01:00 and 17:00-18:00 UTC on a UTC+8 host), whenever a
+            # row seeded 25h ago lands a different number of CALENDAR days
+            # back in the two frames. Reproduced on pristine main
+            # 2026-09-01 00:04-00:07 UTC; passed at 23:10 UTC on the same
+            # trees. Test worlds must be deterministic, so the disposable
+            # cluster is pinned to the same frame the fakes mirror.
+            "-c timezone=UTC",
             # PostgreSQL defers unlinking relation files replaced by TRUNCATE
             # until a checkpoint — no longer triggered by any test-reset
             # call site (issue #1156 item 7 replaced every one with DELETE)
