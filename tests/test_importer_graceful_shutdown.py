@@ -16,14 +16,14 @@ from tests.fakes import FakePipelineDB
 
 class TestGracefulShutdownFlag(unittest.TestCase):
     def test_starts_unrequested(self) -> None:
-        flag = importer._GracefulShutdown()
+        flag = importer.GracefulShutdown()
 
         self.assertFalse(flag.requested)
 
     def test_request_is_a_valid_signal_handler_and_sets_the_flag(self) -> None:
         """The exact call shape ``signal.signal(SIGTERM, flag.request)``
         invokes: ``(signum, frame)``."""
-        flag = importer._GracefulShutdown()
+        flag = importer.GracefulShutdown()
 
         flag.request(signal.SIGTERM, None)
 
@@ -47,7 +47,7 @@ class TestDrainImportQueue(unittest.TestCase):
         not attempt even one more claim scan."""
         db = FakePipelineDB()
         calls = self._counting_candidate_scan(db)
-        shutdown = importer._GracefulShutdown(requested=True)
+        shutdown = importer.GracefulShutdown(requested=True)
 
         importer._drain_import_queue(
             db,  # pyright: ignore[reportArgumentType]
@@ -66,7 +66,7 @@ class TestDrainImportQueue(unittest.TestCase):
         finish, nothing claimable) still halts claiming promptly rather
         than looping until an external kill."""
         db = FakePipelineDB()
-        shutdown = importer._GracefulShutdown()
+        shutdown = importer.GracefulShutdown()
         original_scan = db.peek_import_job_candidates
         calls: list[int] = []
 
@@ -96,7 +96,7 @@ class TestDrainImportQueue(unittest.TestCase):
         feature: it still returns after exactly one ``run_once`` call."""
         db = FakePipelineDB()
         calls = self._counting_candidate_scan(db)
-        shutdown = importer._GracefulShutdown()
+        shutdown = importer.GracefulShutdown()
 
         importer._drain_import_queue(
             db,  # pyright: ignore[reportArgumentType]

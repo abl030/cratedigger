@@ -4153,7 +4153,7 @@ class TestAutomationImporterOwnership(unittest.TestCase):
         stored = db.get_import_job(1)
         assert stored is not None
         self.assertEqual((stored.status, stored.attempts), ("queued", 0))
-        self.assertIsNone(importer._execution_lease_from_job(stored))
+        self.assertIsNone(importer.execution_lease_from_job(stored))
 
         progressed = importer.run_once(
             db,  # pyright: ignore[reportArgumentType]
@@ -6508,8 +6508,8 @@ class TestImportPreviewWorker(unittest.TestCase):
 
         def cursor_recreation_mutant() -> list[object]:
             return [
-                import_preview_worker._CandidateScanCursor(),
-                import_preview_worker._CandidateScanCursor(),
+                import_preview_worker.CandidateScanCursor(),
+                import_preview_worker.CandidateScanCursor(),
             ]
 
         with self.assertRaisesRegex(AssertionError, "recreated"):

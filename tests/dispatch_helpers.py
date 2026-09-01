@@ -204,7 +204,8 @@ def finalize_claimed_dispatch(
     fake-vs-concrete DB seam needs the hatch (#1278 helpers split).
     """
     from lib.import_queue import IMPORT_JOB_AUTOMATION
-    from scripts.importer import _execution_lease_from_job, process_claimed_job
+    from lib.import_worker_loop import execution_lease_from_job
+    from scripts.importer import process_claimed_job
 
     def _execute(*_args: object, **_kwargs: object) -> DispatchOutcome:
         if isinstance(outcome, BaseException):
@@ -212,7 +213,7 @@ def finalize_claimed_dispatch(
         return outcome
 
     if job.job_type == IMPORT_JOB_AUTOMATION:
-        execution_lease = _execution_lease_from_job(job)
+        execution_lease = execution_lease_from_job(job)
         assert execution_lease is not None, (
             "automation fixture must claim with an importer execution lease"
         )

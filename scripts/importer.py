@@ -60,8 +60,6 @@ from lib.import_execution import (
     ExecutionLivenessDecision,
     ExecutionLivenessProbe,
     OwnerSessionIdentity,
-    ProcessIdentity,
-    capture_execution_lease,
     checkpoint_automation_owner,
     probe_execution_liveness,
 )
@@ -77,6 +75,14 @@ from lib.import_queue import (
     ImportJobPayload,
     LocalImportPayload,
     YoutubeImportPayload,
+)
+from lib.import_worker_loop import (
+    CandidateScanCursor,
+    ClaimState,
+    GracefulShutdown,
+    capture_worker_execution_lease,
+    claim_one_candidate,
+    execution_lease_from_job,
 )
 from lib.mb_canonical import configure_canonical_release_lookup
 from lib.pipeline_db import (
@@ -129,41 +135,6 @@ IMPORTER_SYSTEMD_UNIT = "cratedigger-importer.service"
 # startup sweep cannot see a transient procfs failure coming, so the same exact
 # death proof is re-run on this cadence for as long as the worker lives.
 AUTOMATION_RECOVERY_REPROBE_INTERVAL_SECONDS = 300.0
-
-
-@dataclass
-class _ClaimState:
-    claimed: bool = False
-
-    def mark(self) -> None:
-        self.claimed = True
-
-
-@dataclass
-class _CandidateScanCursor:
-    offset: int = 0
-
-
-@dataclass
-class _GracefulShutdown:
-    """Signal-safe stop flag: SIGTERM sets it, the poll loop reads it.
-
-    Best-effort drain (issue #1089): a deploy switch's SIGTERM no longer has
-    to kill an in-flight import mid-flight. ``run_once`` never returns until
-    its own at-most-one claimed job reaches a terminal write, so simply not
-    calling it again once this flag is set already IS "let the in-flight job
-    finish, then stop claiming new work" — no special interruption of a
-    running job is needed or attempted. Past the unit's ``TimeoutStopSec``,
-    systemd still SIGKILLs exactly as before; the recovery-side crash-debris
-    removal in ``lib.automation_recovery_debris`` is that world's safety net,
-    not this one.
-    """
-
-    requested: bool = False
-
-    def request(self, signum: int, frame: object) -> None:
-        del signum, frame
-        self.requested = True
 
 
 def _job_result(outcome: DispatchOutcome) -> dict[str, Any]:
@@ -354,7 +325,7 @@ class _ClaimAttempt:
     execution_lease: ExecutionLeaseSnapshot | None
     stage_db_factory: Callable[[str], object]
     execute_fn: Callable[..., DispatchOutcome]
-    claim_state: _ClaimState
+    claim_state: ClaimState
 
     def dsn(self) -> str | None:
         """The pinned-session routes each open a stage connection of their own."""
@@ -1628,48 +1599,6 @@ def _cleanup_committed_wrong_match_rejection(
         )
 
 
-def _execution_lease_from_job(
-    job: ImportJob | None,
-) -> ExecutionLeaseSnapshot | None:
-    if job is None:
-        return None
-    values = (
-        job.execution_invocation_id,
-        job.execution_host_boot_id,
-        job.execution_systemd_unit,
-        job.execution_worker_pid,
-        job.execution_worker_start_ticks,
-    )
-    if any(value is None for value in values):
-        return None
-    assert job.execution_invocation_id is not None
-    assert job.execution_host_boot_id is not None
-    assert job.execution_systemd_unit is not None
-    assert job.execution_worker_pid is not None
-    assert job.execution_worker_start_ticks is not None
-    child = (
-        ProcessIdentity(
-            job.execution_beets_pid,
-            job.execution_beets_start_ticks,
-        )
-        if (
-            job.execution_beets_pid is not None
-            and job.execution_beets_start_ticks is not None
-        )
-        else None
-    )
-    return ExecutionLeaseSnapshot(
-        host_boot_id=job.execution_host_boot_id,
-        invocation_id=job.execution_invocation_id,
-        systemd_unit=job.execution_systemd_unit,
-        worker=ProcessIdentity(
-            job.execution_worker_pid,
-            job.execution_worker_start_ticks,
-        ),
-        beets=child,
-    )
-
-
 @runtime_checkable
 class _AutomationOwnerDB(Protocol):
     def get_import_job(self, job_id: int) -> ImportJob | None: ...
@@ -1963,7 +1892,7 @@ def _automation_claim_is_current(
         and current.status == "running"
         and current.preview_status == "evidence_ready"
         and current.beets_launch_authorized_at is None
-        and _execution_lease_from_job(current) == execution_lease
+        and execution_lease_from_job(current) == execution_lease
         and request.get("status") == "processing"
         and request.get("active_automation_import_job_id") == job.id
         and request.get("active_download_state") is not None
@@ -2197,7 +2126,7 @@ def process_claimed_job(
         if is_automation:
             current = db.get_import_job(job.id)
             current_lease = (
-                _execution_lease_from_job(current)
+                execution_lease_from_job(current)
                 if current is not None else None
             )
             if current_lease is None:
@@ -2249,7 +2178,7 @@ def process_claimed_job(
             return None
         current = db.get_import_job(job.id)
         current_lease = (
-            _execution_lease_from_job(current)
+            execution_lease_from_job(current)
             if current is not None else None
         )
         if current is None or current_lease is None:
@@ -2716,30 +2645,25 @@ def run_once(
     stage_db_factory: Callable[[str], object] | None = None,
     execution_lease_factory: Callable[..., ExecutionLeaseSnapshot] | None = None,
     execute_fn: Callable[..., DispatchOutcome] = execute_import_job,
-    scan_cursor: _CandidateScanCursor | None = None,
+    scan_cursor: CandidateScanCursor | None = None,
 ) -> ImportJob | None:
-    cursor = scan_cursor or _CandidateScanCursor()
-    capture = execution_lease_factory or capture_execution_lease
-    try:
-        execution_lease = capture(systemd_unit=IMPORTER_SYSTEMD_UNIT)
-    except ValueError:
-        # Non-systemd development runs may still process Force/local-import/YouTube jobs.
-        # Automation stays invisible without a complete invocation lease.
-        execution_lease = None
-    candidates = db.peek_import_job_candidates(
-        execution_lease=execution_lease,
-        limit=IMPORT_CANDIDATE_SCAN_LIMIT,
-        offset=cursor.offset,
+    cursor = scan_cursor or CandidateScanCursor()
+    execution_lease = capture_worker_execution_lease(
+        systemd_unit=IMPORTER_SYSTEMD_UNIT,
+        factory=execution_lease_factory,
     )
-    if not candidates and cursor.offset:
-        cursor.offset = 0
-        candidates = db.peek_import_job_candidates(
+
+    def _peek(offset: int) -> list[ImportJob]:
+        return db.peek_import_job_candidates(
             execution_lease=execution_lease,
             limit=IMPORT_CANDIDATE_SCAN_LIMIT,
-            offset=0,
+            offset=offset,
         )
-    for candidate in candidates:
-        claim_state = _ClaimState()
+
+    def _claim(
+        candidate: ImportJob,
+        claim_state: ClaimState,
+    ) -> ImportJob | None:
         attempt = _ClaimAttempt(
             db=db,
             worker_id=worker_id,
@@ -2749,17 +2673,11 @@ def run_once(
             execute_fn=execute_fn,
             claim_state=claim_state,
         )
+        return _kind_for(candidate.job_type).claim_route(candidate, attempt)
 
-        result = _kind_for(candidate.job_type).claim_route(candidate, attempt)
-
-        if not claim_state.claimed:
-            continue
-        # The only successful-claim exit for every job type. Any success is
-        # a bounded revisit point for older rows that may now be claimable.
-        cursor.offset = 0
-        return result
-    cursor.offset += len(candidates)
-    return None
+    return claim_one_candidate(
+        scan_cursor=cursor, peek=_peek, claim=_claim,
+    )
 
 
 def recover_abandoned_automation_owners(
@@ -2784,7 +2702,7 @@ def recover_abandoned_automation_owners(
     """
     recovered: list[ImportJob] = []
     for job in db.list_automation_import_jobs_for_startup_recovery():
-        lease = _execution_lease_from_job(job)
+        lease = execution_lease_from_job(job)
         if lease is None and job.status != IMPORT_JOB_RECOVERY_REQUIRED:
             # A leaseless owner in a live lane is simply waiting to be claimed
             # — normal, not abandoned. A historical leaseless
@@ -2895,16 +2813,16 @@ def _drain_import_queue(
     worker_id: str,
     poll_interval: float,
     once: bool,
-    shutdown: _GracefulShutdown,
+    shutdown: GracefulShutdown,
 ) -> None:
     """The importer's steady-state poll loop, extracted for direct testing.
 
     Checked once per iteration, before the next claim attempt — never
-    mid-``run_once()`` (see ``_GracefulShutdown``). ``once`` still returns
+    mid-``run_once()`` (see ``GracefulShutdown``). ``once`` still returns
     after at most one claimed job regardless of ``shutdown``, preserving
     the existing ``--once`` contract untouched.
     """
-    scan_cursor = _CandidateScanCursor()
+    scan_cursor = CandidateScanCursor()
     next_reprobe_at = (
         time.monotonic() + AUTOMATION_RECOVERY_REPROBE_INTERVAL_SECONDS
     )
@@ -3002,7 +2920,7 @@ def main() -> int:
     # the world the recovery-side crash-debris removal exists to clean up
     # after. A bounded ``TimeoutStopSec`` on the unit still SIGKILLs past
     # this — that world is unaffected and remains covered by the same fix.
-    shutdown = _GracefulShutdown()
+    shutdown = GracefulShutdown()
     signal.signal(signal.SIGTERM, shutdown.request)
     try:
         # Keep the beets-mutating queue to one worker process. See

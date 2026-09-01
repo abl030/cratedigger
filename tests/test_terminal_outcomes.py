@@ -528,7 +528,7 @@ def _prepare_automation_terminal_command(
     job = db.get_import_job(job_id)
     request = db.get_request(request_id)
     assert job is not None and request is not None
-    lease = importer._execution_lease_from_job(job)
+    lease = importer.execution_lease_from_job(job)
     assert lease is not None
     state = ActiveDownloadState.from_raw(request["active_download_state"])
     assert state.current_path is not None
@@ -621,7 +621,7 @@ def _prepare_automation_preview_terminal_command(
     job = db.get_import_job(job_id)
     request = db.get_request(request_id)
     assert job is not None and request is not None
-    lease = importer._execution_lease_from_job(job)
+    lease = importer.execution_lease_from_job(job)
     assert lease is not None
     state = ActiveDownloadState.from_raw(request["active_download_state"])
     assert state.current_path is not None
@@ -2329,7 +2329,7 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
 
         job = db.get_import_job(job_id)
         assert job is not None
-        execution_lease = importer._execution_lease_from_job(job)
+        execution_lease = importer.execution_lease_from_job(job)
         assert execution_lease is not None
         process_album = RecordingProcessAlbum(outcome=completion)
 

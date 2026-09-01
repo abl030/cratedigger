@@ -727,7 +727,12 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_spectral_attempt_audit_generated",
         "tests.test_wrong_match_post_commit_generated",
     ),
+    # tests.test_preview_claim_routes (issue #1313) was added with the
+    # per-job-type claim-route registry it pins — the preview lane's twin of
+    # tests.test_importer_job_kinds above. The basename probe still resolves
+    # nothing for this path, so it is named here like every other neighbour.
     "scripts/import_preview_worker.py": (
+        "tests.test_preview_claim_routes",
         "tests.test_import_queue",
         "tests.test_integration_slices",
         "tests.test_issue_1030_postgres_slice",

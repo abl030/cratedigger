@@ -252,7 +252,7 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
             observed.append(claimed.request_id)
             return claimed
 
-        import_cursor = importer._CandidateScanCursor()
+        import_cursor = importer.CandidateScanCursor()
         if lane == "import":
             for _poll in range(2):
                 importer.run_once(
@@ -264,7 +264,7 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
                     scan_cursor=import_cursor,
                 )
         else:
-            preview_cursor = import_preview_worker._CandidateScanCursor()
+            preview_cursor = import_preview_worker.CandidateScanCursor()
             for _poll in range(2):
                 import_preview_worker.run_once(
                     db,
@@ -516,8 +516,8 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
             observed.append(claimed.request_id)
             return claimed
 
-        import_cursor = importer._CandidateScanCursor()
-        preview_cursor = import_preview_worker._CandidateScanCursor()
+        import_cursor = importer.CandidateScanCursor()
+        preview_cursor = import_preview_worker.CandidateScanCursor()
         if lane == "import":
             importer.run_once(
                 db,  # pyright: ignore[reportArgumentType]
@@ -661,8 +661,8 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
                 observed_job_ids.append(claimed.id)
                 return claimed
 
-            import_cursor = importer._CandidateScanCursor()
-            preview_cursor = import_preview_worker._CandidateScanCursor()
+            import_cursor = importer.CandidateScanCursor()
+            preview_cursor = import_preview_worker.CandidateScanCursor()
             for _poll in range(older_count):
                 if lane == "import":
                     importer.run_once(
@@ -814,8 +814,8 @@ class TestImportJobRunnableLifecycleGenerated(unittest.TestCase):
                 observed_job_ids.append(claimed.id)
                 return claimed
 
-            import_cursor = importer._CandidateScanCursor()
-            preview_cursor = import_preview_worker._CandidateScanCursor()
+            import_cursor = importer.CandidateScanCursor()
+            preview_cursor = import_preview_worker.CandidateScanCursor()
 
             # One fully contended page advances to the tail.
             if lane == "import":
