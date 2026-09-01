@@ -238,6 +238,38 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_local_import_lane",
         "tests.test_pipeline_db",
     ),
+    "lib/current_library_evidence.py": (
+        # The basename probes DO resolve this one — tests.test_current_
+        # library_evidence and its generated sibling both exist — so it was
+        # never zero-neighbour and never failed closed. That is exactly the
+        # problem: editing the module selected 2 of the 11 test modules that
+        # import from it, silently, and PR #1334's retarget of
+        # tests.test_spectral_attempt_audit_generated onto
+        # resolve_current_library_evidence made the gap worse rather than
+        # visible. Deleting this entry leaves the two basename modules
+        # resolving, so nothing here fails closed — hence the
+        # MASKABLE_ENTRY_PINS pin in tests/test_selection_coverage_audit.py.
+        #
+        # DERIVED, not curated (the #1334 lesson): every test module holding
+        # an `import ... from lib.current_library_evidence`, measured by AST
+        # over tests/. Re-derive it the same way. One deliberate omission,
+        # the same one lib/preview_snapshot.py's entry makes:
+        # tests/world_model/support.py and state_machine.py import
+        # HaveEnrichment and three sibling names, but their only drivers are
+        # the world-model state machine and mirror harness, whose target is
+        # the world-model burst rather than an ordinary selection.
+        "tests.test_current_library_evidence",
+        "tests.test_current_library_evidence_generated",
+        "tests.test_download",
+        "tests.test_import_preview",
+        "tests.test_import_queue",
+        "tests.test_preview_failure_evidence_generated",
+        "tests.test_quality_evidence_fingerprint",
+        "tests.test_quality_evidence_fingerprint_generated",
+        "tests.test_quality_lineage_generated",
+        "tests.test_spectral_attempt_audit_generated",
+        "tests.test_terminal_outcome_callers",
+    ),
     "lib/startup_reconciliation.py": (
         # Was an admitted zero-neighbour gap (issue #1199, measured
         # 2026-08-19): there is no tests.test_startup_reconciliation, so
