@@ -2473,7 +2473,7 @@ def _rejection_verdict(entry: LogEntry) -> str:
         )
 
     # Both producer sites sit inside the block that applies the preview's
-    # persisted quality-evidence action, and both ``_emit_and_exit`` before
+    # persisted quality-evidence action, and both RETURN their result before
     # ``run_import`` is reached: one when the recorded decision does not
     # authorize an import at all, one for any exception raised loading,
     # snapshot-checking or materializing the action (the live pair are

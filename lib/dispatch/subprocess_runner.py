@@ -152,7 +152,12 @@ def run_import_one(
     owner_session_probe: Callable[[], bool] | None = None,
     process_group_factory: ProcessGroupFactory = MonitoredProcessGroup,
 ) -> ImportOneRun:
-    """Run import_one.py and parse its ImportResult sentinel."""
+    """Spawn import_one.py as a child and parse its ImportResult sentinel.
+
+    Shares its name with ``harness.import_one.run_import_one``, which runs
+    the same import IN PROCESS and returns the result directly. This is the
+    one production reaches for; that one is what the child ends up calling.
+    """
     cmd = build_import_one_command(
         path=path,
         mb_release_id=mb_release_id,

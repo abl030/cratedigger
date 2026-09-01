@@ -12,6 +12,15 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
+from harness.import_one import DEFAULT_MAX_DISTANCE, apply_max_distance
+from lib.beets import FORCE_IMPORT_DISTANCE_THRESHOLD
+
+#: A candidate distance that sits ABOVE the ordinary ceiling and below the
+#: force override, so the ceiling alone decides apply-versus-reject. Every
+#: other fixture in this module sits under both, which is exactly why the
+#: comparison had no behavioural coverage before.
+DECIDING_DISTANCE = 0.9
+
 
 def _make_harness_proc(messages: list[dict]) -> MagicMock:
     """Create a mock Popen that emits a sequence of JSON messages on stdout.
@@ -130,6 +139,105 @@ def _coverage_message(
     }
 
 
+class TestApplyDistanceCeiling(unittest.TestCase):
+    """The ceiling decides apply versus reject — the outcome, not a kwarg.
+
+    Everything else that asserts a ceiling in this repo asserts the VALUE
+    handed to ``run_import``. That is a proxy: until these tests landed, no
+    test in the tree ever took the ``dist > max_distance`` branch, so a
+    ceiling of 0.5 and a ceiling of 999 were behaviourally identical
+    everywhere and every ceiling assertion patrolled a bystander.
+    """
+
+    @patch("harness.import_one.select.select", return_value=([99], [], []))
+    @patch("harness.import_one.subprocess.Popen")
+    def test_over_ceiling_candidate_is_rejected_not_applied(
+        self,
+        mock_popen,
+        _mock_select,
+    ):
+        from harness import import_one
+
+        proc = _make_harness_proc([_choose_match(distance=DECIDING_DISTANCE)])
+        mock_popen.return_value = proc
+
+        outcome = import_one.run_import(
+            "/tmp/test", TARGET_MBID, max_distance=DEFAULT_MAX_DISTANCE)
+
+        self.assertEqual(outcome.exit_code, 2)
+        self.assertIn("exceeded", outcome.failure_reason or "")
+        self.assertEqual(outcome.applied_distance, DECIDING_DISTANCE)
+        writes = "".join(call.args[0] for call in proc.stdin.write.call_args_list)
+        self.assertIn('"skip"', writes)
+        self.assertNotIn('"apply"', writes)
+
+    @patch("harness.import_one.select.select", return_value=([99], [], []))
+    @patch("harness.import_one.subprocess.Popen")
+    def test_the_same_candidate_applies_under_the_force_ceiling(
+        self,
+        mock_popen,
+        _mock_select,
+    ):
+        """Same world, one changed input: the force override applies it."""
+        from harness import import_one
+
+        proc = _make_harness_proc([_choose_match(distance=DECIDING_DISTANCE)])
+        mock_popen.return_value = proc
+
+        outcome = import_one.run_import(
+            "/tmp/test",
+            TARGET_MBID,
+            max_distance=apply_max_distance(force=True),
+        )
+
+        self.assertEqual(outcome.exit_code, 0)
+        self.assertIsNone(outcome.failure_reason)
+        self.assertEqual(outcome.applied_distance, DECIDING_DISTANCE)
+        writes = "".join(call.args[0] for call in proc.stdin.write.call_args_list)
+        self.assertIn('"apply"', writes)
+
+    @patch("harness.import_one.select.select", return_value=([99], [], []))
+    @patch("harness.import_one.subprocess.Popen")
+    def test_bowie_retry_applies_a_high_distance_candidate_under_the_force_ceiling(
+        self,
+        mock_popen,
+        _mock_select,
+    ):
+        """The Discogs retry runs under the SAME ceiling as the first pass.
+
+        Reverting the retry to ``DEFAULT_MAX_DISTANCE`` makes the second
+        pass skip a candidate the first pass was authorized to apply — the
+        exact defect ``run_import``'s docstring legislates against, and
+        invisible to every other test because no other fixture's distance
+        sits between the two ceilings.
+        """
+        from harness import import_one
+
+        default = _make_harness_proc([_coverage_message(
+            mapped_paths=["A1.flac", "A2.1.flac"],
+            extra_paths=["A2.2.flac"],
+        )])
+        expanded = _make_harness_proc([_coverage_message(
+            mapped_paths=["A1.flac", "A2.1.flac", "A2.2.flac"],
+            extra_paths=[],
+            distance=DECIDING_DISTANCE,
+        )])
+        mock_popen.side_effect = [default, expanded]
+
+        outcome = import_one.run_import(
+            "/tmp/test",
+            "2823685",
+            max_distance=FORCE_IMPORT_DISTANCE_THRESHOLD,
+        )
+
+        self.assertEqual(outcome.exit_code, 0)
+        self.assertEqual(outcome.applied_distance, DECIDING_DISTANCE)
+        self.assertIn(
+            '"apply"',
+            "".join(call.args[0] for call in expanded.stdin.write.call_args_list),
+        )
+
+
 class TestRunImportAudioCoverage(unittest.TestCase):
     @patch("harness.import_one.select.select", return_value=([99], [], []))
     @patch("harness.import_one.subprocess.Popen")
@@ -154,7 +262,8 @@ class TestRunImportAudioCoverage(unittest.TestCase):
             proc = _make_harness_proc([message])
             mock_popen.return_value = proc
 
-            outcome = import_one.run_import(album, "2823685")
+            outcome = import_one.run_import(
+                album, "2823685", max_distance=DEFAULT_MAX_DISTANCE)
 
         self.assertEqual(outcome.exit_code, 2)
         self.assertIn("A2.flac", outcome.failure_reason or "")
@@ -180,7 +289,8 @@ class TestRunImportAudioCoverage(unittest.TestCase):
         )])
         mock_popen.side_effect = [default, expanded]
 
-        outcome = import_one.run_import("/tmp/test", "2823685")
+        outcome = import_one.run_import(
+            "/tmp/test", "2823685", max_distance=DEFAULT_MAX_DISTANCE)
 
         self.assertEqual(outcome.exit_code, 0)
         self.assertEqual(outcome.admitted_audio_count, 3)
@@ -203,6 +313,14 @@ class TestRunImportAudioCoverage(unittest.TestCase):
         mock_popen,
         _mock_select,
     ):
+        """The coverage guard returns BEFORE the distance ceiling is read.
+
+        That ordering is the whole point: a force import raises the ceiling
+        to 999, and this proves the audio-loss refusal is not reached around
+        by it. The consequence is that ``max_distance``'s VALUE is
+        irrelevant here — the comparison never runs. Its own behaviour lives
+        in ``TestApplyDistanceCeiling``.
+        """
         from harness import import_one
 
         default = _make_harness_proc([_coverage_message(
@@ -248,7 +366,8 @@ class TestRunImportAudioCoverage(unittest.TestCase):
         )])
         mock_popen.return_value = proc
 
-        outcome = import_one.run_import("/tmp/test", "2823685")
+        outcome = import_one.run_import(
+            "/tmp/test", "2823685", max_distance=DEFAULT_MAX_DISTANCE)
 
         self.assertEqual(outcome.exit_code, 2)
         self.assertEqual(mock_popen.call_count, 1)
@@ -277,7 +396,8 @@ class TestRunImportDuplicateGuard(unittest.TestCase):
         # select.select always says stdout is ready
         mock_select.return_value = ([99], [], [])
 
-        outcome = import_one.run_import("/tmp/test", TARGET_MBID)
+        outcome = import_one.run_import(
+            "/tmp/test", TARGET_MBID, max_distance=DEFAULT_MAX_DISTANCE)
 
         self.assertEqual(outcome.exit_code,
                          import_one.DUPLICATE_REMOVE_GUARD_EXIT_CODE)
@@ -307,7 +427,8 @@ class TestRunImportDuplicateGuard(unittest.TestCase):
         mock_popen.return_value = proc
         mock_select.return_value = ([99], [], [])
 
-        outcome = import_one.run_import("/tmp/test", TARGET_MBID)
+        outcome = import_one.run_import(
+            "/tmp/test", TARGET_MBID, max_distance=DEFAULT_MAX_DISTANCE)
 
         self.assertEqual(outcome.exit_code, 0)
         self.assertTrue(outcome.beets_owned_replacement)
@@ -328,7 +449,8 @@ class TestRunImportDuplicateGuard(unittest.TestCase):
         mock_popen.return_value = proc
         mock_select.return_value = ([99], [], [])
 
-        outcome = import_one.run_import("/tmp/test", TARGET_MBID)
+        outcome = import_one.run_import(
+            "/tmp/test", TARGET_MBID, max_distance=DEFAULT_MAX_DISTANCE)
 
         self.assertEqual(outcome.exit_code, 0)
         self.assertFalse(outcome.beets_owned_replacement)
@@ -354,7 +476,8 @@ class TestRunImportDuplicateGuard(unittest.TestCase):
         # select returns empty = timeout
         mock_select.return_value = ([], [], [])
 
-        outcome = import_one.run_import("/tmp/test", TARGET_MBID)
+        outcome = import_one.run_import(
+            "/tmp/test", TARGET_MBID, max_distance=DEFAULT_MAX_DISTANCE)
 
         self.assertEqual(outcome.exit_code, 2)
 
@@ -372,7 +495,8 @@ class TestRunImportDuplicateGuard(unittest.TestCase):
         mock_popen.return_value = proc
         mock_select.return_value = ([99], [], [])
 
-        outcome = import_one.run_import("/tmp/test", TARGET_MBID)
+        outcome = import_one.run_import(
+            "/tmp/test", TARGET_MBID, max_distance=DEFAULT_MAX_DISTANCE)
 
         self.assertEqual(outcome.exit_code, 4)
 
@@ -394,7 +518,8 @@ class TestRunImportDuplicateGuard(unittest.TestCase):
         mock_popen.return_value = proc
         mock_select.return_value = ([99], [], [])
 
-        outcome = import_one.run_import("/tmp/test", TARGET_MBID)
+        outcome = import_one.run_import(
+            "/tmp/test", TARGET_MBID, max_distance=DEFAULT_MAX_DISTANCE)
 
         self.assertEqual(outcome.exit_code, 2)
         self.assertIn("readonly database", "\n".join(outcome.beets_lines))
@@ -419,7 +544,8 @@ class TestRunImportDuplicateGuard(unittest.TestCase):
         mock_popen.return_value = proc
         mock_select.return_value = ([99], [], [])
 
-        outcome = import_one.run_import("/tmp/test", TARGET_MBID)
+        outcome = import_one.run_import(
+            "/tmp/test", TARGET_MBID, max_distance=DEFAULT_MAX_DISTANCE)
 
         self.assertEqual(outcome.exit_code, 2)
         assert outcome.failure_reason is not None
@@ -448,7 +574,8 @@ class TestHarnessDuplicateRemoveGuard(unittest.TestCase):
         mock_popen.return_value = proc
         mock_select.return_value = ([99], [], [])
 
-        import_one.run_import("/tmp/test", TARGET_MBID)
+        import_one.run_import(
+            "/tmp/test", TARGET_MBID, max_distance=DEFAULT_MAX_DISTANCE)
 
         writes = "".join(
             call.args[0] for call in proc.stdin.write.call_args_list)
@@ -469,7 +596,8 @@ class TestHarnessDuplicateRemoveGuard(unittest.TestCase):
         mock_popen.return_value = proc
         mock_select.return_value = ([99], [], [])
 
-        import_one.run_import("/tmp/test", TARGET_MBID)
+        import_one.run_import(
+            "/tmp/test", TARGET_MBID, max_distance=DEFAULT_MAX_DISTANCE)
 
         writes = "".join(
             call.args[0] for call in proc.stdin.write.call_args_list)
@@ -494,7 +622,8 @@ class TestHarnessDuplicateRemoveGuard(unittest.TestCase):
         mock_popen.return_value = proc
         mock_select.return_value = ([99], [], [])
 
-        outcome = import_one.run_import("/tmp/test", TARGET_MBID)
+        outcome = import_one.run_import(
+            "/tmp/test", TARGET_MBID, max_distance=DEFAULT_MAX_DISTANCE)
 
         self.assertEqual(outcome.exit_code,
                          import_one.DUPLICATE_REMOVE_GUARD_EXIT_CODE)

@@ -41,8 +41,14 @@ class TestImportOneForceFlag(unittest.TestCase):
 
     The ceiling used to be a module attribute ``main()`` mutated, and these
     tests read it back off the module. It is now derived per run and threaded
-    into ``run_import``, so they assert the value the child was handed — the
-    outermost real adapter, and the thing an operator actually cares about.
+    into ``run_import``, so they assert the value the child was handed.
+
+    That value is still a proxy, not the decided outcome: ``run_import`` is
+    an intermediate, and the outermost real adapter for a distance ceiling
+    is the ``dist > max_distance`` comparison inside ``_run_import_once``.
+    ``tests/test_disambiguation.py::TestApplyDistanceCeiling`` drives that
+    comparison and asserts apply-versus-reject flipping on the ceiling
+    alone; these tests pin that the flag reaches it.
     """
 
     def test_force_flag_raises_the_ceiling_to_the_shared_override(self) -> None:

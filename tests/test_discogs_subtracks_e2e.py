@@ -283,6 +283,7 @@ class TestDiscogsSubtracksEndToEnd(unittest.TestCase):
                 outcome = import_one.run_import(
                     str(source),
                     _RELEASE_ID,
+                    max_distance=import_one.DEFAULT_MAX_DISTANCE,
                     beets_config_dir=str(beets_dir),
                     beets_python=os.environ.get("CRATEDIGGER_BEETS_PYTHON"),
                     beets_library_db_path=str(database),

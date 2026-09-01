@@ -32,10 +32,25 @@ from harness.import_one import (
 )
 from lib.beets import FORCE_IMPORT_DISTANCE_THRESHOLD
 
-#: The two positionals, in argv order. Taken from the parser rather than
-#: assumed: ``parse_args`` refuses a run that supplies them out of order, so
-#: a strategy that guessed would fail loudly rather than silently.
-_POSITIONALS: tuple[str, ...] = ("path", "mb_release_id")
+
+def _positionals() -> tuple[str, ...]:
+    """The positional destinations, in argv order, read off the parser.
+
+    ``argparse`` marks a positional by its empty ``option_strings``, and
+    ``_actions`` preserves declaration order — the same bounded parser
+    introspection ``tests/test_import_one_argparse_audit.py`` uses. Derived
+    rather than typed out, so adding a positional to ``build_parser``
+    changes the generated argv instead of quietly desynchronising it.
+    """
+    return tuple(
+        action.dest
+        for action in build_parser()._actions
+        if not action.option_strings
+    )
+
+
+#: Evaluated once at import: the parser is a pure constructor.
+_POSITIONALS: tuple[str, ...] = _positionals()
 
 
 def _flag(field_name: str) -> str:
@@ -95,8 +110,8 @@ def _value_strategy(kind: str) -> st.SearchStrategy[object]:
 
 @st.composite
 def _argv_worlds(draw: st.DrawFn) -> list[str]:
-    """One complete argv: both positionals plus any subset of the flags."""
-    argv: list[str] = [draw(_TOKEN), draw(_TOKEN)]
+    """One complete argv: every positional plus any subset of the flags."""
+    argv: list[str] = [draw(_TOKEN) for _ in _POSITIONALS]
     for field in _optional_fields():
         kind = _kind(field)
         if not draw(st.booleans()):

@@ -1680,7 +1680,7 @@ def run_import(
     path: str,
     mb_release_id: str,
     *,
-    max_distance: float = DEFAULT_MAX_DISTANCE,
+    max_distance: float,
     beets_config_dir: str | None = None,
     beets_python: str | None = None,
     beets_library_db_path: str | None = None,
@@ -1688,9 +1688,17 @@ def run_import(
 ) -> RunImportOutcome:
     """Import one exact release with at most one safe Discogs retry.
 
-    Both attempts run under the SAME ``max_distance`` — a retry that quietly
-    reverted to the default ceiling would let a force import's second pass
-    reject what its first pass was authorized to apply.
+    ``max_distance`` is required for the same reason ``_run_import_once``
+    requires it: this function reaches the apply decision, so no caller may
+    arrive without stating a ceiling. A default here would make a dropped
+    kwarg silently import at 0.5 on the one process that mutates the
+    library, and Pyright would not say a word.
+
+    Both attempts run under the SAME ceiling. A retry that quietly reverted
+    to the default would let a force import's second pass reject what its
+    first pass was authorized to apply —
+    ``test_bowie_retry_applies_a_high_distance_candidate_under_the_force_ceiling``
+    is the pin that makes that observable.
     """
 
     outcome = _run_import_once(
@@ -3279,6 +3287,15 @@ def run_import_one(request: ImportOneRequest) -> ImportResult:
     ``ImportResult`` out. Nothing here exits the process, so a caller can
     read the result directly instead of catching ``SystemExit`` and parsing
     the sentinel line back off stdout.
+
+    Not a general-purpose loop entry, and ``main`` is its only production
+    caller: each run registers its ``BeetsDB.close`` with ``atexit`` (the
+    safety net for the return paths that do not close explicitly), so
+    calling this repeatedly in one process retains a handle per call.
+
+    Distinct from ``lib.dispatch.subprocess_runner.run_import_one``, which
+    shares the name and spawns ``import_one.py`` as a child. That one is
+    how production reaches this one.
     """
     scratch = _PreviewScratch()
     try:

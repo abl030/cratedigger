@@ -110,7 +110,9 @@ def fake_harness_import_world(
         ):
             warnings.simplefilter("ignore", ResourceWarning)
             yield tmpdir, lambda: import_one.run_import(
-                tmpdir, "release-under-test",
+                tmpdir,
+                "release-under-test",
+                max_distance=import_one.DEFAULT_MAX_DISTANCE,
             )
 
 
@@ -518,11 +520,19 @@ class TestImportBootstrap(unittest.TestCase):
         self.assertEqual(result.conversion.target_filetype, "mp3")
 
 
+def _current_umask() -> int:
+    """Read the process umask. ``os`` offers no plain getter, only a swap."""
+    value = os.umask(0o022)
+    os.umask(value)
+    return value
+
+
 def run_evidence_authorized_import(
     tmp_root: str,
     *,
     force: bool = False,
     mbid: str = "mbid-evidence",
+    child_exit_code: int = 0,
 ) -> tuple[ImportResult, list[float]]:
     """Drive one whole evidence-authorized import in this process.
 
@@ -600,11 +610,15 @@ def run_evidence_authorized_import(
     ):
         ceilings.append(max_distance)
         return import_one.RunImportOutcome(
-            0,
+            child_exit_code,
             [],
             applied_distance=0.01,
             admitted_audio_count=1,
             applied_audio_count=1,
+            failure_reason=(
+                None if child_exit_code == 0
+                else f"fake beets child exited {child_exit_code}"
+            ),
         )
 
     request = import_one.ImportOneRequest(
@@ -665,6 +679,43 @@ class TestImportOneRequest(unittest.TestCase):
 
         with self.assertRaises(dataclasses.FrozenInstanceError):
             request.force = True  # pyright: ignore[reportAttributeAccessIssue]
+
+
+class TestResolveRankConfig(unittest.TestCase):
+    """``--quality-rank-config`` is how the caller's runtime config crosses.
+
+    Ignoring it silently makes the harness classify ranks by the hardcoded
+    defaults while the caller believes its own config applied — a quality
+    decision made on the wrong table, with nothing to see in the log.
+    """
+
+    def test_a_serialized_config_survives_the_round_trip(self):
+        from harness.import_one import resolve_rank_config
+        from lib.quality import QualityRankConfig, RankBitrateMetric
+
+        sent = dataclasses.replace(
+            QualityRankConfig.defaults(),
+            bitrate_metric=RankBitrateMetric.MIN,
+        )
+        self.assertNotEqual(sent, QualityRankConfig.defaults())
+
+        self.assertEqual(resolve_rank_config(sent.to_json()), sent)
+
+    def test_absent_or_malformed_argv_falls_back_to_defaults(self):
+        from harness.import_one import resolve_rank_config
+        from lib.quality import QualityRankConfig
+
+        cases = [
+            ("flag absent", None),
+            ("empty string", ""),
+            ("not JSON at all", "{not json"),
+        ]
+        for desc, serialized in cases:
+            with self.subTest(desc=desc), patch("harness.import_one._log"):
+                self.assertEqual(
+                    resolve_rank_config(serialized),
+                    QualityRankConfig.defaults(),
+                )
 
 
 class TestRunImportOneReturnsInsteadOfExiting(unittest.TestCase):
@@ -794,6 +845,190 @@ class TestRunImportOneReturnsInsteadOfExiting(unittest.TestCase):
         self.assertEqual(result.decision, "import")
         self.assertEqual(result.postflight.beets_id, 77)
         self.assertEqual(ceilings, [import_one.DEFAULT_MAX_DISTANCE])
+
+    def test_a_failed_beets_child_returns_import_failed_and_stops(self):
+        """The evidence lane's ``rc != 0`` return, which nothing drove.
+
+        Every existing mock in this file hands the lane a zero-exit child,
+        so deleting that early return left the whole postflight running
+        against a Beets that never applied anything.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result, ceilings = run_evidence_authorized_import(
+                tmpdir, child_exit_code=2)
+
+        self.assertEqual(result.exit_code, 2)
+        self.assertEqual(result.decision, "import_failed")
+        self.assertEqual(result.error, "fake beets child exited 2")
+        # The run stopped AT the failure: no postflight identity was
+        # recorded, which is what the deleted return was protecting.
+        self.assertIsNone(result.postflight.beets_id)
+        self.assertEqual(len(ceilings), 1)
+
+    def test_a_missing_release_returns_mbid_missing(self):
+        """rc 4 takes the other side of the same branch."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result, _ceilings = run_evidence_authorized_import(
+                tmpdir, child_exit_code=4)
+
+        self.assertEqual(result.exit_code, 4)
+        self.assertEqual(result.decision, "mbid_missing")
+
+    def test_the_measured_lane_hands_its_derived_ceiling_to_the_child(self):
+        """The non-evidence lane's ``run_import`` call had zero coverage.
+
+        Production reaches it only from a bare CLI invocation today —
+        ``lib/dispatch/core.py`` writes an evidence action file on every
+        launch — but the code is live, and its ceiling argument was the one
+        place a dropped ``max_distance=`` would silently import at 0.5.
+        """
+        from harness import import_one
+        from lib.beets import FORCE_IMPORT_DISTANCE_THRESHOLD
+        from lib.beets_db import AlbumInfo
+        from lib.quality import SpectralAnalysisDetail, SpectralDetail
+
+        audit = SpectralDetail(
+            candidate=SpectralAnalysisDetail(
+                attempted=True, grade="genuine", suspect_pct=0.0),
+            existing=SpectralAnalysisDetail(attempted=False),
+        )
+        ceilings: list[float] = []
+
+        def recording_run_import(
+            path: str,
+            mb_release_id: str,
+            *,
+            max_distance: float,
+            **_kwargs: str | None,
+        ):
+            ceilings.append(max_distance)
+            return import_one.RunImportOutcome(
+                0,
+                [],
+                applied_distance=0.02,
+                admitted_audio_count=1,
+                applied_audio_count=1,
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            album = os.path.join(tmpdir, "album")
+            library = os.path.join(tmpdir, "library", "Artist", "Album")
+            os.makedirs(album)
+            os.makedirs(library)
+            with open(os.path.join(album, "01 - One.mp3"), "wb") as handle:
+                handle.write(b"cratedigger test bytes")
+
+            beets = FakeBeetsDB()
+            beets.set_album_exists("mbid-measured", False)
+            beets.set_item_paths(
+                "mbid-measured", [(1, os.path.join(library, "01 - One.mp3"))])
+            beets.set_album_info("mbid-measured", AlbumInfo(
+                album_id=88,
+                track_count=1,
+                min_bitrate_kbps=320,
+                is_cbr=True,
+                album_path=library,
+                format="MP3",
+            ))
+
+            with patch("harness.import_one.BeetsDB", return_value=beets), \
+                 patch("harness.import_one.run_import", recording_run_import), \
+                 patch("lib.measurement.collect_attempt_spectral_audit",
+                       return_value=audit), \
+                 patch("harness.import_one.convert_lossless",
+                       return_value=(0, 0, None, None)), \
+                 patch("harness.import_one._get_folder_bitrates",
+                       return_value=[900]), \
+                 patch("harness.import_one._detect_source_format",
+                       return_value="MP3"), \
+                 patch("harness.import_one._detect_native_codec_family",
+                       return_value="mp3"), \
+                 patch("harness.import_one._probe_native_lossy_as_v0",
+                       return_value=None), \
+                 patch("harness.import_one._cleanup_staged_dir"), \
+                 patch("harness.import_one.fix_library_modes"), \
+                 patch("harness.import_one._log"):
+                result = import_one.run_import_one(
+                    import_one.ImportOneRequest(
+                        path=album,
+                        mb_release_id="mbid-measured",
+                        force=True,
+                    )
+                )
+
+        self.assertEqual(ceilings, [FORCE_IMPORT_DISTANCE_THRESHOLD])
+        self.assertEqual(result.exit_code, 0)
+
+    def test_a_crash_before_any_terminal_stage_is_still_acknowledged(self):
+        """``_current_result`` is published before the run touches Beets.
+
+        ``_run_entrypoint`` reads that global to acknowledge a crash with
+        whatever the run had built. Publishing it later — after the
+        preflight block, say — silently downgrades every early crash to a
+        bare ``ImportResult``, losing the preview flag and the caller's V0
+        probe. The existing crash tests set the global by hand, so they
+        cannot see the ordering at all.
+        """
+        from harness import import_one
+        from lib.quality import parse_import_result
+
+        stdout = io.StringIO()
+
+        def crash_in_preflight() -> None:
+            import_one.run_import_one(import_one.ImportOneRequest(
+                path="/tmp/cratedigger-no-such-album",
+                mb_release_id="mbid-crash",
+                dry_run=True,
+                existing_v0_probe_avg_bitrate=253,
+            ))
+
+        with patch("sys.stdout", stdout), \
+             patch("harness.import_one.BeetsDB",
+                   side_effect=RuntimeError("beets DB unreachable")), \
+             patch.object(import_one, "_import_total_start", None), \
+             patch("harness.import_one._log"), \
+             self.assertRaises(SystemExit) as caught:
+            import_one._run_entrypoint(main_fn=crash_in_preflight)
+
+        self.assertEqual(caught.exception.code, 99)
+        parsed = parse_import_result(stdout.getvalue())
+        assert parsed is not None
+        self.assertEqual(parsed.decision, "crash")
+        self.assertEqual(parsed.error, "RuntimeError: beets DB unreachable")
+        # Both come from the partial result the run had already published.
+        self.assertTrue(parsed.preview)
+        assert parsed.existing_v0_probe is not None
+        self.assertEqual(parsed.existing_v0_probe.avg_bitrate_kbps, 253)
+
+    def test_main_resets_the_umask_for_the_subprocess_chain(self):
+        """GH #84's group-writable boundary, asserted rather than assumed.
+
+        The expected value comes from ``reset_umask`` itself, not a typed
+        literal: the number lives inside that function and nowhere else, so
+        a pin holding its own copy would go stale silently.
+        """
+        from harness import import_one
+        from lib.permissions import reset_umask
+
+        saved = _current_umask()
+        self.addCleanup(os.umask, saved)
+        reset_umask()
+        expected = _current_umask()
+        # A value nothing in this run would arrive at by accident.
+        os.umask(0o077)
+
+        beets = FakeBeetsDB()
+        beets.set_album_exists("mbid-missing", False)
+        with patch.object(
+            sys, "argv",
+            ["import_one.py", "/tmp/cratedigger-no-such-album", "mbid-missing"],
+        ), patch("sys.stdout", io.StringIO()), \
+             patch("harness.import_one.BeetsDB", return_value=beets), \
+             patch("harness.import_one._log"), \
+             self.assertRaises(SystemExit):
+            import_one.main()
+
+        self.assertEqual(_current_umask(), expected)
 
 
 class TestPipelineDbUpdate(unittest.TestCase):
