@@ -48,9 +48,12 @@ V   **Verdict from the re-read files.** ``synced`` is claimed only over a
     the world space and V6 survived unwidened, because all three injection
     sites fire strictly BEFORE the write: no world can reach the write and
     then lose the authority, so ``beets_unavailable`` after a write is
-    still the mutant signature and not a legitimate outcome. A world that
-    vanishes the album mid-sync, or one that fails the authority on the
-    POST-write re-read, still has to widen V6 (and V4) before it lands.
+    still the mutant signature and not a legitimate outcome. Two worlds
+    would still have to widen it: an album that vanishes mid-sync (that
+    one widens V4 as well, since its ``not_found`` IS in the refusal set),
+    and an authority that fails on the POST-write re-read (V6 only — V4
+    deliberately excludes ``beets_unavailable``, which is the whole point
+    of ``test_the_beets_unavailable_outcome_is_not_a_refusal_clause``).
 R   **Release resolution gating.** The release entry's refusal names what
     Beets actually said: an ambiguous resolution refuses ``not_unique``, a
     missing one ``not_found``, and ``not_unique`` is claimed nowhere else.
@@ -450,8 +453,11 @@ def verdict_violations(run: SyncRun) -> list[str]:
         # arm) and the mediated wrapper's beets_unavailable (authority
         # raised on the re-read) are correct behavior in worlds
         # _FakeSyncBeets cannot produce — so seeing them here is evidence
-        # of a returncode-driven verdict, and a future strategy that adds
-        # authority failure or mid-sync deletion must widen this clause.
+        # of a returncode-driven verdict. #1313 added authority failure to
+        # the strategy and this clause did NOT need widening: all three
+        # injection sites fire before the write. A strategy that fails the
+        # authority on the POST-write re-read, or deletes the album
+        # mid-sync, still would.
         expected = (
             RESULT_SYNCED if _post_converged(run)
             else RESULT_RESIDUAL_DIVERGENCE
@@ -466,12 +472,22 @@ def verdict_violations(run: SyncRun) -> list[str]:
 
 
 def release_resolution_violations(run: SyncRun) -> list[str]:
-    """R — the release entry's refusal names what Beets actually said."""
+    """R — the release entry's refusal names what Beets actually said.
+
+    R1 and R2 hold Beets to its own answer, so they only apply when Beets
+    got to give one. An authority that went away has no answer to be held
+    to, and ``beets_unavailable`` is then the honest outcome — the same
+    ``run.authority_raises`` counter ``_write_authorized`` reads, for the
+    same reason: whether the injected failure FIRED is an observation, not
+    something to re-derive from how far the code should have got.
+    """
     violations: list[str] = []
     world = run.world
     outcome = run.result.outcome
     resolved = (
-        world.entry == "owned_release" and world.expected in IDENTITIES
+        world.entry == "owned_release"
+        and world.expected in IDENTITIES
+        and not run.authority_raises
     )
     if resolved and world.resolution == "ambiguous" \
             and outcome != RESULT_NOT_UNIQUE:
@@ -827,6 +843,26 @@ class TestCheckersTripOnViolations(unittest.TestCase):
         )
         violations = release_resolution_violations(run)
         self.assertTrue(any(v.startswith("R2") for v in violations), violations)
+
+    def test_r1_and_r2_stay_quiet_when_the_authority_went_away(self) -> None:
+        """The false-positive direction, which is where these clauses were
+        wrong when they shipped: an authority that failed before the
+        resolution leaves Beets with no answer to be held to, and every
+        such world is producible by the strategy."""
+        for resolution in ("missing", "ambiguous"):
+            for site in ("open", "resolve"):
+                with self.subTest(resolution=resolution, site=site):
+                    run = self._base_run(
+                        world=_world(
+                            entry="owned_release", resolution=resolution,
+                            authority_failure=site,
+                        ),
+                        result=TagSyncResult(outcome=RESULT_BEETS_UNAVAILABLE),
+                        write_calls=(), authority_raises=1,
+                        final_tags={"/library/a/01.opus": OLD_TAG},
+                    )
+                    self.assertEqual(release_resolution_violations(run), [])
+                    self.assertEqual(authority_violations(run), [])
 
     def test_r3_trips_on_not_unique_from_the_album_entry(self) -> None:
         """The album entry has no resolution step, so it can never have a

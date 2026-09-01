@@ -503,9 +503,10 @@ def _sync_with_mediated_beets(
 
     Both entry points below reach the write through here, so an authority
     that goes away mid-sync becomes the same typed ``beets_unavailable``
-    on either. That can happen on the POST-write re-read, so unlike every
-    other non-accepting outcome this one does NOT promise the file-tag
-    world was left untouched.
+    on either. That can happen on the POST-write re-read, so this outcome
+    carries no promise that the file-tag world was left untouched — unlike
+    every refusal decided BEFORE the write (``residual_divergence`` and
+    the post-write ``not_found`` arm make no such promise either).
     """
     from lib.beets_db import beets_authority_availability_category
 

@@ -23,13 +23,16 @@ import subprocess
 def _synth_timeout_seconds(duration: int) -> int:
     """Wall-clock budget for one sox synthesis of ``duration`` seconds.
 
-    sox costs roughly a hundredth of a second per second of audio it
-    synthesises, so a FLAT budget is only right at one duration. The 30 s
-    constant this replaced was sized for the 5 s default and left the one
-    800 s caller 3.5x headroom (measured idle on doc1: 8.54 s against a
-    30 s budget) — thin enough that a loaded gate host ate it, and
-    `tests.test_conversion_e2e` flaked. The budget is a wedge detector,
-    not a performance assertion, so it scales with the work asked for.
+    sox's cost is linear in the duration asked for, so a FLAT budget is
+    only right at one duration. The 30 s constant this replaced was sized
+    for the 5 s default and left the one 800 s caller 3.5x headroom
+    (measured idle on doc1: `make_test_flac(800)` takes 8.54 s, 0.011 s
+    per synthesised second) — thin enough that a loaded gate host ate it,
+    and `tests.test_conversion_e2e` flaked. The slope is per-generator,
+    and this budget is sized for the expensive one: `make_long_test_flac`
+    runs at 0.001 s per second, so it gets 10x more room than it needs.
+    That is fine. The budget is a wedge detector, not a performance
+    assertion.
     """
     return 30 + duration // 2
 
