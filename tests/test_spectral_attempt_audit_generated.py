@@ -1851,8 +1851,12 @@ class TestAttemptAuditGenerated(unittest.TestCase):
         stale_grade,
         stale_bitrate,
     ):
-        from lib.current_library_evidence import load_persisted_existing_spectral
-        from lib.quality import AudioQualityMeasurement
+        from lib.current_library_evidence import (
+            CurrentLibraryEvidence,
+            resolve_current_library_evidence,
+        )
+        from lib.quality import AudioQualityMeasurement, QualityRankConfig
+        from lib.quality_evidence import EvidenceBuildResult
         from tests.evidence_helpers import make_album_quality_evidence
         from tests.fakes import FakePipelineDB
         from tests.helpers import make_request_row
@@ -1897,11 +1901,23 @@ class TestAttemptAuditGenerated(unittest.TestCase):
         assert persisted is not None and persisted.id is not None
         db.set_request_current_evidence(42, persisted.id)
 
-        _, detail, authoritative = load_persisted_existing_spectral(db, 42)
+        # Drive the resolver every lane actually calls, not the loader
+        # underneath it: until issue #1313 this property read a tuple slot
+        # the resolver reassigned in all three of its branches before ever
+        # looking at it, so no production HAVE projection was under test.
+        resolved = resolve_current_library_evidence(
+            db,
+            request_id=42,
+            mb_release_id=req["mb_release_id"],
+            quality_ranks=QualityRankConfig.defaults(),
+            beets_library_root="/library",
+            loader=lambda *_a, **_k: EvidenceBuildResult(persisted, "ready"),
+        )
 
-        self.assertTrue(authoritative)
+        self.assertIsInstance(resolved, CurrentLibraryEvidence)
+        assert isinstance(resolved, CurrentLibraryEvidence)
         self.assertTrue(_authoritative_have_matches(
-            detail,
+            resolved.existing_spectral_evidence,
             authoritative_grade,
             evidence_spectral_bitrate,
         ))

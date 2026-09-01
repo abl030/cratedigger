@@ -11,6 +11,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from contextlib import nullcontext
 from unittest.mock import patch
 
 from lib.current_library_evidence import (
@@ -302,6 +303,52 @@ class TestResolveCurrentLibraryEvidence(unittest.TestCase):
         self.assertIsNotNone(preloaded)
         assert preloaded is not None
         self.assertEqual(getattr(preloaded, "id"), stored.id)  # noqa: B009
+
+    def test_an_unresolvable_link_hands_the_loader_no_preloaded_row(self):
+        """Every way the link can fail reaches the loader as one absence.
+
+        No link, a link naming a row that is gone, and either read raising
+        are four different worlds, and the loader must not be able to tell
+        them apart: it resolves Beets freshly and backfills from the files
+        that are actually installed. Handing it a half-built row instead
+        would let an unreadable link decide the HAVE facts (issue #1313).
+        """
+        boom = RuntimeError("evidence unavailable")
+        for label in (
+            "no link at all",
+            "link names a row that is gone",
+            "the id read raises",
+            "the row read raises",
+        ):
+            with self.subTest(world=label):
+                db = self._db()
+                if label == "link names a row that is gone":
+                    db.set_request_current_evidence(42, 999)
+                seen: list[object] = []
+
+                def loader(_db, seen=seen, **kwargs):
+                    seen.append(kwargs.get("preloaded_evidence"))
+                    return EvidenceBuildResult(None, "empty_current")
+
+                if label == "the id read raises":
+                    failing = patch.object(
+                        db, "get_request_current_evidence_id", side_effect=boom,
+                    )
+                elif label == "the row read raises":
+                    db.set_request_current_evidence(42, 999)
+                    failing = patch.object(
+                        db, "load_album_quality_evidence_by_id", side_effect=boom,
+                    )
+                else:
+                    failing = nullcontext()
+
+                with failing:
+                    resolved = self._resolve(db, loader)
+
+                self.assertEqual(seen, [None])
+                assert isinstance(resolved, CurrentLibraryEvidence)
+                self.assertIsNone(resolved.evidence)
+                self.assertFalse(resolved.existing_spectral_evidence.attempted)
 
 
 class _PersistRecordingDB(FakePipelineDB):
