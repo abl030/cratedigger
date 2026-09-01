@@ -516,7 +516,11 @@ class _CoreMixin(_PipelineDBBase):
         sweep thread (``web/triage_runner.py``) each hold their OWN
         connection/session — cross-thread serialisation in that process
         depends on never sharing a ``PipelineDB`` connection between
-        threads (``web/server.py::_new_db``).
+        threads (``web/runtime.py::WebRuntime.open_background_db``).
+        That holds under a DSN, which is what production runs. A
+        DSN-less runtime (the dev server, the test harness) has one
+        injected handle and the sweep shares it, so the two threads are
+        one session there and this lock cannot separate them.
 
         See ``docs/advisory-locks.md`` for namespaces, keys, ordering,
         and call-site index.
