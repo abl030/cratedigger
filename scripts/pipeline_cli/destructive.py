@@ -11,6 +11,7 @@ import msgspec
 
 from lib import transitions
 from lib.beets_db import BeetsDB, open_beets_db
+from lib.beets_delete import BeetsDeleteFn
 from lib.destructive_release_service import (
     BanSourceBeetsAmbiguous,
     BanSourceCleanupIncomplete,
@@ -21,7 +22,6 @@ from lib.destructive_release_service import (
     BanSourceRequestNotFound,
     BanSourceSuccess,
     BanSourceTransitionConflict,
-    BeetsDeleteFn,
     DeleteAlbumAuthorityMismatch,
     DeleteAlbumNotFound,
     DeleteBeetsAmbiguous,

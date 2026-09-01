@@ -93,6 +93,22 @@ class BeetsDeleteFailed(
 
 type BeetsDeleteOutcome = BeetsDeleteCompleted | BeetsDeleteFailed
 
+BeetsDeleteFn = Callable[[BeetsDeleteRequest], BeetsDeleteOutcome]
+"""The injectable exact-album deletion boundary.
+
+Production passes :func:`run_beets_delete`; tests pass a recorder. It
+lives here, beside the request and outcome it names, because every
+consumer already imports those two from this module.
+
+It used to be declared three times: this alias in
+``lib/destructive_release_service.py`` and ``lib/mbid_replace_service.py``,
+plus a ``Protocol`` in ``lib/automation_recovery_debris.py`` whose
+``__call__(self, request: ...)`` made the parameter NAME part of the
+contract (Pyright rejects a function whose parameter is spelled
+otherwise). Every call site passes the request positionally, so nothing
+relied on that; the alias is the weaker, sufficient contract.
+"""
+
 
 class _OwnedPath(msgspec.Struct, frozen=True):
     path: str

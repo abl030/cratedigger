@@ -86,7 +86,7 @@ import msgspec
 from lib.beets_db import BeetsDB, beets_authority_availability_category
 from lib.beets_delete import (
     BeetsDeleteCompleted,
-    BeetsDeleteOutcome,
+    BeetsDeleteFn,
     BeetsDeleteRequest,
     _confined_path,
     run_beets_delete,
@@ -219,10 +219,6 @@ class SupportsRecoveryDebrisBeetsDB(Protocol):
 
 class BeetsDbFactory(Protocol):
     def __call__(self) -> SupportsRecoveryDebrisBeetsDB: ...
-
-
-class BeetsDeleteFn(Protocol):
-    def __call__(self, request: BeetsDeleteRequest) -> BeetsDeleteOutcome: ...
 
 
 class RecoveryDebrisRemovalFn(Protocol):
@@ -374,7 +370,6 @@ def remove_recovery_debris(
 
 __all__ = [
     "BeetsDbFactory",
-    "BeetsDeleteFn",
     "RecoveryDebrisOutcomeKind",
     "RecoveryDebrisRemovalFn",
     "RecoveryDebrisReport",

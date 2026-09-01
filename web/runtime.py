@@ -31,8 +31,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from lib.beets_db import BeetsDB, open_beets_db
+from lib.beets_delete import BeetsDeleteFn
 from lib.convergence_service import ConvergenceSignal
-from lib.destructive_release_service import BeetsDeleteFn, DeleteNotifyFn
+from lib.destructive_release_service import DeleteNotifyFn
 from lib.pipeline_db import PipelineDB
 from lib.pipeline_db.rows import ArtistRequestRow
 from web import overlay as _overlay

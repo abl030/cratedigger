@@ -67,7 +67,7 @@ from lib.beets_db import (
 )
 from lib.beets_delete import (
     BeetsDeleteFailed,
-    BeetsDeleteOutcome,
+    BeetsDeleteFn,
     BeetsDeleteRequest,
     run_beets_delete,
 )
@@ -248,10 +248,6 @@ class ReplaceBeetsDB(Protocol):
 BeetsDBFactory = Callable[[], ReplaceBeetsDB]
 """Zero-arg callable returning a ``BeetsDB`` instance. Default uses
 ``lib.beets_db.BeetsDB`` against the configured library path."""
-
-BeetsDeleteFn = Callable[[BeetsDeleteRequest], BeetsDeleteOutcome]
-"""Injectable pinned exact-album deletion boundary."""
-
 
 def _default_mb_lookup(mbid: str, *, fresh: bool = False) -> dict[str, Any]:
     """Default MB-mirror lookup. Imported lazily so the service module
