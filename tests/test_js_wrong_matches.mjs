@@ -314,7 +314,7 @@ t.section('forceImportWrongMatch() maps processing conflict to the shared locked
     'force import refetches only the owner request');
   t.equal(attributes.get('aria-disabled'), 'true', 'force-import control locks');
   t.equal(btn.textContent, 'waiting to import', 'fresh owner state is rendered');
-  t.ok(live.textContent.includes('job #71'), 'exact owner is announced');
+  t.contains(live.textContent, 'job #71', 'exact owner is announced');
   globals.restore();
 }
 
@@ -340,13 +340,13 @@ t.section('renderWrongMatches() shows threshold controls and green state');
   installStorage();
   const dom = installDom();
   renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
-  t.ok(dom.wrongMatches.innerHTML.includes('Loosen'), 'renders threshold input');
-  t.ok(dom.wrongMatches.innerHTML.includes('2 green'), 'renders default green count');
-  t.ok(dom.wrongMatches.innerHTML.includes('Converge (2)'), 'converge button includes count');
-  t.ok(!dom.wrongMatches.innerHTML.includes('remove all wrong matches when converging'), 'cleanup checkbox is gone');
-  t.ok(dom.wrongMatches.innerHTML.includes('Cleanup Wrong Matches (3)'), 'renders full-queue cleanup action');
-  t.ok(dom.wrongMatches.innerHTML.includes('Delete All (3)'), 'renders per-group delete-all action');
-  t.ok(dom.wrongMatches.innerHTML.includes('deleteWrongMatch(100'), 'renders per-entry delete action');
+  t.contains(dom.wrongMatches.innerHTML, 'Loosen', 'renders threshold input');
+  t.contains(dom.wrongMatches.innerHTML, '2 green', 'renders default green count');
+  t.contains(dom.wrongMatches.innerHTML, 'Converge (2)', 'converge button includes count');
+  t.excludes(dom.wrongMatches.innerHTML, 'remove all wrong matches when converging', 'cleanup checkbox is gone');
+  t.contains(dom.wrongMatches.innerHTML, 'Cleanup Wrong Matches (3)', 'renders full-queue cleanup action');
+  t.contains(dom.wrongMatches.innerHTML, 'Delete All (3)', 'renders per-group delete-all action');
+  t.contains(dom.wrongMatches.innerHTML, 'deleteWrongMatch(100', 'renders per-entry delete action');
   t.ok(
     dom.wrongMatches.innerHTML.includes('data-pipeline-request-id="42"')
       && dom.wrongMatches.innerHTML.includes('forceImportWrongMatch(100, this)'),
@@ -354,8 +354,8 @@ t.section('renderWrongMatches() shows threshold controls and green state');
   );
 
   setWrongMatchConvergeThreshold(42, 230);
-  t.ok(dom.wrongMatches.innerHTML.includes('3 green'), 'threshold edit updates green count');
-  t.ok(dom.wrongMatches.innerHTML.includes('Converge (3)'), 'threshold edit updates converge count');
+  t.contains(dom.wrongMatches.innerHTML, '3 green', 'threshold edit updates green count');
+  t.contains(dom.wrongMatches.innerHTML, 'Converge (3)', 'threshold edit updates converge count');
 }
 
 t.section('renderWrongMatches() keeps converge usable with active import jobs');
@@ -371,8 +371,8 @@ t.section('renderWrongMatches() keeps converge usable with active import jobs');
   }];
   renderWrongMatches(data, dom.wrongMatches);
 
-  t.ok(!dom.wrongMatches.innerHTML.includes('Import Active'), 'does not replace converge with Import Active');
-  t.ok(dom.wrongMatches.innerHTML.includes('Converge (2)'), 'keeps converge label with active jobs');
+  t.excludes(dom.wrongMatches.innerHTML, 'Import Active', 'does not replace converge with Import Active');
+  t.contains(dom.wrongMatches.innerHTML, 'Converge (2)', 'keeps converge label with active jobs');
   t.ok(!/id="wm-converge-btn-42"[^>]*disabled/.test(dom.wrongMatches.innerHTML), 'active jobs do not disable converge');
 }
 
@@ -409,7 +409,7 @@ t.section('setWrongMatchConvergeThreshold() updates expanded group in place');
   t.equal(dom.wrongMatches.innerHTML, originalHtml, 'threshold edit does not rerender the pane');
   t.equal(elements.get('wm-green-count-42').textContent, '3 green', 'updates green count badge');
   t.equal(elements.get('wm-converge-btn-42').textContent, 'Converge (3)', 'updates converge button text');
-  t.ok(!String(elements.get('wm-entry-green-102').style.cssText || '').includes('display:none'), 'newly green entry badge is shown');
+  t.excludes(String(elements.get('wm-entry-green-102').style.cssText || ''), 'display:none', 'newly green entry badge is shown');
 }
 
 t.section('convergeWrongMatches() posts selected threshold and removes row in place');
@@ -450,8 +450,8 @@ t.section('convergeWrongMatches() posts selected threshold and removes row in pl
     'posts converge payload',
   );
   t.ok(!calls.some(call => call.url === '/api/wrong-matches'), 'does not refetch the whole wrong-matches pane');
-  t.ok(dom.toast.textContent.includes('Queued 2 candidates'), 'toasts converge result');
-  t.ok(dom.wrongMatches.innerHTML.includes('No wrong matches'), 'removes the emptied group locally');
+  t.contains(dom.toast.textContent, 'Queued 2 candidates', 'toasts converge result');
+  t.contains(dom.wrongMatches.innerHTML, 'No wrong matches', 'removes the emptied group locally');
 }
 
 t.section('deleteWrongMatch() posts one row and removes it in place — no full refresh');
@@ -486,7 +486,7 @@ t.section('deleteWrongMatch() posts one row and removes it in place — no full 
   );
   t.ok(!calls.some(call => call.url === '/api/wrong-matches'),
     'does NOT refetch the queue after row delete (in-place removal)');
-  t.ok(dom.toast.textContent.includes('Deleted wrong match'), 'toasts row delete result');
+  t.contains(dom.toast.textContent, 'Deleted wrong match', 'toasts row delete result');
 }
 
 t.section('deleteWrongMatchGroup() posts request id and removes the group in place');
@@ -526,7 +526,7 @@ t.section('deleteWrongMatchGroup() posts request id and removes the group in pla
   // "candidates" became "folders": a pointer-only clear over an
   // already-missing folder is counted separately and never headlined as a
   // deletion (issue #1063).
-  t.ok(dom.toast.textContent.includes('Deleted 3 folders'), 'toasts group delete result');
+  t.contains(dom.toast.textContent, 'Deleted 3 folders', 'toasts group delete result');
 }
 
 t.section('delete controls handle cancel and failures');
@@ -613,7 +613,7 @@ t.section('bulkTriageWrongMatches() posts full-queue confirmation and refreshes'
   const dom = installDom();
   const data = wrongMatchesData();
   renderWrongMatches(data, dom.wrongMatches);
-  t.ok(dom.wrongMatches.innerHTML.includes('Cleanup Wrong Matches (3)'), 'renders full-queue cleanup button');
+  t.contains(dom.wrongMatches.innerHTML, 'Cleanup Wrong Matches (3)', 'renders full-queue cleanup button');
   const calls = [];
   globalThis.confirm = () => true;
   // The sweep runs server-side on a background thread; the client polls.
@@ -693,8 +693,8 @@ t.section('bulkTriageWrongMatches() posts full-queue confirmation and refreshes'
   t.ok(calls.some(call => call.url === '/api/wrong-matches/triage/status'),
     'polls the background sweep status');
   t.ok(calls.some(call => call.url === '/api/wrong-matches'), 'refetches the full pane after cleanup');
-  t.ok(dom.toast.textContent.includes('Deleted 2 candidates'), 'toasts cleanup result');
-  t.ok(dom.wrongMatches.innerHTML.includes('No wrong matches'), 'renders refreshed empty state');
+  t.contains(dom.toast.textContent, 'Deleted 2 candidates', 'toasts cleanup result');
+  t.contains(dom.wrongMatches.innerHTML, 'No wrong matches', 'renders refreshed empty state');
   globals.restore();
 }
 
@@ -739,9 +739,9 @@ t.section('bulkTriageWrongMatches() handles a restart-lost sweep as partial, not
   };
   await bulkTriageWrongMatches();
   t.equal(dom.cleanupBtn.disabled, true, 'restart-lost sweep leaves Cleanup disabled (queue is empty post-refresh)');
-  t.ok(dom.toast.textContent.includes('status lost'), 'restart-lost sweep explains the lost status');
-  t.ok(!dom.toast.textContent.includes('failed'), 'restart-lost sweep is not reported as failed');
-  t.ok(dom.wrongMatches.innerHTML.includes('No wrong matches'), 'restart-lost sweep still refreshes the pane');
+  t.contains(dom.toast.textContent, 'status lost', 'restart-lost sweep explains the lost status');
+  t.excludes(dom.toast.textContent, 'failed', 'restart-lost sweep is not reported as failed');
+  t.contains(dom.wrongMatches.innerHTML, 'No wrong matches', 'restart-lost sweep still refreshes the pane');
   globals.restore();
 }
 
@@ -802,10 +802,10 @@ t.section('bulkTriageWrongMatches() reports a cancelled sweep distinctly from co
   await bulkTriageWrongMatches();
   t.equal(dom.cleanupBtn.disabled, true, 'cancelled sweep leaves Cleanup disabled (queue is empty post-refresh)');
   t.equal(dom.stopBtn.disabled, true, 'Stop button is disabled once the sweep reaches a terminal state');
-  t.ok(dom.toast.textContent.includes('stopped'), 'cancelled sweep says "stopped", not "completed"');
-  t.ok(dom.toast.textContent.includes('Deleted 1 candidate'), 'cancelled sweep still reports what ran');
+  t.contains(dom.toast.textContent, 'stopped', 'cancelled sweep says "stopped", not "completed"');
+  t.contains(dom.toast.textContent, 'Deleted 1 candidate', 'cancelled sweep still reports what ran');
   t.equal(dom.toast.className, 'toast', 'cancelled sweep is not toasted as an error');
-  t.ok(dom.wrongMatches.innerHTML.includes('No wrong matches'), 'cancelled sweep still refreshes the pane');
+  t.contains(dom.wrongMatches.innerHTML, 'No wrong matches', 'cancelled sweep still refreshes the pane');
   globals.restore();
 }
 
@@ -854,7 +854,7 @@ t.section('stopWrongMatchTriage() re-enables the button when the request itself 
   await stopWrongMatchTriage();
   t.equal(dom.stopBtn.disabled, false, 'a failed cancel request restores the button enabled');
   t.equal(dom.stopBtn.textContent, 'Stop', 'a failed cancel request restores the button label');
-  t.ok(dom.toast.textContent.includes('Stop request failed'), 'a failed cancel request is toasted');
+  t.contains(dom.toast.textContent, 'Stop request failed', 'a failed cancel request is toasted');
 }
 
 t.section('stopWrongMatchTriage() mutates the CURRENTLY registered Stop node, never a node captured earlier (#1106)');
@@ -930,7 +930,7 @@ t.section('bulkTriageWrongMatches() surfaces a failed sweep and restores the but
   await bulkTriageWrongMatches();
   t.equal(dom.cleanupBtn.disabled, false, 'failed sweep restores button enabled');
   t.equal(dom.cleanupBtn.textContent, 'Cleanup Wrong Matches (3)', 'failed sweep restores button text off the still-current count');
-  t.ok(dom.toast.textContent.includes('sweep blew up'), 'failed sweep toasts the error');
+  t.contains(dom.toast.textContent, 'sweep blew up', 'failed sweep toasts the error');
   t.equal(dom.toast.className, 'toast error', 'failed sweep shows error toast');
   globals.restore();
 }
@@ -964,8 +964,8 @@ t.section('formatEntryEvidence() formats spectral and lossless-source V0 cells')
     'Gas source and target render separately without relabelling the V0 proxy',
   );
   t.equal(gas.v0, 'V0 ≈ 224 kbps', 'Gas V0 probe remains its own fact');
-  t.ok(!gas.format.includes('191'), 'target contract does not claim the V0 min');
-  t.ok(!gas.format.includes('224'), 'target contract does not claim the V0 average');
+  t.excludes(gas.format, '191', 'target contract does not claim the V0 min');
+  t.excludes(gas.format, '224', 'target contract does not claim the V0 average');
 
   // Happy path: AE1 — both pieces of evidence present.
   let cells = formatEntryEvidence({
@@ -974,9 +974,9 @@ t.section('formatEntryEvidence() formats spectral and lossless-source V0 cells')
     v0_probe_kind: 'lossless_source_v0',
     v0_probe_avg_bitrate: 265,
   });
-  t.ok(cells.spectral.includes('genuine'), 'spectral cell shows the grade');
-  t.ok(cells.spectral.includes('950'), 'spectral cell shows the bitrate floor');
-  t.ok(cells.v0.includes('265'), 'V0 cell shows the lossless-source probe average');
+  t.contains(cells.spectral, 'genuine', 'spectral cell shows the grade');
+  t.contains(cells.spectral, '950', 'spectral cell shows the bitrate floor');
+  t.contains(cells.v0, '265', 'V0 cell shows the lossless-source probe average');
 
   // AE2: missing evidence renders as a dash, not as a preview trigger.
   cells = formatEntryEvidence({
@@ -987,8 +987,8 @@ t.section('formatEntryEvidence() formats spectral and lossless-source V0 cells')
   });
   t.equal(cells.spectral, '—', 'absent spectral evidence renders as a dash');
   t.equal(cells.v0, '—', 'absent V0 evidence renders as a dash');
-  t.ok(!cells.spectral.toLowerCase().includes('preview'), 'no preview trigger in spectral cell');
-  t.ok(!cells.v0.toLowerCase().includes('preview'), 'no preview trigger in V0 cell');
+  t.excludes(cells.spectral.toLowerCase(), 'preview', 'no preview trigger in spectral cell');
+  t.excludes(cells.v0.toLowerCase(), 'preview', 'no preview trigger in V0 cell');
 
   // Wrong-match review surfaces V0 evidence regardless of source lineage —
   // operators want to compare every candidate's bitrate at a glance, not
@@ -999,8 +999,8 @@ t.section('formatEntryEvidence() formats spectral and lossless-source V0 cells')
     v0_probe_kind: 'native_lossy_research_v0',
     v0_probe_avg_bitrate: 240,
   });
-  t.ok(cells.spectral.includes('suspect'), 'spectral cell still renders for suspect grade');
-  t.ok(cells.v0.includes('240'),
+  t.contains(cells.spectral, 'suspect', 'spectral cell still renders for suspect grade');
+  t.contains(cells.v0, '240',
     'V0 probe surfaces regardless of source lineage for wrong-match review');
 
   // Edge: spectral present, V0 absent (rejected pre-conversion).
@@ -1010,7 +1010,7 @@ t.section('formatEntryEvidence() formats spectral and lossless-source V0 cells')
     v0_probe_kind: null,
     v0_probe_avg_bitrate: null,
   });
-  t.ok(cells.spectral.includes('marginal'), 'marginal grade renders');
+  t.contains(cells.spectral, 'marginal', 'marginal grade renders');
   t.equal(cells.v0, '—', 'absent V0 still renders as dash');
 
   // Edge: missing the four keys entirely (extra defensive — payload should
@@ -1029,9 +1029,9 @@ t.section('renderQualityBadges() labels current average and retained floor fallb
     avg_bitrate: 288,
     min_bitrate: 194,
   });
-  t.ok(html.includes('avg 288k · min 194k'),
+  t.contains(html, 'avg 288k · min 194k',
     'missing-format fallback leads with the current average and labels the floor');
-  t.ok(!html.includes('>194k<'), 'minimum bitrate is never rendered as a bare current tier');
+  t.excludes(html, '>194k<', 'minimum bitrate is never rendered as a bare current tier');
 
   html = renderQualityBadges({
     in_library: true,
@@ -1040,8 +1040,8 @@ t.section('renderQualityBadges() labels current average and retained floor fallb
     avg_bitrate: null,
     min_bitrate: 194,
   });
-  t.ok(html.includes('min 194k'), 'missing-average fallback labels minimum as floor data');
-  t.ok(!html.includes('>194k<'), 'missing average never revives a bare min-derived tier');
+  t.contains(html, 'min 194k', 'missing-average fallback labels minimum as floor data');
+  t.excludes(html, '>194k<', 'missing average never revives a bare min-derived tier');
 
   html = renderQualityBadges({
     in_library: true,
@@ -1050,7 +1050,7 @@ t.section('renderQualityBadges() labels current average and retained floor fallb
     avg_bitrate: 288,
     min_bitrate: null,
   });
-  t.ok(html.includes('avg 288k'), 'average-only fallback remains visible current data');
+  t.contains(html, 'avg 288k', 'average-only fallback remains visible current data');
 
   html = renderQualityBadges({
     in_library: true,
@@ -1059,8 +1059,8 @@ t.section('renderQualityBadges() labels current average and retained floor fallb
     avg_bitrate: 288,
     min_bitrate: 194,
   });
-  t.ok(html.includes('MP3 V0'), 'explicit backend quality label remains authoritative');
-  t.ok(!html.includes('avg 288k'), 'fallback summary is omitted with an explicit label');
+  t.contains(html, 'MP3 V0', 'explicit backend quality label remains authoritative');
+  t.excludes(html, 'avg 288k', 'fallback summary is omitted with an explicit label');
 
   t.equal(
     renderQualityBadges({
@@ -1099,9 +1099,9 @@ for (const [grade, tone] of [
     current_spectral_grade: grade,
     current_spectral_bitrate: 128,
   });
-  t.ok(html.includes(`badge-rank-${tone}`), `${grade} uses shared ${tone} badge`);
-  t.ok(html.includes(grade.replaceAll('_', ' ')), `${grade} is humanized`);
-  if (grade.includes('_')) t.ok(!html.includes(grade), `${grade} raw token stays hidden`);
+  t.contains(html, `badge-rank-${tone}`, `${grade} uses shared ${tone} badge`);
+  t.contains(html, grade.replaceAll('_', ' '), `${grade} is humanized`);
+  if (grade.includes('_')) t.excludes(html, grade, `${grade} raw token stays hidden`);
 }
 
 t.section('wrong-match bucket badges use the same canonical classes as every other view');
@@ -1111,7 +1111,7 @@ for (const rank of ['poor', 'acceptable', 'good', 'excellent', 'transparent', 'l
     quality_label: rank,
     quality_rank: rank,
   });
-  t.ok(html.includes(`badge-rank-${rank}`), `${rank} uses its canonical rank class`);
+  t.contains(html, `badge-rank-${rank}`, `${rank} uses its canonical rank class`);
 }
 
 t.section('wrong-match verified-lossless identity reuses the lossless bucket colour');
@@ -1122,7 +1122,7 @@ t.section('wrong-match verified-lossless identity reuses the lossless bucket col
     quality_rank: 'lossless',
     verified_lossless: true,
   });
-  t.ok(html.includes('verified lossless'), 'verified identity remains explicit');
+  t.contains(html, 'verified lossless', 'verified identity remains explicit');
   t.ok(countOccurrences(html, 'badge-rank-lossless') === 3,
     'quality label, verified identity, and rank label share lossless colour');
 }
@@ -1138,12 +1138,12 @@ t.section('renderEntry() embeds evidence cells without preview hooks');
   data.groups[0].entries[0].v0_probe_avg_bitrate = 265;
   renderWrongMatches(data, dom.wrongMatches);
   const html = dom.wrongMatches.innerHTML;
-  t.ok(html.includes('suspect'), 'rendered HTML carries the spectral grade');
-  t.ok(html.includes('quality-tone-acceptable'),
+  t.contains(html, 'suspect', 'rendered HTML carries the spectral grade');
+  t.contains(html, 'quality-tone-acceptable',
     'candidate spectral metadata uses the same orange suspect tone');
-  t.ok(html.includes('265'), 'rendered HTML carries the lossless-source V0 average');
-  t.ok(html.includes('Downloaded as'), 'rendered HTML surfaces preserved source folders');
-  t.ok(html.includes('wm-explorer-100'), 'rendered HTML includes an explorer mount');
+  t.contains(html, '265', 'rendered HTML carries the lossless-source V0 average');
+  t.contains(html, 'Downloaded as', 'rendered HTML surfaces preserved source folders');
+  t.contains(html, 'wm-explorer-100', 'rendered HTML includes an explorer mount');
   // R3 / AE2: no preview button or preview action surfaces in this feature.
   t.ok(!/data-action=["']preview["']/.test(html), 'no data-action=preview attribute');
   t.ok(!/preview[-_]btn/.test(html), 'no preview button class');
@@ -1165,8 +1165,8 @@ t.section('renderWrongMatches() preserves ordinary candidate metadata presentati
     }],
   };
   renderWrongMatches(data, dom.wrongMatches);
-  t.ok(dom.wrongMatches.innerHTML.includes('(1969)'), 'ordinary candidate year remains visible');
-  t.ok(dom.wrongMatches.innerHTML.includes(' MP3'), 'ordinary local format remains visible');
+  t.contains(dom.wrongMatches.innerHTML, '(1969)', 'ordinary candidate year remains visible');
+  t.contains(dom.wrongMatches.innerHTML, ' MP3', 'ordinary local format remains visible');
 }
 
 t.section('renderWrongMatches() escapes candidate metadata at the live HTML sink');
@@ -1257,17 +1257,17 @@ t.section('renderWrongMatchExplorer() collapses shared album tags and hides repl
     }],
   });
 
-  t.ok(html.includes('Downloaded as'), 'keeps the original user folder in the summary');
-  t.ok(html.includes('albumartist'), 'renders shared album-level tags');
-  t.ok(html.includes('2 tracks in surviving folder in matched order'), 'surfaces matched-order explorer label');
+  t.contains(html, 'Downloaded as', 'keeps the original user folder in the summary');
+  t.contains(html, 'albumartist', 'renders shared album-level tags');
+  t.contains(html, '2 tracks in surviving folder in matched order', 'surfaces matched-order explorer label');
   t.equal(countOccurrences(html, 'The Castiles Live (Vol. 1)'), 2, 'album name appears in the preserved source folder and shared tag summary');
-  t.ok(html.includes('Purple Haze'), 'renders the first track title inline');
-  t.ok(html.includes('Get Outta My Life'), 'renders the second track title inline');
-  t.ok(html.includes('https://musicbrainz.org/release/20f1e791-34cd-4b47-8783-51492b90218a'), 'links musicbrainz_albumid to the release page');
-  t.ok(html.includes('https://musicbrainz.org/artist/4f13e8cb-11aa-4b1a-8bb5-0ad1437dbdee'), 'links musicbrainz_artistid to the artist page');
+  t.contains(html, 'Purple Haze', 'renders the first track title inline');
+  t.contains(html, 'Get Outta My Life', 'renders the second track title inline');
+  t.contains(html, 'https://musicbrainz.org/release/20f1e791-34cd-4b47-8783-51492b90218a', 'links musicbrainz_albumid to the release page');
+  t.contains(html, 'https://musicbrainz.org/artist/4f13e8cb-11aa-4b1a-8bb5-0ad1437dbdee', 'links musicbrainz_artistid to the artist page');
   t.equal(countOccurrences(html, '<audio'), 2, 'renders one player per track');
-  t.ok(!html.includes('replaygain_album_gain'), 'hides replaygain album tags');
-  t.ok(!html.includes('replaygain_track_gain'), 'hides replaygain track tags');
+  t.excludes(html, 'replaygain_album_gain', 'hides replaygain album tags');
+  t.excludes(html, 'replaygain_track_gain', 'hides replaygain track tags');
 }
 
 t.section('renderWrongMatchExplorer() distinguishes a containment refusal from a world failure, visibly and without a futile Retry (issue #1086 review)');
@@ -1297,8 +1297,8 @@ t.section('renderWrongMatchExplorer() distinguishes a containment refusal from a
     containmentHtml.includes('1 entry was refused (not read) as a containment decision'),
     'containment refusal leads with the containment sentence',
   );
-  t.ok(!containmentHtml.includes('could not be read'), 'containment refusal never says "could not be read"');
-  t.ok(!containmentHtml.includes('Retry'), 'containment refusal offers no Retry — re-fetching cannot change it');
+  t.excludes(containmentHtml, 'could not be read', 'containment refusal never says "could not be read"');
+  t.excludes(containmentHtml, 'Retry', 'containment refusal offers no Retry — re-fetching cannot change it');
 
   // The world-failure control: same shape, EACCES instead of a symlink.
   const worldFailureHtml = renderWrongMatchExplorer({
@@ -1320,8 +1320,8 @@ t.section('renderWrongMatchExplorer() distinguishes a containment refusal from a
     worldFailureHtml.includes('1 entry could not be read'),
     'world-failure refusal leads with the "could not be read" sentence',
   );
-  t.ok(!worldFailureHtml.includes('refused (not read)'), 'world-failure refusal never uses the containment wording');
-  t.ok(worldFailureHtml.includes('Retry'), 'world-failure refusal offers Retry — the world might have cleared');
+  t.excludes(worldFailureHtml, 'refused (not read)', 'world-failure refusal never uses the containment wording');
+  t.contains(worldFailureHtml, 'Retry', 'world-failure refusal offers Retry — the world might have cleared');
   t.ok(
     worldFailureHtml.includes('window.reloadWrongMatchExplorer(901)'),
     'Retry targets the exact entry id',
@@ -1347,9 +1347,9 @@ t.section('renderWrongMatchExplorer() empty-state (status:"unavailable") also ho
     audio_file_count: 0,
     files: [],
   });
-  t.ok(!containmentEmpty.includes('could not be read'), 'containment-refused empty state never says "could not be read"');
-  t.ok(containmentEmpty.includes('refused (not read)'), 'containment-refused empty state uses the containment wording');
-  t.ok(!containmentEmpty.includes('Retry'), 'containment-refused empty state offers no Retry');
+  t.excludes(containmentEmpty, 'could not be read', 'containment-refused empty state never says "could not be read"');
+  t.contains(containmentEmpty, 'refused (not read)', 'containment-refused empty state uses the containment wording');
+  t.excludes(containmentEmpty, 'Retry', 'containment-refused empty state offers no Retry');
   t.ok(
     containmentEmpty.includes('NOT evidence that the folder is empty'),
     'still denies the folder is confidently empty',
@@ -1365,9 +1365,9 @@ t.section('renderWrongMatchExplorer() empty-state (status:"unavailable") also ho
     audio_file_count: 0,
     files: [],
   });
-  t.ok(worldFailureEmpty.includes('could not be read'), 'world-failure empty state still says "could not be read"');
-  t.ok(!worldFailureEmpty.includes('refused (not read)'), 'world-failure empty state never uses the containment wording');
-  t.ok(worldFailureEmpty.includes('Retry'), 'world-failure empty state still offers Retry');
+  t.contains(worldFailureEmpty, 'could not be read', 'world-failure empty state still says "could not be read"');
+  t.excludes(worldFailureEmpty, 'refused (not read)', 'world-failure empty state never uses the containment wording');
+  t.contains(worldFailureEmpty, 'Retry', 'world-failure empty state still offers Retry');
   t.ok(
     worldFailureEmpty.includes('NOT evidence that the folder is empty'),
     'still denies the folder is confidently empty',
@@ -1452,13 +1452,13 @@ t.section('maybeLoadWrongMatchExplorer() lazy-loads explorer tags and audio on <
     ['/api/wrong-matches/explorer?download_log_id=100'],
     'opening the file-explorer dropdown loads the explorer exactly once',
   );
-  t.ok(mount.innerHTML.includes('Downloaded as'), 'explorer shows the original user folder');
-  t.ok(mount.innerHTML.includes('Scott 3'), 'explorer shows shared album tags once loaded');
-  t.ok(mount.innerHTML.includes('It&#39;s Raining Today'), 'explorer shows extracted tags');
-  t.ok(mount.innerHTML.includes('https://musicbrainz.org/release/20f1e791-34cd-4b47-8783-51492b90218a'), 'lazy-loaded explorer links the album MBID');
-  t.ok(mount.innerHTML.includes('https://musicbrainz.org/recording/d5b1a858-84be-4005-a2a0-29dfcf005851'), 'lazy-loaded explorer links the recording MBID');
-  t.ok(mount.innerHTML.includes('<audio'), 'explorer renders a browser audio player');
-  t.ok(!mount.innerHTML.includes('replaygain_track_gain'), 'explorer hides replaygain noise');
+  t.contains(mount.innerHTML, 'Downloaded as', 'explorer shows the original user folder');
+  t.contains(mount.innerHTML, 'Scott 3', 'explorer shows shared album tags once loaded');
+  t.contains(mount.innerHTML, 'It&#39;s Raining Today', 'explorer shows extracted tags');
+  t.contains(mount.innerHTML, 'https://musicbrainz.org/release/20f1e791-34cd-4b47-8783-51492b90218a', 'lazy-loaded explorer links the album MBID');
+  t.contains(mount.innerHTML, 'https://musicbrainz.org/recording/d5b1a858-84be-4005-a2a0-29dfcf005851', 'lazy-loaded explorer links the recording MBID');
+  t.contains(mount.innerHTML, '<audio', 'explorer renders a browser audio player');
+  t.excludes(mount.innerHTML, 'replaygain_track_gain', 'explorer hides replaygain noise');
 
   await maybeLoadWrongMatchExplorer(100, openDetails);
   await maybeLoadWrongMatchExplorer(100, openDetails);
@@ -1508,22 +1508,22 @@ t.section('maybeLoadWrongMatchExplorer() renders the honest copy for a refused l
 
   await maybeLoadWrongMatchExplorer(200, { open: true });
 
-  t.ok(!mount.innerHTML.includes('Failed to load file explorer'),
+  t.excludes(mount.innerHTML, 'Failed to load file explorer',
     'a renderable unavailable payload is not treated as a load failure');
-  t.ok(mount.innerHTML.includes('3 entries could not be read'),
+  t.contains(mount.innerHTML, '3 entries could not be read',
     'the refusal count reaches the operator');
-  t.ok(mount.innerHTML.includes('nothing here is confirmed missing'),
+  t.contains(mount.innerHTML, 'nothing here is confirmed missing',
     'the listing is labelled incomplete');
-  t.ok(mount.innerHTML.includes('NOT evidence that the folder is empty'),
+  t.contains(mount.innerHTML, 'NOT evidence that the folder is empty',
     'an unreadable folder is never presented as an empty one');
-  t.ok(mount.innerHTML.includes('Permission denied'),
+  t.contains(mount.innerHTML, 'Permission denied',
     'the refusal reason is shown');
   // An unreadable folder is a world the operator can REPAIR, so the panel
   // owes a Retry and must not cache the answer — otherwise the only way
   // to see a fixed permission is a full page reload (issue #1063).
-  t.ok(mount.innerHTML.includes('Retry'),
+  t.contains(mount.innerHTML, 'Retry',
     'an unavailable listing offers a retry');
-  t.ok(mount.innerHTML.includes('window.reloadWrongMatchExplorer(200)'),
+  t.contains(mount.innerHTML, 'window.reloadWrongMatchExplorer(200)',
     'the retry re-reads THIS entry');
 
   await maybeLoadWrongMatchExplorer(200, { open: true });
@@ -1561,18 +1561,18 @@ t.section('maybeLoadWrongMatchExplorer() surfaces a 503 refusal reason instead o
   // Review round 1: the wording must not PROMISE transience — the 503
   // bucket also carries the unclassified residual code, which is not a
   // disk hiccup a retry will clear.
-  t.ok(mount.innerHTML.includes('could not be read'),
+  t.contains(mount.innerHTML, 'could not be read',
     'a real transport/authority failure still reads as a failure');
-  t.ok(mount.innerHTML.includes('may be temporary'),
+  t.contains(mount.innerHTML, 'may be temporary',
     '503 copy hedges rather than promising a retry will succeed');
-  t.ok(!mount.innerHTML.includes('a retry may succeed'),
+  t.excludes(mount.innerHTML, 'a retry may succeed',
     '503 copy must not overclaim transience for the residual bucket');
   // "could not be read" alone is now ambiguous — the LEAD copy itself
   // contains that phrase — so assert something unique to the server's
   // OWN detail text to prove it still rides along, not just the lead.
-  t.ok(mount.innerHTML.includes('Permission denied'),
+  t.contains(mount.innerHTML, 'Permission denied',
     'the server’s own reason still reaches the operator as detail');
-  t.ok(mount.innerHTML.includes('Retry'),
+  t.contains(mount.innerHTML, 'Retry',
     'the retry affordance survives — a 503 can plausibly clear');
 }
 
@@ -1599,14 +1599,14 @@ t.section('maybeLoadWrongMatchExplorer() surfaces a whole-root 422 refusal, neve
 
   await maybeLoadWrongMatchExplorer(205, { open: true });
 
-  t.ok(mount.innerHTML.toLowerCase().includes('refused'),
+  t.contains(mount.innerHTML.toLowerCase(), 'refused',
     'a whole-root containment refusal names itself as a refusal');
-  t.ok(!mount.innerHTML.toLowerCase().includes('not found'),
+  t.excludes(mount.innerHTML.toLowerCase(), 'not found',
     'a containment refusal must never read as a definitive absence');
   // Review round 1: the #1086 doctrine ("containment carries no Retry")
   // applies here too — re-fetching the same name answers the same
   // refusal every time, so offering Retry would be a dead end.
-  t.ok(!mount.innerHTML.includes('Retry'),
+  t.excludes(mount.innerHTML, 'Retry',
     'a containment refusal offers no Retry — retrying can never help');
 }
 
@@ -1671,24 +1671,24 @@ t.section('maybeLoadWrongMatchExplorer() treats a PARTIAL listing as repairable 
   });
 
   await maybeLoadWrongMatchExplorer(202, { open: true });
-  t.ok(mount.innerHTML.includes('1 entry could not be read'),
+  t.contains(mount.innerHTML, '1 entry could not be read',
     'the partial listing names its refusal');
-  t.ok(mount.innerHTML.includes('1 track in surviving folder'),
+  t.contains(mount.innerHTML, '1 track in surviving folder',
     'the partial listing still lists what it could read');
-  t.ok(mount.innerHTML.includes('Retry'),
+  t.contains(mount.innerHTML, 'Retry',
     'a PARTIAL listing offers a retry, not only an empty one');
-  t.ok(mount.innerHTML.includes('window.reloadWrongMatchExplorer(202)'),
+  t.contains(mount.innerHTML, 'window.reloadWrongMatchExplorer(202)',
     'the partial listing retry re-reads THIS entry');
 
   // The operator repairs the world; the retry must show the repair.
   refused = false;
   await reloadWrongMatchExplorer(202);
   t.equal(calls.length, 2, 'the retry re-reads the folder');
-  t.ok(!mount.innerHTML.includes('could not be read'),
+  t.excludes(mount.innerHTML, 'could not be read',
     'the repaired listing drops the refusal notice');
-  t.ok(mount.innerHTML.includes('2 tracks in surviving folder'),
+  t.contains(mount.innerHTML, '2 tracks in surviving folder',
     'the repaired listing shows the previously-refused track');
-  t.ok(!mount.innerHTML.includes('Retry'),
+  t.excludes(mount.innerHTML, 'Retry',
     'a complete listing needs no retry');
 
   // …and a complete listing IS cached again.
@@ -1725,11 +1725,11 @@ t.section('renderWrongMatchExplorer() must still work: a complete listing claims
     unreadable_reason: null,
     files: [],
   });
-  t.ok(html.includes('No audio files found in this folder.'),
+  t.contains(html, 'No audio files found in this folder.',
     'a readable empty folder still reads as empty');
-  t.ok(!html.includes('could not be read'),
+  t.excludes(html, 'could not be read',
     'a complete listing never claims a refusal');
-  t.ok(!html.includes('NOT evidence'),
+  t.excludes(html, 'NOT evidence',
     'a complete listing never denies emptiness');
 }
 
@@ -1770,26 +1770,26 @@ t.section('renderLatestImport() distinguishes absent / in-library / verified-los
 {
   // 1. No latest import, album not in library — neutral copy.
   let html = renderLatestImport(null, { in_library: false, verified_lossless: false });
-  t.ok(html.includes('No previous import on disk.'), 'absent: renders neutral "no previous import" copy');
-  t.ok(!html.includes('Album already in library'), 'absent: does not claim album in library');
-  t.ok(!html.includes('Verified-lossless copy in library'), 'absent: no verified-lossless copy');
-  t.ok(!html.includes('No successful import on disk'), 'absent: no longer uses old "No successful import on disk" copy');
+  t.contains(html, 'No previous import on disk.', 'absent: renders neutral "no previous import" copy');
+  t.excludes(html, 'Album already in library', 'absent: does not claim album in library');
+  t.excludes(html, 'Verified-lossless copy in library', 'absent: no verified-lossless copy');
+  t.excludes(html, 'No successful import on disk', 'absent: no longer uses old "No successful import on disk" copy');
 
   // 2. No latest import, album in library, not verified lossless — distinguishes
   //    "no cratedigger history" from "Beets already has this MBID".
   html = renderLatestImport(null, { in_library: true, verified_lossless: false });
-  t.ok(html.includes('Album already in library'), 'in_library: surfaces the in-library copy');
-  t.ok(html.includes('must beat current quality'), 'in_library: explains upgrade gate semantics');
-  t.ok(!html.includes('No previous import'), 'in_library: does not claim no prior import');
-  t.ok(!html.includes('No successful import'), 'in_library: no longer uses old "No successful import" copy');
-  t.ok(!html.includes('Verified-lossless copy in library'), 'in_library: not the verified-lossless branch');
+  t.contains(html, 'Album already in library', 'in_library: surfaces the in-library copy');
+  t.contains(html, 'must beat current quality', 'in_library: explains upgrade gate semantics');
+  t.excludes(html, 'No previous import', 'in_library: does not claim no prior import');
+  t.excludes(html, 'No successful import', 'in_library: no longer uses old "No successful import" copy');
+  t.excludes(html, 'Verified-lossless copy in library', 'in_library: not the verified-lossless branch');
 
   // 3. No latest import, album in library AND verified lossless — strongest copy.
   html = renderLatestImport(null, { in_library: true, verified_lossless: true });
-  t.ok(html.includes('Verified-lossless copy in library'), 'verified-lossless: surfaces the verified-lossless copy');
-  t.ok(html.includes('cleared on the next cleanup sweep'), 'verified-lossless: explains the cleanup behavior');
-  t.ok(!html.includes('Album already in library'), 'verified-lossless: does not fall back to plain in-library copy');
-  t.ok(!html.includes('No previous import'), 'verified-lossless: does not fall back to absent copy');
+  t.contains(html, 'Verified-lossless copy in library', 'verified-lossless: surfaces the verified-lossless copy');
+  t.contains(html, 'cleared on the next cleanup sweep', 'verified-lossless: explains the cleanup behavior');
+  t.excludes(html, 'Album already in library', 'verified-lossless: does not fall back to plain in-library copy');
+  t.excludes(html, 'No previous import', 'verified-lossless: does not fall back to absent copy');
 
   // 4. Latest import present — render existing summary regardless of in_library.
   html = renderLatestImport(
@@ -1801,10 +1801,10 @@ t.section('renderLatestImport() distinguishes absent / in-library / verified-los
     },
     { in_library: true, verified_lossless: false },
   );
-  t.ok(html.includes('Last import: imported'), 'present: renders existing latest-import summary');
-  t.ok(html.includes('FLAC 950k'), 'present: renders filetype and bitrate floor');
-  t.ok(!html.includes('Album already in library'), 'present: in_library flag does not override the summary');
-  t.ok(!html.includes('No previous import'), 'present: does not render absent copy');
+  t.contains(html, 'Last import: imported', 'present: renders existing latest-import summary');
+  t.contains(html, 'FLAC 950k', 'present: renders filetype and bitrate floor');
+  t.excludes(html, 'Album already in library', 'present: in_library flag does not override the summary');
+  t.excludes(html, 'No previous import', 'present: does not render absent copy');
 }
 
 // --- issue #829 Phase 5 PR4/N3: audit-only flags on both WM surfaces ---
@@ -1823,10 +1823,10 @@ t.section('renderQualityBadges() withholds an audit-only HAVE accusation');
     current_spectral_accusation_admissible: false,
     current_spectral_accusation_withheld: 'audit_only_codec',
   });
-  t.ok(html.includes('likely transcode'), 'the measured grade stays visible');
-  t.ok(html.includes('audit-only'), 'the withheld suffix is stated');
-  t.ok(html.includes('native encoder behaviour'), 'the hover explains why');
-  t.ok(!html.includes('badge-rank-poor'),
+  t.contains(html, 'likely transcode', 'the measured grade stays visible');
+  t.contains(html, 'audit-only', 'the withheld suffix is stated');
+  t.contains(html, 'native encoder behaviour', 'the hover explains why');
+  t.excludes(html, 'badge-rank-poor',
     'the accusing red badge is withheld');
 
   html = renderQualityBadges({
@@ -1834,12 +1834,12 @@ t.section('renderQualityBadges() withholds an audit-only HAVE accusation');
     current_spectral_accusation_admissible: true,
     current_spectral_accusation_withheld: null,
   });
-  t.ok(html.includes('badge-rank-poor'),
+  t.contains(html, 'badge-rank-poor',
     'an admissible grade still gets the accusing badge');
-  t.ok(!html.includes('audit-only'), 'nothing is withheld on a real finding');
+  t.excludes(html, 'audit-only', 'nothing is withheld on a real finding');
 
   html = renderQualityBadges(group);
-  t.ok(html.includes('badge-rank-poor'),
+  t.contains(html, 'badge-rank-poor',
     'absent flags keep the historical accusing badge (fail-accusing)');
 
   html = renderQualityBadges({
@@ -1848,10 +1848,10 @@ t.section('renderQualityBadges() withholds an audit-only HAVE accusation');
     current_spectral_accusation_admissible: false,
     current_spectral_accusation_withheld: 'codec_unresolved',
   });
-  t.ok(html.includes('codec unresolved'), 'the unresolved world is named');
-  t.ok(!html.includes('native encoder behaviour'),
+  t.contains(html, 'codec unresolved', 'the unresolved world is named');
+  t.excludes(html, 'native encoder behaviour',
     'an unresolved codec is never described as native encoder rolloff');
-  t.ok(!html.includes('audit-only'),
+  t.excludes(html, 'audit-only',
     'the two withholding worlds are never conflated');
 }
 
@@ -1865,22 +1865,22 @@ t.section('entrySpectralCell() withholds an audit-only candidate accusation');
     spectral_accusation_admissible: false,
     spectral_accusation_withheld: 'audit_only_codec',
   }, text);
-  t.ok(html.includes('likely transcode'), 'the measured grade stays visible');
-  t.ok(html.includes('audit-only'), 'the withheld suffix is stated');
-  t.ok(html.includes('quality-tone-unknown'), 'the neutral tone is used');
-  t.ok(!html.includes('quality-tone-poor'), 'the accusing red is withheld');
+  t.contains(html, 'likely transcode', 'the measured grade stays visible');
+  t.contains(html, 'audit-only', 'the withheld suffix is stated');
+  t.contains(html, 'quality-tone-unknown', 'the neutral tone is used');
+  t.excludes(html, 'quality-tone-poor', 'the accusing red is withheld');
 
   html = entrySpectralCell({
     ...entry,
     spectral_accusation_admissible: true,
     spectral_accusation_withheld: null,
   }, text);
-  t.ok(html.includes('quality-tone-poor'),
+  t.contains(html, 'quality-tone-poor',
     'an admissible candidate grade still accuses');
-  t.ok(!html.includes('audit-only'), 'nothing is withheld on a real finding');
+  t.excludes(html, 'audit-only', 'nothing is withheld on a real finding');
 
   html = entrySpectralCell(entry, text);
-  t.ok(html.includes('quality-tone-poor'),
+  t.contains(html, 'quality-tone-poor',
     'a pre-evidence candidate keeps the accusing chip (fail-accusing)');
 
   html = entrySpectralCell({
@@ -1889,14 +1889,14 @@ t.section('entrySpectralCell() withholds an audit-only candidate accusation');
     spectral_accusation_admissible: false,
     spectral_accusation_withheld: 'codec_unresolved',
   }, 'suspect · 192 kbps');
-  t.ok(html.includes('codec unresolved'), 'the unresolved world is named');
-  t.ok(!html.includes('native encoder behaviour'),
+  t.contains(html, 'codec unresolved', 'the unresolved world is named');
+  t.excludes(html, 'native encoder behaviour',
     'an unresolved codec is never described as native encoder rolloff');
 
   // A candidate with no grade at all keeps the pre-existing neutral cell.
   html = entrySpectralCell({}, '—');
-  t.ok(html.includes('quality-tone-unknown'), 'a gradeless candidate is neutral');
-  t.ok(!html.includes('audit-only'), 'a gradeless candidate withholds nothing');
+  t.contains(html, 'quality-tone-unknown', 'a gradeless candidate is neutral');
+  t.excludes(html, 'audit-only', 'a gradeless candidate withholds nothing');
 }
 
 t.section('an unobservable source is surfaced, never silently dropped');
@@ -1921,16 +1921,16 @@ t.section('an unobservable source is surfaced, never silently dropped');
     'must still work: an observable close match is still green');
 
   const html = renderEntry(unavailable, 180, 42);
-  t.ok(html.includes('source unavailable'), 'the card is badged unavailable');
-  t.ok(html.includes('NOT been confirmed missing'),
+  t.contains(html, 'source unavailable', 'the card is badged unavailable');
+  t.contains(html, 'NOT been confirmed missing',
     'the copy refuses to claim the folder is gone');
-  t.ok(html.includes('EACCES'), 'the refusal reason reaches the operator');
+  t.contains(html, 'EACCES', 'the refusal reason reaches the operator');
   t.equal(countOccurrences(html, 'disabled'), 2,
     'both Force Import and Delete are disabled');
 
   const ordinary = renderEntry(
     { download_log_id: 78, soulseek_username: 'peer', distance: 0.05 }, 180, 42);
-  t.ok(!ordinary.includes('source unavailable'),
+  t.excludes(ordinary, 'source unavailable',
     'must still work: an ordinary entry carries no unavailable badge');
   t.equal(countOccurrences(ordinary, 'disabled'), 0,
     'must still work: an ordinary entry keeps both actions enabled');
@@ -1949,9 +1949,9 @@ t.section('the detail card renders operator-facing scenario detail copy (#1122 i
     detail: 'could not verify the curated move source was fully consumed',
   };
   const html = renderEntry(withDetail, 180, 42);
-  t.ok(html.includes('could not verify the curated move source was fully consumed'),
+  t.contains(html, 'could not verify the curated move source was fully consumed',
     'the detail copy reaches the operator');
-  t.ok(html.includes('p-detail-label">Detail<'),
+  t.contains(html, 'p-detail-label">Detail<',
     'the detail row carries its own labeled field, distinct from scenario');
 
   const escaped = renderEntry({
@@ -1960,9 +1960,9 @@ t.section('the detail card renders operator-facing scenario detail copy (#1122 i
     distance: 0.05,
     detail: '<script>alert(1)</script>',
   }, 180, 42);
-  t.ok(!escaped.includes('<script>alert(1)</script>'),
+  t.excludes(escaped, '<script>alert(1)</script>',
     'detail copy is escaped, not injected raw');
-  t.ok(escaped.includes(esc('<script>alert(1)</script>')),
+  t.contains(escaped, esc('<script>alert(1)</script>'),
     'the escaped form of the detail text is present');
 
   // Most rows have no detail at all -- the card must not grow an empty
@@ -1972,7 +1972,7 @@ t.section('the detail card renders operator-facing scenario detail copy (#1122 i
     soulseek_username: 'peer',
     distance: 0.05,
   }, 180, 42);
-  t.ok(!withoutDetail.includes('p-detail-label">Detail<'),
+  t.excludes(withoutDetail, 'p-detail-label">Detail<',
     'must still work: an entry with no detail renders no Detail row at all');
 
   const nullDetail = renderEntry({
@@ -1981,7 +1981,7 @@ t.section('the detail card renders operator-facing scenario detail copy (#1122 i
     distance: 0.05,
     detail: null,
   }, 180, 42);
-  t.ok(!nullDetail.includes('p-detail-label">Detail<'),
+  t.excludes(nullDetail, 'p-detail-label">Detail<',
     'must still work: an explicit null detail also renders no Detail row');
 }
 
@@ -2028,18 +2028,18 @@ t.section('a partial group delete asks for attention and re-renders');
   const btn = { disabled: false, textContent: 'Delete All (2)', style: {} };
   await deleteWrongMatchGroup(42, btn);
 
-  t.ok(dom.toast.textContent.includes('Deleted 1 folder'),
+  t.contains(dom.toast.textContent, 'Deleted 1 folder',
     'the toast still credits the folder that really went');
-  t.ok(dom.toast.textContent.includes('unavailable 1'),
+  t.contains(dom.toast.textContent, 'unavailable 1',
     'the toast surfaces the unavailable bucket by name');
-  t.ok(!dom.toast.textContent.includes('skipped'),
+  t.excludes(dom.toast.textContent, 'skipped',
     'an unavailable candidate is not ALSO reported as skipped');
-  t.ok(!dom.toast.textContent.includes('errors'),
+  t.excludes(dom.toast.textContent, 'errors',
     'an unavailable candidate is not ALSO reported as an error — that was '
     + 'the double count issue #1086 item 3 fixes');
-  t.ok(dom.toast.textContent.includes('1 left'),
+  t.contains(dom.toast.textContent, '1 left',
     'the toast says work remains');
-  t.ok(dom.toast.className.includes('error'),
+  t.contains(dom.toast.className, 'error',
     'an incomplete group delete asks for attention, not a green all-clear');
   t.ok(calls.some(call => call.url === '/api/wrong-matches'),
     'a partial outcome re-renders from the server instead of leaving a '
@@ -2054,7 +2054,7 @@ t.section('Delete All reflects actionable candidates, never a dead end (issue #1
   // A fully available group keeps today's plain label and stays enabled —
   // the common case must not regress just because unavailability exists.
   renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
-  t.ok(dom.wrongMatches.innerHTML.includes('Delete All (3)'),
+  t.contains(dom.wrongMatches.innerHTML, 'Delete All (3)',
     'a fully available group keeps the plain label');
   t.ok(!/id="wm-delete-group-btn-42"[^>]*disabled/.test(dom.wrongMatches.innerHTML),
     'a fully available group stays enabled');
@@ -2064,7 +2064,7 @@ t.section('Delete All reflects actionable candidates, never a dead end (issue #1
   const partial = JSON.parse(JSON.stringify(wrongMatchesData()));
   partial.groups[0].entries[0].path_unavailable = true;
   renderWrongMatches(partial, dom.wrongMatches);
-  t.ok(dom.wrongMatches.innerHTML.includes('Delete All (2 of 3)'),
+  t.contains(dom.wrongMatches.innerHTML, 'Delete All (2 of 3)',
     'a partially unavailable group shows the actionable count');
   t.ok(!/id="wm-delete-group-btn-42"[^>]*disabled/.test(dom.wrongMatches.innerHTML),
     'a partially unavailable group stays enabled');
@@ -2075,7 +2075,7 @@ t.section('Delete All reflects actionable candidates, never a dead end (issue #1
   const dead = JSON.parse(JSON.stringify(wrongMatchesData()));
   for (const entry of dead.groups[0].entries) entry.path_unavailable = true;
   renderWrongMatches(dead, dom.wrongMatches);
-  t.ok(dom.wrongMatches.innerHTML.includes('Delete All (0 of 3)'),
+  t.contains(dom.wrongMatches.innerHTML, 'Delete All (0 of 3)',
     'a fully unavailable group names zero actionable candidates');
   t.ok(/id="wm-delete-group-btn-42"[^>]*disabled/.test(dom.wrongMatches.innerHTML),
     'a fully unavailable group disables Delete All instead of a dead-end 503');
@@ -2421,7 +2421,7 @@ t.section('a NEW sweep discovered while an OLDER one\'s terminal handling is sti
   tellBTerminate = true;
   await flushMicrotasks(50);
   t.equal(dom.stopBtn.disabled, true, 'sweep B reaching a terminal state disables Stop again');
-  t.ok(dom.toast.textContent.includes('sweep B blew up'),
+  t.contains(dom.toast.textContent, 'sweep B blew up',
     'sweep B\'s own terminal outcome reached the toast — proving it was actually followed to completion, not silently dropped');
   globals.restore();
 }
@@ -2606,7 +2606,7 @@ t.section('a literal-null status body degrades instead of aborting loadWrongMatc
 
   t.ok(queueFetched,
     'a null status body does not stop loadWrongMatches() from reaching its own queue fetch (issue #1106 N5)');
-  t.ok(dom.wrongMatches.innerHTML.includes('Scott Walker'),
+  t.contains(dom.wrongMatches.innerHTML, 'Scott Walker',
     'the pane actually rendered the fetched queue data, proving the try block ran to completion');
   await flushMicrotasks(60);
   globals.restore();

@@ -183,17 +183,21 @@ function errorMatches(thrown, expected) {
  *
  * These two used to read `String(haystack).includes(needle)`, which is
  * silently WRONG for an array: `['ab', 'cd'].includes('a')` is `false`,
- * while `String(['ab', 'cd']).includes('a')` is `true`. So the obvious
- * mechanical sweep of the several hundred remaining `t.ok(x.includes(y))`
- * sites — and the ~95 negated `t.ok(!x.includes(y))` ones, which map to
- * `excludes` and are exposed the same way — would have flipped every array
- * one from correct-failing to passing, with no test anywhere to notice
- * (issue #1319's residual 1, the reason that sweep was left undone).
+ * while `String(['ab', 'cd']).includes('a')` is `true`. The sweep of the
+ * remaining `t.ok(x.includes(y))` sites, and of the negated
+ * `t.ok(!x.includes(y))` ones that map to `excludes`, would have flipped
+ * every array one from correct-failing to passing with no test anywhere to
+ * notice (issue #1319's residual 1, which is why that sweep waited for
+ * this guard).
  *
- * Refusing the type makes the sweep fail loudly instead. An array site
- * keeps `t.ok(x.includes(y), …)`; there is deliberately no `t.includes`
- * for collections, because nothing calls one today and a harness method
- * with no callers is how this file grows shapes nobody reads.
+ * Refusing the type makes such a site fail loudly instead, and it did.
+ * Running the sweep converted 397 sites; this guard caught the five whose
+ * haystack turned out to be an array, each one a recorded list of fetch
+ * URLs in `test_js_pipeline.mjs` or `test_js_wrong_matches.mjs`. Those
+ * five keep `t.ok(!x.includes(y), …)`. There is deliberately no
+ * `t.includes` for collections: every one of them is negative, nothing
+ * calls a positive one, and a harness method with no callers is how this
+ * file grows shapes nobody reads.
  */
 function nonStringHaystack(method, haystack) {
   if (typeof haystack === 'string') return '';

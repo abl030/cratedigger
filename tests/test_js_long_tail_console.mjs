@@ -56,9 +56,9 @@ for (const [grade, tone] of [
     current_spectral_grade: grade,
     current_spectral_bitrate: 128,
   });
-  t.ok(html.includes(`quality-tone-${tone}`), `${grade} uses shared ${tone} tone`);
-  t.ok(html.includes(grade.replaceAll('_', ' ')), `${grade} is humanized`);
-  if (grade.includes('_')) t.ok(!html.includes(grade), `${grade} raw token stays hidden`);
+  t.contains(html, `quality-tone-${tone}`, `${grade} uses shared ${tone} tone`);
+  t.contains(html, grade.replaceAll('_', ' '), `${grade} is humanized`);
+  if (grade.includes('_')) t.excludes(html, grade, `${grade} raw token stays hidden`);
 }
 
 // --- issue #829 Phase 5 PR4/N3: the worklist chip's audit-only flags ---
@@ -74,23 +74,23 @@ t.section('long-tail worklist chip never accuses an audit-only codec');
     current_spectral_accusation_admissible: false,
     current_spectral_accusation_withheld: 'audit_only_codec',
   });
-  t.ok(html.includes('likely transcode'), 'the measured grade stays visible');
-  t.ok(html.includes('audit-only'), 'the withheld suffix is stated');
-  t.ok(html.includes('native encoder behaviour'), 'the hover explains why');
-  t.ok(html.includes('quality-tone-unknown'), 'the neutral tone is used');
-  t.ok(!html.includes('quality-tone-poor'), 'the accusing red is withheld');
+  t.contains(html, 'likely transcode', 'the measured grade stays visible');
+  t.contains(html, 'audit-only', 'the withheld suffix is stated');
+  t.contains(html, 'native encoder behaviour', 'the hover explains why');
+  t.contains(html, 'quality-tone-unknown', 'the neutral tone is used');
+  t.excludes(html, 'quality-tone-poor', 'the accusing red is withheld');
 
   html = renderSpectralFragment({
     ...row,
     current_spectral_accusation_admissible: true,
     current_spectral_accusation_withheld: null,
   });
-  t.ok(html.includes('quality-tone-poor'),
+  t.contains(html, 'quality-tone-poor',
     'an admissible grade still accuses');
-  t.ok(!html.includes('audit-only'), 'nothing is withheld on a real finding');
+  t.excludes(html, 'audit-only', 'nothing is withheld on a real finding');
 
   html = renderSpectralFragment(row);
-  t.ok(html.includes('quality-tone-poor'),
+  t.contains(html, 'quality-tone-poor',
     'a row with no linked evidence keeps the accusing chip (fail-accusing)');
 
   html = renderSpectralFragment({
@@ -99,10 +99,10 @@ t.section('long-tail worklist chip never accuses an audit-only codec');
     current_spectral_accusation_admissible: false,
     current_spectral_accusation_withheld: 'codec_unresolved',
   });
-  t.ok(html.includes('codec unresolved'), 'the unresolved world is named');
-  t.ok(!html.includes('native encoder behaviour'),
+  t.contains(html, 'codec unresolved', 'the unresolved world is named');
+  t.excludes(html, 'native encoder behaviour',
     'an unresolved codec is never described as native encoder rolloff');
-  t.ok(!html.includes('audit-only'),
+  t.excludes(html, 'audit-only',
     'the two withholding worlds are never conflated');
 
   t.equal(renderSpectralFragment({
@@ -369,9 +369,10 @@ t.section('current long-tail failure invalidates cached rows before navigation r
       'successful load establishes the cached cohort');
     t.equal(state.longTail.band, 'missing',
       'successful load selects the cached Missing band');
-    t.ok(pipelineContent.innerHTML.includes('Cached Missing Artist')
-      && pipelineContent.innerHTML.includes('window.toggleLongTailDetail(501)'),
-    'successful load paints the cached Missing row and its action control');
+    t.contains(pipelineContent.innerHTML, 'Cached Missing Artist',
+      'successful load paints the cached Missing row');
+    t.contains(pipelineContent.innerHTML, 'window.toggleLongTailDetail(501)',
+      'successful load paints that row\'s action control');
     consoleOpen(consoleStates, cachedRow.id);
     consoleCanStart(consoleStates, cachedRow.id, 'resolve');
     consoleSetYoutubeResult(consoleStates, cachedRow.id, {
@@ -387,11 +388,12 @@ t.section('current long-tail failure invalidates cached rows before navigation r
       'current failure preserves the operator search query');
     t.equal(consoleStates.size, 0,
       'current failure clears every cached console and action guard');
-    t.ok(pipelineContent.innerHTML.includes('Failed to load long tail'),
+    t.contains(pipelineContent.innerHTML, 'Failed to load long tail',
       'current failure paints the explicit load error');
-    t.ok(!pipelineContent.innerHTML.includes('Cached Missing Artist')
-      && !pipelineContent.innerHTML.includes('window.toggleLongTailDetail(501)'),
-    'the error paint never retains cached Missing rows or action controls');
+    t.excludes(pipelineContent.innerHTML, 'Cached Missing Artist',
+      'the error paint never retains a cached Missing row');
+    t.excludes(pipelineContent.innerHTML, 'window.toggleLongTailDetail(501)',
+      'the error paint never retains a cached action control');
 
     setPipelineView('dashboard');
     await dashboardRead;
@@ -405,9 +407,10 @@ t.section('current long-tail failure invalidates cached rows before navigation r
       'returning to Long Tail after failure refetches instead of rendering cache');
     t.equal(state.longTail.rows[0].id, freshRow.id,
       'the navigation refetch installs only the fresh cohort');
-    t.ok(pipelineContent.innerHTML.includes('Fresh Artist')
-      && !pipelineContent.innerHTML.includes('Cached Missing Artist'),
-    'the post-navigation paint contains the refetched row, never the failed cache');
+    t.contains(pipelineContent.innerHTML, 'Fresh Artist',
+      'the post-navigation paint contains the refetched row');
+    t.excludes(pipelineContent.innerHTML, 'Cached Missing Artist',
+      'the post-navigation paint never contains the failed cache');
   } finally {
     consoleStates.clear();
     state.pipelineView = 'dashboard';
@@ -429,7 +432,7 @@ t.section('Discogs-only long-tail rows retain their exact source chip');
     mb_release_id: null,
     discogs_release_id: '12856590',
   });
-  t.ok(html.includes('Discogs'),
+  t.contains(html, 'Discogs',
     'a modern Discogs-only exact identity renders the Discogs chip');
 }
 
@@ -464,9 +467,9 @@ t.section('long-tail failure settling after navigation never overwrites the new 
 
     t.equal(state.longTail.rows, null,
       'the failed authority read invalidates cache even after navigation');
-    t.ok(pipelineContent.innerHTML.includes('Dashboard remains active'),
+    t.contains(pipelineContent.innerHTML, 'Dashboard remains active',
       'the settled Long Tail failure does not paint over dashboard');
-    t.ok(!pipelineContent.innerHTML.includes('Failed to load long tail'),
+    t.excludes(pipelineContent.innerHTML, 'Failed to load long tail',
       'the inactive view receives no Long Tail error paint');
   } finally {
     state.pipelineView = 'dashboard';

@@ -256,10 +256,12 @@ t.section('contains and excludes refuse a non-string haystack');
 {
   // Both used to coerce with String(haystack), which INVERTS an array:
   // measured, ['ab','cd'].includes('a') is false while
-  // String(['ab','cd']).includes('a') is true. So a mechanical sweep of the
+  // String(['ab','cd']).includes('a') is true. A mechanical sweep of the
   // remaining t.ok(x.includes(y)) sites would have turned array ones into
-  // the opposite assertion, silently — the reason #1319 left that sweep
-  // undone. One needle, both directions of the inversion: with the old
+  // the opposite assertion, silently, which is why #1319 held that sweep
+  // back until this guard existed. Running it then found five real array
+  // sites and this refusal is what stopped them. One needle, both
+  // directions of the inversion: with the old
   // coercion `contains` passed where the array says no, and `excludes`
   // failed where the array says yes. Verified by disabling the guard: the
   // fixture then reports 1 passed, 1 failed instead of two refusals.

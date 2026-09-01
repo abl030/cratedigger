@@ -251,16 +251,16 @@ t.section('renderPaginationControls()');
 t.equal(renderPaginationControls(1, 1), '', 'pages=1 → empty');
 t.equal(renderPaginationControls(1, 0), '', 'pages=0 → empty');
 const ctrl_p1_of_5 = renderPaginationControls(1, 5);
-t.ok(ctrl_p1_of_5.includes('Page 1 of 5'), 'p1/5: position label rendered');
-t.ok(ctrl_p1_of_5.includes('disabled'), 'p1/5: prev button is disabled');
-t.ok(ctrl_p1_of_5.includes('window.goToLabelPage(2)'), 'p1/5: next button targets page 2');
+t.contains(ctrl_p1_of_5, 'Page 1 of 5', 'p1/5: position label rendered');
+t.contains(ctrl_p1_of_5, 'disabled', 'p1/5: prev button is disabled');
+t.contains(ctrl_p1_of_5, 'window.goToLabelPage(2)', 'p1/5: next button targets page 2');
 const ctrl_p5_of_5 = renderPaginationControls(5, 5);
-t.ok(ctrl_p5_of_5.includes('window.goToLabelPage(4)'), 'p5/5: prev button targets page 4');
+t.contains(ctrl_p5_of_5, 'window.goToLabelPage(4)', 'p5/5: prev button targets page 4');
 t.ok(ctrl_p5_of_5.match(/disabled/g).length === 1, 'p5/5: only next button is disabled');
 const ctrl_p3_of_5 = renderPaginationControls(3, 5);
-t.ok(!ctrl_p3_of_5.includes('disabled'), 'p3/5: neither button disabled');
-t.ok(ctrl_p3_of_5.includes('window.goToLabelPage(2)'), 'p3/5: prev → page 2');
-t.ok(ctrl_p3_of_5.includes('window.goToLabelPage(4)'), 'p3/5: next → page 4');
+t.excludes(ctrl_p3_of_5, 'disabled', 'p3/5: neither button disabled');
+t.contains(ctrl_p3_of_5, 'window.goToLabelPage(2)', 'p3/5: prev → page 2');
+t.contains(ctrl_p3_of_5, 'window.goToLabelPage(4)', 'p3/5: next → page 4');
 
 // --- renderLabelRows tests ---
 t.section('renderLabelRows()');
@@ -283,12 +283,12 @@ t.section('renderLabelRows()');
     querySelector: (selector) => selector === '#browse-label-rows' ? body : null,
   };
   renderLabelRows(container);
-  t.ok(body.innerHTML.includes('Greetings From Birmingham'), 'label row renders release title');
-  t.ok(body.innerHTML.includes('window.toggleReleaseDetail(&quot;12856590&quot;)'),
+  t.contains(body.innerHTML, 'Greetings From Birmingham', 'label row renders release title');
+  t.contains(body.innerHTML, 'window.toggleReleaseDetail(&quot;12856590&quot;)',
     'label row opens exact Discogs release details');
-  t.ok(body.innerHTML.includes('id="reldet-12856590"'),
+  t.contains(body.innerHTML, 'id="reldet-12856590"',
     'label row renders matching release-detail container');
-  t.ok(!body.innerHTML.includes('window.loadReleaseGroup(&quot;12856590&quot;'),
+  t.excludes(body.innerHTML, 'window.loadReleaseGroup(&quot;12856590&quot;',
     'label row does not route Discogs release id through release-group loader');
 }
 
@@ -368,10 +368,10 @@ t.section('renderLabelLinks()');
 
 // Single Discogs-style label (id + name) → clickable link.
 const hymen = renderLabelLinks([{ id: 757, name: 'Hymen Records' }]);
-t.ok(hymen.includes('Hymen Records'), 'renders the label name');
-t.ok(hymen.includes('data-label-id="757"'), 'tags the link with data-label-id="757"');
-t.ok(hymen.includes('window.openLabelDetail'), 'wires window.openLabelDetail call');
-t.ok(hymen.includes('class="label-link"'), 'tags the anchor with the label-link class');
+t.contains(hymen, 'Hymen Records', 'renders the label name');
+t.contains(hymen, 'data-label-id="757"', 'tags the link with data-label-id="757"');
+t.contains(hymen, 'window.openLabelDetail', 'wires window.openLabelDetail call');
+t.contains(hymen, 'class="label-link"', 'tags the anchor with the label-link class');
 t.ok(/<a\b/i.test(hymen), 'renders an anchor element');
 
 // Empty input → empty string.
@@ -393,31 +393,31 @@ const warpDual = renderLabelLinks([
   { id: 757, name: 'Warp Records' },
   { id: 758, name: 'Warp Singles' },
 ]);
-t.ok(warpDual.includes('Warp Records'), 'first label name rendered');
-t.ok(warpDual.includes('Warp Singles'), 'second label name rendered');
-t.ok(warpDual.includes('data-label-id="757"'), 'first link has correct id attr');
-t.ok(warpDual.includes('data-label-id="758"'), 'second link has correct id attr');
+t.contains(warpDual, 'Warp Records', 'first label name rendered');
+t.contains(warpDual, 'Warp Singles', 'second label name rendered');
+t.contains(warpDual, 'data-label-id="757"', 'first link has correct id attr');
+t.contains(warpDual, 'data-label-id="758"', 'second link has correct id attr');
 t.equal((warpDual.match(/<a\b/gi) || []).length, 2, 'two anchor elements rendered');
-t.ok(warpDual.includes('</a>, <a'), 'anchors are separated by ", "');
+t.contains(warpDual, '</a>, <a', 'anchors are separated by ", "');
 
 // Mixed: one with id (link), one without (text).
 const mixed = renderLabelLinks([
   { id: 757, name: 'Hymen Records' },
   { name: 'Plaintext Co.' },
 ]);
-t.ok(mixed.includes('Hymen Records'), 'mixed: linked name present');
-t.ok(mixed.includes('Plaintext Co.'), 'mixed: plain name present');
+t.contains(mixed, 'Hymen Records', 'mixed: linked name present');
+t.contains(mixed, 'Plaintext Co.', 'mixed: plain name present');
 t.equal((mixed.match(/<a\b/gi) || []).length, 1, 'mixed: only the id-bearing entry becomes a link');
 
 // XSS guard — name with <script> is escaped, no raw tag in output.
 const xss = renderLabelLinks([{ id: 1, name: '<script>alert(1)</script>' }]);
-t.ok(!xss.includes('<script>'), 'XSS guard: raw <script> tag not present in output');
-t.ok(xss.includes('&lt;script&gt;'), 'XSS guard: angle brackets entity-escaped');
+t.excludes(xss, '<script>', 'XSS guard: raw <script> tag not present in output');
+t.contains(xss, '&lt;script&gt;', 'XSS guard: angle brackets entity-escaped');
 
 // XSS guard via name with quotes — should not break out of jsArg().
 const xssQuote = renderLabelLinks([{ id: 1, name: 'Bad", alert(1), "X' }]);
-t.ok(!xssQuote.includes('", alert'), 'XSS guard: quote escapes prevent attribute break-out');
-t.ok(xssQuote.includes('&quot;'), 'XSS guard: double quotes are entity-escaped');
+t.excludes(xssQuote, '", alert', 'XSS guard: quote escapes prevent attribute break-out');
+t.contains(xssQuote, '&quot;', 'XSS guard: double quotes are entity-escaped');
 
 // Empty / falsy entries skipped.
 t.equal(renderLabelLinks([null, undefined, { id: 1, name: '' }, { id: 2, name: 'OK' }]),
@@ -426,8 +426,8 @@ t.equal(renderLabelLinks([null, undefined, { id: 1, name: '' }, { id: 2, name: '
 
 // Numeric-string id is honored.
 const stringId = renderLabelLinks([{ id: '12345', name: 'String ID Label' }]);
-t.ok(stringId.includes('data-label-id="12345"'), 'string id is preserved');
-t.ok(stringId.includes('<a'), 'string id renders as link');
+t.contains(stringId, 'data-label-id="12345"', 'string id is preserved');
+t.contains(stringId, '<a', 'string id renders as link');
 
 // --- distinctFormats tests (review-fix #9) ---
 t.section('distinctFormats()');
@@ -503,20 +503,20 @@ t.equal(mixedNan.map(r => r.id).join(','), '1',
 // --- renderForensicBlock tests ---
 t.section('renderForensicBlock()');
 const noBlock = renderForensicBlock(null);
-t.ok(noBlock.includes('No search forensic data yet'),
+t.contains(noBlock, 'No search forensic data yet',
   'null last_search → "no forensic data" message');
-t.ok(noBlock.includes('p-forensic'),
+t.contains(noBlock, 'p-forensic',
   'null last_search still wraps in .p-forensic for layout');
 
 const emptyTopBlock = renderForensicBlock({
   variant: 'v1_year', final_state: 'Completed', outcome: 'no_match',
   top_candidates: [],
 });
-t.ok(emptyTopBlock.includes('v1_year'),
+t.contains(emptyTopBlock, 'v1_year',
   'variant tag rendered');
-t.ok(emptyTopBlock.includes('Completed'),
+t.contains(emptyTopBlock, 'Completed',
   'final_state rendered');
-t.ok(emptyTopBlock.includes('No candidates captured'),
+t.contains(emptyTopBlock, 'No candidates captured',
   'empty top_candidates → no-candidates body');
 
 const populatedBlock = renderForensicBlock({
@@ -530,13 +530,13 @@ const populatedBlock = renderForensicBlock({
       missing_titles: ['x'], file_count: 22 },
   ],
 });
-t.ok(populatedBlock.includes('alice'), 'first candidate username rendered');
-t.ok(populatedBlock.includes('bob'), 'second candidate username rendered');
-t.ok(populatedBlock.includes('26/26'),
+t.contains(populatedBlock, 'alice', 'first candidate username rendered');
+t.contains(populatedBlock, 'bob', 'second candidate username rendered');
+t.contains(populatedBlock, '26/26',
   'matched/total rendered for first row');
-t.ok(populatedBlock.includes('0.95'),
+t.contains(populatedBlock, '0.95',
   'avg_ratio rendered to 2 decimals');
-t.ok(populatedBlock.includes('flac'),
+t.contains(populatedBlock, 'flac',
   'filetype rendered');
 
 // HTML-escape coverage — adversarial username/dir must not leak markup.
@@ -548,9 +548,9 @@ const xssBlock = renderForensicBlock({
     missing_titles: [], file_count: 1,
   }],
 });
-t.ok(!xssBlock.includes('<script>x</script>'),
+t.excludes(xssBlock, '<script>x</script>',
   'malicious username escaped');
-t.ok(!xssBlock.includes('"><img>'),
+t.excludes(xssBlock, '"><img>',
   'malicious dir escaped');
 
 // --- youtubeSectionState tests (U4 four-state classifier) ---
@@ -576,7 +576,7 @@ t.equal(ytMatrix.message, '', 'fresh matrix needs no message');
 // ok + empty releases → resolved_empty.
 const ytEmpty = youtubeSectionState({ outcome: 'ok', youtube_releases: [], from_cache: false });
 t.equal(ytEmpty.state, 'resolved_empty', 'ok + releases==0 → resolved_empty');
-t.ok(ytEmpty.message.includes('Not on YouTube Music'), 'resolved_empty surfaces "not on YouTube Music" copy');
+t.contains(ytEmpty.message, 'Not on YouTube Music', 'resolved_empty surfaces "not on YouTube Music" copy');
 // ok + missing youtube_releases key → resolved_empty (no releases).
 t.equal(youtubeSectionState({ outcome: 'ok' }).state, 'resolved_empty', 'ok + no releases key → resolved_empty');
 // transient / 503 outcomes → resolver_failed.
@@ -585,7 +585,7 @@ t.equal(youtubeSectionState({ outcome: 'unresolved_timeout' }).state, 'resolver_
 t.equal(youtubeSectionState({ outcome: 'unresolved_mirror_unavailable' }).state, 'resolver_failed', 'mirror unavailable → resolver_failed');
 t.equal(youtubeSectionState({ outcome: 'not_found' }).state, 'resolver_failed', 'not_found → resolver_failed');
 const ytFail = youtubeSectionState({ outcome: 'transient', error_message: 'mirror down' });
-t.ok(ytFail.message.includes('mirror down'), 'resolver_failed surfaces the error_message');
+t.contains(ytFail.message, 'mirror down', 'resolver_failed surfaces the error_message');
 // from_cache + error_message → staleness flag on an otherwise-resolved state.
 const ytStaleMatrix = youtubeSectionState({
   outcome: 'ok',
@@ -595,7 +595,7 @@ const ytStaleMatrix = youtubeSectionState({
 });
 t.equal(ytStaleMatrix.state, 'resolved_with_matrix', 'cached matrix still resolves with matrix');
 t.equal(ytStaleMatrix.stale, true, 'from_cache + error_message sets the staleness flag');
-t.ok(ytStaleMatrix.message.includes('stale'), 'stale matrix surfaces a staleness message');
+t.contains(ytStaleMatrix.message, 'stale', 'stale matrix surfaces a staleness message');
 // from_cache WITHOUT error_message is a clean cache hit, not stale.
 t.equal(
   youtubeSectionState({ outcome: 'ok', youtube_releases: [{ yt_browse_id: 'z', distances: [] }], from_cache: true }).stale,
@@ -879,21 +879,24 @@ const sample = [
   { id: 'bbb', title: 'Pressing B', date: '2021-05-01', country: 'JP', track_count: 13, format: 'LP' },
 ];
 const pressingsHtml = renderPressingsList(sample, 'aaa');
-t.ok(pressingsHtml.includes('data-expand-mbid="aaa"'),
+t.contains(pressingsHtml, 'data-expand-mbid="aaa"',
   'renderPressingsList wires current pressing as expandable row');
 t.ok(/data-expand-mbid="aaa"[^>]*disabled|disabled[^>]*data-expand-mbid="aaa"/.test(pressingsHtml),
   'renderPressingsList marks current pressing disabled');
-t.ok(pressingsHtml.includes('current pressing'), 'renderPressingsList labels current pressing');
-t.ok(pressingsHtml.includes('data-expand-mbid="bbb"'), 'renderPressingsList includes sibling');
+t.contains(pressingsHtml, 'current pressing', 'renderPressingsList labels current pressing');
+t.contains(pressingsHtml, 'data-expand-mbid="bbb"', 'renderPressingsList includes sibling');
 t.ok(!/<button[^>]*data-expand-mbid="bbb"[^>]*disabled/.test(pressingsHtml),
   'renderPressingsList does not disable non-current siblings');
-t.ok(pressingsHtml.includes('data-mbid="bbb"') &&
-  /replace-picker-confirm[^>]*data-mbid="bbb"/.test(pressingsHtml),
+t.contains(pressingsHtml, 'data-mbid="bbb"',
+  'renderPressingsList tags the non-current pressing with its own mbid');
+t.match(pressingsHtml, /replace-picker-confirm[^>]*data-mbid="bbb"/,
   'renderPressingsList renders pick-button for non-current pressing');
 t.ok(!/replace-picker-confirm[^>]*data-mbid="aaa"/.test(pressingsHtml),
   'renderPressingsList omits pick-button for current pressing');
-t.ok(!pressingsHtml.includes('aaa</small>') && !pressingsHtml.includes('bbb</small>'),
-  'renderPressingsList does not expose MBID to operator (visual-noise cleanup)');
+t.excludes(pressingsHtml, 'aaa</small>',
+  'renderPressingsList does not expose the current MBID to the operator');
+t.excludes(pressingsHtml, 'bbb</small>',
+  'renderPressingsList does not expose a sibling MBID to the operator');
 t.ok(/2020.*US.*CD.*12t/.test(pressingsHtml) || pressingsHtml.includes('US · 2020 · CD · 12t'),
   'renderPressingsList renders meta in country·year·format·Nt order');
 
@@ -905,11 +908,11 @@ t.equal(
 const reqHtml = renderRequestsList([
   { id: 42, mb_release_id: 'old-uuid', status: 'wanted', artist_name: 'Pet Grief', album_title: 'X' },
 ]);
-t.ok(reqHtml.includes('data-rid="42"'), 'renderRequestsList carries id (pick button)');
-t.ok(reqHtml.includes('Pet Grief'), 'renderRequestsList includes artist');
-t.ok(reqHtml.includes('data-expand-mbid="old-uuid"'),
+t.contains(reqHtml, 'data-rid="42"', 'renderRequestsList carries id (pick button)');
+t.contains(reqHtml, 'Pet Grief', 'renderRequestsList includes artist');
+t.contains(reqHtml, 'data-expand-mbid="old-uuid"',
   'renderRequestsList row expands by MBID');
-t.ok(reqHtml.includes('data-tracks-for="old-uuid"'),
+t.contains(reqHtml, 'data-tracks-for="old-uuid"',
   'renderRequestsList renders lazy tracklist container per row');
 t.ok(!/<small[^>]*>[^<]*old-uuid/.test(reqHtml),
   'renderRequestsList hides the MBID from the operator');
@@ -919,20 +922,20 @@ const dlg = renderConfirmDialog({
   targetMbid: '18056805-33f5-3e99-aa4b-5f5919c4f8af',
   targetLabel: 'Pet Grief — New Pressing',
 });
-t.ok(dlg.includes('Replace request #4194'), 'confirm dialog includes source id');
-t.ok(dlg.includes('18056805-33f5-3e99-aa4b-5f5919c4f8af'), 'confirm dialog includes target mbid');
-t.ok(dlg.includes('issue #278'), 'confirm dialog mentions orphan transfer issue #278');
-t.ok(dlg.includes('replace-picker-cancel'), 'confirm dialog has cancel button id');
-t.ok(dlg.includes('replace-picker-confirm'), 'confirm dialog has confirm button id');
-t.ok(dlg.includes('frozen for audit'), 'confirm dialog explains supersede semantics');
+t.contains(dlg, 'Replace request #4194', 'confirm dialog includes source id');
+t.contains(dlg, '18056805-33f5-3e99-aa4b-5f5919c4f8af', 'confirm dialog includes target mbid');
+t.contains(dlg, 'issue #278', 'confirm dialog mentions orphan transfer issue #278');
+t.contains(dlg, 'replace-picker-cancel', 'confirm dialog has cancel button id');
+t.contains(dlg, 'replace-picker-confirm', 'confirm dialog has confirm button id');
+t.contains(dlg, 'frozen for audit', 'confirm dialog explains supersede semantics');
 
-t.ok(renderStandardHeader('Pet Grief — Old').includes('Switch'),
+t.contains(renderStandardHeader('Pet Grief — Old'), 'Switch',
   'renderStandardHeader carries "Switch" verb');
-t.ok(renderInvertedHeader('Pet Grief — New').includes('replace an existing request'),
+t.contains(renderInvertedHeader('Pet Grief — New'), 'replace an existing request',
   'renderInvertedHeader carries inverted-mode verb');
 
 // Tracklist container is rendered hidden until row.open
-t.ok(pressingsHtml.includes('data-tracks-for="aaa"'),
+t.contains(pressingsHtml, 'data-tracks-for="aaa"',
   'renderPressingsList renders tracklist container per row');
 
 // formatLength
@@ -945,23 +948,25 @@ t.equal(formatLength(undefined), '', 'formatLength undefined → empty');
 t.equal(formatLength(NaN), '', 'formatLength NaN → empty');
 
 // renderTracklist
-t.ok(renderTracklist([]).includes('No tracks'),
+t.contains(renderTracklist([]), 'No tracks',
   'renderTracklist empty → friendly message');
 const tlHtml = renderTracklist([
   { disc_number: 1, track_number: 1, title: 'Aaa', length_seconds: 200 },
   { disc_number: 1, track_number: 2, title: 'Bbb <em>', length_seconds: 263.4 },
 ]);
-t.ok(tlHtml.includes('Aaa'), 'renderTracklist includes title');
-t.ok(tlHtml.includes('4:23'), 'renderTracklist formats track length');
-t.ok(tlHtml.includes('&lt;em&gt;'), 'renderTracklist escapes titles');
+t.contains(tlHtml, 'Aaa', 'renderTracklist includes title');
+t.contains(tlHtml, '4:23', 'renderTracklist formats track length');
+t.contains(tlHtml, '&lt;em&gt;', 'renderTracklist escapes titles');
 t.ok(!/Disc 1/.test(tlHtml), 'renderTracklist hides disc header for single-disc');
 
 const multiDiscHtml = renderTracklist([
   { disc_number: 1, track_number: 1, title: 'A', length_seconds: 60 },
   { disc_number: 2, track_number: 1, title: 'B', length_seconds: 60 },
 ]);
-t.ok(multiDiscHtml.includes('Disc 1') && multiDiscHtml.includes('Disc 2'),
-  'renderTracklist shows disc headers for multi-disc');
+t.contains(multiDiscHtml, 'Disc 1',
+  'renderTracklist shows the disc 1 header for a multi-disc release');
+t.contains(multiDiscHtml, 'Disc 2',
+  'renderTracklist shows the disc 2 header for a multi-disc release');
 
 // renderSourcePanel
 const loadingPanel = renderSourcePanel({
@@ -970,24 +975,24 @@ const loadingPanel = renderSourcePanel({
   tracks: null,
   loading: true,
 });
-t.ok(loadingPanel.includes('Current request:'),
+t.contains(loadingPanel, 'Current request:',
   'renderSourcePanel labels the panel "Current request:"');
-t.ok(loadingPanel.includes('Pet Grief — Old'), 'renderSourcePanel includes the label');
-t.ok(loadingPanel.includes('US · 2020 · CD · 12t'),
+t.contains(loadingPanel, 'Pet Grief — Old', 'renderSourcePanel includes the label');
+t.contains(loadingPanel, 'US · 2020 · CD · 12t',
   'renderSourcePanel renders meta line on summary');
-t.ok(loadingPanel.includes('Loading'), 'renderSourcePanel loading state shows placeholder');
-t.ok(loadingPanel.includes('replace-picker-source-body'),
+t.contains(loadingPanel, 'Loading', 'renderSourcePanel loading state shows placeholder');
+t.contains(loadingPanel, 'replace-picker-source-body',
   'renderSourcePanel exposes the body container for lazy fill');
 
 const loadedPanel = renderSourcePanel({
   label: 'X',
   tracks: [{ disc_number: 1, track_number: 1, title: 'Z', length_seconds: 120 }],
 });
-t.ok(loadedPanel.includes('Z'), 'renderSourcePanel renders tracks when loaded');
-t.ok(loadedPanel.includes('2:00'), 'renderSourcePanel renders track duration');
+t.contains(loadedPanel, 'Z', 'renderSourcePanel renders tracks when loaded');
+t.contains(loadedPanel, '2:00', 'renderSourcePanel renders track duration');
 
 const errorPanel = renderSourcePanel({ label: 'X', tracks: null, error: 'HTTP 500' });
-t.ok(errorPanel.includes('HTTP 500'), 'renderSourcePanel renders error message');
+t.contains(errorPanel, 'HTTP 500', 'renderSourcePanel renders error message');
 
 // pickBestDistance — picks the lowest-distance ok result; null when none scored
 t.equal(pickBestDistance([]), null, 'pickBestDistance [] → null');
@@ -1157,7 +1162,7 @@ t.equal(replaceEsc('"x"'), '&quot;x&quot;', 'esc escapes "');
 // tests/web/test_routes_browse.py::test_release_group_numeric_id_forwards_to_discogs.
 
 // renderMasterlessNote — R2/AE1 copy, pure/DOM-free.
-t.ok(renderMasterlessNote().toLowerCase().includes('no other pressings'),
+t.contains(renderMasterlessNote().toLowerCase(), 'no other pressings',
   'renderMasterlessNote explains there is nothing to swap to');
 
 // extractTracklist — GET /api/release/<id> (or /api/discogs/release/<id>,
@@ -1177,7 +1182,7 @@ const discogsReleasePayload = {
 const extracted = extractTracklist(discogsReleasePayload);
 t.equal(extracted.length, 2, 'extractTracklist preserves track count');
 t.equal(extracted[0].title, 'Slam', 'extractTracklist preserves track title');
-t.ok(renderTracklist(extracted).includes('Slam'),
+t.contains(renderTracklist(extracted), 'Slam',
   'extractTracklist output renders through the existing renderTracklist');
 t.equal(extractTracklist({}).length, 0, 'extractTracklist({}) → []');
 t.equal(extractTracklist(null).length, 0, 'extractTracklist(null) → []');
@@ -1197,11 +1202,11 @@ const stdBtn = renderReplaceButton({
   releaseGroupId: 'rg-1',
   sourceLabel: 'Pet Grief — Old',
 }, { stopPropagation: true });
-t.ok(stdBtn.includes('window.openReplacePicker'),
+t.contains(stdBtn, 'window.openReplacePicker',
   'renderReplaceButton standard wires through window.openReplacePicker');
-t.ok(stdBtn.includes('sourceRequestId: 4194'),
+t.contains(stdBtn, 'sourceRequestId: 4194',
   'renderReplaceButton standard carries sourceRequestId');
-t.ok(stdBtn.includes('releaseGroupId'),
+t.contains(stdBtn, 'releaseGroupId',
   'renderReplaceButton standard carries releaseGroupId');
 
 const invEnabled = renderReplaceButton({
@@ -1210,9 +1215,9 @@ const invEnabled = renderReplaceButton({
   releaseGroupId: 'rg-1',
   targetLabel: 'Pet Grief — New',
 }, { enabled: true });
-t.ok(invEnabled.includes('targetMbid'),
+t.contains(invEnabled, 'targetMbid',
   'renderReplaceButton inverted enabled wires targetMbid');
-t.ok(!invEnabled.includes('disabled'),
+t.excludes(invEnabled, 'disabled',
   'renderReplaceButton inverted enabled is not disabled');
 
 const invDisabled = renderReplaceButton({
@@ -1221,9 +1226,9 @@ const invDisabled = renderReplaceButton({
   releaseGroupId: 'rg-1',
   targetLabel: 'Pet Grief — New',
 }, { enabled: false });
-t.ok(invDisabled.includes('disabled'),
+t.contains(invDisabled, 'disabled',
   'renderReplaceButton inverted disabled carries disabled attr');
-t.ok(!invDisabled.includes('window.openReplacePicker'),
+t.excludes(invDisabled, 'window.openReplacePicker',
   'renderReplaceButton inverted disabled does not wire onclick');
 
 // Null-RG handling: legacy rows have releaseGroupId=null. The picker
@@ -1236,9 +1241,9 @@ const stdNullRg = renderReplaceButton({
   releaseGroupId: null,
   sourceLabel: 'Pet Grief — Old',
 }, { stopPropagation: true });
-t.ok(stdNullRg.includes('window.openReplacePicker'),
+t.contains(stdNullRg, 'window.openReplacePicker',
   'renderReplaceButton standard renders with null releaseGroupId');
-t.ok(stdNullRg.includes('releaseGroupId: null'),
+t.contains(stdNullRg, 'releaseGroupId: null',
   'renderReplaceButton standard encodes null RG as JS null literal');
 
 const invNullRg = renderReplaceButton({
@@ -1247,9 +1252,9 @@ const invNullRg = renderReplaceButton({
   releaseGroupId: null,
   targetLabel: 'Pet Grief — New',
 }, { enabled: true });
-t.ok(invNullRg.includes('window.openReplacePicker'),
+t.contains(invNullRg, 'window.openReplacePicker',
   'renderReplaceButton inverted renders with null releaseGroupId');
-t.ok(invNullRg.includes('releaseGroupId: null'),
+t.contains(invNullRg, 'releaseGroupId: null',
   'renderReplaceButton inverted encodes null RG as JS null literal');
 
 // Standard mode without sourceRequestId still returns empty.
@@ -1471,11 +1476,13 @@ t.section('long_tail_console.js pure helpers (U4 console)');
     search_forensics: { total_searches: 40, with_cands_count: 12, zero_results_count: 5,
       dominant_rejection_reason: 'strict_count', last_search_at: '2026-05-22T00:00:00Z' },
   });
-  t.ok(categorised.includes('wrong_pressing_available'),
+  t.contains(categorised, 'wrong_pressing_available',
     'renderUnfindableBody renders the category for a categorised request');
-  t.ok(categorised.includes('40 searches') && categorised.includes('dominant reject: strict_count'),
-    'renderUnfindableBody renders the search-forensics rollup');
-  t.ok(categorised.includes('artist probe: 3 matches'),
+  t.contains(categorised, '40 searches',
+    'renderUnfindableBody rolls up the search count');
+  t.contains(categorised, 'dominant reject: strict_count',
+    'renderUnfindableBody rolls up the dominant reject reason');
+  t.contains(categorised, 'artist probe: 3 matches',
     'renderUnfindableBody renders the artist-probe rollup');
   // Not-yet-categorised (unfindable == null) → daily-detection state, NOT
   // an error, NOT blank (R7).
@@ -1483,13 +1490,15 @@ t.section('long_tail_console.js pure helpers (U4 console)');
     unfindable: null,
     search_forensics: { total_searches: 2, with_cands_count: 0, zero_results_count: 2 },
   });
-  t.ok(uncategorised.includes('not yet categorised') && uncategorised.includes('detection runs daily'),
-    'renderUnfindableBody renders the not-yet-categorised daily-detection state');
-  t.ok(!uncategorised.toLowerCase().includes("couldn't load"),
+  t.contains(uncategorised, 'not yet categorised',
+    'renderUnfindableBody names the not-yet-categorised state');
+  t.contains(uncategorised, 'detection runs daily',
+    'renderUnfindableBody says when detection will categorise it');
+  t.excludes(uncategorised.toLowerCase(), "couldn't load",
     'not-yet-categorised is distinct from an error affordance');
   // category explicitly absent on the unfindable struct also → uncategorised.
   const catNull = renderUnfindableBody({ unfindable: { category: null }, search_forensics: {} });
-  t.ok(catNull.includes('not yet categorised'),
+  t.contains(catNull, 'not yet categorised',
     'renderUnfindableBody treats a null category as not-yet-categorised');
 
   // --- youtubeHistoryRows: only source==="youtube" rows ---
@@ -1529,17 +1538,19 @@ t.section('long_tail_console.js pure helpers (U4 console)');
   // Active youtube_running row → "rescue running".
   const running = renderRescuesBody(
     [{ source: 'youtube', outcome: 'youtube_running', created_at: '2026-05-26T00:00:00Z' }], false);
-  t.ok(running.includes('rescue running'), 'renderRescuesBody shows "rescue running" for an active youtube_running row');
+  t.contains(running, 'rescue running', 'renderRescuesBody shows "rescue running" for an active youtube_running row');
   // in_flight flag alone (no history) → "rescue running" (KTD4 same predicate).
-  t.ok(renderRescuesBody([], true).includes('rescue running'),
+  t.contains(renderRescuesBody([], true), 'rescue running',
     'renderRescuesBody honours the in_flight_rescue flag with no history');
   // Latest terminal youtube_failed → "last rescue failed: <reason>".
   // Reason comes from the production-shaped youtube_metadata.reason blob.
   const failed = renderRescuesBody(
     [{ source: 'youtube', outcome: 'youtube_failed', created_at: '2026-05-25T00:00:00Z',
        youtube_metadata: { reason: 'track_count_mismatch' } }], false);
-  t.ok(failed.includes('last rescue failed') && failed.includes('track_count_mismatch'),
-    'renderRescuesBody shows the failure reason (from youtube_metadata) for a terminal youtube_failed row');
+  t.contains(failed, 'last rescue failed',
+    'renderRescuesBody marks a terminal youtube_failed row as failed');
+  t.contains(failed, 'track_count_mismatch',
+    'renderRescuesBody shows that row\u2019s failure reason from youtube_metadata');
   // The importer records a linked failure as source=youtube, outcome=failed.
   // It is newer than the canonical handoff's older youtube_success origin and
   // must win as the terminal rescue result with its persisted diagnosis.
@@ -1549,20 +1560,22 @@ t.section('long_tail_console.js pure helpers (U4 console)');
       error_message: 'YouTube import attempt failed: beets acknowledgement was ambiguous' },
     { source: 'youtube', outcome: 'youtube_success', created_at: '2026-05-26T00:00:00Z' },
   ], false);
-  t.ok(importerFailed.includes('last rescue failed')
-    && importerFailed.includes('YouTube import attempt failed: beets acknowledgement was ambiguous'),
-  'renderRescuesBody treats the newest linked importer failure as terminal and actionable');
-  t.ok(!importerFailed.includes('youtube_success'),
+  t.contains(importerFailed, 'last rescue failed',
+    'renderRescuesBody treats the newest linked importer failure as terminal');
+  t.contains(importerFailed,
+    'YouTube import attempt failed: beets acknowledgement was ambiguous',
+    'renderRescuesBody carries that importer failure\u2019s own detail');
+  t.excludes(importerFailed, 'youtube_success',
     'renderRescuesBody does not fall back to the older canonical handoff after an importer failure');
   // A terminal youtube_success is NOT a failure (distinct from youtube_failed).
   const succeeded = renderRescuesBody(
     [{ source: 'youtube', outcome: 'youtube_success', created_at: '2026-05-24T00:00:00Z' }], false);
-  t.ok(!succeeded.includes('last rescue failed'),
+  t.excludes(succeeded, 'last rescue failed',
     'renderRescuesBody does NOT render a failure for a youtube_success row');
-  t.ok(succeeded.includes('youtube_success'),
+  t.contains(succeeded, 'youtube_success',
     'renderRescuesBody lists a youtube_success attempt');
   // No youtube rows at all → "no rescue attempts".
-  t.ok(renderRescuesBody([{ source: 'request', outcome: 'success' }], false).includes('No rescue attempts'),
+  t.contains(renderRescuesBody([{ source: 'request', outcome: 'success' }], false), 'No rescue attempts',
     'renderRescuesBody shows "no rescue attempts" when there are no youtube rows');
 
   // --- renderPeersBody: cap + show-all toggle ---
@@ -1573,8 +1586,10 @@ t.section('long_tail_console.js pure helpers (U4 console)');
     ],
   };
   const fewHtml = renderPeersBody(fewPeers, 7);
-  t.ok(fewHtml.includes('p-forensic') && !fewHtml.includes('show all'),
-    'renderPeersBody under the cap renders the plain forensic block (no show-all)');
+  t.contains(fewHtml, 'p-forensic',
+    'renderPeersBody under the cap renders the plain forensic block');
+  t.excludes(fewHtml, 'show all',
+    'renderPeersBody under the cap offers no show-all control');
   const manyCands = [];
   for (let i = 0; i < PEERS_VISIBLE_CAP + 4; i++) {
     manyCands.push({ username: `u${i}`, dir: `d${i}`, filetype: 'flac',
@@ -1582,14 +1597,14 @@ t.section('long_tail_console.js pure helpers (U4 console)');
   }
   const manyHtml = renderPeersBody(
     { variant: 'v1', final_state: 'Completed', outcome: 'no_match', top_candidates: manyCands }, 7);
-  t.ok(manyHtml.includes(`show all ${manyCands.length} peers`),
+  t.contains(manyHtml, `show all ${manyCands.length} peers`,
     'renderPeersBody over the cap offers a show-all toggle with the full count');
-  t.ok(manyHtml.includes('window.toggleLongTailPeers(7)'),
+  t.contains(manyHtml, 'window.toggleLongTailPeers(7)',
     'renderPeersBody wires the show-all toggle to toggleLongTailPeers with the row id');
-  t.ok(manyHtml.includes('lt-peers-full'),
+  t.contains(manyHtml, 'lt-peers-full',
     'renderPeersBody pre-renders the full block for the toggle');
   // Null last_search → forensic block "no data yet" (not a crash).
-  t.ok(renderPeersBody(null, 7).includes('No search forensic data yet'),
+  t.contains(renderPeersBody(null, 7), 'No search forensic data yet',
     'renderPeersBody null last_search → forensic "no data yet"');
 
   // --- renderSiblingsBody: rows + empty ---
@@ -1599,23 +1614,26 @@ t.section('long_tail_console.js pure helpers (U4 console)');
     { id: 'r2', title: 'Pressing B', date: '2000-01-01', country: 'GB', track_count: 10, format: 'CD',
       in_library: false, pipeline_status: 'wanted' },
   ] });
-  t.ok(siblings.includes('Pressing A') && siblings.includes('Pressing B'),
-    'renderSiblingsBody renders each sibling pressing');
-  t.ok(siblings.includes('in library') && siblings.includes('badge-rank-transparent'),
-    'renderSiblingsBody renders the in-library badge with the rank colour');
+  t.contains(siblings, 'Pressing A', 'renderSiblingsBody renders the first sibling pressing');
+  t.contains(siblings, 'Pressing B', 'renderSiblingsBody renders the second sibling pressing');
+  t.contains(siblings, 'in library', 'renderSiblingsBody renders the in-library badge');
+  t.contains(siblings, 'badge-rank-transparent',
+    'renderSiblingsBody colours that badge by rank');
   t.ok(siblings.includes('badge-wanted') || siblings.includes('wanted'),
     'renderSiblingsBody renders the pipeline status for a sibling already requested');
-  t.ok(renderSiblingsBody({ releases: [] }).includes('No sibling pressings'),
+  t.contains(renderSiblingsBody({ releases: [] }), 'No sibling pressings',
     'renderSiblingsBody empty → "no sibling pressings"');
-  t.ok(renderSiblingsBody(null).includes('No sibling pressings'),
+  t.contains(renderSiblingsBody(null), 'No sibling pressings',
     'renderSiblingsBody null → "no sibling pressings"');
 
   // --- renderYoutubeBody: four states (display-only matrix in U4) ---
   // never_run (null result) → Check YouTube button, no matrix.
   const ytNever = renderYoutubeBody(null, 9);
-  t.ok(ytNever.includes('Check YouTube') && ytNever.includes('window.checkYoutube(9)'),
-    'renderYoutubeBody never_run renders the Check-YouTube stub wired to window.checkYoutube');
-  t.ok(!ytNever.includes('lt-yt-row'),
+  t.contains(ytNever, 'Check YouTube',
+    'renderYoutubeBody never_run renders the Check-YouTube stub');
+  t.contains(ytNever, 'window.checkYoutube(9)',
+    'renderYoutubeBody never_run wires that stub to window.checkYoutube');
+  t.excludes(ytNever, 'lt-yt-row',
     'renderYoutubeBody never_run renders no matrix rows (no auto-resolve)');
   // resolved_with_matrix → display-only matrix rows.
   const ytMatrixHtml = renderYoutubeBody({
@@ -1624,46 +1642,50 @@ t.section('long_tail_console.js pure helpers (U4 console)');
         distances: [{ mbid: 'm', outcome: 'ok', distance: 0.07 }, { mbid: 'n', outcome: 'no_audio' }] },
     ],
   }, 9);
-  t.ok(ytMatrixHtml.includes('MPREb_z') && ytMatrixHtml.includes('lt-yt-row'),
+  t.contains(ytMatrixHtml, 'MPREb_z',
+    'renderYoutubeBody resolved_with_matrix names the resolved browse id');
+  t.contains(ytMatrixHtml, 'lt-yt-row',
     'renderYoutubeBody resolved_with_matrix renders the display-only matrix rows');
-  t.ok(ytMatrixHtml.includes('dist 0.070'),
+  t.contains(ytMatrixHtml, 'dist 0.070',
     'renderYoutubeBody matrix surfaces the best ok distance');
   // resolved_empty → "not on YouTube Music".
   const ytEmptyHtml = renderYoutubeBody({ outcome: 'ok', youtube_releases: [] }, 9);
-  t.ok(ytEmptyHtml.includes('Not on YouTube Music'),
+  t.contains(ytEmptyHtml, 'Not on YouTube Music',
     'renderYoutubeBody resolved_empty renders the "not on YouTube Music" copy');
   // resolver_failed → error message + retry affordance. The retry button
   // is relabelled "Retry" in U5 (still wired to window.checkYoutube), so
   // assert on the retry verb + the wired handler rather than the original
   // "Check YouTube" label.
   const ytFailedHtml = renderYoutubeBody({ outcome: 'transient', error_message: 'mirror down' }, 9);
-  t.ok(ytFailedHtml.includes('mirror down') && ytFailedHtml.includes('Retry')
-    && ytFailedHtml.includes('window.checkYoutube(9)'),
-    'renderYoutubeBody resolver_failed renders the error + retry affordance');
+  t.contains(ytFailedHtml, 'mirror down',
+    'renderYoutubeBody resolver_failed shows the resolver error');
+  t.contains(ytFailedHtml, 'Retry',
+    'renderYoutubeBody resolver_failed offers a retry');
+  t.contains(ytFailedHtml, 'window.checkYoutube(9)',
+    'renderYoutubeBody resolver_failed wires that retry to window.checkYoutube');
   // staleness flag on a cached matrix.
   const ytStaleHtml = renderYoutubeBody({
     outcome: 'ok', from_cache: true, error_message: 'live fetch failed',
     youtube_releases: [{ yt_browse_id: 'b', track_count: 1, tracks: [], distances: [] }],
   }, 9);
-  t.ok(ytStaleHtml.includes('lt-yt-stale'),
+  t.contains(ytStaleHtml, 'lt-yt-stale',
     'renderYoutubeBody surfaces a staleness flag on a cached-but-stale matrix');
 
   // --- renderConsoleShell: band-aware emphasis + panel containers ---
   // Missing row → why-unfindable leads; the per-panel containers exist.
   const missingShell = renderConsoleShell({ id: 11, band: 'missing', source: 'mb', target_format: 'lossless' });
-  t.ok(missingShell.includes('id="lt-panel-unfindable-11"'),
+  t.contains(missingShell, 'id="lt-panel-unfindable-11"',
     'renderConsoleShell emits the why-unfindable panel container');
-  t.ok(missingShell.includes('id="lt-panel-peers-11"')
-    && missingShell.includes('id="lt-panel-rescues-11"')
-    && missingShell.includes('id="lt-panel-siblings-11"')
-    && missingShell.includes('id="lt-panel-youtube-11"'),
-    'renderConsoleShell emits all five evidence-panel containers');
+  for (const panel of ['peers', 'rescues', 'siblings', 'youtube']) {
+    t.contains(missingShell, `id="lt-panel-${panel}-11"`,
+      `renderConsoleShell emits the ${panel} evidence-panel container`);
+  }
   // Lead emphasis: the unfindable panel carries the lead class for a Missing row.
   t.ok(/lt-panel-unfindable[^"]*lt-panel-lead|lt-panel-lead[^"]*lt-panel-unfindable/.test(missingShell.replace(/\n/g, ' '))
     || missingShell.includes('lt-panel lt-panel-unfindable lt-panel-lead'),
     'renderConsoleShell makes why-unfindable the lead panel for a Missing row');
   // The YouTube panel opens in never_run (no auto-resolve) — Check button present.
-  t.ok(missingShell.includes('window.checkYoutube(11)'),
+  t.contains(missingShell, 'window.checkYoutube(11)',
     'renderConsoleShell opens the YouTube panel in never_run (Check-YouTube stub, no auto-resolve)');
   // #398: the cohort row carries mb_release_group_id, so accept-sibling is
   // in its final ENABLED state at shell render — no detail-fetch stamp, no
@@ -1671,7 +1693,7 @@ t.section('long_tail_console.js pure helpers (U4 console)');
   const rgShell = renderConsoleShell({
     id: 11, band: 'missing', source: 'request',
     target_format: 'lossless', mb_release_group_id: 'rg-11' });
-  t.ok(rgShell.includes('window.longTailAcceptSibling(11)'),
+  t.contains(rgShell, 'window.longTailAcceptSibling(11)',
     'renderConsoleShell wires accept-sibling at open when the row carries an rg (#398)');
   t.ok(/lt-act-accept[^>]*disabled/.test(missingShell),
     'renderConsoleShell disables accept-sibling at open when the row has no rg');
@@ -1682,13 +1704,16 @@ t.section('long_tail_console.js pure helpers (U4 console)');
     { id: 11, band: 'missing', source: 'request' },
     { outcome: 'ok', youtube_releases: [
       { yt_browse_id: 'MPREb_x', track_count: 10, tracks: [], distances: [] }] });
-  t.ok(cachedYtShell.includes('Rescue from this')
-    && cachedYtShell.includes('MPREb_x'),
+  t.contains(cachedYtShell, 'Rescue from this',
     'renderConsoleShell renders a cached resolver matrix instead of never_run (#398)');
+  t.contains(cachedYtShell, 'MPREb_x',
+    'renderConsoleShell carries the cached matrix\u2019s own browse id');
   // On-disk row → band-vs-intent leads (R8), why-unfindable does not.
   const onDiskShell = renderConsoleShell({ id: 12, band: 'poor', source: 'mb', target_format: 'lossless' });
-  t.ok(onDiskShell.includes('Quality vs intent') && onDiskShell.includes('lt-band-intent'),
+  t.contains(onDiskShell, 'Quality vs intent',
     'renderConsoleShell leads an on-disk row with the band-vs-intent header');
+  t.contains(onDiskShell, 'lt-band-intent',
+    'renderConsoleShell gives that header its band-vs-intent class');
   t.ok(onDiskShell.indexOf('lt-band-intent') < onDiskShell.indexOf('lt-panel-unfindable-12'),
     'renderConsoleShell orders band-vs-intent BEFORE why-unfindable for an on-disk row');
 
@@ -1697,15 +1722,19 @@ t.section('long_tail_console.js pure helpers (U4 console)');
   // error affordance while the other panels render their content. The pure
   // pieces guarantee a failing panel never blanks or drops its siblings.
   const errBody = renderPanelError('sibling pressings');
-  t.ok(errBody.includes("Couldn't load sibling pressings") && errBody.includes('other panels are unaffected'),
-    'renderPanelError renders the isolated per-panel error affordance');
+  t.contains(errBody, "Couldn't load sibling pressings",
+    'renderPanelError names the panel that failed');
+  t.contains(errBody, 'other panels are unaffected',
+    'renderPanelError says the failure is isolated to that panel');
   // Compose the shell + a per-panel error swap + a sibling content render,
   // proving the three coexist (the independent-load contract).
   const composed = renderConsoleShell({ id: 13, band: 'missing' })
     + renderUnfindableBody({ unfindable: { category: 'artist_absent' }, search_forensics: {} })
     + renderPanelError('sibling pressings');
-  t.ok(composed.includes('artist_absent') && composed.includes("Couldn't load sibling pressings"),
-    'a panel error and other panels\' content coexist (independent-load contract)');
+  t.contains(composed, 'artist_absent',
+    'a healthy panel keeps its content beside a failed one (independent-load contract)');
+  t.contains(composed, "Couldn't load sibling pressings",
+    'the failed panel keeps its error beside healthy content (independent-load contract)');
 }
 
 // --- long_tail_console.js U5 rescue flow pure helpers ---
@@ -1770,52 +1799,61 @@ t.section('long_tail_console.js pure helpers (U5 rescue flow)');
 
   // --- renderYoutubeBody: matrix rows are pickable rescue targets (U5) ---
   const matrixHtml = renderYoutubeBody(resolverOk, 9);
-  t.ok(matrixHtml.includes('window.pickYoutubeRescue(9, ')
-    && matrixHtml.includes('MPREb_one') && matrixHtml.includes('MPREb_two'),
-    'renderYoutubeBody resolved_with_matrix makes each release a pickable rescue target');
-  t.ok(matrixHtml.includes('Rescue from this'),
+  t.contains(matrixHtml, 'window.pickYoutubeRescue(9, ',
+    'renderYoutubeBody resolved_with_matrix routes a pick through window.pickYoutubeRescue');
+  for (const browseId of ['MPREb_one', 'MPREb_two']) {
+    t.contains(matrixHtml, browseId,
+      `renderYoutubeBody resolved_with_matrix makes ${browseId} a pickable rescue target`);
+  }
+  t.contains(matrixHtml, 'Rescue from this',
     'renderYoutubeBody matrix rows carry a "Rescue from this" button');
   // resolved_empty HIDES the rescue affordance (R9 — nothing to pick).
   const emptyHtml = renderYoutubeBody({ outcome: 'ok', youtube_releases: [] }, 9);
-  t.ok(!emptyHtml.includes('Rescue from this') && emptyHtml.includes('Not on YouTube Music'),
-    'renderYoutubeBody resolved_empty hides the rescue affordance and shows "not on YouTube Music"');
-  t.ok(emptyHtml.includes('Re-check'),
+  t.excludes(emptyHtml, 'Rescue from this',
+    'renderYoutubeBody resolved_empty hides the rescue affordance');
+  t.contains(emptyHtml, 'Not on YouTube Music',
+    'renderYoutubeBody resolved_empty says the album is not on YouTube Music');
+  t.contains(emptyHtml, 'Re-check',
     'renderYoutubeBody resolved_empty offers a re-check');
   // resolver_failed → Retry affordance.
-  t.ok(renderYoutubeBody({ outcome: 'transient', error_message: 'mirror down' }, 9).includes('Retry'),
+  t.contains(renderYoutubeBody({ outcome: 'transient', error_message: 'mirror down' }, 9), 'Retry',
     'renderYoutubeBody resolver_failed offers a Retry affordance');
 
   // --- rescueOutcomeCopy: every ingest outcome → its intended copy ---
   // accepted → success tone, "rescue queued".
   const accepted = rescueOutcomeCopy({ outcome: 'accepted', download_log_id: 42 });
   t.equal(accepted.tone, 'success', 'rescueOutcomeCopy accepted → success tone');
-  t.ok(accepted.title.toLowerCase().includes('queued'), 'rescueOutcomeCopy accepted title says queued');
-  t.ok(accepted.detail.includes('42'), 'rescueOutcomeCopy accepted surfaces the download_log_id');
+  t.contains(accepted.title.toLowerCase(), 'queued', 'rescueOutcomeCopy accepted title says queued');
+  t.contains(accepted.detail, '42', 'rescueOutcomeCopy accepted surfaces the download_log_id');
   // in_flight → error tone, surfaces the existing download_log_id.
   const inFlight = rescueOutcomeCopy({ outcome: 'in_flight', download_log_id: 7 });
   t.equal(inFlight.tone, 'error', 'rescueOutcomeCopy in_flight → error tone');
-  t.ok(inFlight.detail.includes('already running') && inFlight.detail.includes('7'),
+  t.contains(inFlight.detail, 'already running',
+    'rescueOutcomeCopy in_flight says a rescue is already running');
+  t.contains(inFlight.detail, '7',
     'rescueOutcomeCopy in_flight surfaces the existing download_log_id');
   // wrong_state → "request changed — refresh".
   const wrongState = rescueOutcomeCopy({ outcome: 'wrong_state' });
-  t.ok(wrongState.detail.toLowerCase().includes('refresh'),
+  t.contains(wrongState.detail.toLowerCase(), 'refresh',
     'rescueOutcomeCopy wrong_state tells the operator to refresh');
   // no_resolver_mapping → explicit resolver actions.
   const noMapping = rescueOutcomeCopy({ outcome: 'no_resolver_mapping' });
-  t.ok(noMapping.detail.includes('Search YouTube') && noMapping.detail.includes('Check URL'),
-    'rescueOutcomeCopy no_resolver_mapping names both explicit resolver actions');
+  t.contains(noMapping.detail, 'Search YouTube',
+    'rescueOutcomeCopy no_resolver_mapping names the search action');
+  t.contains(noMapping.detail, 'Check URL',
+    'rescueOutcomeCopy no_resolver_mapping names the manual URL action');
   // track_count_precheck_failed → shows the precheck mismatch detail.
   const trackMismatch = rescueOutcomeCopy({
     outcome: 'track_count_precheck_failed', detail: 'expected 14, got 10' });
-  t.ok(trackMismatch.detail.includes('expected 14, got 10'),
+  t.contains(trackMismatch.detail, 'expected 14, got 10',
     'rescueOutcomeCopy track_count_precheck_failed surfaces the mismatch detail');
   // transient → retry.
   const transient = rescueOutcomeCopy({ outcome: 'transient' });
-  t.ok(transient.detail.toLowerCase().includes('retry'),
+  t.contains(transient.detail.toLowerCase(), 'retry',
     'rescueOutcomeCopy transient tells the operator to retry');
   t.equal(transient.tone, 'error', 'rescueOutcomeCopy transient → error tone');
   // request_not_found → refresh.
-  t.ok(rescueOutcomeCopy({ outcome: 'request_not_found' }).detail.toLowerCase().includes('refresh'),
+  t.contains(rescueOutcomeCopy({ outcome: 'request_not_found' }).detail.toLowerCase(), 'refresh',
     'rescueOutcomeCopy request_not_found tells the operator to refresh');
   // unknown outcome → generic error (never blank), surfaces the error field.
   const unknown = rescueOutcomeCopy({ outcome: 'who_knows', error: 'boom' });
@@ -1830,12 +1868,12 @@ t.section('long_tail_console.js pure helpers (U5 rescue flow)');
 
   // --- renderRescueConfirm: reuses the .confirm-box shell ---
   const confirm = renderRescueConfirm(11, 'MPREb_x', { artist_name: 'Smog', album_title: 'Knock Knock' });
-  t.ok(confirm.includes('confirm-box') && confirm.includes('MPREb_x'),
-    'renderRescueConfirm renders the confirm-box shell carrying the target browse id');
-  t.ok(confirm.includes('Smog') && confirm.includes('Knock Knock'),
-    'renderRescueConfirm labels the request being rescued');
-  t.ok(confirm.includes('id="lt-rescue-confirm"') && confirm.includes('id="lt-rescue-cancel"'),
-    'renderRescueConfirm wires confirm + cancel buttons');
+  t.contains(confirm, 'confirm-box', 'renderRescueConfirm renders the confirm-box shell');
+  t.contains(confirm, 'MPREb_x', 'renderRescueConfirm carries the target browse id');
+  t.contains(confirm, 'Smog', 'renderRescueConfirm labels the artist being rescued');
+  t.contains(confirm, 'Knock Knock', 'renderRescueConfirm labels the album being rescued');
+  t.contains(confirm, 'id="lt-rescue-confirm"', 'renderRescueConfirm wires the confirm button');
+  t.contains(confirm, 'id="lt-rescue-cancel"', 'renderRescueConfirm wires the cancel button');
 }
 
 // --- long_tail_console.js U6 secondary-action pure helpers ---
@@ -1872,11 +1910,11 @@ t.section('long_tail_console.js pure helpers (U6 secondary actions)');
     acceptDisabledReason({ source: 'request' }, 'rg-1'),
     '',
     'acceptDisabledReason: enabled → empty string');
-  t.ok(
-    acceptDisabledReason({ source: 'discogs' }, 'rg-1').toLowerCase().includes('discogs'),
+  t.contains(
+    acceptDisabledReason({ source: 'discogs' }, 'rg-1').toLowerCase(), 'discogs',
     'acceptDisabledReason: Discogs reason mentions Discogs');
-  t.ok(
-    acceptDisabledReason({ source: 'request' }, null).toLowerCase().includes('release group'),
+  t.contains(
+    acceptDisabledReason({ source: 'request' }, null).toLowerCase(), 'release group',
     'acceptDisabledReason: no-rg reason mentions the missing release group');
 
   // --- intentToggleTarget: lossless ⇄ default toggle ---
@@ -1906,8 +1944,10 @@ t.section('long_tail_console.js pure helpers (U6 secondary actions)');
     id: 77, artist_name: 'Smog', album_title: 'Knock Knock', mb_release_group_id: 'rg-9' });
   t.equal(opts.sourceRequestId, 77, 'buildAcceptSiblingOptions carries the source request id');
   t.equal(opts.releaseGroupId, 'rg-9', 'buildAcceptSiblingOptions carries the release group id');
-  t.ok(opts.sourceLabel.includes('Smog') && opts.sourceLabel.includes('Knock Knock'),
-    'buildAcceptSiblingOptions builds an "Artist — Album" source label');
+  t.contains(opts.sourceLabel, 'Smog',
+    'buildAcceptSiblingOptions puts the artist in the source label');
+  t.contains(opts.sourceLabel, 'Knock Knock',
+    'buildAcceptSiblingOptions puts the album in the source label');
   t.equal(
     buildAcceptSiblingOptions({ id: 5, artist_name: 'A', album_title: 'B' }).releaseGroupId,
     null,
@@ -1916,24 +1956,31 @@ t.section('long_tail_console.js pure helpers (U6 secondary actions)');
   // --- renderActionsBar: enable/disable + intent badge + triage buttons ---
   const mbBar = renderActionsBar({
     id: 12, source: 'request', mb_release_group_id: 'rg-1', target_format: null });
-  t.ok(mbBar.includes('window.longTailAcceptSibling(12)'),
+  t.contains(mbBar, 'window.longTailAcceptSibling(12)',
     'renderActionsBar: MB row wires the accept-sibling handler');
   t.ok(!/lt-act-accept[^>]*disabled/.test(mbBar),
     'renderActionsBar: MB row accept-sibling is enabled');
-  t.ok(mbBar.includes('window.longTailSetIntent(12, this)')
-    && mbBar.includes('data-pipeline-request-id="12"'),
-    'renderActionsBar wires the set-intent toggle with request/control identity');
+  t.contains(mbBar, 'window.longTailSetIntent(12, this)',
+    'renderActionsBar wires the set-intent toggle to its initiating control');
+  t.contains(mbBar, 'data-pipeline-request-id="12"',
+    'renderActionsBar stamps the bar with the request identity');
   // Triage buttons wired to the existing update / delete endpoints.
-  t.ok(mbBar.includes('window.longTailSetImported(12, this)') && mbBar.includes('Set imported'),
-    'renderActionsBar wires the Set imported button with its initiating control');
-  t.ok(mbBar.includes('window.longTailDeleteRequest(12, this)') && mbBar.includes('Delete request'),
-    'renderActionsBar wires the Delete request button with its initiating control');
+  t.contains(mbBar, 'window.longTailSetImported(12, this)',
+    'renderActionsBar wires Set imported to its initiating control');
+  t.contains(mbBar, 'Set imported', 'renderActionsBar labels the Set imported button');
+  t.contains(mbBar, 'window.longTailDeleteRequest(12, this)',
+    'renderActionsBar wires Delete request to its initiating control');
+  t.contains(mbBar, 'Delete request', 'renderActionsBar labels the Delete request button');
   // The re-search button is gone.
-  t.ok(!mbBar.includes('longTailReSearch') && !mbBar.includes('lt-act-research'),
+  t.excludes(mbBar, 'longTailReSearch',
+    'renderActionsBar no longer wires a re-search handler');
+  t.excludes(mbBar, 'lt-act-research',
     'renderActionsBar no longer renders the re-search button');
   // default intent (no target_format) → toggle offers "switch to lossless".
-  t.ok(mbBar.includes('switch to lossless') && mbBar.includes('lt-intent-default'),
-    'renderActionsBar: default intent renders a default badge + "switch to lossless"');
+  t.contains(mbBar, 'switch to lossless',
+    'renderActionsBar: default intent offers "switch to lossless"');
+  t.contains(mbBar, 'lt-intent-default',
+    'renderActionsBar: default intent renders the default badge');
 
   const discogsBar = renderActionsBar({
     id: 13, source: 'discogs', mb_release_group_id: null, target_format: 'lossless' });
@@ -1942,11 +1989,13 @@ t.section('long_tail_console.js pure helpers (U6 secondary actions)');
   t.ok(discogsBar.toLowerCase().includes('musicbrainz-only')
     || discogsBar.toLowerCase().includes('discogs'),
     'renderActionsBar: Discogs row shows the one-line disable reason');
-  t.ok(!discogsBar.includes('window.longTailAcceptSibling(13)'),
+  t.excludes(discogsBar, 'window.longTailAcceptSibling(13)',
     'renderActionsBar: disabled accept-sibling does not wire the handler onclick');
   // lossless intent → badge + "accept current floor" toggle.
-  t.ok(discogsBar.includes('lt-intent-lossless') && discogsBar.includes('accept current floor'),
-    'renderActionsBar: lossless intent renders a lossless badge + "accept current floor"');
+  t.contains(discogsBar, 'lt-intent-lossless',
+    'renderActionsBar: lossless intent renders the lossless badge');
+  t.contains(discogsBar, 'accept current floor',
+    'renderActionsBar: lossless intent offers "accept current floor"');
 
   // MB row with no release group → accept-sibling disabled.
   const noRgBar = renderActionsBar({
@@ -2028,7 +2077,7 @@ t.section('long_tail_console.js console persistence (#398 / #481 item 1)');
   // never satisfy) and a 503 (a retryable world failure) all got the exact
   // same wording. wrongMatchExplorerFailureCopy is the pure function that
   // turns the status into honest, status-specific copy.
-  t.ok(wrongMatchExplorerFailureCopy(404, null).includes('not'),
+  t.contains(wrongMatchExplorerFailureCopy(404, null), 'not',
     '404 gets an absence-family lead sentence');
   t.equal(wrongMatchExplorerFailureCopy(404, null),
     'This wrong-match folder could not be located.',
@@ -2038,9 +2087,9 @@ t.section('long_tail_console.js console persistence (#398 / #481 item 1)');
     '404 appends the server detail');
 
   const refused = wrongMatchExplorerFailureCopy(422, null);
-  t.ok(refused.toLowerCase().includes('refused'),
+  t.contains(refused.toLowerCase(), 'refused',
     '422 gets a containment-family lead sentence naming the refusal');
-  t.ok(!refused.toLowerCase().includes('not found'),
+  t.excludes(refused.toLowerCase(), 'not found',
     '422 copy must never say "not found" — the name may well exist');
 
   // Review round 1: the 503 bucket also carries the unclassified
@@ -2048,15 +2097,16 @@ t.section('long_tail_console.js console persistence (#398 / #481 item 1)');
   // quarantine root, for example) — a data mismatch, not a disk hiccup
   // — so the copy must not PROMISE a retry will succeed.
   const unavailable = wrongMatchExplorerFailureCopy(503, null);
-  t.ok(unavailable.toLowerCase().includes('could not be read'),
+  t.contains(unavailable.toLowerCase(), 'could not be read',
     '503 gets its own lead sentence (world-failure + residual family)');
-  t.ok(!unavailable.toLowerCase().includes('a retry may succeed')
-    && !unavailable.toLowerCase().includes('temporarily unavailable'),
-    '503 copy must not overclaim transience for the residual bucket');
+  t.excludes(unavailable.toLowerCase(), 'a retry may succeed',
+    '503 copy never promises a retry will succeed (residual bucket)');
+  t.excludes(unavailable.toLowerCase(), 'temporarily unavailable',
+    '503 copy never calls the residual bucket temporary');
   // "the storage refused or failed" uses "refused" in its ordinary
   // English sense (a generic storage-layer non-answer) — the ban is on
   // the SPECIFIC 422 containment phrase, not the bare word.
-  t.ok(!unavailable.toLowerCase().includes('containment decision'),
+  t.excludes(unavailable.toLowerCase(), 'containment decision',
     '503 must not borrow the specific containment-decision wording');
 
   t.equal(wrongMatchExplorerFailureCopy(200, null),
