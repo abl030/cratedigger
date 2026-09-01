@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -9,7 +10,10 @@ from lib.dispatch import (
     DispatchOutcome,
     dispatch_import_from_db,
 )
-from lib.dispatch.manifest_guard import _guard_force_import_audio_manifest
+from lib.dispatch.manifest_guard import (
+    _guard_force_import_audio_manifest,
+    _guard_reject,
+)
 from lib.dispatch.types import ImportAttemptResult
 from lib.grab_list import DownloadFile
 from lib.import_execution import ExecutionCancelled
@@ -406,6 +410,33 @@ class TestForceImportManifestGuard(unittest.TestCase):
         assert claimed is not None and claimed.id == job.id
         return job.id
 
+
+    def test_manifest_rejection_persists_complete_audit_and_outcome(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted", mb_release_id="mb-42"))
+        outcome = _guard_reject(
+            cast(Any, db), request_id=42, failed_path="/action-copy/Album",
+            audit_source_path="/operator/Album", source_username="peer",
+            attempt_result=ImportAttemptResult(None), detail="manifest mismatch",
+            scenario="untracked_audio", distance=0.42, import_job_id=None,
+            source_download_log_id=23,
+        )
+        self.assertFalse(outcome.success)
+        self.assertEqual(outcome.message, "manifest mismatch")
+        self.assertEqual(outcome.code, DISPATCH_CODE_IMPORT_MANIFEST_REJECTED)
+        self.assertEqual(len(db.download_logs), 1)
+        row = db.download_logs[0]
+        self.assertEqual(row.soulseek_username, "peer")
+        self.assertEqual(row.outcome, "rejected")
+        self.assertEqual(row.beets_distance, 0.42)
+        self.assertEqual(row.beets_scenario, "untracked_audio")
+        self.assertEqual(row.beets_detail, "manifest mismatch")
+        self.assertEqual(row.staged_path, "/action-copy/Album")
+        self.assertEqual(row.source_download_log_id, 23)
+        self.assertEqual(
+            json.loads(row.validation_result)["failed_path"], "/operator/Album"
+        )
+
     def test_force_import_rejects_audio_not_in_origin_manifest(self):
         import msgspec
 
@@ -469,6 +500,7 @@ class TestForceImportManifestGuard(unittest.TestCase):
             log for log in db.download_logs
             if log.outcome == "rejected" and log.beets_scenario == "untracked_audio"
         )
+        self.assertEqual(rejection.source_download_log_id, log_id)
         self.assertIsNotNone(rejection.import_result)
         assert rejection.import_result is not None
         self.assertEqual(
