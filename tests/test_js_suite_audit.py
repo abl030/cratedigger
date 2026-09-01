@@ -94,15 +94,15 @@ def covered_js_suite_names(script_text: str, suite_names: set[str]) -> set[str]:
 # reaches the single exit path. Deliberately bounded syntax -- this is a
 # local syntactic fact, not an attempt to understand the file.
 _HARNESS_IMPORT_RE = re.compile(
-    r"^import \{[^}]*\bsuite\b[^}]*\} from '\./js_harness\.mjs';$", re.M
+    r"^import \{[^}]*\bsuite\b[^}]*\} from '\./js_harness\.mjs';$", re.MULTILINE
 )
-_HARNESS_SUITE_RE = re.compile(r"^const \w+ = suite\(import\.meta\.url\);$", re.M)
-_HARNESS_DONE_RE = re.compile(r"^\w+\.done\(\);$", re.M)
+_HARNESS_SUITE_RE = re.compile(r"^const \w+ = suite\(import\.meta\.url\);$", re.MULTILINE)
+_HARNESS_DONE_RE = re.compile(r"^\w+\.done\(\);$", re.MULTILINE)
 
 # The two abandoned idioms. A suite carrying either is running its own
 # harness again, whatever else it also does.
-_OWN_COUNTER_RE = re.compile(r"^let (?:passed|failed) = 0;$", re.M)
-_NODE_ASSERT_RE = re.compile(r"^import .*from 'node:assert(?:/strict)?';$", re.M)
+_OWN_COUNTER_RE = re.compile(r"^let (?:passed|failed) = 0;$", re.MULTILINE)
+_NODE_ASSERT_RE = re.compile(r"^import .*from 'node:assert(?:/strict)?';$", re.MULTILINE)
 
 
 def harness_violations(name: str, source: str) -> list[str]:
@@ -180,24 +180,30 @@ class TestEveryJsSuiteUsesTheSharedHarness(unittest.TestCase):
         ),
         (
             "constructed but never finished",
-            "import { suite } from './js_harness.mjs';\n"
-            "const t = suite(import.meta.url);\n",
+            (
+                "import { suite } from './js_harness.mjs';\n"
+                "const t = suite(import.meta.url);\n"
+            ),
             "never reaches the harness exit path",
         ),
         (
             "a third idiom smuggled in beside the harness",
-            "import { suite } from './js_harness.mjs';\n"
-            "const t = suite(import.meta.url);\n"
-            "let passed = 0;\n"
-            "t.done();\n",
+            (
+                "import { suite } from './js_harness.mjs';\n"
+                "const t = suite(import.meta.url);\n"
+                "let passed = 0;\n"
+                "t.done();\n"
+            ),
             "declares its own passed/failed counter",
         ),
         (
             "node:assert smuggled in beside the harness",
-            "import assert from 'node:assert/strict';\n"
-            "import { suite } from './js_harness.mjs';\n"
-            "const t = suite(import.meta.url);\n"
-            "t.done();\n",
+            (
+                "import assert from 'node:assert/strict';\n"
+                "import { suite } from './js_harness.mjs';\n"
+                "const t = suite(import.meta.url);\n"
+                "t.done();\n"
+            ),
             "imports node:assert instead of the harness",
         ),
     )
