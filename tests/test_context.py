@@ -78,9 +78,10 @@ class TestCollaboratorsAreRequired(unittest.TestCase):
     silently omitted ``download_ownership``, failing every download-timeout
     cleanup closed with the whole suite green. An 888-line hand-registered
     AST audit (``tests/test_context_construction_audit.py``) held the set
-    of construction sites to catch a repeat; it checked exactly one thing —
-    that the kwarg is PRESENT at each site — which the required frozen
-    field now checks at every site, existing and future, for free.
+    of construction sites to catch a repeat. It constrained production in
+    one way, that the kwarg is PRESENT at each site, which the required
+    frozen field now checks at every site, existing and future, for free.
+    Its other clauses policed the registry itself and do not outlive it.
 
     These are the runtime half of that guarantee; pyright's is the half
     that fires before the code runs.

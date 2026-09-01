@@ -73,10 +73,13 @@ class CycleCollaborators:
     ``CratediggerContext(...)`` in ``_run_phase1`` silently omitted
     ``download_ownership``, which made every download-timeout cleanup fail
     CLOSED under the ownership gate that same PR introduced, with the whole
-    suite green. The 888-line hand-registered AST audit that used to hold
-    the set of construction sites (``tests/test_context_construction_audit.py``)
-    checked exactly one thing this type now checks for free: that the kwarg
-    is *present* at every site.
+    suite green. An 888-line hand-registered AST audit
+    (``tests/test_context_construction_audit.py``) held the set of
+    construction sites to catch a repeat. Its several clauses all served one
+    constraint on production, which this type now carries for free: that the
+    kwarg is *present* at every site. The rest of that module policed its own
+    registry (exactness, alias binding, per-scope construction counts, a
+    human-written reason per entry), and none of it outlives the registry.
 
     Requiredness constrains presence, not value: ``download_ownership=None``
     is still spellable, and still fails the ownership gate closed. What it

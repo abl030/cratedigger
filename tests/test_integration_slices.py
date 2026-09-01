@@ -5357,6 +5357,7 @@ class TestSearchExhaustionResetsCounterSlice(unittest.TestCase):
         ctx = CratediggerContext(
             collaborators=make_cycle_collaborators(
                 cfg=CratediggerConfig.from_ini(configparser.ConfigParser()),
+                slskd=FakeSlskdAPI(),
                 pipeline_db_source=source,
             ),
         )
@@ -6488,6 +6489,7 @@ class TestU5PlanDrivenExecutorSlice(unittest.TestCase):
         worker_ctx = CratediggerContext(
             collaborators=make_cycle_collaborators(
                 cfg=cfg,
+                slskd=FakeSlskdAPI(),
                 pipeline_db_source=MagicMock(),
                 download_ownership=writer,
             ),

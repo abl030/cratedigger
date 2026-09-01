@@ -245,7 +245,10 @@ def prepare_find_download_context(
     from lib.context import CratediggerContext, CycleCollaborators
 
     # A per-worker fork, never the owner's instance: PeerCache is not shared
-    # across threads. ``None`` (Redis down / disabled) forks to None.
+    # across threads. The None arm is for a context built without a peer
+    # cache at all; ``connect_from_config`` never returns None (an
+    # unreachable Redis gives a real, cold PeerCache with client=None), so
+    # no production caller of this function reaches it today.
     peer_cache = ctx.peer_cache.fork() if ctx.peer_cache is not None else None
 
     plan_execution = (

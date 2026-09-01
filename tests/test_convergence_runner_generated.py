@@ -177,9 +177,10 @@ class TestCycleConvergenceWindows(unittest.TestCase):
     strictly after it.
 
     The two hand-off claims this class also used to parse out of
-    ``main()``'s source — one cycle per run, dry-run gate first — moved to
-    ``TestCycleHandoff`` below when #1313 split ``run_startup_and_cycle``
-    out of ``main()``; they are executed there rather than parsed.
+    ``main()``'s source, one cycle per run and dry-run gate first, moved to
+    ``tests/test_cycle_startup.py::TestCycleHandoff`` when #1313 split
+    ``run_startup_and_cycle`` out of ``main()``. They are executed there
+    rather than parsed.
     """
 
     def test_run_cycle_calls_both_groups_in_their_required_windows(self):

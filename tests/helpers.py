@@ -876,7 +876,10 @@ def rebind_collaborators(
     Every field is named explicitly here rather than going through
     ``dataclasses.replace``, for the same reason production does: measured
     against pyright 1.1.412, ``replace()`` kwargs are checked for neither
-    name nor type, so a typo would silently keep the old value.
+    name nor type. A misspelled NAME is still loud, at runtime, because
+    ``__init__`` rejects the unknown kwarg; what ``replace()`` loses is the
+    wrong-TYPE check, which a constructor call gets and which nothing else
+    here would catch.
 
     ``cfg`` is deliberately not reboundable: no test varies it this way,
     and a context whose config changes mid-scenario is a different world,

@@ -631,7 +631,7 @@ def _merge_search_result(result: SearchResult, ctx: CratediggerContext) -> None:
                 if d not in ctx.search_cache[album_id][username][filetype]:
                     ctx.search_cache[album_id][username][filetype].append(d)
 
-    peer_cache = getattr(ctx, "peer_cache", None)
+    peer_cache = ctx.peer_cache
     if peer_cache is not None:
         for username, filetypes in result.cache_entries.items():
             cached_speed = peer_cache.get_upload_speed(username)
@@ -1521,11 +1521,11 @@ def _run_phase1(
 def _reconcile_dry_run(pipeline_db_source: PipelineDBSource) -> int:
     """Deploy-verification mode: read-only reconciliation only, then exit.
 
-    Runs BEFORE any convergence step, Phase 1, or Phase 2 —
-    ``run_startup_and_cycle`` takes this branch instead of the cycle, and
-    ``tests/test_convergence_runner_generated.py::TestCycleHandoff`` drives
-    it to prove no cycle runs and this function's exit code is what
-    ``main()`` returns. No plans are generated and nothing is mutated;
+    Runs BEFORE any convergence step, Phase 1, or Phase 2:
+    ``run_startup_and_cycle`` takes this branch instead of the cycle.
+    ``tests/test_cycle_startup.py::TestCycleHandoff`` drives that function
+    with a stub in this position and proves no cycle runs and the stub's
+    exit code comes back. No plans are generated and nothing is mutated;
     only classification counts are emitted.
     """
     from lib.startup_reconciliation import (
@@ -1553,8 +1553,9 @@ def run_cycle(
 ) -> None:
     """Run one complete pipeline cycle over an already-constructed context.
 
-    ``main()`` owns argv, config, the startup gates, locking, collaborator
-    construction, and teardown; everything cyclical lives here so a test can
+    ``main()`` owns argv, config, the startup gates, locking and teardown,
+    and hands the rest to ``run_startup_and_cycle``, which owns collaborator
+    construction (#1313). Everything cyclical lives here so a test can
     execute a whole cycle against fakes. The only non-context collaborator is
     the Phase 1 source factory above.
     """

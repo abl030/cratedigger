@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 
 from lib.context import CratediggerContext
 from lib.cycle_summary import format_cycle_summary
+from tests.fakes import FakeSlskdAPI
 from tests.helpers import make_cycle_collaborators
 
 
@@ -25,6 +26,7 @@ class TestContextCounterDefault(unittest.TestCase):
         ctx = CratediggerContext(
             collaborators=make_cycle_collaborators(
                 cfg=MagicMock(),
+                slskd=FakeSlskdAPI(),
                 pipeline_db_source=MagicMock(),
             ),
         )
@@ -41,6 +43,7 @@ class TestCycleSummaryWatchdogField(unittest.TestCase):
         ctx = CratediggerContext(
             collaborators=make_cycle_collaborators(
                 cfg=MagicMock(),
+                slskd=FakeSlskdAPI(),
                 pipeline_db_source=MagicMock(),
             ),
         )
@@ -72,6 +75,7 @@ class TestLogSearchResultIncrementsCounter(unittest.TestCase):
         return CratediggerContext(
             collaborators=make_cycle_collaborators(
                 cfg=MagicMock(),
+                slskd=FakeSlskdAPI(),
                 pipeline_db_source=MagicMock(),
             ),
         )
@@ -142,6 +146,7 @@ class TestRemovedFieldsAreGone(unittest.TestCase):
         ctx = CratediggerContext(
             collaborators=make_cycle_collaborators(
                 cfg=MagicMock(),
+                slskd=FakeSlskdAPI(),
                 pipeline_db_source=MagicMock(),
             ),
         )

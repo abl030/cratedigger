@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import unittest
 from collections.abc import Callable
 from unittest.mock import MagicMock
@@ -76,6 +77,9 @@ WORKER_PEER_FORK_CLAUSE = (
     "instance, because PeerCache is not thread-shared")
 WORKER_NO_PEER_CACHE_CLAUSE = (
     "peer_cache: no owner cache means the worker gets none either")
+WORKER_BROWSE_LOCK_CLAUSE = (
+    "browse_coordinator_lock: every worker shares the owner's lock object, "
+    "which is what makes browse_global_max_workers global")
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +141,8 @@ def worker_derivation_violations(
         violations.append(WORKER_PEER_FORK_CLAUSE)
     if owner.peer_cache is None and derived.peer_cache is not None:
         violations.append(WORKER_NO_PEER_CACHE_CLAUSE)
+    if derived.browse_coordinator_lock is not owner.browse_coordinator_lock:
+        violations.append(WORKER_BROWSE_LOCK_CLAUSE)
     return violations
 
 
@@ -260,41 +266,50 @@ class TestDerivationCheckersTripOnViolations(unittest.TestCase):
             "peer_cache": collaborators.peer_cache,
         }
         fields.update(overrides)
-        return CratediggerContext(collaborators=_cycle_ctor()(**fields))
+        derived = CratediggerContext(collaborators=_cycle_ctor()(**fields))
+        # The owner's lock object, because a fresh context makes its own and
+        # that alone would trip the browse-lock clause in every world here.
+        derived.browse_coordinator_lock = owner.browse_coordinator_lock
+        return derived
 
     # --- shared_derivation_violations ------------------------------------
 
     def test_cfg_clause(self):
         owner = self._owner()
         derived = self._derived(owner, cfg=CratediggerConfig())
-        self.assertIn(
-            CFG_CLAUSE, shared_derivation_violations(owner, derived))
+        self.assertEqual(
+            shared_derivation_violations(owner, derived),
+            [CFG_CLAUSE])
 
     def test_slskd_clause(self):
         owner = self._owner()
         derived = self._derived(owner, slskd=FakeSlskdAPI())
-        self.assertIn(
-            SLSKD_CLAUSE, shared_derivation_violations(owner, derived))
+        self.assertEqual(
+            shared_derivation_violations(owner, derived),
+            [SLSKD_CLAUSE])
 
     def test_download_ownership_clause(self):
         owner = self._owner()
         derived = self._derived(owner, download_ownership=None)
-        self.assertIn(
-            OWNERSHIP_CLAUSE, shared_derivation_violations(owner, derived))
+        self.assertEqual(
+            shared_derivation_violations(owner, derived),
+            [OWNERSHIP_CLAUSE])
 
     def test_claimed_queue_keys_registry_clause(self):
         owner = self._owner()
         derived = self._derived(
             owner, claimed_queue_keys_registry=ClaimedQueueKeysRegistry())
-        self.assertIn(
-            REGISTRY_CLAUSE, shared_derivation_violations(owner, derived))
+        self.assertEqual(
+            shared_derivation_violations(owner, derived),
+            [REGISTRY_CLAUSE])
 
     def test_pipeline_db_source_clause(self):
         owner = self._owner()
         derived = self._derived(
             owner, pipeline_db_source=owner.pipeline_db_source)
-        self.assertIn(
-            OWN_SOURCE_CLAUSE, shared_derivation_violations(owner, derived))
+        self.assertEqual(
+            shared_derivation_violations(owner, derived),
+            [OWN_SOURCE_CLAUSE])
 
     # --- phase1_derivation_violations -------------------------------------
 
@@ -304,17 +319,17 @@ class TestDerivationCheckersTripOnViolations(unittest.TestCase):
         # world trips exactly the cooldown-sharing one.
         derived = self._derived(owner, peer_cache=None)
         derived.cooled_down_users = set(owner.cooled_down_users)
-        self.assertIn(
-            PHASE1_COOLDOWN_CLAUSE,
-            phase1_derivation_violations(owner, derived))
+        self.assertEqual(
+            phase1_derivation_violations(owner, derived),
+            [PHASE1_COOLDOWN_CLAUSE])
 
     def test_phase1_peer_cache_clause(self):
         owner = self._owner()
         derived = self._derived(owner)
         derived.cooled_down_users = owner.cooled_down_users
-        self.assertIn(
-            PHASE1_PEER_CACHE_CLAUSE,
-            phase1_derivation_violations(owner, derived))
+        self.assertEqual(
+            phase1_derivation_violations(owner, derived),
+            [PHASE1_PEER_CACHE_CLAUSE])
 
     # --- worker_derivation_violations -------------------------------------
 
@@ -323,34 +338,43 @@ class TestDerivationCheckersTripOnViolations(unittest.TestCase):
         owner.cooled_down_users.add("peer-a")
         derived = self._derived(owner, peer_cache=_peer_cache())
         derived.cooled_down_users = owner.cooled_down_users
-        self.assertIn(
-            WORKER_COOLDOWN_COPY_CLAUSE,
-            worker_derivation_violations(owner, derived))
+        self.assertEqual(
+            worker_derivation_violations(owner, derived),
+            [WORKER_COOLDOWN_COPY_CLAUSE])
 
     def test_worker_cooldown_contents_clause(self):
         owner = self._owner()
         owner.cooled_down_users.add("peer-a")
         derived = self._derived(owner, peer_cache=_peer_cache())
         derived.cooled_down_users = set()
-        self.assertIn(
-            WORKER_COOLDOWN_CONTENTS_CLAUSE,
-            worker_derivation_violations(owner, derived))
+        self.assertEqual(
+            worker_derivation_violations(owner, derived),
+            [WORKER_COOLDOWN_CONTENTS_CLAUSE])
 
     def test_worker_unforked_peer_cache_clause(self):
         owner = self._owner()
         derived = self._derived(owner, peer_cache=owner.peer_cache)
         derived.cooled_down_users = set(owner.cooled_down_users)
-        self.assertIn(
-            WORKER_PEER_FORK_CLAUSE,
-            worker_derivation_violations(owner, derived))
+        self.assertEqual(
+            worker_derivation_violations(owner, derived),
+            [WORKER_PEER_FORK_CLAUSE])
+
+    def test_worker_browse_lock_clause(self):
+        owner = self._owner()
+        derived = self._derived(owner, peer_cache=_peer_cache())
+        derived.cooled_down_users = set(owner.cooled_down_users)
+        derived.browse_coordinator_lock = threading.Lock()
+        self.assertEqual(
+            worker_derivation_violations(owner, derived),
+            [WORKER_BROWSE_LOCK_CLAUSE])
 
     def test_worker_invented_peer_cache_clause(self):
         owner = self._owner(peer_cache=None)
         derived = self._derived(owner, peer_cache=_peer_cache())
         derived.cooled_down_users = set(owner.cooled_down_users)
-        self.assertIn(
-            WORKER_NO_PEER_CACHE_CLAUSE,
-            worker_derivation_violations(owner, derived))
+        self.assertEqual(
+            worker_derivation_violations(owner, derived),
+            [WORKER_NO_PEER_CACHE_CLAUSE])
 
 
 if __name__ == "__main__":

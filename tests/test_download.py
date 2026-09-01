@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, cast
@@ -28,6 +29,7 @@ from lib.download_materialization import (
     Materialized,
     MaterializeFailed,
 )
+from lib.download_ownership import DownloadOwnershipWriter
 from lib.import_execution import (
     CancellationToken,
     ExecutionLeaseSnapshot,
@@ -579,6 +581,34 @@ class TestDownloadMaterializationExtraction(unittest.TestCase):
 
 # === NEW tests for functions moving to lib/download.py ===
 
+class _RecordingOwnershipWriter(DownloadOwnershipWriter):
+    """A real ownership writer that records what it was asked (#1313).
+
+    A subclass rather than an assignment over ``owned_transfer_keys``:
+    the field is typed ``DownloadOwnershipWriter | None`` since #1313, and
+    pyright rejects assigning to a method. Both counters matter and neither
+    implies the other. ``owned_transfer_keys`` returns early on empty keys
+    before opening a handle, so a caller can reach the writer without ever
+    reaching ``db_factory``.
+    """
+
+    def __init__(self, db: FakePipelineDB) -> None:
+        self._db = db
+        self.opened = 0
+        self.asked: list[list[tuple[str, str]]] = []
+        super().__init__(db_factory=self._open, close_after_use=False)
+
+    def _open(self) -> FakePipelineDB:
+        self.opened += 1
+        return self._db
+
+    def owned_transfer_keys(
+        self, keys: Sequence[tuple[str, str]],
+    ) -> set[tuple[str, str]]:
+        self.asked.append(list(keys))
+        return super().owned_transfer_keys(keys)
+
+
 class TestCancelAndDelete(unittest.TestCase):
     """cancel_and_delete deletes completed payloads at their authoritative
     (event-derived) local paths — never at inferred folder locations
@@ -850,27 +880,24 @@ class TestCancelAndDelete(unittest.TestCase):
         """An empty batch is not an ownership question.
 
         The early exit is what keeps a caller with nothing to clean up
-        from opening a DB handle to ask about zero keys.
+        from asking the ledger about zero keys, and from opening a DB
+        handle to do it. Both halves are asserted, because they are not
+        the same claim: ``owned_transfer_keys`` early-returns on empty
+        keys BEFORE it opens a handle, so deleting
+        ``lib/slskd_transfers.py``'s own ``if not files`` guard would send
+        an empty batch all the way into the writer while leaving the
+        handle count at zero (#1313 review).
         """
-        from lib.download_ownership import DownloadOwnershipWriter
         from lib.slskd_transfers import cancel_and_delete
         ctx, slskd, _ = self._ctx()
-        opened: list[object] = []
-
-        def _recording_factory() -> FakePipelineDB:
-            opened.append(object())
-            return self.ledger_db
-
-        # The db_factory seam, not a patched method: the claim IS "no DB
-        # handle is opened", so recording the real writer's own factory
-        # measures it directly (#1313).
-        rebind_collaborators(ctx, download_ownership=DownloadOwnershipWriter(
-            db_factory=_recording_factory, close_after_use=False))
+        writer = _RecordingOwnershipWriter(self.ledger_db)
+        rebind_collaborators(ctx, download_ownership=writer)
 
         ok = cancel_and_delete([], ctx)
 
         self.assertTrue(ok)
-        self.assertEqual(opened, [])
+        self.assertEqual(writer.asked, [], "the writer is never consulted")
+        self.assertEqual(writer.opened, 0, "and no DB handle is opened")
         self.assertEqual(slskd.transfers.cancel_download_calls, [])
 
     def test_empty_file_list_with_no_collaborator_stays_silent(self):

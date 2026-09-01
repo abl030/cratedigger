@@ -1,18 +1,22 @@
-"""Deterministic pins for cratedigger.py's startup / cycle hand-off (#1313).
+"""Deterministic pins for cratedigger.py's startup and cycle hand-off (#1313).
 
-Three claims here were bounded AST parses of ``cratedigger.main``'s source
-until #1313 split its tail into ``run_startup_and_cycle`` and
-``build_cycle_collaborators``: that ``main()`` hands off to ``run_cycle``
-exactly once, that the ``--reconcile-dry-run`` gate sits ahead of that
-hand-off, and that the owner context wires a real
-``ClaimedQueueKeysRegistry()``. All three are executed here instead, over
-the real functions, together with the Phase-1 call-site pin that used to
-parse ``_run_phase1``.
+Four claims here were bounded AST parses of ``cratedigger.main`` or
+``_run_phase1`` before #1313 split ``main()``'s tail into
+``run_startup_and_cycle`` and ``build_cycle_collaborators``: that ``main()``
+hands off to ``run_cycle`` exactly once, that the ``--reconcile-dry-run``
+gate sits ahead of that hand-off, that the owner context wires a real
+``ClaimedQueueKeysRegistry()``, and that Phase 1's context comes from the
+forwarding helper. All four are executed here instead, over the real
+functions.
+
+One bounded AST pin survives, ``TestMainForwardsTheDryRunFlag``, and its
+own docstring says why: ``main()``'s remaining startup gates need live
+infrastructure, so nothing reaches the line that hands the flag on.
 
 Deterministic only, and deliberately NOT left in
-``tests/test_convergence_runner_generated.py`` where the source pins lived:
-a Hypothesis module cannot take part in the mutmut breadth pass (#1317),
-and these are pins, not properties.
+``tests/test_convergence_runner_generated.py`` where the source pins lived.
+A Hypothesis module cannot take part in the mutmut breadth pass (#1317),
+and these are pins rather than properties.
 """
 from __future__ import annotations
 
@@ -119,6 +123,66 @@ class TestCycleHandoff(unittest.TestCase):
         self.assertEqual(reconciled, [source])
 
 
+class TestMainForwardsTheDryRunFlag(unittest.TestCase):
+    """``main()`` hands its own ``--reconcile-dry-run`` flag to the tail.
+
+    The one claim in this area that no behavioural test can reach, and the
+    reason a bounded AST pin survives here at all. #1313 converted four
+    source pins to executions; this is the residue. ``main()``'s tail is
+    one line, ``return run_startup_and_cycle(cfg, pipeline_db_source,
+    reconcile_dry_run=args.reconcile_dry_run)``, and gates that need live
+    infrastructure stand in front of it: ``enforce_beets_startup``,
+    ``probe_startup_paths``, ``assert_schema_current``, and the lock file.
+
+    Passing ``reconcile_dry_run=False`` there would make
+    ``--reconcile-dry-run`` run a full mutating cycle, with pyright silent
+    because the types match. Measured: with that defect planted, this test
+    fails and the four modules that drive ``main()`` or its startup gates
+    (``test_beets_config_startup_entrypoints``, ``test_startup_write_probe``,
+    ``test_config``, ``test_convergence_runner_generated``) stay green
+    across 144 tests. The old
+    ``test_dry_run_gate_precedes_the_cycle_handoff`` pin covered this by
+    accident, through position; this covers it on purpose, through the
+    value.
+
+    Deliberately bounded (`.claude/rules/code-quality.md` § "Semantic
+    source scanners are prohibited"): one ``ast.parse`` of one function,
+    matching one call by name and reading one keyword's spelling. It
+    infers nothing about reachability or values.
+    """
+
+    def test_the_tail_receives_args_reconcile_dry_run(self):
+        import ast
+        import inspect
+
+        tree = ast.parse(inspect.getsource(cratedigger.main))
+        calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "run_startup_and_cycle"
+        ]
+        self.assertEqual(
+            len(calls), 1,
+            "main() hands off to run_startup_and_cycle exactly once")
+        flags = [
+            kw.value for kw in calls[0].keywords
+            if kw.arg == "reconcile_dry_run"
+        ]
+        self.assertEqual(len(flags), 1, "the flag is passed by keyword")
+        value = flags[0]
+        self.assertTrue(
+            isinstance(value, ast.Attribute)
+            and value.attr == "reconcile_dry_run"
+            and isinstance(value.value, ast.Name)
+            and value.value.id == "args",
+            "reconcile_dry_run= must be args.reconcile_dry_run: a literal "
+            "or another flag there silently turns the read-only "
+            "deploy-verification mode into a full mutating cycle, got "
+            f"{ast.dump(value)}",
+        )
+
+
 class TestCycleCollaboratorWiring(unittest.TestCase):
     """What ``main()``'s owner collaborators are actually wired with.
 
@@ -188,10 +252,13 @@ class TestCycleCollaboratorWiring(unittest.TestCase):
         self.assertIs(built.pipeline_db_source, source)
         self.assertIs(built.slskd, self.slskd)
         self.assertIs(built.peer_cache, self.peer_cache)
-        # Both factories were handed THIS cfg — an slskd client built from
+        # Both factories were handed THIS cfg. An slskd client built from
         # another config would talk to another host, and a peer cache from
-        # another config to another Redis.
-        self.assertEqual(self.factory_cfgs, [cfg, cfg])
+        # another config to another Redis. assertIs on each, because a
+        # value-equal CratediggerConfig would satisfy equality.
+        self.assertEqual(len(self.factory_cfgs), 2)
+        for handed in self.factory_cfgs:
+            self.assertIs(handed, cfg)
 
     def test_each_cycle_gets_its_own_registry(self):
         cfg = CratediggerConfig()
@@ -269,9 +336,11 @@ class TestPhase1ContextCallSite(unittest.TestCase):
             phase1_ctx.peer_cache,
             "Phase 1 takes no peer cache: the owner's instance is not "
             "shareable unforked across threads")
-        # Phase 1's own source is opened from the OWNER's config: a factory
-        # handed something else would open a connection to another DB.
-        self.assertEqual(source_factory_cfgs, [owner.cfg])
+        # assertIs, not assertEqual: CratediggerConfig is a frozen
+        # dataclass with eq=True, so any value-equal config would satisfy
+        # equality while proving nothing about which object arrived.
+        self.assertEqual(len(source_factory_cfgs), 1)
+        self.assertIs(source_factory_cfgs[0], owner.cfg)
         self.assertEqual(
             phase1_source.close_calls, 1,
             "Phase 1's own source is closed in the finally, always")
