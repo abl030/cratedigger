@@ -28,6 +28,10 @@ export function setRecentsSub(sub) {
   loadRecents();
 }
 
+/**
+ * Render the Recents sub-navigation (acquisition vs import).
+ * @returns {string}
+ */
 export function renderRecentsSubnav() {
   return `<div class="pipeline-subtabs">
     <button class="p-btn ${state.recentsSub === 'history' ? 'active-status' : ''}" onclick="window.setRecentsSub('history')">History</button>
@@ -37,6 +41,10 @@ export function renderRecentsSubnav() {
   </div>`;
 }
 
+/**
+ * The pipeline-log API URL for the current Recents filter.
+ * @returns {string}
+ */
 export function recentsLogUrl() {
   const params = new URLSearchParams();
   if (state.recentsFilter !== 'all') params.set('outcome', state.recentsFilter);
@@ -44,6 +52,11 @@ export function recentsLogUrl() {
   return `${API}/api/pipeline/log?${params.toString()}`;
 }
 
+/**
+ * Flatten a triage summary into one operator-readable label.
+ * @param {string} summary
+ * @returns {string}
+ */
 export function triageLabelText(summary) {
   const normalized = String(summary || '').replace(/:/g, '').replace(/\s+/g, ' ').trim();
   return normalized ? `triage - ${normalized}` : '';
@@ -297,6 +310,11 @@ function isYoutubeIngestItem(item) {
   return item && item.download_kind === 'youtube_ingest';
 }
 
+/**
+ * Coerce a YouTube-ingest row into the shape the acquisition list renders.
+ * @param {any} row
+ * @returns {any}
+ */
 export function normalizeYoutubeIngestItem(row) {
   return {
     ...row,
@@ -416,6 +434,11 @@ function hasMatchRates(counts) {
     && counts.matches_per_hour_24h != null;
 }
 
+/**
+ * Derive Recents' match-rate figures from the dashboard's search windows.
+ * @param {any[]} windows
+ * @returns {any}
+ */
 export function matchRatesFromDashboardWindows(windows) {
   const rates = {
     matches_24h: 0,
@@ -452,6 +475,10 @@ async function loadRecentsMatchRatesFallback() {
   }
 }
 
+/**
+ * Render the Recents counts strip from cached dashboard state.
+ * @returns {string}
+ */
 export function renderRecentsCounts() {
   return `<div class="recents-counts">
     <div class="count ${state.recentsFilter === 'all' ? 'active' : ''}" onclick="window.setRecentsFilter('all')">
@@ -494,4 +521,3 @@ export async function loadRecents() {
     el.innerHTML = html;
   } catch (e) { el.innerHTML = renderRecentsSubnav() + '<div class="loading">Failed to load log</div>'; }
 }
-

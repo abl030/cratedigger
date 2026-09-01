@@ -446,6 +446,10 @@ export function renderPipeline() {
   void loadPipelineDashboard();
 }
 
+/**
+ * Render the pipeline view's own tab strip.
+ * @returns {string}
+ */
 export function renderPipelineNav() {
   const refreshAction = state.pipelineView === 'dashboard'
     ? 'window.loadPipelineDashboard()'
@@ -724,4 +728,3 @@ export async function updateStatus(id, newStatus) {
     }
   } catch (e) { toast('Update failed', true); }
 }
-

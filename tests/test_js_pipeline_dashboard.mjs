@@ -28,6 +28,41 @@ import { stubGlobals, suite } from './js_harness.mjs';
 
 const t = suite(import.meta.url);
 
+t.section('renderCoverageCard() tones the Searched 24h count by severity');
+{
+  // The three-way ladder had no assertion at all: swapping metric-bad for
+  // metric-warn survived, and so did hard-wiring metric-good, which paints
+  // a never-searched backlog healthy green (#1313 mutant runner, D3/D3b).
+  state.pipelineMatchGraphOpen = false;
+  state.pipelineHourlyMatchGraphOpen = false;
+  state.pipelineDailyMatchGraphOpen = false;
+  const searchedRow = (coverage) => {
+    const html = renderCoverageCard(coverage);
+    const match = html.match(/Searched 24h<\/span><strong class="([^"]*)"/);
+    return match ? match[1] : '(no Searched 24h row)';
+  };
+  t.equal(
+    searchedRow({ wanted_total: 10, wanted_searched_24h: 10, wanted_unsearched_24h: 0,
+      wanted_never_searched: 0 }),
+    'metric-good',
+    'nothing stale in 24h is good, whatever else the cohort looks like');
+  t.equal(
+    searchedRow({ wanted_total: 10, wanted_searched_24h: 8, wanted_unsearched_24h: 2,
+      wanted_never_searched: 0 }),
+    'metric-warn',
+    'stale but every request searched at least once is a warning');
+  t.equal(
+    searchedRow({ wanted_total: 10, wanted_searched_24h: 8, wanted_unsearched_24h: 2,
+      wanted_never_searched: 1 }),
+    'metric-bad',
+    'a request the pipeline has NEVER searched is bad, never a warning');
+  t.equal(
+    searchedRow({ wanted_total: 10, wanted_searched_24h: 0, wanted_unsearched_24h: 10,
+      wanted_never_searched: 10 }),
+    'metric-bad',
+    'an entirely unsearched backlog never paints healthy');
+}
+
 t.section('renderCoverageCard() shows found-enqueue match rates');
 {
   state.pipelineMatchGraphOpen = false;

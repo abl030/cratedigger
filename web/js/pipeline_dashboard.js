@@ -10,7 +10,6 @@
 import { state } from './state.js';
 import { esc, awstDate, awstDateTime, awstTime } from './util.js';
 
-
 /**
  * Compose the full dashboard (nav, header, all cards) into `el`.
  * @param {string} navHtml - nav strip HTML from the queue module
@@ -56,6 +55,12 @@ export function renderPipelineDashboard(navHtml, data, el) {
   `;
 }
 
+/**
+ * Render the wanted-backlog trend card: current count, per-window drain,
+ * and the ETA of the first window actually draining.
+ * @param {any} trend
+ * @returns {string}
+ */
 export function renderWantedTrendCard(trend) {
   const current = trend.current_wanted == null ? null : Number(trend.current_wanted);
   const windows = Array.isArray(trend.windows) ? trend.windows : [];
@@ -140,6 +145,11 @@ function formatWantedTrendWindow(w) {
   return `${direction} ${formatDecimal(Math.abs(w.delta_per_hour))}/hr (${formatSignedCount(delta)})`;
 }
 
+/**
+ * Render the peer-activity card.
+ * @param {any} peers
+ * @returns {string}
+ */
 export function renderPeersCard(peers) {
   const totals = peers.totals || {};
   const days = /** @type {any[]} */ (peers.days || []);
@@ -192,6 +202,11 @@ function renderRedisCard(redis) {
   `;
 }
 
+/**
+ * Render the disk-coverage card.
+ * @param {any} dc
+ * @returns {string}
+ */
 export function renderDiskCoverageCard(dc) {
   if (!dc) {
     return `
@@ -237,7 +252,11 @@ export function renderMarkIncompleteButton(row) {
     : `<button class="p-btn" onclick="window.toggleMarkIncomplete(${row.request_id}, true, this)">Mark incomplete</button>`;
 }
 
-/** Render the persisted read-only source/catalog/files census. */
+/**
+ * Render the persisted read-only source/catalog/files census.
+ * @param {any} census
+ * @returns {string}
+ */
 export function renderLibraryCompletenessCard(census) {
   const c = census || {};
   const runButton = `<button class="p-btn" onclick="window.refreshLibraryCensus(this)">Run census now</button>`;
@@ -591,6 +610,12 @@ function renderRetagDivergenceItemRow(item) {
   `;
 }
 
+/**
+ * Render the request-coverage card: status counts and the derived
+ * match-rate metrics, each toned by severity.
+ * @param {any} coverage
+ * @returns {string}
+ */
 export function renderCoverageCard(coverage) {
   const wanted = coverage.wanted_total || 0;
   const searched24 = coverage.wanted_searched_24h || 0;
@@ -698,6 +723,12 @@ function formatChartRate(value, unit) {
   return formatMatchRate(value);
 }
 
+/**
+ * Return ``coverage`` with match-rate fields derived from search windows.
+ * @param {any} coverage
+ * @param {any[]} windows
+ * @returns {any}
+ */
 export function withCoverageMatchRates(coverage, windows) {
   if (
     coverage.matches_per_hour_6h != null
@@ -809,6 +840,11 @@ function renderCycleOutliers(rows) {
   `;
 }
 
+/**
+ * Render the heaviest peer-browse queries as a metric list.
+ * @param {any} peers
+ * @returns {string}
+ */
 export function renderPeerBrowseHeavyQueries(peers) {
   const rows = /** @type {any[]} */ (peers.heavy_queries || []);
   const hours = Number(peers.heavy_query_hours || 24);
@@ -974,6 +1010,11 @@ function renderUnfindableBacklogChart(points) {
   `;
 }
 
+/**
+ * Coerce a persisted unfindable-backlog series into chartable points.
+ * @param {any} points
+ * @returns {{label: string, value: number}[]}
+ */
 export function normalizeUnfindableBacklogSeries(points) {
   return (Array.isArray(points) ? points : []).map(point => {
     const row = point || {};
@@ -1073,4 +1114,3 @@ function formatPercent(value) {
   if (value == null || Number.isNaN(Number(value))) return 'n/a';
   return `${(Number(value) * 100).toFixed(1)}%`;
 }
-

@@ -553,13 +553,6 @@ function thresholdForGroup(requestId) {
   return normalizeThreshold(readStorage(thresholdStorageKey(requestId)));
 }
 
-/**
- * @returns {boolean}
- */
-function deleteUnmatchedOnConverge() {
-  return true;
-}
-
 function rerenderWrongMatches() {
   if (_lastData && _lastEl) {
     renderWrongMatches(_lastData, _lastEl);
@@ -1575,7 +1568,6 @@ export async function pollImportJob(jobId, btn, logId) {
   }
   btn.textContent = 'Queued';
 }
-
 
 /**
  * Queue every green candidate for a release and delete the rest.

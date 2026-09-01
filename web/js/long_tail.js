@@ -49,7 +49,7 @@ import {
  *
  * @type {string}
  */
-export const MISSING_BAND = 'missing';
+const MISSING_BAND = 'missing';
 
 /**
  * Canonical band ordering for the tab strip: `Missing` first, then the
@@ -64,7 +64,7 @@ export const MISSING_BAND = 'missing';
  *
  * @type {string[]}
  */
-export const BAND_ORDER = [
+const BAND_ORDER = [
   'missing',
   'unknown',
   'poor',
@@ -579,5 +579,3 @@ export function onLongTailSearchInput(value) {
     run();
   }
 }
-
-

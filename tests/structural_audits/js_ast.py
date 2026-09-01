@@ -369,15 +369,13 @@ def _fixture_registration_nodes(
                 renderer_nodes.add(_node_key(identifiers[0]))
                 allowed.add(_node_key(identifiers[1]))
 
-    registration_is_import = any(
-        parents.get(key) is not None
-        and parents[key].type == "import_specifier"
-        for key in allowed
-    )
+    # `allowed` is now populated at exactly one site, from a child of an
+    # `import_specifier`, so a separate `registration_is_import` term would
+    # be true whenever `allowed` is nonempty and the cardinality check below
+    # already covers that. It went with the `__test__` destructuring loop
+    # (#1313); two mutants proved the pair mutually redundant beforehand.
     module_registration_valid = (
-        len(module_imports) == 1
-        and not has_opaque_module_import
-        and registration_is_import
+        len(module_imports) == 1 and not has_opaque_module_import
     )
     if (
         len(allowed) != 1
@@ -414,13 +412,11 @@ def _validate_renderer_references(
         if node.type == "call_expression":
             reference = _payload_call_reference(node, source_bytes, call_name)
             if reference is not None:
-                if declaration_nodes and not _identifier_is(
-                    node.child_by_field_name("function"), source_bytes, call_name
-                ):
-                    raise ValueError(
-                        f"registered fixture {call_name} must be called through "
-                        "its direct local alias"
-                    )
+                # `_payload_call_reference` returns non-None only when the
+                # callee IS the bare identifier, so a "must be called
+                # through its direct local alias" guard here could never
+                # fire. It was reachable while a `__test__` member callee
+                # was also accepted; that branch went with the bags (#1313).
                 allowed.add(_node_key(reference))
         elif node.type == "import_specifier":
             identifiers = [

@@ -119,9 +119,9 @@
  * Pure / DOM-free helpers (the #481 console-state transitions and the
  * panel render fragments) are named exports the Node unit suite imports
  * directly. The YouTube state classifier and console emphasis selector are
- * not here at all: they live in `util.js`, the shared pure home, and the
- * suite imports them from there. Rendering and fetch live alongside the
- * pure helpers but never leak into them.
+ * imported from `util.js`, their shared pure home, and used here but not
+ * re-exported; the suite imports them from `util.js` too. Rendering and
+ * fetch live alongside the pure helpers but never leak into them.
  *
  * Shape mirrors `web/js/search_plan.js` / `web/js/recents.js`:
  * `// @ts-check`, ES6 module, JSDoc on exports.
@@ -228,7 +228,7 @@ export function longTailConsoleGeneration() {
  * @param {number} generation
  * @returns {boolean}
  */
-export function isLongTailConsoleGenerationCurrent(generation) {
+function isLongTailConsoleGenerationCurrent(generation) {
   return generation === consoleLifecycleGeneration;
 }
 
@@ -2136,4 +2136,3 @@ async function refetchLongTailProcessingRow(
   }
   return projection;
 }
-
