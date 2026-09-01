@@ -509,6 +509,29 @@ t.section('element() gives the fields render code touches');
   t.equal(seeded.extra, 1, 'an unknown seeded field is kept');
 }
 
+t.section('element() tracks connection, children and focus');
+{
+  // These four fields are why the factory had no callers: every suite that
+  // needed a button hand-rolled them beside the attribute map.
+  const parent = element({ isConnected: true });
+  const child = element();
+  t.equal(child.isConnected, false, 'a fresh node is disconnected, as in a real DOM');
+  t.equal(parent.appendChild(child), child, 'appendChild hands the child back');
+  t.equal(child.isConnected, true, 'appendChild connects the child');
+  t.deepEqual(parent.children, [child], 'and records it under the parent');
+
+  child.focus();
+  child.focus();
+  t.equal(child.focused, 2, 'focus() counts its calls');
+
+  child.remove();
+  t.equal(child.removed, true, 'remove() flags the child');
+  t.equal(child.isConnected, false, 'and disconnects it');
+  t.deepEqual(parent.children, [child],
+    'remove() does not reach into the parent, which is what the DOM detach '
+    + 'assertions in test_js_release_actions.mjs read isConnected for');
+}
+
 t.section('element() attributes live beside the element, never on it');
 {
   // The first version assigned `this[name] = value`, which is less faithful

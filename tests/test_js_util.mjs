@@ -1194,7 +1194,7 @@ t.equal(extractTracklist(null).length, 0, 'extractTracklist(null) → []');
 // renderReplaceButton (release_actions.js) — U9
 import { renderReplaceButton } from '../web/js/release_actions.js';
 
-import { stubGlobals, suite } from './js_harness.mjs';
+import { element, stubGlobals, suite } from './js_harness.mjs';
 
 const stdBtn = renderReplaceButton({
   mode: 'standard',
@@ -2127,17 +2127,13 @@ t.section('long_tail_console.js console persistence (#398 / #481 item 1)');
   function fakeDocument() {
     const byId = new Map();
     let reloads = 0;
-    const makeElement = (tag) => {
-      const node = {
-        tag, id: '', className: '', textContent: '', type: '',
-        children: [], attributes: {}, listeners: {},
-        setAttribute(name, value) { this.attributes[name] = value; },
-        addEventListener(name, fn) { this.listeners[name] = fn; },
-        append(...kids) { this.children.push(...kids); },
-        appendChild(kid) { this.children.push(kid); return kid; },
-      };
-      return node;
-    };
+    const makeElement = (tag) => element({
+      tag,
+      type: '',
+      listeners: {},
+      addEventListener(name, fn) { this.listeners[name] = fn; },
+      append(...kids) { this.children.push(...kids); },
+    });
     const doc = {
       body: makeElement('body'),
       location: { reload() { reloads += 1; } },
@@ -2173,9 +2169,9 @@ t.section('long_tail_console.js console persistence (#398 / #481 item 1)');
     );
     const overlay = doc.getElementById('session-expired-overlay');
     t.ok(overlay !== null, 'an interrupted response shows the expired-session overlay');
-    t.equal(overlay.attributes['role'], 'alertdialog',
+    t.equal(overlay.getAttribute('role'), 'alertdialog',
       'the overlay announces itself as an alert dialog');
-    t.equal(overlay.attributes['aria-modal'], 'true',
+    t.equal(overlay.getAttribute('aria-modal'), 'true',
       'the overlay is a modal for assistive technology');
   }
 

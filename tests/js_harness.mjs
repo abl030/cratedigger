@@ -462,6 +462,18 @@ export function stubGlobals(values) {
  * A minimal stand-in DOM element: the fields production render code
  * touches, plus whatever the caller seeds.
  *
+ * The field list is not a guess. It is the union of what the suites
+ * hand-rolled before adopting this factory (`test_js_release_actions.mjs`'s
+ * `fakeDomElement`, `test_js_discography.mjs`'s local `element(tag)`, the
+ * processing-lock button in `test_js_analysis.mjs` /
+ * `test_js_long_tail_console.mjs`, and `test_js_wrong_matches.mjs`'s
+ * `fakeElement`), which is why `isConnected`, `children`, `focused` and the
+ * attribute map all live here rather than at five call sites.
+ *
+ * A fresh node is `isConnected: false`, as in a real DOM: it is connected
+ * by `appendChild`, by a caller's `insertAdjacentElement`, or by seeding
+ * the field. `remove()` reverses that and flags `removed`.
+ *
  * @param {Object} [initial]
  * @returns {any}
  */
@@ -475,14 +487,27 @@ export function element(initial = {}) {
   // (`.claude/rules/test-fidelity.md` Rule B in spirit).
   const attributes = new Map();
   return {
+    id: '',
     textContent: '',
     innerHTML: '',
     className: '',
     disabled: false,
     style: {},
     dataset: {},
+    children: [],
+    isConnected: false,
+    focused: 0,
     removed: false,
-    remove() { this.removed = true; },
+    focus() { this.focused += 1; },
+    remove() {
+      this.removed = true;
+      this.isConnected = false;
+    },
+    appendChild(child) {
+      child.isConnected = true;
+      this.children.push(child);
+      return child;
+    },
     querySelector() { return null; },
     querySelectorAll() { return []; },
     setAttribute(name, value) { attributes.set(name, String(value)); },

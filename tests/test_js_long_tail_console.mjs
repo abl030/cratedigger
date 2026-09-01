@@ -41,7 +41,7 @@ import { loadLongTail, renderLongTailRow } from '../web/js/long_tail.js';
 import { renderPipeline, setPipelineView } from '../web/js/pipeline.js';
 import { state } from '../web/js/state.js';
 
-import { stubGlobals, suite } from './js_harness.mjs';
+import { element, stubGlobals, suite } from './js_harness.mjs';
 
 const t = suite(import.meta.url);
 
@@ -572,24 +572,17 @@ for (const scenario of [
     invoke: (id, control) => longTailDeleteRequest(id, control),
   },
 ]) {
-  const attributes = new Map([['data-pipeline-request-id', String(scenario.requestId)]]);
   const inserted = [];
-  const control = {
-    dataset: {},
-    disabled: false,
+  const control = element({
     textContent: scenario.name,
-    style: {},
     isConnected: true,
-    setAttribute(name, value) { attributes.set(name, value); },
-    removeAttribute(name) { attributes.delete(name); },
-    getAttribute(name) { return attributes.get(name) || null; },
-    focus() {},
-    insertAdjacentElement(_position, element) {
-      element.isConnected = true;
-      inserted.push(element);
+    insertAdjacentElement(_position, child) {
+      child.isConnected = true;
+      inserted.push(child);
     },
-  };
-  const live = { textContent: '', setAttribute() {} };
+  });
+  control.setAttribute('data-pipeline-request-id', String(scenario.requestId));
+  const live = element();
   state.longTail.rows = [{
     id: scenario.requestId,
     target_format: null,
@@ -600,22 +593,11 @@ for (const scenario of [
     confirm: () => true,
     document: {
       activeElement: control,
-      body: { appendChild() {} },
-      createElement() {
-        return {
-          children: [],
-          className: '',
-          id: '',
-          textContent: '',
-          isConnected: false,
-          setAttribute() {},
-          appendChild(child) { this.children.push(child); },
-          remove() { this.isConnected = false; },
-        };
-      },
+      body: element({ isConnected: true }),
+      createElement() { return element(); },
       getElementById(id) {
         if (id === 'processing-lock-live-region') return live;
-        return inserted.find(element => element.id === id && element.isConnected) || null;
+        return inserted.find(node => node.id === id && node.isConnected) || null;
       },
       querySelectorAll() { return [control]; },
     },
@@ -667,7 +649,7 @@ for (const scenario of [
     `${scenario.name} conflict refetches only its request`,
   );
   t.equal(
-    attributes.get('aria-disabled'),
+    control.getAttribute('aria-disabled'),
     'true',
     `${scenario.name} control becomes aria-disabled`,
   );

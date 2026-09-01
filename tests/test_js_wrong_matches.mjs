@@ -41,7 +41,7 @@ import {
 } from '../web/js/wrong-matches.js';
 import { esc } from '../web/js/util.js';
 
-import { stubGlobals, suite } from './js_harness.mjs';
+import { domStub, element, stubGlobals, suite } from './js_harness.mjs';
 
 const t = suite(import.meta.url);
 
@@ -73,25 +73,6 @@ function installStorage() {
 }
 
 /**
- * A minimal stand-in DOM element: `textContent`/`disabled`/`style`, a
- * `remove()` that just flags itself, and whatever fields the caller wants
- * to seed. Shared by every test that needs `document.getElementById` to
- * resolve a specific button/badge id (issue #1086 review blocker 2).
- * @param {Object} [initial]
- * @returns {any}
- */
-function fakeElement(initial = {}) {
-  return {
-    textContent: '',
-    disabled: false,
-    style: {},
-    removed: false,
-    remove() { this.removed = true; },
-    ...initial,
-  };
-}
-
-/**
  * Drain pending microtasks. Used after a call that kicks off a
  * fire-and-forget background chain (the render-time triage attach —
  * issue #1106) so a test can let it settle to a terminal state before
@@ -107,19 +88,15 @@ async function flushMicrotasks(times = 30) {
 
 /**
  * `installDom()` always wires `wrong-matches-content` and `toast`; the
- * returned `elements` Map is an open registry a test can `.set(id, el)`
- * BEFORE exercising code that looks up an id `installDom` doesn't know
- * about by default (`wm-delete-group-btn-<id>`, `wm-entry-card-<id>`,
- * `wm-release-<id>`, …) — a shared extension point, not a one-off inline
- * `getElementById` override per test.
+ * returned `elements` object is an open registry a test can write an id
+ * into BEFORE exercising code that looks it up (`wm-delete-group-btn-<id>`,
+ * `wm-entry-card-<id>`, `wm-release-<id>`, …) — a shared extension point,
+ * not a one-off inline `getElementById` override per test. `domStub` reads
+ * the same object on every lookup, so a later write is visible.
  */
 function installDom() {
-  const wrongMatches = { innerHTML: '' };
-  const toast = {
-    textContent: '',
-    className: '',
-    style: { display: 'none' },
-  };
+  const wrongMatches = element();
+  const toast = element({ style: { display: 'none' } });
   // Plain object stand-ins for the triage toolbar buttons (issues #1083 /
   // #1106) — real production code re-fetches BOTH by id at every
   // mutation point, never a node captured once at click or render time,
@@ -128,19 +105,22 @@ function installDom() {
   // and detaches any previously-captured node. Registered in the open
   // element map (issue #1086) so a test can `.set()` a DIFFERENT object
   // under the same id to simulate exactly that detachment.
-  const cleanupBtn = { id: 'wm-bulk-triage-btn', disabled: false, textContent: 'Cleanup Wrong Matches (0)', style: {} };
-  const stopBtn = { id: 'wm-bulk-triage-stop-btn', disabled: true, textContent: 'Stop' };
-  const elements = new Map([
-    ['wrong-matches-content', wrongMatches],
-    ['toast', toast],
-    ['wm-bulk-triage-btn', cleanupBtn],
-    ['wm-bulk-triage-stop-btn', stopBtn],
-  ]);
-  globalThis.document = {
-    getElementById(id) {
-      return elements.has(id) ? elements.get(id) : null;
-    },
+  const cleanupBtn = element({
+    id: 'wm-bulk-triage-btn',
+    textContent: 'Cleanup Wrong Matches (0)',
+  });
+  const stopBtn = element({
+    id: 'wm-bulk-triage-stop-btn',
+    disabled: true,
+    textContent: 'Stop',
+  });
+  const elements = {
+    'wrong-matches-content': wrongMatches,
+    toast,
+    'wm-bulk-triage-btn': cleanupBtn,
+    'wm-bulk-triage-stop-btn': stopBtn,
   };
+  globalThis.document = domStub(elements);
   globalThis.setTimeout = (fn) => {
     fn();
     return 0;
@@ -226,45 +206,26 @@ t.section('pollImportJob() surfaces historical recovery while convergence contin
 
 t.section('forceImportWrongMatch() maps processing conflict to the shared locked row state');
 {
-  const attributes = new Map();
   const inserted = [];
-  const btn = {
-    dataset: {},
-    disabled: false,
+  const btn = element({
     textContent: 'Force Import',
-    style: {},
     isConnected: true,
-    setAttribute(name, value) { attributes.set(name, value); },
-    removeAttribute(name) { attributes.delete(name); },
-    getAttribute(name) { return attributes.get(name) || null; },
-    focus() {},
-    insertAdjacentElement(_position, element) {
-      element.isConnected = true;
-      inserted.push(element);
+    insertAdjacentElement(_position, child) {
+      child.isConnected = true;
+      inserted.push(child);
     },
-  };
-  const live = { textContent: '', setAttribute() {} };
+  });
+  const live = element();
   const calls = [];
   const globals = stubGlobals({
     confirm: () => true,
     document: {
       activeElement: btn,
-      body: { appendChild() {} },
-      createElement() {
-        return {
-          children: [],
-          className: '',
-          id: '',
-          textContent: '',
-          isConnected: false,
-          setAttribute() {},
-          appendChild(child) { this.children.push(child); },
-          remove() { this.isConnected = false; },
-        };
-      },
+      body: element({ isConnected: true }),
+      createElement() { return element(); },
       getElementById(id) {
         if (id === 'processing-lock-live-region') return live;
-        return inserted.find(element => element.id === id && element.isConnected) || null;
+        return inserted.find(node => node.id === id && node.isConnected) || null;
       },
       querySelectorAll() { return [btn]; },
     },
@@ -312,7 +273,7 @@ t.section('forceImportWrongMatch() maps processing conflict to the shared locked
   await forceImportWrongMatch(100, btn);
   t.equal(calls.join(','), '/api/pipeline/force-import,/api/pipeline/42',
     'force import refetches only the owner request');
-  t.equal(attributes.get('aria-disabled'), 'true', 'force-import control locks');
+  t.equal(btn.getAttribute('aria-disabled'), 'true', 'force-import control locks');
   t.equal(btn.textContent, 'waiting to import', 'fresh owner state is rendered');
   t.contains(live.textContent, 'job #71', 'exact owner is announced');
   globals.restore();
@@ -383,20 +344,12 @@ t.section('setWrongMatchConvergeThreshold() updates expanded group in place');
   renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
   const originalHtml = dom.wrongMatches.innerHTML;
   const elements = new Map();
-  const el = (initial = {}) => ({
-    textContent: '',
-    disabled: false,
-    style: {},
-    removed: false,
-    remove() { this.removed = true; },
-    ...initial,
-  });
-  elements.set('wm-green-count-42', el());
-  elements.set('wm-converge-btn-42', el({ textContent: 'Converge (2)' }));
+  elements.set('wm-green-count-42', element());
+  elements.set('wm-converge-btn-42', element({ textContent: 'Converge (2)' }));
   for (const id of [100, 101, 102]) {
-    elements.set(`wm-entry-card-${id}`, el());
-    elements.set(`wm-entry-green-${id}`, el());
-    elements.set(`wm-entry-dist-${id}`, el());
+    elements.set(`wm-entry-card-${id}`, element());
+    elements.set(`wm-entry-green-${id}`, element());
+    elements.set(`wm-entry-dist-${id}`, element());
   }
   globalThis.document.getElementById = (id) => {
     if (id === 'wrong-matches-content') return dom.wrongMatches;
@@ -870,8 +823,11 @@ t.section('stopWrongMatchTriage() mutates the CURRENTLY registered Stop node, ne
   // after the call can only mean one of them was actually mutated.
   const staleStopBtn = dom.stopBtn;
   staleStopBtn.disabled = false;
-  const freshStopBtn = { id: 'wm-bulk-triage-stop-btn', disabled: false, textContent: 'Stop' };
-  dom.elements.set('wm-bulk-triage-stop-btn', freshStopBtn);
+  const freshStopBtn = element({
+    id: 'wm-bulk-triage-stop-btn',
+    textContent: 'Stop',
+  });
+  dom.elements['wm-bulk-triage-stop-btn'] = freshStopBtn;
   globalThis.fetch = async (url) => {
     if (url === '/api/wrong-matches/triage/cancel') {
       return { ok: true, status: 200, json: async () => ({ state: 'running' }) };
@@ -2190,9 +2146,9 @@ t.section('removeWrongMatchEntry() keeps the group Delete All button actionable-
   data.groups[0].entries[1].path_unavailable = true; // logId 101 stays unavailable
   renderWrongMatches(data, dom.wrongMatches);
 
-  const groupBtn = fakeElement({ textContent: 'Delete All (2 of 3)' });
-  dom.elements.set('wm-delete-group-btn-42', groupBtn);
-  dom.elements.set('wm-entry-card-100', fakeElement());
+  const groupBtn = element({ textContent: 'Delete All (2 of 3)' });
+  dom.elements['wm-delete-group-btn-42'] = groupBtn;
+  dom.elements['wm-entry-card-100'] = element();
 
   // Remove the AVAILABLE candidate (id 100): 2 candidates remain, only one
   // (id 102) actionable.
@@ -2205,7 +2161,7 @@ t.section('removeWrongMatchEntry() keeps the group Delete All button actionable-
     'one actionable candidate remains, so the group button stays enabled');
 
   // Must still work: removing the LAST actionable candidate disables it.
-  dom.elements.set('wm-entry-card-102', fakeElement());
+  dom.elements['wm-entry-card-102'] = element();
   removeWrongMatchEntry(102);
 
   t.equal(groupBtn.textContent, 'Delete All (0 of 1)',
