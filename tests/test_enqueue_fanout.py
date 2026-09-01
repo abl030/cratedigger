@@ -39,6 +39,7 @@ from lib.download_ownership import DownloadOwnershipWriter
 from lib.enqueue import (
     ClaimedQueueKeysRegistry,
     DownloadOwnershipClaim,
+    EnqueueAttempt,
     _enqueue_with_claim_outcome,
     _WorkerPipelineDBSource,
     get_album_tracks,
@@ -50,7 +51,7 @@ from lib.grab_list import DownloadFile, GrabListEntry
 from lib.matching import MatchResult
 from lib.pipeline_db import TransferLedgerRow
 from lib.processing_paths import attempt_fingerprint_of_files
-from lib.quality import ActiveDownloadState
+from lib.quality import ActiveDownloadState, CandidateScore
 from lib.slskd_transfers import SlskdEnqueueOutcome
 from tests.fakes import (
     DenylistEntry,
@@ -935,6 +936,237 @@ class TestEnqueueFailureTracking(unittest.TestCase):
 
         self.assertFalse(attempt.matched)
         self.assertTrue(attempt.enqueue_failed)
+
+
+def _candidate_score(username: str, dir_: str) -> CandidateScore:
+    """One forensic score row, in the cheap sub-count-gate shape."""
+    return CandidateScore(
+        username=username, dir=dir_, filetype="flac",
+        matched_tracks=0, total_tracks=1, avg_ratio=0.0,
+        missing_titles=[], file_count=0,
+    )
+
+
+def _scored_match(
+    username: str,
+    *,
+    matched: bool,
+    candidates: int,
+    skips: int,
+    empty_after_filter: bool = False,
+) -> MatchResult:
+    """A MatchResult carrying forensics, matched or not.
+
+    ``empty_after_filter`` is a match whose directory holds no enqueueable
+    file — the world both lanes handle with their own "nothing remained
+    after filtering and admission" return. Without it those two return
+    sites are unreachable from any generated world (issue #1313 review,
+    reader F3).
+    """
+    file_dir = f"Music\\{username}\\Album"
+    files = (
+        [] if empty_after_filter
+        else [{"filename": "01 - Track.flac", "size": 123}]
+    )
+    return MatchResult(
+        matched=matched,
+        directory=(
+            {"directory": file_dir, "files": files} if matched else {}
+        ),
+        file_dir=file_dir if matched else "",
+        candidates=[
+            _candidate_score(username, f"{file_dir}\\{i}")
+            for i in range(candidates)
+        ],
+        pre_filter_skip_count=skips,
+    )
+
+
+def run_forensics_world(
+    plan: list[tuple[bool, int, int]],
+    *,
+    enqueue_succeeds: bool = True,
+    lane: str = "single",
+    empty_after_filter: bool = False,
+) -> tuple[EnqueueAttempt, list[tuple[int, int]]]:
+    """Drive one real enqueue lane over a per-peer ``(matched, candidates,
+    skips)`` plan, returning the attempt and what ``match_fn`` was asked for.
+
+    ``consumed`` is recorded per call rather than derived from ``plan``, so
+    the expectation follows the lane's real iteration — the single lane walks
+    peers until one is kept, the multi lane takes each disc's first match.
+    Shared by the deterministic pins here and the generated property in
+    ``tests/test_enqueue_admission_generated.py`` (issue #1313 review).
+    """
+    cfg = _make_cfg(browse_top_k=20)
+    users = _ranked_users(len(plan))
+    ctx = _make_ctx(cfg, user_upload_speed=_upload_speeds(users))
+    results = _make_results(users)
+    specs = dict(zip(users, plan, strict=True))
+    consumed: list[tuple[int, int]] = []
+
+    def match_fn(_tracks, _ft, _dirs, username, _ctx):
+        matched, candidates, skips = specs[username]
+        consumed.append((candidates, skips))
+        return _scored_match(
+            username, matched=matched, candidates=candidates, skips=skips,
+            empty_after_filter=empty_after_filter,
+        )
+
+    with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+         patch(
+             "lib.enqueue.slskd_do_enqueue",
+             return_value=[MagicMock()] if enqueue_succeeds else None,
+         ):
+        if lane == "multi":
+            release = MagicMock()
+            release.media = [
+                MagicMock(medium_number=1), MagicMock(medium_number=2)]
+            attempt = try_multi_enqueue(
+                release, _multi_disc_tracks(), results, "flac", ctx,
+                match_fn=match_fn,
+            )
+        else:
+            attempt = try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=match_fn,
+            )
+    return attempt, consumed
+
+
+class TestAttemptReportsItsForensics(unittest.TestCase):
+    """Whatever the outcome, an attempt reports what matching cost it.
+
+    ``search_log.candidates`` and ``search_log.pre_filter_skip_count`` are
+    the request's search history, and both are populated from the returned
+    ``EnqueueAttempt`` regardless of whether anything matched. Before issue
+    #1313 every one of the two impls' nineteen return sites repeated the two
+    keyword arguments by hand. Dropping the skip count would have gone
+    unnoticed by every test in the tree; dropping the candidates would have
+    been caught only indirectly, by two integration slices asserting the
+    persisted ``search_log`` row.
+    """
+
+    def _assert_reports_every_visit(self, attempt, consumed):
+        self.assertEqual(
+            len(attempt.candidates),
+            sum(candidates for candidates, _ in consumed),
+        )
+        self.assertEqual(
+            attempt.pre_filter_skip_count,
+            sum(skips for _, skips in consumed),
+        )
+
+    def test_a_match_still_reports_the_peers_it_walked_past(self):
+        """The decisive world: matching on the second peer must not throw
+        away the first peer's skipped dirs, which is the whole reason the
+        skip count is accumulated rather than read off the winner."""
+        attempt, consumed = run_forensics_world(
+            [(False, 2, 3), (True, 1, 1)])
+
+        self.assertTrue(attempt.matched)
+        self.assertEqual(len(consumed), 2)
+        self.assertEqual(len(attempt.candidates), 3)
+        self.assertEqual(attempt.pre_filter_skip_count, 4)
+        self._assert_reports_every_visit(attempt, consumed)
+
+    def test_an_attempt_that_matches_nothing_still_reports_them_all(self):
+        attempt, consumed = run_forensics_world(
+            [(False, 1, 2), (False, 3, 0)])
+
+        self.assertFalse(attempt.matched)
+        self.assertEqual(len(attempt.candidates), 4)
+        self.assertEqual(attempt.pre_filter_skip_count, 2)
+        self._assert_reports_every_visit(attempt, consumed)
+
+    def test_a_failed_enqueue_reports_them_too(self):
+        attempt, consumed = run_forensics_world(
+            [(True, 2, 5)], enqueue_succeeds=False)
+
+        self.assertFalse(attempt.matched)
+        self.assertTrue(attempt.enqueue_failed)
+        self.assertEqual(len(attempt.candidates), 2)
+        self.assertEqual(attempt.pre_filter_skip_count, 5)
+        self._assert_reports_every_visit(attempt, consumed)
+
+    def test_the_multi_disc_lane_reports_every_disc_it_walked(self):
+        """The multi lane restarts matching per disc, so the same peers get
+        asked twice and both walks count. Its fifteen return sites were
+        reached by none of the pins above (issue #1313 review, reader F3)."""
+        attempt, consumed = run_forensics_world(
+            [(False, 1, 2), (True, 2, 1)], lane="multi")
+
+        self.assertGreater(len(consumed), 2)
+        self._assert_reports_every_visit(attempt, consumed)
+
+
+    def _multi_disc_partial(self, discs_that_match: int):
+        """Drive try_multi_enqueue where only some discs find a folder."""
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db)
+        release = MagicMock()
+        release.media = [MagicMock(medium_number=1), MagicMock(medium_number=2)]
+        tracks = _multi_disc_tracks()
+
+        def match_fn(disc_tracks, _ft, _dirs, username, _ctx):
+            disc = disc_tracks[0]["mediumNumber"]
+            return _scored_match(
+                username,
+                matched=disc <= discs_that_match,
+                candidates=1,
+                skips=1,
+            )
+
+        def accept(*, username, files, file_dir, ctx, **_ledger_kwargs):
+            return SlskdEnqueueOutcome(status="accepted", downloads=[
+                DownloadFile(
+                    filename=files[0]["filename"],
+                    id=f"transfer-{username}",
+                    file_dir=file_dir,
+                    username=username,
+                    size=files[0]["size"],
+                ),
+            ])
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch(
+                 "lib.enqueue.slskd_enqueue_with_outcome", side_effect=accept,
+             ):
+            return try_multi_enqueue(
+                release, tracks, _make_results(_ranked_users(2)), "flac", ctx,
+                match_fn=match_fn,
+            ), db
+
+    def test_a_multi_disc_album_missing_a_disc_is_not_a_match(self):
+        """The world no multi-disc test built, and the one that crashes.
+
+        Disc 1 finds a folder, disc 2 does not, so the candidate is
+        incomplete and the attempt must report ``matched=False``. Nothing
+        constructed this world before, so both of the multi lane's
+        not-every-disc returns could report ``matched=True`` with no
+        downloads and the entire enqueue suite stayed green (issue #1313,
+        mutant runner mutants 3 and 6). That is not a cosmetic wrong flag:
+        ``_try_filetype`` asserts ``attempt.downloads is not None`` the
+        moment ``matched`` is true, so it takes the cycle down with a bare
+        AssertionError the next time an album is missing a disc.
+        """
+        attempt, db = self._multi_disc_partial(discs_that_match=1)
+
+        self.assertFalse(attempt.matched)
+        self.assertIsNone(attempt.downloads)
+        self.assertFalse(attempt.enqueue_failed)
+        # Still reports what the walk cost, on the incomplete-candidate path.
+        self.assertTrue(attempt.candidates)
+        self.assertTrue(attempt.pre_filter_skip_count)
+        self.assertEqual(db.request(1)["status"], "wanted")
+
+    def test_a_multi_disc_album_finding_every_disc_still_matches(self):
+        """Must-still-work: the guard above must not refuse a whole album."""
+        attempt, _db = self._multi_disc_partial(discs_that_match=2)
+
+        self.assertTrue(attempt.matched)
+        self.assertIsNotNone(attempt.downloads)
 
 
 class TestDownloadOwnershipPreclaim(unittest.TestCase):
@@ -2980,6 +3212,69 @@ class TestCrossRequestEnqueueGuard(unittest.TestCase):
         # marker naming its conflicting owner; the winner carries none.
         self.assertEqual(attempt2.conflicting_request_ids, frozenset({1}))
         self.assertEqual(attempt1.conflicting_request_ids, frozenset())
+
+    def test_two_candidates_conflicting_with_two_owners_carry_both(self):
+        """The union across candidates, driven through the real guard.
+
+        Every other assertion on ``conflicting_request_ids`` in this file
+        checks a single-conflict outcome, so degrading the union to an
+        assignment — losing the first candidate's ids — survived the whole
+        enqueue suite (issue #1313, mutant runner finding 2). Two peers,
+        each already owned by a different request, and one attempt that
+        browses both: the guard's own docstring says every id it skipped
+        for during the WHOLE call is carried, and this is what proves it.
+        """
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        for request_id in (1, 2, 3):
+            db.seed_request(make_request_row(id=request_id, status="wanted"))
+        dirs = {
+            "TheBun": "Music\\TheBun\\Album",
+            "OtherPeer": "Music\\OtherPeer\\Album",
+        }
+        candidates = {
+            peer: self._shared_candidate(
+                file_dir, [f"{file_dir}\\0{i}.flac" for i in (1, 2)])
+            for peer, file_dir in dirs.items()
+        }
+        registry = ClaimedQueueKeysRegistry()
+
+        def context(request_id: int, peer: str) -> CratediggerContext:
+            ctx = _ctx_with_download_ownership(
+                cfg=cfg, db=db, slskd=candidates[peer][0], registry=registry)
+            ctx.current_album_cache[request_id] = _album_with_request(
+                request_id)
+            ctx.user_upload_speed.update({"TheBun": 10_000, "OtherPeer": 9_999})
+            return ctx
+
+        results = {peer: {"flac": [d]} for peer, d in dirs.items()}
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch("time.sleep"):
+            # Each owner takes one peer's keys, through the real ledger.
+            first = try_enqueue(
+                _make_tracks(), {"TheBun": results["TheBun"]}, "flac",
+                context(1, "TheBun"),
+                match_fn=_const_match(candidates["TheBun"][1]),
+            )
+            second = try_enqueue(
+                _make_tracks(album_id=2), {"OtherPeer": results["OtherPeer"]},
+                "flac", context(2, "OtherPeer"),
+                match_fn=_const_match(candidates["OtherPeer"][1]),
+            )
+            # Request 3 browses both and can have neither.
+            third = try_enqueue(
+                _make_tracks(album_id=3), results, "flac",
+                context(3, "TheBun"),
+                match_fn=lambda _t, _f, _d, peer, _c: candidates[peer][1],
+            )
+
+        self.assertTrue(first.matched)
+        self.assertTrue(second.matched)
+        self.assertFalse(third.matched)
+        self.assertFalse(third.enqueue_failed)
+        self.assertEqual(third.conflicting_request_ids, frozenset({1, 2}))
+        self.assertEqual(db.request(3)["status"], "wanted")
 
     def test_persisted_state_fingerprint_agrees_with_real_ledger_rows_single_disc(self):
         """#1196 item 1 (review F1): agreement-by-construction, driven at
