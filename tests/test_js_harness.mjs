@@ -226,6 +226,46 @@ t.section('checker vocabulary — the failing side of every method');
   t.contains(run.stdout, 'expected RangeError, got TypeError', 'the wrong error class is named');
 }
 
+t.section('contains and excludes refuse a non-string haystack');
+{
+  // Both used to coerce with String(haystack), which INVERTS an array:
+  // measured, ['ab','cd'].includes('a') is false while
+  // String(['ab','cd']).includes('a') is true. So a mechanical sweep of the
+  // remaining t.ok(x.includes(y)) sites would have turned array ones into
+  // the opposite assertion, silently — the reason #1319 left that sweep
+  // undone. One needle, both directions of the inversion: with the old
+  // coercion `contains` passed where the array says no, and `excludes`
+  // failed where the array says yes. Verified by disabling the guard: the
+  // fixture then reports 1 passed, 1 failed instead of two refusals.
+  const run = runFixture(
+    "t.contains(['ab', 'cd'], 'a', 'the array does not contain it');\n"
+    + "t.excludes(['ab', 'cd'], 'a', 'the array really does exclude it');\n"
+    + 't.done();',
+  );
+  t.equal(run.status, 1, 'an array haystack fails rather than coercing');
+  t.equal(run.markers.length, 2, 'both methods refuse it');
+  t.contains(run.stdout, 't.contains needs a string haystack, got array',
+    'the refusal names the method and the type');
+  t.contains(run.stdout, 't.excludes needs a string haystack, got array',
+    'excludes refuses it too, rather than accusing a correct assertion');
+
+  // Must still work: the string haystacks all 974 existing call sites pass.
+  const ok = runFixture(
+    "t.contains('abc', 'b', 'a string haystack still matches');\n"
+    + "t.excludes('abc', 'z', 'and still excludes');\n"
+    + 't.done();',
+  );
+  t.equal(ok.status, 0, 'a string haystack is unaffected');
+
+  // Anything else is refused by TYPE, not by a list of known-bad ones.
+  const other = runFixture(
+    "t.contains(12345, '234', 'a number is not a string either');\n"
+    + 't.done();',
+  );
+  t.equal(other.status, 1, 'a number haystack is refused, not stringified');
+  t.contains(other.stdout, 'got number', 'the refusal names the real type');
+}
+
 t.section('equal and notEqual are STRICT');
 {
   // Nothing else distinguished `===` from `==`: degrading both to loose
