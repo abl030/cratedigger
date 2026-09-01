@@ -100,9 +100,15 @@ def converge_slskd_searches(ctx: CratediggerContext) -> SearchSweepSummary:
     form: we always mint lowercase, and .NET's Guid.ToString() echoes
     lowercase, but nothing in the sweep depends on that staying true.
 
-    Best-effort throughout: this function never raises for an external
-    failure. Wrap it in the caller (matching how ``converge_slskd_orphans``
-    is invoked in Phase 0) for defense-in-depth regardless.
+    Best-effort against slskd throughout: a fetch failure skips this
+    cycle's reconciliation (pruning still runs) and a per-id delete
+    failure never blocks the rest. Pipeline-DB failures are split by
+    seam (issue #1312; pinned in
+    ``tests/test_slskd_sweep_exception_contracts.py``): the unswept read
+    and the swept mark deliberately propagate to ``lib/convergence.py``'s
+    registered-step isolation, while the retention prune is internally
+    isolated (warn + continue) so a prune failure never discards this
+    same pass's reconciliation work.
     """
     db = ctx.pipeline_db_source._get_db()
     now = datetime.now(UTC)

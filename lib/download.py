@@ -555,8 +555,12 @@ def harvest_terminal_transfer_evidence(ctx: CratediggerContext) -> None:
     skips only that row — one row's failure must never abort harvesting
     the remaining rows, because the purge runs immediately after and an
     aborted loop would destroy the un-harvested rows' evidence (the I1b
-    failure mode). The purge always still runs regardless (the
-    pre-existing behavior). The write goes through the status-and-attempt-
+    failure mode). The initial ``get_downloading`` read is deliberately
+    unguarded: a pipeline-DB failure propagates to
+    ``lib/convergence.py``'s registered-step isolation (issue #1312;
+    pinned in ``tests/test_slskd_sweep_exception_contracts.py``).
+    The purge always still runs regardless (the pre-existing
+    behavior). The write goes through the status-and-attempt-
     guarded ``update_download_state_if_downloading`` — mirroring the poll
     path's ownership guard — so a row a concurrent action moved out of
     ``downloading`` or replaced with a newer attempt is never rewritten.

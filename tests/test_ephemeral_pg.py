@@ -87,12 +87,24 @@ class TestEphemeralPostgresIsolation(unittest.TestCase):
             ),
         )
 
+    def test_server_options_pin_the_utc_clock_frame(self) -> None:
+        """The disposable cluster's sessions must truncate dates in the
+        same frame the fakes mirror (UTC), or the read-projection
+        value-parity gate fails only inside two one-hour UTC wall-clock
+        windows per day (issue #1312 gate incident, 2026-09-01 00:04
+        UTC). ``tests/test_pipeline_db.py::TestEphemeralPostgresClockFrame``
+        pins the live session setting; this pins the argv."""
+        pg = EphemeralPostgres()
+        pg._socket_tmpdir = Path("/tmp/cdpg-clock-contract")
+
+        self.assertEqual(pg._server_options[2], "-c timezone=UTC")
+
     def test_server_options_bound_delayed_relation_unlink_lifetime(self) -> None:
         pg = EphemeralPostgres()
         pg._socket_tmpdir = Path("/tmp/cdpg-checkpoint-contract")
 
         self.assertEqual(
-            pg._server_options[2:4],
+            pg._server_options[3:5],
             (
                 "-c checkpoint_timeout=30s",
                 "-c checkpoint_completion_target=0.1",
@@ -107,7 +119,7 @@ class TestEphemeralPostgresIsolation(unittest.TestCase):
         pg._socket_tmpdir = Path("/tmp/cdpg-diet-contract")
 
         self.assertEqual(
-            pg._server_options[4:],
+            pg._server_options[5:],
             (
                 "-c shared_buffers=16MB",
                 "-c fsync=off",

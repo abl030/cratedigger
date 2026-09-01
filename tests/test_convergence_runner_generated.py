@@ -10,7 +10,9 @@ from __future__ import annotations
 import ast
 import inspect
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -400,13 +402,21 @@ class TestRegisteredStepFailureMessagesReachable(unittest.TestCase):
     registered step through the runner, and asserts the runner logged THAT
     step's message.
 
-    Scope: the steps this series registered or corrected, plus
+    Scope: the steps the #1297/#1299 series registered or corrected, plus
     ``prune_terminal_pin_rows_cycle`` — already registered and already
-    propagating before this series, included as regression patrol so its
-    row cannot silently regain a swallow. The slskd convergence sweeps
-    (orphans, disk reap, search ledger, harvest, purge) keep their own
-    internal isolation contracts and belong to the owned-key-module work
-    (#1278 strong candidate 1), not this table.
+    propagating before that series, included as regression patrol so its
+    row cannot silently regain a swallow. The five slskd convergence
+    sweeps (orphans, disk reap, search ledger, harvest, purge) were
+    deferred to the owned-key-module work and joined this table when
+    issue #1312 settled their internal swallow-vs-propagate contracts:
+    each row here injects a failure at the sweep's PROPAGATING
+    pipeline-DB seam and proves the registered message is what the
+    operator sees. The sweep-internal cells (what each swallows, and
+    with what degradation) are stated — with each cell mapped to the
+    module that pins it — in
+    ``tests/test_slskd_sweep_exception_contracts.py``, which also
+    directly pins the pipeline-DB propagate/degrade cells and the
+    reaper's per-item removal-failure cell.
 
     One row is fail-closed LEGISLATION rather than reachability proof:
     ``log_cycle_summary``'s world (``ctx.cycle_start = None``) is not
@@ -436,8 +446,31 @@ class TestRegisteredStepFailureMessagesReachable(unittest.TestCase):
         summary_ctx.cycle_start = cast(float, None)  # time.time() - None raises
         observations_ctx = self._ctx("record_peer_observations")
         observations_ctx.peer_observations = {"peer-a"}
+        # The five slskd sweeps (issue #1312): failure injected at each
+        # sweep's PROPAGATING pipeline-DB seam. Orphans/purge need a
+        # working slskd snapshot to get past the fetch and reach the DB;
+        # the reaper additionally needs an existing download root or it
+        # returns before touching the DB at all.
+        orphans_ctx = make_ctx_with_fake_db(
+            _raising_db("get_downloading"),
+            cfg=CratediggerConfig(), slskd=FakeSlskdAPI())
+        purge_ctx = make_ctx_with_fake_db(
+            _raising_db("get_owned_transfer_keys"),
+            cfg=CratediggerConfig(), slskd=FakeSlskdAPI())
+        reap_root = tempfile.mkdtemp(prefix="cratedigger-reap-row-")
+        self.addCleanup(shutil.rmtree, reap_root, True)
+        reap_ctx = make_ctx_with_fake_db(
+            _raising_db("get_owned_local_paths"),
+            cfg=CratediggerConfig(slskd_download_dir=reap_root))
         return [
             ("load_user_cooldowns", self._ctx("get_cooled_down_users")),
+            ("converge_slskd_orphans", orphans_ctx),
+            ("reap_disk_orphans", reap_ctx),
+            ("converge_slskd_searches",
+             self._ctx("get_unswept_search_ids")),
+            ("harvest_terminal_transfer_evidence",
+             self._ctx("get_downloading")),
+            ("purge_completed_transfers", purge_ctx),
             ("reconcile_search_plans_cycle",
              self._ctx("list_wanted_for_plan_reconciliation")),
             ("reconcile_plex_added_at_pins_cycle", plex_ctx),
