@@ -1260,6 +1260,30 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertEqual(entry["target_format"], "opus 128")
         self.assertEqual(entry["quality_lineage_version"], 1)
 
+    def test_v1_bare_codec_storage_format_is_not_a_configured_target(self):
+        """A historical row's bare codec never wears the contract chip.
+
+        Only an EXPLICIT label ("opus 128", "mp3 v0") may project into
+        ``target_format`` from a lineage-1 row; a bare codec name is
+        beets-item vocabulary, not a quality contract. The world is
+        mass-produced: 5,555 live lineage-1 evidence rows carry
+        bare-codec storage_format (measured 2026-09-01) — an upper
+        bound on the blast radius, since only rows joined into a
+        visible wrong-match entry render here (#1317 mutmut survivor:
+        the and→or precedence mutant).
+        """
+        self._seed_entry_evidence(
+            self.default_log_id,
+            storage_format="FLAC",
+            target_format=None,
+            lineage_version=1,
+        )
+
+        _, data = self._get("/api/wrong-matches")
+        entry = data["groups"][0]["entries"][0]
+        self.assertIsNone(entry["target_format"])
+        self.assertEqual(entry["format"], "FLAC")
+
     def test_entries_sort_best_quality_first(self):
         """Entries within a group sort lossless → transparent → ... → unknown.
 
