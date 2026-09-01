@@ -264,8 +264,16 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
         "tests.test_discogs_cover_art_fallback_generated",
     ),
     # The harness/ prefix rule resolves tests.test_harness_beets2_contract
-    # regardless, masking the loss of the second-pass argv coverage.
-    "harness/import_one.py": ("tests.test_disambiguation",),
+    # regardless, masking the loss of everything else: no basename probe
+    # reaches a harness/ path, so this entry is the ONLY thing selecting
+    # the import child's own stage, argv, and force coverage.
+    "harness/import_one.py": (
+        "tests.test_disambiguation",
+        "tests.test_import_one_stages",
+        "tests.test_import_one_request_generated",
+        "tests.test_import_one_argparse_audit",
+        "tests.test_force_import",
+    ),
     # Basename probes resolve tests.test_beets_child(_generated).
     "lib/beets_child.py": (
         "tests.test_beets_delete",

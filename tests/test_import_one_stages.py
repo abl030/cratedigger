@@ -789,14 +789,15 @@ class TestRunImportOneReturnsInsteadOfExiting(unittest.TestCase):
         beets.set_album_info("mbid-scratch", None)
         scratch_roots: list[str] = []
 
-        def record_scratch(work_path: str) -> None:
-            # ``normalize_media_metadata`` is the first thing the preview
-            # does to its private copy, so ``work_path``'s parent IS the
-            # scratch root, observed while it is still alive.
-            scratch_roots.append(os.path.dirname(work_path))
+        def record_scratch(candidate_path: str, _existing: str | None):
+            # Spectral analysis runs on the preview's private copy, so
+            # ``candidate_path``'s parent IS the scratch root, observed
+            # while it is still alive.
+            scratch_roots.append(os.path.dirname(candidate_path))
+            return audit
 
-        def record_then_raise(work_path: str) -> None:
-            record_scratch(work_path)
+        def record_then_raise(candidate_path: str, existing: str | None):
+            record_scratch(candidate_path, existing)
             raise RuntimeError("boom")
 
         request_for = import_one.ImportOneRequest
@@ -807,19 +808,17 @@ class TestRunImportOneReturnsInsteadOfExiting(unittest.TestCase):
             make_test_flac(os.path.join(album, "01 - One.flac"), duration=1)
 
             with patch("harness.import_one.BeetsDB", return_value=beets), \
-                 patch("lib.measurement.collect_attempt_spectral_audit",
-                       return_value=audit), \
                  patch("harness.import_one.convert_lossless",
                        return_value=(1, 0, "flac", 2)), \
                  patch("harness.import_one._log"):
-                with patch("harness.import_one.normalize_media_metadata",
+                with patch("lib.measurement.collect_attempt_spectral_audit",
                            record_scratch):
                     returned = import_one.run_import_one(request_for(
                         path=album,
                         mb_release_id="mbid-scratch",
                         dry_run=True,
                     ))
-                with patch("harness.import_one.normalize_media_metadata",
+                with patch("lib.measurement.collect_attempt_spectral_audit",
                            record_then_raise), \
                      self.assertRaises(RuntimeError):
                     import_one.run_import_one(request_for(
@@ -911,7 +910,11 @@ class TestRunImportOneReturnsInsteadOfExiting(unittest.TestCase):
             )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            album = os.path.join(tmpdir, "album")
+            # One level down, like the evidence driver: the real
+            # ``_cleanup_staged_dir`` runs at the end of a successful import
+            # and prunes the album's parent, which must not be the
+            # ``TemporaryDirectory`` itself.
+            album = os.path.join(tmpdir, "staging", "album")
             library = os.path.join(tmpdir, "library", "Artist", "Album")
             os.makedirs(album)
             os.makedirs(library)
@@ -945,7 +948,6 @@ class TestRunImportOneReturnsInsteadOfExiting(unittest.TestCase):
                        return_value="mp3"), \
                  patch("harness.import_one._probe_native_lossy_as_v0",
                        return_value=None), \
-                 patch("harness.import_one._cleanup_staged_dir"), \
                  patch("harness.import_one.fix_library_modes"), \
                  patch("harness.import_one._log"):
                 result = import_one.run_import_one(
