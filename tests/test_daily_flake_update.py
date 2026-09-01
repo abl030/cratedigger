@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import signal
 import subprocess
@@ -9,6 +10,7 @@ import tempfile
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from pathlib import Path
 
 from tests._source_pins import pinned_source
@@ -539,6 +541,130 @@ class TestDailyFlakeUpdateFakeShimCaching(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("ModuleNotFoundError", proc.stderr)
         self.assertIn("_shim", proc.stderr)
+
+
+class TestFakeStatePublication(unittest.TestCase):
+    """The fixture's state file, which three poll loops read unlocked.
+
+    `test_process_group_term_emits_one_terminal_receipt_without_deadlock`,
+    `test_invalid_receipt_from_a_write_failure_...` and
+    `test_shared_flock_serializes_nixpkgs_and_tip_processes` all spin on
+    `self.fake.state` while a fake command is writing the same file. Under a
+    loaded parallel suite that read caught the file mid-truncation and raised
+    `JSONDecodeError`; standalone it passed. These are that contract, made
+    explicit.
+
+    Test infrastructure, so deterministic only -- an exact mechanism pin plus
+    one end-to-end contract, never a generated property
+    (`.claude/rules/code-quality.md` § "Never property-test the test
+    machinery").
+    """
+
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.fake = FakeDailyFlakeUpdateCommands(Path(self.tempdir.name))
+
+    def test_fixture_publishes_state_by_rename_never_by_truncation(self) -> None:
+        """The mechanism itself: a fresh file replaces the old one.
+
+        `Path.write_text` opens the live path with mode "w", which truncates
+        before a single byte is written and keeps the inode; `os.replace`
+        publishes a different inode and never makes the path unreadable. The
+        inode changing IS the atomicity here, so it is what this asserts.
+        """
+        before = self.fake.state_path.stat().st_ino
+
+        self.fake.update_state(hold_seconds=1.5)
+
+        self.assertNotEqual(
+            self.fake.state_path.stat().st_ino,
+            before,
+            "state.json kept its inode, so it was written in place -- a "
+            "concurrent reader can observe it truncated",
+        )
+        self.assertEqual(self.fake.state["hold_seconds"], 1.5)
+
+    def test_shim_publishes_state_by_rename_never_by_truncation(self) -> None:
+        """The same mechanism on the other writer, driven as a real process.
+
+        The shim is a separate interpreter running out of the fixture
+        directory and carries its own copy of the publish helper, so proving
+        the fixture side says nothing about it.
+        """
+        before = self.fake.state_path.stat().st_ino
+
+        proc = subprocess.run(
+            [str(self.fake.fake_bin / "git"), "diff", "--quiet", "--", "flake.lock"],
+            env=self.fake.environment(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn(
+            ["git", "diff", "--quiet", "--", "flake.lock"],
+            self.fake.state["events"],
+        )
+        self.assertNotEqual(self.fake.state_path.stat().st_ino, before)
+
+    def test_unlocked_reads_stay_valid_while_a_writer_runs(self) -> None:
+        """End-to-end: the poll loops' own read shape, under real contention.
+
+        A background thread republishes the state as fast as it can while
+        this thread reads it exactly the way every poll loop does. On the
+        pre-fix fixture this raised `JSONDecodeError` within milliseconds
+        (measured: 9,086 empty reads in 15,769 attempts over two seconds).
+        Bounded by the writer's iteration count, so it cannot hang, and it
+        can only fail in the direction of a real defect.
+        """
+        writes = 300
+        errors: list[str] = []
+
+        def publish() -> None:
+            for index in range(writes):
+                self.fake.update_state(hold_seconds=float(index))
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            writer = executor.submit(publish)
+            reads = 0
+            while not writer.done():
+                try:
+                    self.fake.state["stage_started"]
+                except (ValueError, KeyError) as exc:
+                    errors.append(f"{type(exc).__name__}: {exc}")
+                    break
+                reads += 1
+            writer.result(timeout=30)
+
+        self.assertEqual(errors, [], f"after {reads} reads")
+        self.assertGreater(reads, 0, "the reader never got to run")
+        self.assertEqual(self.fake.state["hold_seconds"], float(writes - 1))
+
+    def test_update_state_waits_for_the_shim_lock(self) -> None:
+        """`update_state` is a read-modify-write and must hold the lock.
+
+        Atomic publication does not make it safe on its own: one test sets
+        `hold_stage` on an already-running process, and an unlocked
+        read-modify-write there loses whichever update the other writer
+        publishes second. Holding the lock from this thread must therefore
+        block it, and releasing must let it finish and merge.
+        """
+        lock_path = self.fake.state_path.with_suffix(".lock")
+        with lock_path.open("a+", encoding="utf-8") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                blocked = executor.submit(
+                    self.fake.update_state, hold_stage="suite"
+                )
+                with self.assertRaises(FuturesTimeoutError):
+                    blocked.result(timeout=0.5)
+                self.assertIsNone(self.fake.state["hold_stage"])
+                fcntl.flock(lock, fcntl.LOCK_UN)
+                blocked.result(timeout=10)
+
+        self.assertEqual(self.fake.state["hold_stage"], "suite")
 
 
 if __name__ == "__main__":

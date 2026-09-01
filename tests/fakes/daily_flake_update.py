@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import subprocess
@@ -30,7 +31,18 @@ def main():
         args = sys.argv[1:]
 
         def save():
-            state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+            # Rename-into-place, never a truncating write. Three poll loops
+            # in tests/test_daily_flake_update.py read this file WITHOUT the
+            # lock while this process holds it, so a plain write_text left a
+            # window in which the path existed and was empty: open(mode="w")
+            # truncates before anything is written, and the reader's
+            # json.loads raised "Expecting value: line 1 column 1 (char 0)".
+            # Measured on the pre-fix fixture: 9,086 empty reads out of
+            # 15,769 in two seconds of contention. The reader stays
+            # lock-free on purpose -- see FakeDailyFlakeUpdateCommands.state.
+            tmp = state_path.with_name(f"{state_path.name}.tmp.{os.getpid()}")
+            tmp.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+            os.replace(tmp, state_path)
 
         def fail(message):
             print(message, file=sys.stderr)
@@ -268,17 +280,51 @@ class FakeDailyFlakeUpdateCommands:
 
     @property
     def state(self) -> dict[str, Any]:
+        """Read the state file without taking the shim's lock.
+
+        Deliberately lock-free. The shim holds ``state.lock`` across its
+        hold sleep (`_SHIM_MODULE`'s ``time.sleep`` sits inside the ``with``
+        that takes it), so a locking reader would block the poll loops in
+        tests/test_daily_flake_update.py for the whole hold -- 30 seconds in
+        the process-group-term test, whose entire premise is signalling
+        DURING the hold. Correctness comes from the writers renaming into
+        place instead, so this read can never observe a half-published file.
+        """
         return json.loads(self.state_path.read_text(encoding="utf-8"))
 
     def _write_state(self, state: dict[str, Any]) -> None:
-        self.state_path.write_text(
-            json.dumps(state, sort_keys=True), encoding="utf-8"
+        """Publish the state by rename, the shim's ``save()`` twin.
+
+        The shim is a standalone process running out of the fixture
+        directory with no import path back to this module, so it carries its
+        own copy of these three lines rather than sharing this one.
+        """
+        tmp = self.state_path.with_name(
+            f"{self.state_path.name}.tmp.{os.getpid()}"
         )
+        tmp.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, self.state_path)
 
     def update_state(self, **changes: Any) -> None:
-        state = self.state
-        state.update(changes)
-        self._write_state(state)
+        """Merge ``changes`` into the state under the shim's own lock.
+
+        Atomic publication alone is not enough here: this is a
+        read-modify-write, and one test calls it AFTER launching the runner
+        (`test_invalid_receipt_from_a_write_failure_...` sets ``hold_stage``
+        on a live process). Unlocked, a shim invocation that read the state
+        first would publish its own copy afterwards and silently drop this
+        update -- including the ``hold_stage`` the caller is about to wait
+        on. Taking the lock is bounded: every caller sets ``hold_stage``
+        while it is still ``None``, so no shim can be sleeping under the
+        lock, and the wait is at most one ordinary shim invocation.
+        """
+        with self.state_path.with_suffix(".lock").open(
+            "a+", encoding="utf-8"
+        ) as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            state = self.state
+            state.update(changes)
+            self._write_state(state)
 
     def environment(
         self, *, extra_env: dict[str, str] | None = None
