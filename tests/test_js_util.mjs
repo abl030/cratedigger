@@ -2117,13 +2117,10 @@ t.section('long_tail_console.js console persistence (#398 / #481 item 1)');
   {
     const doc = fakeDocument();
     const guarded = wrapFetchWithSessionGuard(async () => expiredResponse, doc);
-    let threw = false;
-    try {
-      await guarded('/api/pipeline/dashboard');
-    } catch (e) {
-      threw = true;
-    }
-    t.ok(threw, 'an interrupted response rejects instead of returning HTML as data');
+    await t.rejects(
+      () => guarded('/api/pipeline/dashboard'),
+      'an interrupted response rejects instead of returning HTML as data',
+    );
     const overlay = doc.getElementById('session-expired-overlay');
     t.ok(overlay !== null, 'an interrupted response shows the expired-session overlay');
     t.equal(overlay.attributes['role'], 'alertdialog',
