@@ -1,4 +1,9 @@
-"""Audit: every JS suite on disk must be reached by the canonical full suite.
+"""Audit: the shape of the JavaScript test surface — suites and the modules
+they import.
+
+Three rules live here. Every suite on disk must be reached by the canonical
+full suite; every suite must be on the one shared harness; and no `web/js`
+module may ship a `__test__` bag.
 
 See issue #537. PR #531 fixed a hardcoded ``node tests/test_js_X.mjs`` list
 in ``scripts/run_tests.sh`` that had silently stopped covering three suites
@@ -32,6 +37,7 @@ RUN_TESTS_SH = os.path.join(REPO_ROOT, "scripts", "run_tests.sh")
 RUN_TEST_SUITE = os.path.join(REPO_ROOT, "scripts", "run_test_suite.py")
 RUN_JS_CHECKS = os.path.join(REPO_ROOT, "scripts", "run_js_checks.sh")
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+WEB_JS_DIR = os.path.join(REPO_ROOT, "web", "js")
 
 # An explicit, hardcoded invocation: node tests/test_js_foo.mjs
 _EXPLICIT_NODE_RE = re.compile(
@@ -124,6 +130,177 @@ def harness_violations(name: str, source: str) -> list[str]:
     if _NODE_ASSERT_RE.search(source) is not None:
         violations.append(f"{name} imports node:assert instead of the harness")
     return violations
+
+
+# The retired bag, in every position it could return to. One identifier,
+# checked as a whole word anywhere in the file rather than only in an
+# `export const` — `export let`, `export { renderEntry as __test__ }` and a
+# re-export through another module are the same construct spelled
+# differently. Comments count too, since a comment is how the convention
+# taught itself to the next author; see `test_bag_violations` for the raw-read
+# that clause depends on.
+_TEST_BAG_RE = re.compile(r"(?<![\w$])__test__(?![\w$])")
+
+
+# The syntax phase's own glob over the production modules, read out of the
+# script rather than hand-typed here — same reason
+# `test_the_harness_module_is_not_itself_run_as_a_suite` reads its glob out.
+_WEB_JS_GLOB_RE = re.compile(r"for\s+\w+\s+in\s+(web/js/[^\s;]*\.js)\s*;\s*do")
+# `_FOR_GLOB_RE` above captures the loop variable too; this is the same
+# suite glob with one group, so `_script_glob` gets a plain string.
+_SUITE_GLOB_RE = re.compile(r"for\s+\w+\s+in\s+([^\s;]*test_js_[^\s;]*\.mjs)\s*;\s*do")
+
+
+def _script_glob(pattern_re: re.Pattern[str]) -> str:
+    """The one glob in `run_js_checks.sh` matching ``pattern_re``."""
+    script = pinned_source(Path(RUN_JS_CHECKS))
+    patterns = pattern_re.findall(script)
+    if len(patterns) != 1:
+        raise AssertionError(
+            f"expected exactly one {pattern_re.pattern!r} glob in "
+            f"run_js_checks.sh, got {patterns}"
+        )
+    return patterns[0]
+
+
+def _files_matching(pattern: str) -> set[str]:
+    """Basenames the repository-relative shell glob ``pattern`` matches."""
+    return {
+        os.path.basename(p) for p in glob.glob(os.path.join(REPO_ROOT, pattern))
+    }
+
+
+def _listed_files(directory: str, suffix: str) -> set[str]:
+    """Basenames in ``directory`` ending in ``suffix``, by plain listing.
+
+    The independent witness for a scan's completeness. Asserting only that
+    a scanned set is NONEMPTY leaves a narrowing invisible: with the glob
+    cut to one filename and a real bag shipped in another module, the whole
+    class stayed green (mutant runner, A5b). Two enumerations that must
+    agree turn that into a one-line failure.
+    """
+    return {
+        name for name in os.listdir(directory)
+        if name.endswith(suffix) and os.path.isfile(os.path.join(directory, name))
+    }
+
+
+def test_bag_violations(name: str, source: str) -> list[str]:
+    """Every mention of the retired ``__test__`` convention in ``source``.
+
+    ``source`` must be RAW file text, not ``pinned_source`` output. The
+    house helper strips full-line comments so a POSITIVE pin cannot be
+    satisfied by commented-out code (#1172, #1186). This clause fails on
+    PRESENCE, so the same strip inverts it: a comment would hide the
+    violation instead of failing to prove one. Measured — a file whose
+    only mention is ``// exported via `__test__` `` reaches this function
+    as an empty line through ``pinned_source`` and returns ``[]``.
+    """
+    violations: list[str] = []
+    if _TEST_BAG_RE.search(source) is not None:
+        violations.append(f"{name} mentions the retired __test__ bag")
+    return violations
+
+
+def _raw_source(path: Path) -> str:
+    """Read ``path`` verbatim. See ``test_bag_violations`` for why."""
+    return path.read_text(encoding="utf-8")
+
+
+class TestNoModuleShipsATestBag(unittest.TestCase):
+    """`web/js` modules export names, not test bags (issue #1313).
+
+    Seven modules used to carry ``export const __test__ = {…}``, one object
+    each, listing 137 module-private names between them for the Node
+    suites. Nothing about the shape survived measurement. Fifty-six of the
+    entries were already named exports, listed a second time hundreds of
+    lines from their declaration. Sixteen more were exported for nobody.
+    Four renamed the function on the way out
+    (``pollImportJob: _pollImportJob``), so production and tests spelled
+    the same thing two ways. And nothing enforced the "these are private"
+    claim the bag made — it is not a language construct, just an object.
+
+    Every name a suite uses is now a named export at its declaration. This
+    audit is what stops the convention coming back: it was the house shape
+    for a year and three plan documents still describe it.
+    """
+
+    def test_no_web_js_module_mentions_the_bag(self) -> None:
+        """Every module the syntax phase checks, not merely one of them.
+
+        The scanned set is the `run_js_checks.sh` glob's own matches, so
+        this clause has no glob of its own to narrow. An earlier version
+        globbed `web/js/*.js` here and asserted only that the result was
+        nonempty; narrowing it to a single filename while shipping a real
+        bag in another module left the whole class green (mutant runner,
+        A5b).
+        """
+        names = sorted(_files_matching(_script_glob(_WEB_JS_GLOB_RE)))
+        self.assertEqual(
+            set(names),
+            _listed_files(WEB_JS_DIR, ".js"),
+            "the scanned set must be every web/js module, not a subset",
+        )
+        violations: list[str] = []
+        for name in names:
+            source = _raw_source(Path(WEB_JS_DIR) / name)
+            violations.extend(test_bag_violations(f"web/js/{name}", source))
+        self.assertEqual(
+            violations,
+            [],
+            "web/js modules export names directly, never a __test__ bag: "
+            + "; ".join(violations),
+        )
+
+    def test_no_js_suite_reaches_for_a_bag(self) -> None:
+        """The suite-side mirror.
+
+        Clause one is the load-bearing half — a snippet elsewhere can only
+        import a bag that some module exports. This clause catches the
+        author who writes the import first and would otherwise get a bare
+        ESM resolution error with no explanation of the convention behind
+        it.
+        """
+        names = sorted(_files_matching(_script_glob(_SUITE_GLOB_RE)))
+        self.assertEqual(
+            set(names),
+            _js_suite_names_on_disk(),
+            "the scanned set must be every JS suite, not a subset",
+        )
+        violations: list[str] = []
+        for name in names:
+            source = _raw_source(Path(TESTS_DIR) / name)
+            violations.extend(test_bag_violations(f"tests/{name}", source))
+        self.assertEqual(
+            violations,
+            [],
+            "JS suites import names directly, never a __test__ bag: "
+            + "; ".join(violations),
+        )
+
+    BAG_SPELLINGS = (
+        ("the original object literal", "export const __test__ = {\n  renderEntry,\n};\n"),
+        ("a let instead of a const", "export let __test__ = { renderEntry };\n"),
+        ("an alias on the way out", "export { renderEntry as __test__ };\n"),
+        ("the import side", "import { __test__ } from '../web/js/thing.js';\n"),
+        ("prose teaching the convention", "// Helpers are exported via `__test__`.\n"),
+    )
+
+    def test_the_clause_trips_on_every_spelling_of_the_bag(self) -> None:
+        for label, source in self.BAG_SPELLINGS:
+            with self.subTest(spelling=label):
+                violations = test_bag_violations("web/js/thing.js", source)
+                self.assertEqual(len(violations), 1, f"{label} was not caught")
+                self.assertIn("retired __test__ bag", violations[0])
+
+    def test_a_named_export_and_a_lookalike_identifier_trip_nothing(self) -> None:
+        source = (
+            "export function renderEntry(e) { return `<b>${e}</b>`; }\n"
+            "const __test__helper = 1;\n"
+            "const my__test__ = 2;\n"
+            "export const tests = { renderEntry };\n"
+        )
+        self.assertEqual(test_bag_violations("web/js/thing.js", source), [])
 
 
 class TestEveryJsSuiteUsesTheSharedHarness(unittest.TestCase):
