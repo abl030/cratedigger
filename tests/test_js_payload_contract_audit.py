@@ -211,7 +211,7 @@ renderDownloadHistoryFixture({outcome: 'success', request_id: 1});
             'const name = "renderDownloadHistoryItem"; '
             "historyModule[name]({invented_client_only: 1});"),
             'helpers["renderDownloadHistoryFixture"]({invented_client_only: 1});',
-            "__test__.renderDownloadHistoryFixture({invented_client_only: 1});",
+            "helpers.renderDownloadHistoryFixture({invented_client_only: 1});",
         ):
             with self.subTest(bypass=bypass), self.assertRaises(ValueError):
                 fixture_fields_for_call(
@@ -231,9 +231,9 @@ import historyDefault, {
 renderDownloadHistoryFixture({outcome: 'success'});
 """
         shadowed_test = """
-import { __test__ } from './recents.js';
-function renderWithShadow(__test__) {
-  const { renderRecentsItems: renderRecentsFixture } = __test__;
+import { renderRecentsItems } from './recents.js';
+function renderWithShadow(helpers) {
+  const { renderRecentsItems: renderRecentsFixture } = helpers;
   return renderRecentsFixture([{outcome: 'success'}]);
 }
 """
@@ -296,37 +296,74 @@ function renderWithShadow(__test__) {
         )
 
     def test_scanner_rejects_unsupported_renderer_reference_forms(self) -> None:
+        """Each form names the message it must raise, not a shared prefix.
+
+        `assertRaisesRegex(ValueError, "audited renderer")` matched both
+        `unsupported optional audited renderer call` and `unsupported
+        audited renderer callee form`, so dropping half the optional-chain
+        detection survived — the case fell through to the callee-form raise
+        and still matched (mutant runner, B8).
+        """
         cases = (
-            'globalThis["renderDownloadHistoryItem"]({invented_client_only: 1});',
             (
-                'const name = "renderDownloadHistoryItem"; '
-                "__test__[name]({invented_client_only: 1});"
-            ),
-            "__test__?.renderDownloadHistoryItem({invented_client_only: 1});",
-            "(0, renderDownloadHistoryItem)({invented_client_only: 1});",
-            "renderDownloadHistoryItem.call(null, {invented_client_only: 1});",
-            "renderDownloadHistoryItem?.({invented_client_only: 1});",
-            "const render = renderDownloadHistoryItem; render({invented_client_only: 1});",
-            (
-                "let render; render = renderDownloadHistoryItem; "
-                "render({invented_client_only: 1});"
+                'globalThis["renderDownloadHistoryItem"]({invented_client_only: 1});',
+                "unsupported audited renderer callee form",
             ),
             (
-                "const {renderDownloadHistoryItem: render} = helpers; "
-                "render({invented_client_only: 1});"
+                "helpers?.renderDownloadHistoryItem({invented_client_only: 1});",
+                "unsupported optional audited renderer call",
             ),
             (
-                "let render; ({renderDownloadHistoryItem: render} = helpers); "
-                "render({invented_client_only: 1});"
+                "(0, renderDownloadHistoryItem)({invented_client_only: 1});",
+                "unsupported audited renderer callee form",
             ),
             (
-                "import {renderDownloadHistoryItem as render} from './fixture.js'; "
-                "render({invented_client_only: 1});"
+                "renderDownloadHistoryItem.call(null, {invented_client_only: 1});",
+                "unsupported audited renderer callee form",
+            ),
+            (
+                "renderDownloadHistoryItem?.({invented_client_only: 1});",
+                "unsupported optional audited renderer call",
+            ),
+            (
+                (
+                    "const render = renderDownloadHistoryItem; "
+                    "render({invented_client_only: 1});"
+                ),
+                "unsupported indirect/aliased audited renderer reference",
+            ),
+            (
+                (
+                    "let render; render = renderDownloadHistoryItem; "
+                    "render({invented_client_only: 1});"
+                ),
+                "unsupported indirect/aliased audited renderer reference",
+            ),
+            (
+                (
+                    "const {renderDownloadHistoryItem: render} = helpers; "
+                    "render({invented_client_only: 1});"
+                ),
+                "unsupported indirect/aliased audited renderer reference",
+            ),
+            (
+                (
+                    "let render; ({renderDownloadHistoryItem: render} = helpers); "
+                    "render({invented_client_only: 1});"
+                ),
+                "unsupported indirect/aliased audited renderer reference",
+            ),
+            (
+                (
+                    "import {renderDownloadHistoryItem as render} from './fixture.js'; "
+                    "render({invented_client_only: 1});"
+                ),
+                "unsupported aliased audited renderer import",
             ),
         )
-        for source in cases:
+        for source, expected in cases:
             with self.subTest(source=source), self.assertRaisesRegex(
-                ValueError, "audited renderer"
+                ValueError, expected
             ):
                 fixture_fields_for_call(source, "renderDownloadHistoryItem")
 

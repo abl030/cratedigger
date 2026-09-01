@@ -920,7 +920,10 @@ class TestExplorerRefusalHonestyGenerated(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 _EXPLORER_BROWSER_WORKER = """
-import { __test__ } from './web/js/wrong-matches.js';
+import {
+  EXPLORER_RENDERABLE_STATUSES,
+  maybeLoadWrongMatchExplorer,
+} from './web/js/wrong-matches.js';
 
 function freshMount(logId) {
   const mount = { innerHTML: '' };
@@ -935,7 +938,7 @@ function freshMount(logId) {
 
 async function handle(operation, payload) {
   if (operation === 'renderable_statuses') {
-    return Array.from(__test__.EXPLORER_RENDERABLE_STATUSES);
+    return Array.from(EXPLORER_RENDERABLE_STATUSES);
   }
   if (operation === 'explorer') {
     const logId = Number(payload.log_id);
@@ -945,7 +948,7 @@ async function handle(operation, payload) {
       status: Number(payload.http_status),
       json: async () => payload.body,
     });
-    await __test__.maybeLoadWrongMatchExplorer(logId, { open: true });
+    await maybeLoadWrongMatchExplorer(logId, { open: true });
     return { html: mount.innerHTML };
   }
   throw new Error(`unknown operation ${operation}`);

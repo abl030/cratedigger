@@ -28,7 +28,11 @@ export function setRecentsSub(sub) {
   loadRecents();
 }
 
-function renderRecentsSubnav() {
+/**
+ * Render the Recents sub-navigation (acquisition vs import).
+ * @returns {string}
+ */
+export function renderRecentsSubnav() {
   return `<div class="pipeline-subtabs">
     <button class="p-btn ${state.recentsSub === 'history' ? 'active-status' : ''}" onclick="window.setRecentsSub('history')">History</button>
     <button class="p-btn ${state.recentsSub === 'acquisition' ? 'active-status' : ''}" onclick="window.setRecentsSub('acquisition')">Acquisition</button>
@@ -37,14 +41,23 @@ function renderRecentsSubnav() {
   </div>`;
 }
 
-function recentsLogUrl() {
+/**
+ * The pipeline-log API URL for the current Recents filter.
+ * @returns {string}
+ */
+export function recentsLogUrl() {
   const params = new URLSearchParams();
   if (state.recentsFilter !== 'all') params.set('outcome', state.recentsFilter);
   params.set('limit', String(RECENTS_HISTORY_LIMIT));
   return `${API}/api/pipeline/log?${params.toString()}`;
 }
 
-function triageLabelText(summary) {
+/**
+ * Flatten a triage summary into one operator-readable label.
+ * @param {string} summary
+ * @returns {string}
+ */
+export function triageLabelText(summary) {
   const normalized = String(summary || '').replace(/:/g, '').replace(/\s+/g, ' ').trim();
   return normalized ? `triage - ${normalized}` : '';
 }
@@ -297,7 +310,12 @@ function isYoutubeIngestItem(item) {
   return item && item.download_kind === 'youtube_ingest';
 }
 
-function normalizeYoutubeIngestItem(row) {
+/**
+ * Coerce a YouTube-ingest row into the shape the acquisition list renders.
+ * @param {any} row
+ * @returns {any}
+ */
+export function normalizeYoutubeIngestItem(row) {
   return {
     ...row,
     id: row.request_id,
@@ -416,7 +434,12 @@ function hasMatchRates(counts) {
     && counts.matches_per_hour_24h != null;
 }
 
-function matchRatesFromDashboardWindows(windows) {
+/**
+ * Derive Recents' match-rate figures from the dashboard's search windows.
+ * @param {any[]} windows
+ * @returns {any}
+ */
+export function matchRatesFromDashboardWindows(windows) {
   const rates = {
     matches_24h: 0,
     matches_6h: 0,
@@ -452,7 +475,11 @@ async function loadRecentsMatchRatesFallback() {
   }
 }
 
-function renderRecentsCounts() {
+/**
+ * Render the Recents counts strip from cached dashboard state.
+ * @returns {string}
+ */
+export function renderRecentsCounts() {
   return `<div class="recents-counts">
     <div class="count ${state.recentsFilter === 'all' ? 'active' : ''}" onclick="window.setRecentsFilter('all')">
       <div class="count-num">${state.recentsCounts.all}</div><div class="count-label">all</div></div>
@@ -494,19 +521,3 @@ export async function loadRecents() {
     el.innerHTML = html;
   } catch (e) { el.innerHTML = renderRecentsSubnav() + '<div class="loading">Failed to load log</div>'; }
 }
-
-export const __test__ = {
-  hasMatchRates,
-  matchRatesFromDashboardWindows,
-  recentsLogUrl,
-  triageLabelText,
-  renderAcquisitionItems,
-  normalizeYoutubeIngestItem,
-  renderImportItems,
-  renderRecentsCounts,
-  renderRecentsDateHeader,
-  renderRecentsSubnav,
-  renderRecentsItems,
-  setRecentsSub,
-  loadRecents,
-};

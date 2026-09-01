@@ -116,16 +116,15 @@
  * neither module's top-level evaluation can observe the other mid-load —
  * `node --check` and the mjs test suite both confirm no TDZ error at import.
  *
- * Pure / DOM-free helpers (YouTube state classifier, console emphasis
- * selector, and the #481 console-state transitions) are exported via
- * `__test__` for the Node unit suite. The classifier + emphasis selector
- * live in `util.js` (the shared pure home) and are re-exported through
- * `__test__` here for convenience. Rendering and fetch live alongside them
- * but never leak into the pure helpers.
+ * Pure / DOM-free helpers (the #481 console-state transitions and the
+ * panel render fragments) are named exports the Node unit suite imports
+ * directly. The YouTube state classifier and console emphasis selector are
+ * imported from `util.js`, their shared pure home, and used here but not
+ * re-exported; the suite imports them from `util.js` too. Rendering and
+ * fetch live alongside the pure helpers but never leak into them.
  *
  * Shape mirrors `web/js/search_plan.js` / `web/js/recents.js`:
- * `// @ts-check`, ES6 module, JSDoc on exports, the
- * `export const __test__ = {…}` named-object test convention.
+ * `// @ts-check`, ES6 module, JSDoc on exports.
  */
 
 import { state, API, toast } from './state.js';
@@ -201,9 +200,8 @@ import {
 /**
  * Per-row console state, keyed by `album_requests.id`. The single map
  * backing every pure transition helper below — see the header comment for
- * the eight-structures-to-one consolidation this replaces. Exported (not
- * just via `__test__`) because `./long_tail.js`'s `loadLongTail` prunes it
- * directly on every fresh-cohort fetch (#522).
+ * the eight-structures-to-one consolidation this replaces. `./long_tail.js`'s
+ * `loadLongTail` prunes it directly on every fresh-cohort fetch (#522).
  *
  * @type {Map<number, ConsoleState>}
  */
@@ -230,7 +228,7 @@ export function longTailConsoleGeneration() {
  * @param {number} generation
  * @returns {boolean}
  */
-export function isLongTailConsoleGenerationCurrent(generation) {
+function isLongTailConsoleGenerationCurrent(generation) {
   return generation === consoleLifecycleGeneration;
 }
 
@@ -488,7 +486,7 @@ export function consoleOpenIds(map) {
  *
  * @type {number}
  */
-const PEERS_VISIBLE_CAP = 5;
+export const PEERS_VISIBLE_CAP = 5;
 
 /**
  * Format an ISO timestamp for the console, defensively. Falls back to the
@@ -544,7 +542,7 @@ function renderPanelLoading(label) {
  * @param {string} label
  * @returns {string}
  */
-function renderPanelError(label) {
+export function renderPanelError(label) {
   return `<div class="lt-panel-error">Couldn't load ${esc(label)}. <span class="lt-panel-error-hint">(other panels are unaffected)</span></div>`;
 }
 
@@ -562,7 +560,7 @@ function renderPanelError(label) {
  * @param {Object|null} triage  The `TriageResult` payload.
  * @returns {string}
  */
-function renderUnfindableBody(triage) {
+export function renderUnfindableBody(triage) {
   if (!triage || typeof triage !== 'object') {
     return '<div class="lt-panel-empty">No triage data.</div>';
   }
@@ -602,7 +600,7 @@ function renderUnfindableBody(triage) {
  * @param {Array<Object>|null|undefined} history
  * @returns {Array<Object>}
  */
-function youtubeHistoryRows(history) {
+export function youtubeHistoryRows(history) {
   return (Array.isArray(history) ? history : [])
     .filter((h) => h && h.source === 'youtube');
 }
@@ -620,7 +618,7 @@ function youtubeHistoryRows(history) {
  * @param {Object} row  A `source==='youtube'` download-history row.
  * @returns {string}
  */
-function youtubeFailureReason(row) {
+export function youtubeFailureReason(row) {
   const meta = row && row.youtube_metadata;
   if (meta && typeof meta === 'object' && meta.reason) {
     return String(meta.reason);
@@ -646,7 +644,7 @@ function youtubeFailureReason(row) {
  * @param {boolean} inFlightFlag  The worklist row's `in_flight_rescue`.
  * @returns {string}
  */
-function renderRescuesBody(history, inFlightFlag) {
+export function renderRescuesBody(history, inFlightFlag) {
   const rows = youtubeHistoryRows(history);
   const running = rows.find((h) => h.outcome === 'youtube_running');
   if (running || inFlightFlag) {
@@ -682,7 +680,7 @@ function renderRescuesBody(history, inFlightFlag) {
  * @param {number} id  album_requests.id (namespaces the show-all toggle).
  * @returns {string}
  */
-function renderPeersBody(lastSearch, id) {
+export function renderPeersBody(lastSearch, id) {
   if (!lastSearch) {
     return renderForensicBlock(null);
   }
@@ -757,7 +755,7 @@ function renderSiblingRow(rel) {
  * @param {Object|null|undefined} rgData  `{releases:[...]}`.
  * @returns {string}
  */
-function renderSiblingsBody(rgData) {
+export function renderSiblingsBody(rgData) {
   const releases = (rgData && Array.isArray(rgData.releases)) ? rgData.releases : [];
   if (releases.length === 0) {
     return '<div class="lt-panel-empty">No sibling pressings found.</div>';
@@ -847,7 +845,7 @@ export function youtubeRescueTargets(result) {
  * @param {number} id  album_requests.id
  * @returns {string}
  */
-function renderYoutubeBody(result, id) {
+export function renderYoutubeBody(result, id) {
   const cls = youtubeSectionState(result);
   const row = consoleRow(id);
   const identifier = row && (row.mb_release_id || row.discogs_release_id);
@@ -913,7 +911,7 @@ function renderYoutubeBody(result, id) {
  * @param {Object} row  The worklist row.
  * @returns {string}
  */
-function renderSpectralFragment(row) {
+export function renderSpectralFragment(row) {
   const grade = row && row.current_spectral_grade
     ? String(row.current_spectral_grade) : '';
   if (!grade) return '';
@@ -944,7 +942,7 @@ function renderSpectralFragment(row) {
  *   re-render doesn't wipe a resolved matrix back to `never_run` (#398).
  * @returns {string}
  */
-function renderConsoleShell(row, ytResult) {
+export function renderConsoleShell(row, ytResult) {
   const id = row.id;
   const emphasis = consoleEmphasis(row);
   const leadUnfindable = emphasis.lead === 'unfindable';
@@ -1012,7 +1010,7 @@ function renderConsoleShell(row, ytResult) {
  * @param {Object} row  The worklist row (band, source, intent, rg).
  * @returns {string}
  */
-function renderActionsBar(row) {
+export function renderActionsBar(row) {
   const id = row.id;
   const rg = row.mb_release_group_id || null;
   // Discogs / no-rg disable reason (KTD7 — no MB↔Discogs adapter).
@@ -2138,49 +2136,3 @@ async function refetchLongTailProcessingRow(
   }
   return projection;
 }
-
-export const __test__ = {
-  // U4 — console pure render helpers + re-exported util classifiers.
-  youtubeSectionState,
-  consoleEmphasis,
-  renderConsoleShell,
-  renderUnfindableBody,
-  renderPeersBody,
-  renderRescuesBody,
-  renderSiblingsBody,
-  renderYoutubeBody,
-  renderPanelError,
-  youtubeHistoryRows,
-  youtubeFailureReason,
-  PEERS_VISIBLE_CAP,
-  // U5 — two-step rescue flow pure helpers.
-  youtubeBestDistance,
-  youtubeRescueTargets,
-  rescueOutcomeCopy,
-  renderRescueConfirm,
-  // #481 item 1 — the console-state Map + its five pure transition helpers.
-  consoleStates,
-  consoleOpen,
-  consoleClose,
-  consolePrune,
-  consoleCanStart,
-  consoleSettle,
-  consoleClearGuards,
-  consoleToken,
-  consoleIsStale,
-  consoleIsOpen,
-  consoleYoutubeResult,
-  consoleSetYoutubeResult,
-  consoleSetYoutubeResultForGeneration,
-  consoleOpenIds,
-  longTailConsoleGeneration,
-  isLongTailConsoleGenerationCurrent,
-  invalidateLongTailConsoleState,
-  // U6 — secondary action pure helpers.
-  canAcceptSibling,
-  acceptDisabledReason,
-  intentToggleTarget,
-  buildAcceptSiblingOptions,
-  renderActionsBar,
-  renderSpectralFragment,
-};

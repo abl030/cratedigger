@@ -4,9 +4,40 @@
  */
 
 import {
-  __test__,
+  actionableDeleteEntries,
+  bulkTriageWrongMatches,
+  claimTriageFollow,
+  cleanupSummaryToast,
+  convergeRequestBody,
+  convergeWrongMatches,
+  deleteAllButtonLabel,
+  deleteWrongMatch,
+  deleteWrongMatchGroup,
+  entryPathUnavailable,
+  entrySpectralCell,
+  explorerListingIsRepairable,
   forceImportWrongMatch,
+  formatEntryEvidence,
   invalidateWrongMatches,
+  isConvergeGreen,
+  loadWrongMatches,
+  maybeLoadWrongMatchExplorer,
+  normalizeThreshold,
+  pollImportJob,
+  refreshWrongMatches,
+  releaseTriageFollow,
+  reloadWrongMatchExplorer,
+  removeWrongMatchEntry,
+  renderEntry,
+  renderLatestImport,
+  renderQualityBadges,
+  renderWrongMatchExplorer,
+  renderWrongMatches,
+  retryTriageStatusOnce,
+  setWrongMatchConvergeThreshold,
+  stopWrongMatchTriage,
+  toggleWrongMatchEntry,
+  triageButtonPresentation,
 } from '../web/js/wrong-matches.js';
 import { esc } from '../web/js/util.js';
 
@@ -141,7 +172,7 @@ async function runPoll(job, logId) {
   installStorage();
   const calls = [];
   const dom = installDom();
-  __test__.renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
+  renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
   globalThis.fetch = async (url) => {
     calls.push(url);
     if (String(url).startsWith('/api/import-jobs/')) {
@@ -153,11 +184,11 @@ async function runPoll(job, logId) {
     throw new Error(`unexpected fetch: ${url}`);
   };
   const btn = { textContent: '', style: {} };
-  await __test__.pollImportJob(17, btn, logId);
+  await pollImportJob(17, btn, logId);
   return { calls, dom, btn };
 }
 
-t.section('_pollImportJob() removes row in place after completed jobs — no full refresh');
+t.section('pollImportJob() removes row in place after completed jobs — no full refresh');
 {
   const { calls, dom, btn } = await runPoll({
     status: 'completed',
@@ -169,7 +200,7 @@ t.section('_pollImportJob() removes row in place after completed jobs — no ful
   t.equal(dom.toast.className, 'toast', 'completion toast is not an error');
 }
 
-t.section('_pollImportJob() leaves row visible after failed jobs — no full refresh');
+t.section('pollImportJob() leaves row visible after failed jobs — no full refresh');
 {
   const { calls, dom, btn } = await runPoll({
     status: 'failed',
@@ -181,7 +212,7 @@ t.section('_pollImportJob() leaves row visible after failed jobs — no full ref
   t.equal(dom.toast.className, 'toast error', 'failure toast is an error');
 }
 
-t.section('_pollImportJob() surfaces historical recovery while convergence continues');
+t.section('pollImportJob() surfaces historical recovery while convergence continues');
 {
   const { calls, dom, btn } = await runPoll({
     status: 'recovery_required',
@@ -290,15 +321,15 @@ t.section('forceImportWrongMatch() maps processing conflict to the shared locked
 t.section('converge helpers classify green candidates');
 {
   installStorage();
-  t.equal(__test__.normalizeThreshold(undefined), 180, 'default threshold is 180');
-  t.equal(__test__.normalizeThreshold('9999'), 999, 'threshold is clamped high');
-  t.equal(__test__.normalizeThreshold('-5'), 0, 'threshold is clamped low');
-  t.ok(__test__.isConvergeGreen({ distance: 0.167 }, 180), '0.167 is green at 180');
-  t.ok(__test__.isConvergeGreen({ distance: 0.180 }, 180), '0.180 is green at 180');
-  t.ok(!__test__.isConvergeGreen({ distance: 0.226 }, 180), '0.226 is not green at 180');
-  t.ok(!__test__.isConvergeGreen({ distance: null }, 180), 'missing distance is not green');
+  t.equal(normalizeThreshold(undefined), 180, 'default threshold is 180');
+  t.equal(normalizeThreshold('9999'), 999, 'threshold is clamped high');
+  t.equal(normalizeThreshold('-5'), 0, 'threshold is clamped low');
+  t.ok(isConvergeGreen({ distance: 0.167 }, 180), '0.167 is green at 180');
+  t.ok(isConvergeGreen({ distance: 0.180 }, 180), '0.180 is green at 180');
+  t.ok(!isConvergeGreen({ distance: 0.226 }, 180), '0.226 is not green at 180');
+  t.ok(!isConvergeGreen({ distance: null }, 180), 'missing distance is not green');
   t.deepEqual(
-    __test__.convergeRequestBody('42', '180'),
+    convergeRequestBody('42', '180'),
     { request_id: 42, threshold_milli: 180, delete_unmatched: true },
     'converge always asks the API to delete non-green rows',
   );
@@ -308,7 +339,7 @@ t.section('renderWrongMatches() shows threshold controls and green state');
 {
   installStorage();
   const dom = installDom();
-  __test__.renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
+  renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
   t.ok(dom.wrongMatches.innerHTML.includes('Loosen'), 'renders threshold input');
   t.ok(dom.wrongMatches.innerHTML.includes('2 green'), 'renders default green count');
   t.ok(dom.wrongMatches.innerHTML.includes('Converge (2)'), 'converge button includes count');
@@ -322,7 +353,7 @@ t.section('renderWrongMatches() shows threshold controls and green state');
     'force-import controls carry exact request identity and initiating control',
   );
 
-  __test__.setWrongMatchConvergeThreshold(42, 230);
+  setWrongMatchConvergeThreshold(42, 230);
   t.ok(dom.wrongMatches.innerHTML.includes('3 green'), 'threshold edit updates green count');
   t.ok(dom.wrongMatches.innerHTML.includes('Converge (3)'), 'threshold edit updates converge count');
 }
@@ -338,7 +369,7 @@ t.section('renderWrongMatches() keeps converge usable with active import jobs');
     request_id: 42,
     job_type: 'force_import',
   }];
-  __test__.renderWrongMatches(data, dom.wrongMatches);
+  renderWrongMatches(data, dom.wrongMatches);
 
   t.ok(!dom.wrongMatches.innerHTML.includes('Import Active'), 'does not replace converge with Import Active');
   t.ok(dom.wrongMatches.innerHTML.includes('Converge (2)'), 'keeps converge label with active jobs');
@@ -349,7 +380,7 @@ t.section('setWrongMatchConvergeThreshold() updates expanded group in place');
 {
   installStorage();
   const dom = installDom();
-  __test__.renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
+  renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
   const originalHtml = dom.wrongMatches.innerHTML;
   const elements = new Map();
   const el = (initial = {}) => ({
@@ -373,7 +404,7 @@ t.section('setWrongMatchConvergeThreshold() updates expanded group in place');
     return elements.get(id) || null;
   };
 
-  __test__.setWrongMatchConvergeThreshold(42, 230);
+  setWrongMatchConvergeThreshold(42, 230);
 
   t.equal(dom.wrongMatches.innerHTML, originalHtml, 'threshold edit does not rerender the pane');
   t.equal(elements.get('wm-green-count-42').textContent, '3 green', 'updates green count badge');
@@ -385,8 +416,8 @@ t.section('convergeWrongMatches() posts selected threshold and removes row in pl
 {
   installStorage();
   const dom = installDom();
-  __test__.renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
-  __test__.setWrongMatchConvergeThreshold(42, 180);
+  renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
+  setWrongMatchConvergeThreshold(42, 180);
   const calls = [];
   globalThis.fetch = async (url, options = {}) => {
     calls.push({ url, options });
@@ -411,7 +442,7 @@ t.section('convergeWrongMatches() posts selected threshold and removes row in pl
     throw new Error(`unexpected fetch: ${url}`);
   };
   const btn = { disabled: false, textContent: 'Converge', style: {} };
-  await __test__.convergeWrongMatches(42, btn);
+  await convergeWrongMatches(42, btn);
   t.equal(calls[0].url, '/api/wrong-matches/converge', 'posts to converge endpoint');
   t.deepEqual(
     JSON.parse(calls[0].options.body),
@@ -427,7 +458,7 @@ t.section('deleteWrongMatch() posts one row and removes it in place — no full 
 {
   installStorage();
   const dom = installDom();
-  __test__.renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
+  renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
   const calls = [];
   globalThis.confirm = () => true;
   globalThis.fetch = async (url, options = {}) => {
@@ -446,7 +477,7 @@ t.section('deleteWrongMatch() posts one row and removes it in place — no full 
     throw new Error(`unexpected fetch: ${url}`);
   };
   const btn = { disabled: false, textContent: 'Delete', style: {} };
-  await __test__.deleteWrongMatch(100, btn);
+  await deleteWrongMatch(100, btn);
   t.equal(calls[0].url, '/api/wrong-matches/delete', 'posts to row delete endpoint');
   t.deepEqual(
     JSON.parse(calls[0].options.body),
@@ -462,7 +493,7 @@ t.section('deleteWrongMatchGroup() posts request id and removes the group in pla
 {
   installStorage();
   const dom = installDom();
-  __test__.renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
+  renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
   const calls = [];
   globalThis.confirm = () => true;
   globalThis.fetch = async (url, options = {}) => {
@@ -483,7 +514,7 @@ t.section('deleteWrongMatchGroup() posts request id and removes the group in pla
     throw new Error(`unexpected fetch: ${url}`);
   };
   const btn = { disabled: false, textContent: 'Delete All (3)', style: {} };
-  await __test__.deleteWrongMatchGroup(42, btn);
+  await deleteWrongMatchGroup(42, btn);
   t.equal(calls[0].url, '/api/wrong-matches/delete-group', 'posts to group delete endpoint');
   t.ok(!calls.some(call => call.url === '/api/wrong-matches'),
     'does NOT refetch the queue after group delete (in-place removal)');
@@ -502,7 +533,7 @@ t.section('delete controls handle cancel and failures');
 {
   installStorage();
   const dom = installDom();
-  __test__.renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
+  renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
 
   let calls = [];
   globalThis.confirm = () => false;
@@ -511,7 +542,7 @@ t.section('delete controls handle cancel and failures');
     throw new Error(`unexpected fetch: ${url}`);
   };
   const cancelBtn = { disabled: false, textContent: 'Delete', style: {} };
-  await __test__.deleteWrongMatch(100, cancelBtn);
+  await deleteWrongMatch(100, cancelBtn);
   t.equal(calls.length, 0, 'row delete cancel does not fetch');
   t.equal(cancelBtn.disabled, false, 'row delete cancel leaves button enabled');
 
@@ -527,7 +558,7 @@ t.section('delete controls handle cancel and failures');
     throw new Error(`unexpected fetch: ${url}`);
   };
   const failBtn = { disabled: false, textContent: 'Delete', style: {} };
-  await __test__.deleteWrongMatch(100, failBtn);
+  await deleteWrongMatch(100, failBtn);
   t.equal(failBtn.disabled, false, 'row delete API failure restores button enabled');
   t.equal(failBtn.textContent, 'Delete', 'row delete API failure restores button text');
   t.equal(dom.toast.className, 'toast error', 'row delete API failure shows error toast');
@@ -536,7 +567,7 @@ t.section('delete controls handle cancel and failures');
     throw new Error('network down');
   };
   const errorBtn = { disabled: false, textContent: 'Delete', style: {} };
-  await __test__.deleteWrongMatch(100, errorBtn);
+  await deleteWrongMatch(100, errorBtn);
   t.equal(errorBtn.disabled, false, 'row delete fetch exception restores button enabled');
   t.equal(errorBtn.textContent, 'Delete', 'row delete fetch exception restores button text');
 
@@ -547,7 +578,7 @@ t.section('delete controls handle cancel and failures');
     throw new Error(`unexpected fetch: ${url}`);
   };
   const cancelGroupBtn = { disabled: false, textContent: 'Delete All (3)', style: {} };
-  await __test__.deleteWrongMatchGroup(42, cancelGroupBtn);
+  await deleteWrongMatchGroup(42, cancelGroupBtn);
   t.equal(calls.length, 0, 'group delete cancel does not fetch');
 
   globalThis.confirm = () => true;
@@ -562,7 +593,7 @@ t.section('delete controls handle cancel and failures');
     throw new Error(`unexpected fetch: ${url}`);
   };
   const failGroupBtn = { disabled: false, textContent: 'Delete All (3)', style: {} };
-  await __test__.deleteWrongMatchGroup(42, failGroupBtn);
+  await deleteWrongMatchGroup(42, failGroupBtn);
   t.equal(failGroupBtn.disabled, false, 'group delete API failure restores button enabled');
   t.equal(failGroupBtn.textContent, 'Delete All (3)', 'group delete API failure restores button text');
   t.equal(dom.toast.className, 'toast error', 'group delete API failure shows error toast');
@@ -571,7 +602,7 @@ t.section('delete controls handle cancel and failures');
     throw new Error('network down');
   };
   const errorGroupBtn = { disabled: false, textContent: 'Delete All (3)', style: {} };
-  await __test__.deleteWrongMatchGroup(42, errorGroupBtn);
+  await deleteWrongMatchGroup(42, errorGroupBtn);
   t.equal(errorGroupBtn.disabled, false, 'group delete fetch exception restores button enabled');
   t.equal(errorGroupBtn.textContent, 'Delete All (3)', 'group delete fetch exception restores button text');
 }
@@ -581,7 +612,7 @@ t.section('bulkTriageWrongMatches() posts full-queue confirmation and refreshes'
   installStorage();
   const dom = installDom();
   const data = wrongMatchesData();
-  __test__.renderWrongMatches(data, dom.wrongMatches);
+  renderWrongMatches(data, dom.wrongMatches);
   t.ok(dom.wrongMatches.innerHTML.includes('Cleanup Wrong Matches (3)'), 'renders full-queue cleanup button');
   const calls = [];
   globalThis.confirm = () => true;
@@ -647,7 +678,7 @@ t.section('bulkTriageWrongMatches() posts full-queue confirmation and refreshes'
   // #1106: both toolbar buttons are looked up by id at mutation time,
   // never held as a captured node — bulkTriageWrongMatches() no longer
   // takes a button argument at all.
-  await __test__.bulkTriageWrongMatches();
+  await bulkTriageWrongMatches();
   t.ok(stopBtnEnabledDuringSweep, 'Stop button is enabled while the sweep runs');
   t.equal(dom.stopBtn.disabled, true, 'Stop button is disabled again once the sweep completes');
   t.equal(dom.stopBtn.textContent, 'Stop', 'Stop button label is restored');
@@ -672,7 +703,7 @@ t.section('bulkTriageWrongMatches() handles a restart-lost sweep as partial, not
   installStorage();
   const dom = installDom();
   const data = wrongMatchesData();
-  __test__.renderWrongMatches(data, dom.wrongMatches);
+  renderWrongMatches(data, dom.wrongMatches);
   globalThis.confirm = () => true;
   const globals = stubGlobals({ setTimeout: (fn) => { fn(); return 0; } });
   globalThis.fetch = async (url, _options = {}) => {
@@ -706,7 +737,7 @@ t.section('bulkTriageWrongMatches() handles a restart-lost sweep as partial, not
     }
     throw new Error(`unexpected fetch: ${url}`);
   };
-  await __test__.bulkTriageWrongMatches();
+  await bulkTriageWrongMatches();
   t.equal(dom.cleanupBtn.disabled, true, 'restart-lost sweep leaves Cleanup disabled (queue is empty post-refresh)');
   t.ok(dom.toast.textContent.includes('status lost'), 'restart-lost sweep explains the lost status');
   t.ok(!dom.toast.textContent.includes('failed'), 'restart-lost sweep is not reported as failed');
@@ -719,7 +750,7 @@ t.section('bulkTriageWrongMatches() reports a cancelled sweep distinctly from co
   installStorage();
   const dom = installDom();
   const data = wrongMatchesData();
-  __test__.renderWrongMatches(data, dom.wrongMatches);
+  renderWrongMatches(data, dom.wrongMatches);
   globalThis.confirm = () => true;
   const globals = stubGlobals({ setTimeout: (fn) => { fn(); return 0; } });
   globalThis.fetch = async (url, _options = {}) => {
@@ -768,7 +799,7 @@ t.section('bulkTriageWrongMatches() reports a cancelled sweep distinctly from co
     }
     throw new Error(`unexpected fetch: ${url}`);
   };
-  await __test__.bulkTriageWrongMatches();
+  await bulkTriageWrongMatches();
   t.equal(dom.cleanupBtn.disabled, true, 'cancelled sweep leaves Cleanup disabled (queue is empty post-refresh)');
   t.equal(dom.stopBtn.disabled, true, 'Stop button is disabled once the sweep reaches a terminal state');
   t.ok(dom.toast.textContent.includes('stopped'), 'cancelled sweep says "stopped", not "completed"');
@@ -802,7 +833,7 @@ t.section('stopWrongMatchTriage() posts to the cancel endpoint and stays disable
     };
   };
   // #1106: no button argument — always the currently-registered node.
-  await __test__.stopWrongMatchTriage();
+  await stopWrongMatchTriage();
   t.equal(calls[0].url, '/api/wrong-matches/triage/cancel', 'posts to the canonical cancel route');
   t.equal(calls[0].options.method, 'POST', 'cancel is a POST');
   t.equal(dom.stopBtn.disabled, true, 'button stays disabled after a successful cancel request');
@@ -820,7 +851,7 @@ t.section('stopWrongMatchTriage() re-enables the button when the request itself 
   globalThis.fetch = async () => {
     throw new Error('network down');
   };
-  await __test__.stopWrongMatchTriage();
+  await stopWrongMatchTriage();
   t.equal(dom.stopBtn.disabled, false, 'a failed cancel request restores the button enabled');
   t.equal(dom.stopBtn.textContent, 'Stop', 'a failed cancel request restores the button label');
   t.ok(dom.toast.textContent.includes('Stop request failed'), 'a failed cancel request is toasted');
@@ -856,7 +887,7 @@ t.section('stopWrongMatchTriage() mutates the CURRENTLY registered Stop node, ne
       }),
     };
   };
-  await __test__.stopWrongMatchTriage();
+  await stopWrongMatchTriage();
   t.equal(freshStopBtn.disabled, true, 'the currently-registered node is mutated');
   t.equal(freshStopBtn.textContent, 'Stopping...', 'the currently-registered node shows the in-flight label');
   t.equal(staleStopBtn.disabled, false, 'a node registered before the swap is left untouched');
@@ -870,7 +901,7 @@ t.section('bulkTriageWrongMatches() surfaces a failed sweep and restores the but
   installStorage();
   const dom = installDom();
   const data = wrongMatchesData();
-  __test__.renderWrongMatches(data, dom.wrongMatches);
+  renderWrongMatches(data, dom.wrongMatches);
   globalThis.confirm = () => true;
   const globals = stubGlobals({ setTimeout: (fn) => { fn(); return 0; } });
   globalThis.fetch = async (url, _options = {}) => {
@@ -896,7 +927,7 @@ t.section('bulkTriageWrongMatches() surfaces a failed sweep and restores the but
     }
     throw new Error(`unexpected fetch: ${url}`);
   };
-  await __test__.bulkTriageWrongMatches();
+  await bulkTriageWrongMatches();
   t.equal(dom.cleanupBtn.disabled, false, 'failed sweep restores button enabled');
   t.equal(dom.cleanupBtn.textContent, 'Cleanup Wrong Matches (3)', 'failed sweep restores button text off the still-current count');
   t.ok(dom.toast.textContent.includes('sweep blew up'), 'failed sweep toasts the error');
@@ -906,7 +937,7 @@ t.section('bulkTriageWrongMatches() surfaces a failed sweep and restores the but
 
 t.section('formatEntryEvidence() formats spectral and lossless-source V0 cells');
 {
-  const request6039 = __test__.formatEntryEvidence({
+  const request6039 = formatEntryEvidence({
     format: 'MP3',
     min_bitrate: 194,
     avg_bitrate: 288,
@@ -917,7 +948,7 @@ t.section('formatEntryEvidence() formats spectral and lossless-source V0 cells')
     'current candidate summary labels average and retains the floor',
   );
 
-  const gas = __test__.formatEntryEvidence({
+  const gas = formatEntryEvidence({
     source_codec: 'flac',
     source_container: 'flac',
     target_format: 'opus 128',
@@ -937,7 +968,7 @@ t.section('formatEntryEvidence() formats spectral and lossless-source V0 cells')
   t.ok(!gas.format.includes('224'), 'target contract does not claim the V0 average');
 
   // Happy path: AE1 — both pieces of evidence present.
-  let cells = __test__.formatEntryEvidence({
+  let cells = formatEntryEvidence({
     spectral_grade: 'genuine',
     spectral_bitrate: 950,
     v0_probe_kind: 'lossless_source_v0',
@@ -948,7 +979,7 @@ t.section('formatEntryEvidence() formats spectral and lossless-source V0 cells')
   t.ok(cells.v0.includes('265'), 'V0 cell shows the lossless-source probe average');
 
   // AE2: missing evidence renders as a dash, not as a preview trigger.
-  cells = __test__.formatEntryEvidence({
+  cells = formatEntryEvidence({
     spectral_grade: null,
     spectral_bitrate: null,
     v0_probe_kind: null,
@@ -962,7 +993,7 @@ t.section('formatEntryEvidence() formats spectral and lossless-source V0 cells')
   // Wrong-match review surfaces V0 evidence regardless of source lineage —
   // operators want to compare every candidate's bitrate at a glance, not
   // just the lossless-source ones. Whichever probe ran, show the average.
-  cells = __test__.formatEntryEvidence({
+  cells = formatEntryEvidence({
     spectral_grade: 'suspect',
     spectral_bitrate: 320,
     v0_probe_kind: 'native_lossy_research_v0',
@@ -973,7 +1004,7 @@ t.section('formatEntryEvidence() formats spectral and lossless-source V0 cells')
     'V0 probe surfaces regardless of source lineage for wrong-match review');
 
   // Edge: spectral present, V0 absent (rejected pre-conversion).
-  cells = __test__.formatEntryEvidence({
+  cells = formatEntryEvidence({
     spectral_grade: 'marginal',
     spectral_bitrate: 800,
     v0_probe_kind: null,
@@ -984,14 +1015,14 @@ t.section('formatEntryEvidence() formats spectral and lossless-source V0 cells')
 
   // Edge: missing the four keys entirely (extra defensive — payload should
   // always include them, but the renderer must not crash if it doesn't).
-  cells = __test__.formatEntryEvidence({});
+  cells = formatEntryEvidence({});
   t.equal(cells.spectral, '—', 'missing keys render as dash');
   t.equal(cells.v0, '—', 'missing keys render as dash');
 }
 
 t.section('renderQualityBadges() labels current average and retained floor fallbacks');
 {
-  let html = __test__.renderQualityBadges({
+  let html = renderQualityBadges({
     in_library: true,
     quality_label: null,
     format: null,
@@ -1002,7 +1033,7 @@ t.section('renderQualityBadges() labels current average and retained floor fallb
     'missing-format fallback leads with the current average and labels the floor');
   t.ok(!html.includes('>194k<'), 'minimum bitrate is never rendered as a bare current tier');
 
-  html = __test__.renderQualityBadges({
+  html = renderQualityBadges({
     in_library: true,
     quality_label: null,
     format: null,
@@ -1012,7 +1043,7 @@ t.section('renderQualityBadges() labels current average and retained floor fallb
   t.ok(html.includes('min 194k'), 'missing-average fallback labels minimum as floor data');
   t.ok(!html.includes('>194k<'), 'missing average never revives a bare min-derived tier');
 
-  html = __test__.renderQualityBadges({
+  html = renderQualityBadges({
     in_library: true,
     quality_label: null,
     format: null,
@@ -1021,7 +1052,7 @@ t.section('renderQualityBadges() labels current average and retained floor fallb
   });
   t.ok(html.includes('avg 288k'), 'average-only fallback remains visible current data');
 
-  html = __test__.renderQualityBadges({
+  html = renderQualityBadges({
     in_library: true,
     quality_label: 'MP3 V0',
     format: 'MP3',
@@ -1032,7 +1063,7 @@ t.section('renderQualityBadges() labels current average and retained floor fallb
   t.ok(!html.includes('avg 288k'), 'fallback summary is omitted with an explicit label');
 
   t.equal(
-    __test__.renderQualityBadges({
+    renderQualityBadges({
       in_library: false,
       quality_label: null,
       format: null,
@@ -1043,7 +1074,7 @@ t.section('renderQualityBadges() labels current average and retained floor fallb
     'zero bitrate placeholders are treated as absent off disk',
   );
   t.equal(
-    __test__.renderQualityBadges({
+    renderQualityBadges({
       in_library: true,
       quality_label: null,
       format: null,
@@ -1061,7 +1092,7 @@ for (const [grade, tone] of [
   ['suspect', 'acceptable'],
   ['marginal', 'good'],
 ]) {
-  const html = __test__.renderQualityBadges({
+  const html = renderQualityBadges({
     in_library: true,
     quality_label: 'MP3 V2',
     quality_rank: 'excellent',
@@ -1075,7 +1106,7 @@ for (const [grade, tone] of [
 
 t.section('wrong-match bucket badges use the same canonical classes as every other view');
 for (const rank of ['poor', 'acceptable', 'good', 'excellent', 'transparent', 'lossless']) {
-  const html = __test__.renderQualityBadges({
+  const html = renderQualityBadges({
     in_library: true,
     quality_label: rank,
     quality_rank: rank,
@@ -1085,7 +1116,7 @@ for (const rank of ['poor', 'acceptable', 'good', 'excellent', 'transparent', 'l
 
 t.section('wrong-match verified-lossless identity reuses the lossless bucket colour');
 {
-  const html = __test__.renderQualityBadges({
+  const html = renderQualityBadges({
     in_library: true,
     quality_label: 'FLAC',
     quality_rank: 'lossless',
@@ -1105,7 +1136,7 @@ t.section('renderEntry() embeds evidence cells without preview hooks');
   data.groups[0].entries[0].spectral_bitrate = 320;
   data.groups[0].entries[0].v0_probe_kind = 'lossless_source_v0';
   data.groups[0].entries[0].v0_probe_avg_bitrate = 265;
-  __test__.renderWrongMatches(data, dom.wrongMatches);
+  renderWrongMatches(data, dom.wrongMatches);
   const html = dom.wrongMatches.innerHTML;
   t.ok(html.includes('suspect'), 'rendered HTML carries the spectral grade');
   t.ok(html.includes('quality-tone-acceptable'),
@@ -1133,7 +1164,7 @@ t.section('renderWrongMatches() preserves ordinary candidate metadata presentati
       item: { title: 'It\'s Raining Today', format: 'MP3' },
     }],
   };
-  __test__.renderWrongMatches(data, dom.wrongMatches);
+  renderWrongMatches(data, dom.wrongMatches);
   t.ok(dom.wrongMatches.innerHTML.includes('(1969)'), 'ordinary candidate year remains visible');
   t.ok(dom.wrongMatches.innerHTML.includes(' MP3'), 'ordinary local format remains visible');
 }
@@ -1161,7 +1192,7 @@ t.section('renderWrongMatches() escapes candidate metadata at the live HTML sink
       };
       installStorage();
       const dom = installDom();
-      __test__.renderWrongMatches(data, dom.wrongMatches);
+      renderWrongMatches(data, dom.wrongMatches);
       t.ok(metadataHtmlIsEscaped(dom.wrongMatches.innerHTML, year),
         `candidate year escaped: ${JSON.stringify(year)}`);
       t.ok(metadataHtmlIsEscaped(dom.wrongMatches.innerHTML, format),
@@ -1172,7 +1203,7 @@ t.section('renderWrongMatches() escapes candidate metadata at the live HTML sink
 
 t.section('renderWrongMatchExplorer() collapses shared album tags and hides replaygain noise');
 {
-  const html = __test__.renderWrongMatchExplorer({
+  const html = renderWrongMatchExplorer({
     status: 'ok',
     ordered_by: 'matched',
     folder_name: 'The Castiles Live (Vol. 1)',
@@ -1246,7 +1277,7 @@ t.section('renderWrongMatchExplorer() distinguishes a containment refusal from a
   // never change a containment decision, so no Retry, and the lead
   // sentence must not say "could not be read" — that phrasing is
   // reserved for a world failure a retry might clear.
-  const containmentHtml = __test__.renderWrongMatchExplorer({
+  const containmentHtml = renderWrongMatchExplorer({
     status: 'ok',
     download_log_id: 900,
     partial: true,
@@ -1270,7 +1301,7 @@ t.section('renderWrongMatchExplorer() distinguishes a containment refusal from a
   t.ok(!containmentHtml.includes('Retry'), 'containment refusal offers no Retry — re-fetching cannot change it');
 
   // The world-failure control: same shape, EACCES instead of a symlink.
-  const worldFailureHtml = __test__.renderWrongMatchExplorer({
+  const worldFailureHtml = renderWrongMatchExplorer({
     status: 'ok',
     download_log_id: 901,
     partial: true,
@@ -1304,7 +1335,7 @@ t.section('renderWrongMatchExplorer() empty-state (status:"unavailable") also ho
   // the EMPTY branch (`files.length === 0`), not the per-entry-notice
   // branch a partial listing uses above. Before the fix, this branch's
   // own wording ignored `unreadableIsContainment` entirely.
-  const containmentEmpty = __test__.renderWrongMatchExplorer({
+  const containmentEmpty = renderWrongMatchExplorer({
     status: 'unavailable',
     download_log_id: 902,
     partial: true,
@@ -1324,7 +1355,7 @@ t.section('renderWrongMatchExplorer() empty-state (status:"unavailable") also ho
     'still denies the folder is confidently empty',
   );
 
-  const worldFailureEmpty = __test__.renderWrongMatchExplorer({
+  const worldFailureEmpty = renderWrongMatchExplorer({
     status: 'unavailable',
     download_log_id: 903,
     partial: true,
@@ -1405,17 +1436,17 @@ t.section('maybeLoadWrongMatchExplorer() lazy-loads explorer tags and audio on <
   };
 
   // Entry expand alone is cheap — no fetch.
-  await __test__.toggleWrongMatchEntry('wm-entry-100', 100);
+  await toggleWrongMatchEntry('wm-entry-100', 100);
   t.deepEqual(calls, [], 'entry expand does not auto-load the file explorer');
 
   // Closed <details> toggle does nothing.
   const closedDetails = { open: false };
-  await __test__.maybeLoadWrongMatchExplorer(100, closedDetails);
+  await maybeLoadWrongMatchExplorer(100, closedDetails);
   t.deepEqual(calls, [], 'closed details element does not trigger a load');
 
   // Opened <details> toggle lazy-loads exactly once.
   const openDetails = { open: true };
-  await __test__.maybeLoadWrongMatchExplorer(100, openDetails);
+  await maybeLoadWrongMatchExplorer(100, openDetails);
   t.deepEqual(
     calls,
     ['/api/wrong-matches/explorer?download_log_id=100'],
@@ -1429,8 +1460,8 @@ t.section('maybeLoadWrongMatchExplorer() lazy-loads explorer tags and audio on <
   t.ok(mount.innerHTML.includes('<audio'), 'explorer renders a browser audio player');
   t.ok(!mount.innerHTML.includes('replaygain_track_gain'), 'explorer hides replaygain noise');
 
-  await __test__.maybeLoadWrongMatchExplorer(100, openDetails);
-  await __test__.maybeLoadWrongMatchExplorer(100, openDetails);
+  await maybeLoadWrongMatchExplorer(100, openDetails);
+  await maybeLoadWrongMatchExplorer(100, openDetails);
   t.equal(calls.length, 1, 'reopening the dropdown reuses the loaded explorer state');
 }
 
@@ -1475,7 +1506,7 @@ t.section('maybeLoadWrongMatchExplorer() renders the honest copy for a refused l
     }),
   });
 
-  await __test__.maybeLoadWrongMatchExplorer(200, { open: true });
+  await maybeLoadWrongMatchExplorer(200, { open: true });
 
   t.ok(!mount.innerHTML.includes('Failed to load file explorer'),
     'a renderable unavailable payload is not treated as a load failure');
@@ -1495,7 +1526,7 @@ t.section('maybeLoadWrongMatchExplorer() renders the honest copy for a refused l
   t.ok(mount.innerHTML.includes('window.reloadWrongMatchExplorer(200)'),
     'the retry re-reads THIS entry');
 
-  await __test__.maybeLoadWrongMatchExplorer(200, { open: true });
+  await maybeLoadWrongMatchExplorer(200, { open: true });
   t.equal(calls.length, 2,
     'reopening after an unavailable listing re-fetches instead of caching');
 }
@@ -1521,7 +1552,7 @@ t.section('maybeLoadWrongMatchExplorer() surfaces a 503 refusal reason instead o
     }),
   });
 
-  await __test__.maybeLoadWrongMatchExplorer(201, { open: true });
+  await maybeLoadWrongMatchExplorer(201, { open: true });
 
   // Issue #1099: a whole-root 503 now gets its own status-honest lead
   // sentence instead of the old one-size-fits-all "Failed to load file
@@ -1566,7 +1597,7 @@ t.section('maybeLoadWrongMatchExplorer() surfaces a whole-root 422 refusal, neve
     }),
   });
 
-  await __test__.maybeLoadWrongMatchExplorer(205, { open: true });
+  await maybeLoadWrongMatchExplorer(205, { open: true });
 
   t.ok(mount.innerHTML.toLowerCase().includes('refused'),
     'a whole-root containment refusal names itself as a refusal');
@@ -1639,7 +1670,7 @@ t.section('maybeLoadWrongMatchExplorer() treats a PARTIAL listing as repairable 
     }),
   });
 
-  await __test__.maybeLoadWrongMatchExplorer(202, { open: true });
+  await maybeLoadWrongMatchExplorer(202, { open: true });
   t.ok(mount.innerHTML.includes('1 entry could not be read'),
     'the partial listing names its refusal');
   t.ok(mount.innerHTML.includes('1 track in surviving folder'),
@@ -1651,7 +1682,7 @@ t.section('maybeLoadWrongMatchExplorer() treats a PARTIAL listing as repairable 
 
   // The operator repairs the world; the retry must show the repair.
   refused = false;
-  await __test__.reloadWrongMatchExplorer(202);
+  await reloadWrongMatchExplorer(202);
   t.equal(calls.length, 2, 'the retry re-reads the folder');
   t.ok(!mount.innerHTML.includes('could not be read'),
     'the repaired listing drops the refusal notice');
@@ -1661,30 +1692,30 @@ t.section('maybeLoadWrongMatchExplorer() treats a PARTIAL listing as repairable 
     'a complete listing needs no retry');
 
   // …and a complete listing IS cached again.
-  await __test__.maybeLoadWrongMatchExplorer(202, { open: true });
+  await maybeLoadWrongMatchExplorer(202, { open: true });
   t.equal(calls.length, 2,
     'a complete listing is cached, so reopening does not re-fetch');
 }
 
 t.section('explorerListingIsRepairable() keys off refusals, not status');
 {
-  t.ok(__test__.explorerListingIsRepairable(
+  t.ok(explorerListingIsRepairable(
     { status: 'ok', unreadable_entry_count: 1 }),
     'a partial ok listing is repairable');
-  t.ok(__test__.explorerListingIsRepairable(
+  t.ok(explorerListingIsRepairable(
     { status: 'unavailable', unreadable_entry_count: 0 }),
     'an unavailable listing is repairable');
-  t.ok(!__test__.explorerListingIsRepairable(
+  t.ok(!explorerListingIsRepairable(
     { status: 'ok', unreadable_entry_count: 0 }),
     'a complete listing is not repairable');
-  t.ok(!__test__.explorerListingIsRepairable(
+  t.ok(!explorerListingIsRepairable(
     { status: 'ok', unreadable_entry_count: 0, truncated_reason: 'file_limit' }),
     'a truncated listing is not repairable — retrying hits the same limit');
 }
 
 t.section('renderWrongMatchExplorer() must still work: a complete listing claims nothing');
 {
-  const html = __test__.renderWrongMatchExplorer({
+  const html = renderWrongMatchExplorer({
     status: 'ok',
     audio_file_count: 0,
     other_file_count: 0,
@@ -1704,7 +1735,7 @@ t.section('renderWrongMatchExplorer() must still work: a complete listing claims
 
 t.section('cleanupSummaryToast() reports kept, skipped, and delete failures');
 {
-  const body = __test__.cleanupSummaryToast({
+  const body = cleanupSummaryToast({
     deleted: 2,
     kept_would_import: 1,
     kept_uncertain: 3,
@@ -1723,7 +1754,7 @@ t.section('cleanupSummaryToast() reports kept, skipped, and delete failures');
 
 t.section('cleanupSummaryToast() includes verified-lossless deletes and current-evidence-failed skips');
 {
-  const body = __test__.cleanupSummaryToast({
+  const body = cleanupSummaryToast({
     deleted: 1,
     deleted_verified_lossless_parent: 4,
     kept_would_import: 0,
@@ -1738,7 +1769,7 @@ t.section('cleanupSummaryToast() includes verified-lossless deletes and current-
 t.section('renderLatestImport() distinguishes absent / in-library / verified-lossless / present states');
 {
   // 1. No latest import, album not in library — neutral copy.
-  let html = __test__.renderLatestImport(null, { in_library: false, verified_lossless: false });
+  let html = renderLatestImport(null, { in_library: false, verified_lossless: false });
   t.ok(html.includes('No previous import on disk.'), 'absent: renders neutral "no previous import" copy');
   t.ok(!html.includes('Album already in library'), 'absent: does not claim album in library');
   t.ok(!html.includes('Verified-lossless copy in library'), 'absent: no verified-lossless copy');
@@ -1746,7 +1777,7 @@ t.section('renderLatestImport() distinguishes absent / in-library / verified-los
 
   // 2. No latest import, album in library, not verified lossless — distinguishes
   //    "no cratedigger history" from "Beets already has this MBID".
-  html = __test__.renderLatestImport(null, { in_library: true, verified_lossless: false });
+  html = renderLatestImport(null, { in_library: true, verified_lossless: false });
   t.ok(html.includes('Album already in library'), 'in_library: surfaces the in-library copy');
   t.ok(html.includes('must beat current quality'), 'in_library: explains upgrade gate semantics');
   t.ok(!html.includes('No previous import'), 'in_library: does not claim no prior import');
@@ -1754,14 +1785,14 @@ t.section('renderLatestImport() distinguishes absent / in-library / verified-los
   t.ok(!html.includes('Verified-lossless copy in library'), 'in_library: not the verified-lossless branch');
 
   // 3. No latest import, album in library AND verified lossless — strongest copy.
-  html = __test__.renderLatestImport(null, { in_library: true, verified_lossless: true });
+  html = renderLatestImport(null, { in_library: true, verified_lossless: true });
   t.ok(html.includes('Verified-lossless copy in library'), 'verified-lossless: surfaces the verified-lossless copy');
   t.ok(html.includes('cleared on the next cleanup sweep'), 'verified-lossless: explains the cleanup behavior');
   t.ok(!html.includes('Album already in library'), 'verified-lossless: does not fall back to plain in-library copy');
   t.ok(!html.includes('No previous import'), 'verified-lossless: does not fall back to absent copy');
 
   // 4. Latest import present — render existing summary regardless of in_library.
-  html = __test__.renderLatestImport(
+  html = renderLatestImport(
     {
       outcome: 'imported',
       created_at: '2026-05-17T00:00:00Z',
@@ -1787,7 +1818,7 @@ t.section('renderQualityBadges() withholds an audit-only HAVE accusation');
     current_spectral_grade: 'likely_transcode',
     current_spectral_bitrate: 128,
   };
-  let html = __test__.renderQualityBadges({
+  let html = renderQualityBadges({
     ...group,
     current_spectral_accusation_admissible: false,
     current_spectral_accusation_withheld: 'audit_only_codec',
@@ -1798,7 +1829,7 @@ t.section('renderQualityBadges() withholds an audit-only HAVE accusation');
   t.ok(!html.includes('badge-rank-poor'),
     'the accusing red badge is withheld');
 
-  html = __test__.renderQualityBadges({
+  html = renderQualityBadges({
     ...group,
     current_spectral_accusation_admissible: true,
     current_spectral_accusation_withheld: null,
@@ -1807,11 +1838,11 @@ t.section('renderQualityBadges() withholds an audit-only HAVE accusation');
     'an admissible grade still gets the accusing badge');
   t.ok(!html.includes('audit-only'), 'nothing is withheld on a real finding');
 
-  html = __test__.renderQualityBadges(group);
+  html = renderQualityBadges(group);
   t.ok(html.includes('badge-rank-poor'),
     'absent flags keep the historical accusing badge (fail-accusing)');
 
-  html = __test__.renderQualityBadges({
+  html = renderQualityBadges({
     ...group,
     current_spectral_grade: 'suspect',
     current_spectral_accusation_admissible: false,
@@ -1827,9 +1858,9 @@ t.section('renderQualityBadges() withholds an audit-only HAVE accusation');
 t.section('entrySpectralCell() withholds an audit-only candidate accusation');
 {
   const entry = { spectral_grade: 'likely_transcode', spectral_bitrate: 128 };
-  const text = __test__.formatEntryEvidence(entry).spectral;
+  const text = formatEntryEvidence(entry).spectral;
 
-  let html = __test__.entrySpectralCell({
+  let html = entrySpectralCell({
     ...entry,
     spectral_accusation_admissible: false,
     spectral_accusation_withheld: 'audit_only_codec',
@@ -1839,7 +1870,7 @@ t.section('entrySpectralCell() withholds an audit-only candidate accusation');
   t.ok(html.includes('quality-tone-unknown'), 'the neutral tone is used');
   t.ok(!html.includes('quality-tone-poor'), 'the accusing red is withheld');
 
-  html = __test__.entrySpectralCell({
+  html = entrySpectralCell({
     ...entry,
     spectral_accusation_admissible: true,
     spectral_accusation_withheld: null,
@@ -1848,11 +1879,11 @@ t.section('entrySpectralCell() withholds an audit-only candidate accusation');
     'an admissible candidate grade still accuses');
   t.ok(!html.includes('audit-only'), 'nothing is withheld on a real finding');
 
-  html = __test__.entrySpectralCell(entry, text);
+  html = entrySpectralCell(entry, text);
   t.ok(html.includes('quality-tone-poor'),
     'a pre-evidence candidate keeps the accusing chip (fail-accusing)');
 
-  html = __test__.entrySpectralCell({
+  html = entrySpectralCell({
     spectral_grade: 'suspect',
     spectral_bitrate: 192,
     spectral_accusation_admissible: false,
@@ -1863,7 +1894,7 @@ t.section('entrySpectralCell() withholds an audit-only candidate accusation');
     'an unresolved codec is never described as native encoder rolloff');
 
   // A candidate with no grade at all keeps the pre-existing neutral cell.
-  html = __test__.entrySpectralCell({}, '—');
+  html = entrySpectralCell({}, '—');
   t.ok(html.includes('quality-tone-unknown'), 'a gradeless candidate is neutral');
   t.ok(!html.includes('audit-only'), 'a gradeless candidate withholds nothing');
 }
@@ -1880,16 +1911,16 @@ t.section('an unobservable source is surfaced, never silently dropped');
     path_unavailable: true,
     path_unavailable_reason: 'path_unavailable[EACCES]: /x: Permission denied',
   };
-  t.ok(__test__.entryPathUnavailable(unavailable),
+  t.ok(entryPathUnavailable(unavailable),
     'the payload flag is the single source of the unavailable state');
-  t.ok(!__test__.entryPathUnavailable({ download_log_id: 78, distance: 0.05 }),
+  t.ok(!entryPathUnavailable({ download_log_id: 78, distance: 0.05 }),
     'an ordinary entry is not unavailable');
-  t.ok(!__test__.isConvergeGreen(unavailable, 180),
+  t.ok(!isConvergeGreen(unavailable, 180),
     'an unobservable source is never converge-green, whatever its distance');
-  t.ok(__test__.isConvergeGreen({ distance: 0.05 }, 180),
+  t.ok(isConvergeGreen({ distance: 0.05 }, 180),
     'must still work: an observable close match is still green');
 
-  const html = __test__.renderEntry(unavailable, 180, 42);
+  const html = renderEntry(unavailable, 180, 42);
   t.ok(html.includes('source unavailable'), 'the card is badged unavailable');
   t.ok(html.includes('NOT been confirmed missing'),
     'the copy refuses to claim the folder is gone');
@@ -1897,7 +1928,7 @@ t.section('an unobservable source is surfaced, never silently dropped');
   t.equal(countOccurrences(html, 'disabled'), 2,
     'both Force Import and Delete are disabled');
 
-  const ordinary = __test__.renderEntry(
+  const ordinary = renderEntry(
     { download_log_id: 78, soulseek_username: 'peer', distance: 0.05 }, 180, 42);
   t.ok(!ordinary.includes('source unavailable'),
     'must still work: an ordinary entry carries no unavailable badge');
@@ -1917,13 +1948,13 @@ t.section('the detail card renders operator-facing scenario detail copy (#1122 i
     scenario: 'high_distance',
     detail: 'could not verify the curated move source was fully consumed',
   };
-  const html = __test__.renderEntry(withDetail, 180, 42);
+  const html = renderEntry(withDetail, 180, 42);
   t.ok(html.includes('could not verify the curated move source was fully consumed'),
     'the detail copy reaches the operator');
   t.ok(html.includes('p-detail-label">Detail<'),
     'the detail row carries its own labeled field, distinct from scenario');
 
-  const escaped = __test__.renderEntry({
+  const escaped = renderEntry({
     download_log_id: 92,
     soulseek_username: 'peer',
     distance: 0.05,
@@ -1936,7 +1967,7 @@ t.section('the detail card renders operator-facing scenario detail copy (#1122 i
 
   // Most rows have no detail at all -- the card must not grow an empty
   // block for them (most rejections never populate this field).
-  const withoutDetail = __test__.renderEntry({
+  const withoutDetail = renderEntry({
     download_log_id: 93,
     soulseek_username: 'peer',
     distance: 0.05,
@@ -1944,7 +1975,7 @@ t.section('the detail card renders operator-facing scenario detail copy (#1122 i
   t.ok(!withoutDetail.includes('p-detail-label">Detail<'),
     'must still work: an entry with no detail renders no Detail row at all');
 
-  const nullDetail = __test__.renderEntry({
+  const nullDetail = renderEntry({
     download_log_id: 94,
     soulseek_username: 'peer',
     distance: 0.05,
@@ -1995,7 +2026,7 @@ t.section('a partial group delete asks for attention and re-renders');
     throw new Error(`unexpected fetch: ${url}`);
   };
   const btn = { disabled: false, textContent: 'Delete All (2)', style: {} };
-  await __test__.deleteWrongMatchGroup(42, btn);
+  await deleteWrongMatchGroup(42, btn);
 
   t.ok(dom.toast.textContent.includes('Deleted 1 folder'),
     'the toast still credits the folder that really went');
@@ -2022,7 +2053,7 @@ t.section('Delete All reflects actionable candidates, never a dead end (issue #1
 
   // A fully available group keeps today's plain label and stays enabled —
   // the common case must not regress just because unavailability exists.
-  __test__.renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
+  renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
   t.ok(dom.wrongMatches.innerHTML.includes('Delete All (3)'),
     'a fully available group keeps the plain label');
   t.ok(!/id="wm-delete-group-btn-42"[^>]*disabled/.test(dom.wrongMatches.innerHTML),
@@ -2032,7 +2063,7 @@ t.section('Delete All reflects actionable candidates, never a dead end (issue #1
   // stays enabled — a partial group is still the right action to take.
   const partial = JSON.parse(JSON.stringify(wrongMatchesData()));
   partial.groups[0].entries[0].path_unavailable = true;
-  __test__.renderWrongMatches(partial, dom.wrongMatches);
+  renderWrongMatches(partial, dom.wrongMatches);
   t.ok(dom.wrongMatches.innerHTML.includes('Delete All (2 of 3)'),
     'a partially unavailable group shows the actionable count');
   t.ok(!/id="wm-delete-group-btn-42"[^>]*disabled/.test(dom.wrongMatches.innerHTML),
@@ -2043,20 +2074,20 @@ t.section('Delete All reflects actionable candidates, never a dead end (issue #1
   // gets an error toast instead of a control that told them up front.
   const dead = JSON.parse(JSON.stringify(wrongMatchesData()));
   for (const entry of dead.groups[0].entries) entry.path_unavailable = true;
-  __test__.renderWrongMatches(dead, dom.wrongMatches);
+  renderWrongMatches(dead, dom.wrongMatches);
   t.ok(dom.wrongMatches.innerHTML.includes('Delete All (0 of 3)'),
     'a fully unavailable group names zero actionable candidates');
   t.ok(/id="wm-delete-group-btn-42"[^>]*disabled/.test(dom.wrongMatches.innerHTML),
     'a fully unavailable group disables Delete All instead of a dead-end 503');
 
-  t.equal(__test__.deleteAllButtonLabel(3, 3), 'Delete All (3)',
+  t.equal(deleteAllButtonLabel(3, 3), 'Delete All (3)',
     'a fully actionable group keeps the plain label');
-  t.equal(__test__.deleteAllButtonLabel(2, 3), 'Delete All (2 of 3)',
+  t.equal(deleteAllButtonLabel(2, 3), 'Delete All (2 of 3)',
     'a partially actionable group shows X of N');
-  t.equal(__test__.deleteAllButtonLabel(0, 2), 'Delete All (0 of 2)',
+  t.equal(deleteAllButtonLabel(0, 2), 'Delete All (0 of 2)',
     'zero actionable candidates still names the total');
   t.equal(
-    __test__.actionableDeleteEntries({ entries: [
+    actionableDeleteEntries({ entries: [
       { download_log_id: 1 },
       { download_log_id: 2, path_unavailable: true },
     ] }).length,
@@ -2086,7 +2117,7 @@ t.section('deleteWrongMatchGroup() restores the actionable-aware label on every 
   // 'ok'` nor `remaining: 0` takes the partial-outcome restore branch.
   {
     const dom = installDom();
-    __test__.renderWrongMatches(partiallyUnavailableGroup(), dom.wrongMatches);
+    renderWrongMatches(partiallyUnavailableGroup(), dom.wrongMatches);
     global.fetch = async (url) => {
       if (url === '/api/wrong-matches/delete-group') {
         return {
@@ -2097,7 +2128,7 @@ t.section('deleteWrongMatchGroup() restores the actionable-aware label on every 
       return { ok: true, json: async () => ({ groups: [] }) };
     };
     const btn = { disabled: false, textContent: 'Delete All (2 of 3)', style: {} };
-    await __test__.deleteWrongMatchGroup(42, btn);
+    await deleteWrongMatchGroup(42, btn);
     t.equal(btn.textContent, 'Delete All (2 of 3)',
       'the partial-outcome restore path keeps the actionable-aware label');
     t.equal(btn.disabled, false,
@@ -2108,12 +2139,12 @@ t.section('deleteWrongMatchGroup() restores the actionable-aware label on every 
   // the plain-error restore branch.
   {
     const dom = installDom();
-    __test__.renderWrongMatches(partiallyUnavailableGroup(), dom.wrongMatches);
+    renderWrongMatches(partiallyUnavailableGroup(), dom.wrongMatches);
     global.fetch = async () => ({
       ok: false, json: async () => ({ error: 'cleanup_lock_unavailable' }),
     });
     const btn = { disabled: false, textContent: 'Delete All (2 of 3)', style: {} };
-    await __test__.deleteWrongMatchGroup(42, btn);
+    await deleteWrongMatchGroup(42, btn);
     t.equal(btn.textContent, 'Delete All (2 of 3)',
       'the unsummarised-error restore path keeps the actionable-aware label');
     t.equal(btn.disabled, false,
@@ -2123,10 +2154,10 @@ t.section('deleteWrongMatchGroup() restores the actionable-aware label on every 
   // Path C: the fetch itself throws — the exception restore branch.
   {
     const dom = installDom();
-    __test__.renderWrongMatches(partiallyUnavailableGroup(), dom.wrongMatches);
+    renderWrongMatches(partiallyUnavailableGroup(), dom.wrongMatches);
     global.fetch = async () => { throw new Error('network down'); };
     const btn = { disabled: false, textContent: 'Delete All (2 of 3)', style: {} };
-    await __test__.deleteWrongMatchGroup(42, btn);
+    await deleteWrongMatchGroup(42, btn);
     t.equal(btn.textContent, 'Delete All (2 of 3)',
       'the fetch-exception restore path keeps the actionable-aware label');
     t.equal(btn.disabled, false,
@@ -2139,10 +2170,10 @@ t.section('deleteWrongMatchGroup() restores the actionable-aware label on every 
     const dom = installDom();
     const dead = JSON.parse(JSON.stringify(wrongMatchesData()));
     for (const entry of dead.groups[0].entries) entry.path_unavailable = true;
-    __test__.renderWrongMatches(dead, dom.wrongMatches);
+    renderWrongMatches(dead, dom.wrongMatches);
     global.fetch = async () => { throw new Error('network down'); };
     const btn = { disabled: false, textContent: 'Delete All (0 of 3)', style: {} };
-    await __test__.deleteWrongMatchGroup(42, btn);
+    await deleteWrongMatchGroup(42, btn);
     t.equal(btn.disabled, true,
       'a fully unavailable group stays disabled after a failed request too');
   }
@@ -2157,7 +2188,7 @@ t.section('removeWrongMatchEntry() keeps the group Delete All button actionable-
   const dom = installDom();
   const data = wrongMatchesData();
   data.groups[0].entries[1].path_unavailable = true; // logId 101 stays unavailable
-  __test__.renderWrongMatches(data, dom.wrongMatches);
+  renderWrongMatches(data, dom.wrongMatches);
 
   const groupBtn = fakeElement({ textContent: 'Delete All (2 of 3)' });
   dom.elements.set('wm-delete-group-btn-42', groupBtn);
@@ -2165,7 +2196,7 @@ t.section('removeWrongMatchEntry() keeps the group Delete All button actionable-
 
   // Remove the AVAILABLE candidate (id 100): 2 candidates remain, only one
   // (id 102) actionable.
-  __test__.removeWrongMatchEntry(100);
+  removeWrongMatchEntry(100);
 
   t.equal(groupBtn.textContent, 'Delete All (1 of 2)',
     'removing an available candidate updates the group button to the new '
@@ -2175,7 +2206,7 @@ t.section('removeWrongMatchEntry() keeps the group Delete All button actionable-
 
   // Must still work: removing the LAST actionable candidate disables it.
   dom.elements.set('wm-entry-card-102', fakeElement());
-  __test__.removeWrongMatchEntry(102);
+  removeWrongMatchEntry(102);
 
   t.equal(groupBtn.textContent, 'Delete All (0 of 1)',
     'removing the last actionable candidate updates the count to zero');
@@ -2198,7 +2229,7 @@ t.section('triageButtonPresentation() derives the toolbar shape from state + cou
     ['unknown, zero count', 'unknown', 0, { cleanupDisabled: true, cleanupLabel: 'Cleanup Wrong Matches (status unknown)', stopDisabled: false, stopLabel: 'Stop' }],
   ];
   for (const [desc, state, count, expected] of CASES) {
-    t.deepEqual(__test__.triageButtonPresentation(state, count), expected, desc);
+    t.deepEqual(triageButtonPresentation(state, count), expected, desc);
   }
 }
 
@@ -2206,7 +2237,7 @@ t.section('refreshWrongMatches() discovers an already-running sweep and enables 
 {
   installStorage();
   const dom = installDom();
-  __test__.renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
+  renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
   let confirmCalls = 0;
   globalThis.confirm = () => { confirmCalls += 1; return true; };
   const globals = stubGlobals({ setTimeout: (fn) => { fn(); return 0; } });
@@ -2243,7 +2274,7 @@ t.section('refreshWrongMatches() discovers an already-running sweep and enables 
     throw new Error(`unexpected fetch: ${url}`);
   };
   const refreshBtn = { disabled: false, textContent: 'Refresh' };
-  await __test__.refreshWrongMatches(refreshBtn);
+  await refreshWrongMatches(refreshBtn);
   t.equal(dom.stopBtn.disabled, false, 'discovering a running sweep on refresh enables Stop');
   t.equal(dom.cleanupBtn.disabled, true, 'discovering a running sweep on refresh disables Cleanup');
   t.equal(confirmCalls, 0, 'no confirm dialog is shown for a sweep this tab did not start');
@@ -2299,7 +2330,7 @@ t.section('loadWrongMatches() discovers an already-running sweep on initial load
   // loadWrongMatches() caches on a module-scoped `_loaded` flag, so this
   // must stay the only call to it in this file — a second call would
   // silently no-op against the flag this one sets.
-  await __test__.loadWrongMatches();
+  await loadWrongMatches();
   t.equal(dom.stopBtn.disabled, false, 'a reload that discovers a running sweep enables Stop');
   t.equal(dom.cleanupBtn.disabled, true, 'a reload that discovers a running sweep disables Cleanup');
   forceTerminal = true;
@@ -2311,7 +2342,7 @@ t.section('a NEW sweep discovered while an OLDER one\'s terminal handling is sti
 {
   installStorage();
   const dom = installDom();
-  __test__.renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
+  renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
   const globals = stubGlobals({ setTimeout: (fn) => { fn(); return 0; } });
 
   const STARTED_A = '2026-08-12T00:00:00+00:00';
@@ -2373,7 +2404,7 @@ t.section('a NEW sweep discovered while an OLDER one\'s terminal handling is sti
     };
   };
 
-  await __test__.refreshWrongMatches();
+  await refreshWrongMatches();
   t.equal(dom.stopBtn.disabled, false, 'discovering sweep A running enables Stop');
 
   // Let A's follower reach its poll loop, then tell it to terminate —
@@ -2399,7 +2430,7 @@ t.section('a status fetch that fails once retries after ~3s and recovers (#1106 
 {
   installStorage();
   const dom = installDom();
-  __test__.renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
+  renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
   const globals = stubGlobals({ setTimeout: (fn) => { fn(); return 0; } });
   let statusCalls = 0;
   // Stays 'running' until explicitly told otherwise — a boolean flag,
@@ -2438,7 +2469,7 @@ t.section('a status fetch that fails once retries after ~3s and recovers (#1106 
     throw new Error(`unexpected fetch: ${url}`);
   };
 
-  await __test__.refreshWrongMatches();
+  await refreshWrongMatches();
   t.equal(dom.stopBtn.disabled, true,
     'the failed first attempt leaves the safe default painted, not a stale enabled state');
   await flushMicrotasks(30);
@@ -2454,7 +2485,7 @@ t.section('a status fetch that fails twice (initial + retry) paints the conserva
 {
   installStorage();
   const dom = installDom();
-  __test__.renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
+  renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
   const globals = stubGlobals({ setTimeout: (fn) => { fn(); return 0; } });
   globalThis.fetch = async (url) => {
     if (url === '/api/wrong-matches') {
@@ -2466,7 +2497,7 @@ t.section('a status fetch that fails twice (initial + retry) paints the conserva
     throw new Error(`unexpected fetch: ${url}`);
   };
 
-  await __test__.refreshWrongMatches();
+  await refreshWrongMatches();
   await flushMicrotasks(50);
   t.equal(dom.cleanupBtn.disabled, true,
     'Cleanup disables when the status genuinely cannot be determined — cannot verify it is safe to start another sweep');
@@ -2481,29 +2512,29 @@ t.section('claimTriageFollow()/releaseTriageFollow() refuse a claim for an OLDER
   const LATER = '2026-08-12T02:00:00+00:00';
   const EVEN_LATER = '2026-08-12T03:00:00+00:00';
 
-  t.equal(__test__.claimTriageFollow(LATER), true,
+  t.equal(claimTriageFollow(LATER), true,
     'the first claim for a value succeeds (nothing held yet)');
-  t.equal(__test__.claimTriageFollow(EARLIER), false,
+  t.equal(claimTriageFollow(EARLIER), false,
     'a claim for a value OLDER than the held one is refused — it must not steal the slot');
-  t.equal(__test__.claimTriageFollow(LATER), false,
+  t.equal(claimTriageFollow(LATER), false,
     'a claim for the ALREADY-held value is refused (already claimed)');
-  t.equal(__test__.claimTriageFollow(EVEN_LATER), true,
+  t.equal(claimTriageFollow(EVEN_LATER), true,
     'a claim for a genuinely NEWER value is allowed to take over');
-  __test__.releaseTriageFollow(LATER);
-  t.equal(__test__.claimTriageFollow(EVEN_LATER), false,
+  releaseTriageFollow(LATER);
+  t.equal(claimTriageFollow(EVEN_LATER), false,
     'releasing a value that is NOT currently held is a no-op — the real holder keeps the slot');
-  __test__.releaseTriageFollow(EVEN_LATER);
-  t.equal(__test__.claimTriageFollow(EARLIER), true,
+  releaseTriageFollow(EVEN_LATER);
+  t.equal(claimTriageFollow(EARLIER), true,
     'the slot is free again once the value actually held is released');
   // Leave the module-level slot clean for later tests in this file.
-  __test__.releaseTriageFollow(EARLIER);
+  releaseTriageFollow(EARLIER);
 }
 
 t.section('a follower skips terminal handling when its poll result names a DIFFERENT sweep than the one it claimed (#1106 N3)');
 {
   installStorage();
   const dom = installDom();
-  __test__.renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
+  renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
   const globals = stubGlobals({ setTimeout: (fn) => { fn(); return 0; } });
 
   const CLAIMED = '2026-08-12T00:00:00+00:00';
@@ -2540,7 +2571,7 @@ t.section('a follower skips terminal handling when its poll result names a DIFFE
     throw new Error(`unexpected fetch: ${url}`);
   };
 
-  await __test__.refreshWrongMatches();
+  await refreshWrongMatches();
   await flushMicrotasks(50);
   t.ok(
     !dom.toast.textContent.includes('the DIFFERENT sweep genuinely failed'),
@@ -2571,7 +2602,7 @@ t.section('a literal-null status body degrades instead of aborting loadWrongMatc
     throw new Error(`unexpected fetch: ${url}`);
   };
 
-  await __test__.loadWrongMatches();
+  await loadWrongMatches();
 
   t.ok(queueFetched,
     'a null status body does not stop loadWrongMatches() from reaching its own queue fetch (issue #1106 N5)');
@@ -2581,7 +2612,7 @@ t.section('a literal-null status body degrades instead of aborting loadWrongMatc
   globals.restore();
 }
 
-t.section('_retryTriageStatusOnce() is single-flight — a second concurrent call is a no-op (#1106 N7b)');
+t.section('retryTriageStatusOnce() is single-flight — a second concurrent call is a no-op (#1106 N7b)');
 {
   installStorage();
   installDom();
@@ -2604,8 +2635,8 @@ t.section('_retryTriageStatusOnce() is single-flight — a second concurrent cal
   // Two concurrent retry attempts -- without the single-flight guard,
   // both would independently sleep and fetch, doubling the request
   // count for no benefit.
-  const first = __test__.retryTriageStatusOnce();
-  const second = __test__.retryTriageStatusOnce();
+  const first = retryTriageStatusOnce();
+  const second = retryTriageStatusOnce();
   await Promise.all([first, second]);
 
   t.equal(statusCalls, 1,
