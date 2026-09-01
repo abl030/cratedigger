@@ -314,9 +314,12 @@ class FakeDailyFlakeUpdateCommands:
         on a live process). Unlocked, a shim invocation that read the state
         first would publish its own copy afterwards and silently drop this
         update -- including the ``hold_stage`` the caller is about to wait
-        on. Taking the lock is bounded: every caller sets ``hold_stage``
-        while it is still ``None``, so no shim can be sleeping under the
-        lock, and the wait is at most one ordinary shim invocation.
+        on. Taking the lock is bounded by what actually matters: every caller
+        sets ``hold_stage`` while it is still ``None``, so no shim can be
+        sleeping under the lock and the wait is never a hold sleep. It is not
+        bounded to one invocation — Linux ``flock`` makes no fairness
+        promise, so a waiter can lose a wake-up race to a stream of ordinary
+        acquirers.
         """
         with self.state_path.with_suffix(".lock").open(
             "a+", encoding="utf-8"

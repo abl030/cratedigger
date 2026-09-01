@@ -632,7 +632,7 @@ class TestFakeStatePublication(unittest.TestCase):
             while not writer.done():
                 try:
                     self.fake.state["stage_started"]
-                except (ValueError, KeyError) as exc:
+                except (OSError, ValueError, KeyError) as exc:
                     errors.append(f"{type(exc).__name__}: {exc}")
                     break
                 reads += 1
@@ -642,29 +642,95 @@ class TestFakeStatePublication(unittest.TestCase):
         self.assertGreater(reads, 0, "the reader never got to run")
         self.assertEqual(self.fake.state["hold_seconds"], float(writes - 1))
 
-    def test_update_state_waits_for_the_shim_lock(self) -> None:
-        """`update_state` is a read-modify-write and must hold the lock.
+    def test_update_state_takes_an_exclusive_lock(self) -> None:
+        """`update_state` is a read-modify-write and must hold the lock
+        EXCLUSIVELY.
 
-        Atomic publication does not make it safe on its own: one test sets
-        `hold_stage` on an already-running process, and an unlocked
-        read-modify-write there loses whichever update the other writer
-        publishes second. Holding the lock from this thread must therefore
-        block it, and releasing must let it finish and merge.
+        A shared lock is held here rather than an exclusive one, which is
+        what makes the strength of `update_state`'s own lock observable: a
+        held `LOCK_SH` blocks a `LOCK_EX` request and does not block another
+        `LOCK_SH`, so degrading `update_state` to a shared lock stops this
+        from blocking at all. With an exclusive lock on both sides the test
+        cannot tell the two apart, and a `LOCK_SH` mutant survived it.
+
+        The unlock is in a `finally`: without it, an assertion failing while
+        the lock is held unwinds into `ThreadPoolExecutor.__exit__`, which
+        waits for a worker blocked on the lock this dying thread still owns.
+        Measured — the test hung indefinitely instead of reporting, so a
+        real defect would have shown up as a stuck suite worker rather than
+        a red test.
         """
         lock_path = self.fake.state_path.with_suffix(".lock")
         with lock_path.open("a+", encoding="utf-8") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                blocked = executor.submit(
-                    self.fake.update_state, hold_stage="suite"
-                )
-                with self.assertRaises(FuturesTimeoutError):
-                    blocked.result(timeout=0.5)
-                self.assertIsNone(self.fake.state["hold_stage"])
+            fcntl.flock(lock, fcntl.LOCK_SH)
+            try:
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    blocked = executor.submit(
+                        self.fake.update_state, hold_stage="suite"
+                    )
+                    try:
+                        with self.assertRaises(FuturesTimeoutError):
+                            blocked.result(timeout=0.5)
+                        self.assertIsNone(self.fake.state["hold_stage"])
+                    finally:
+                        fcntl.flock(lock, fcntl.LOCK_UN)
+                    blocked.result(timeout=10)
+            finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
-                blocked.result(timeout=10)
 
         self.assertEqual(self.fake.state["hold_stage"], "suite")
+
+    def test_update_state_waits_behind_a_real_shim_holding_the_lock(
+        self,
+    ) -> None:
+        """The composed contract: the REAL shim writer, not a hand-taken lock.
+
+        The test above proves `update_state` respects a lock; it says nothing
+        about whether the shim still TAKES one, because the lock it contends
+        with is this test's own. Deleting the shim's `flock` left every other
+        test in this module green. So this drives a real fake command into
+        its hold, then updates the state while it sleeps.
+
+        The assertion is the lost update itself, not a duration, so nothing
+        here depends on how long anything takes. Unlocked, the shim read the
+        state before this update and republishes its own copy afterwards,
+        dropping `probe_marker` entirely. Locked, `update_state` runs after
+        the shim's final publish and the marker survives. A poll that slips
+        past the hold makes the test pass without proving anything, never
+        fail — the failure direction is always a real defect.
+        """
+        self.fake.update_state(hold_stage="suite", hold_seconds=2.0)
+        shim = subprocess.Popen(
+            [
+                str(self.fake.fake_bin / "nix-shell"),
+                "--run",
+                "bash scripts/run_tests.sh",
+            ],
+            cwd=self.fake.root,
+            env=self.fake.environment(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(lambda: shim.poll() is None and shim.kill())
+
+        deadline = time.monotonic() + 15
+        while "suite" not in self.fake.state["stage_started"]:
+            self.assertIsNone(shim.poll(), "the fake shim exited before its hold")
+            self.assertLess(time.monotonic(), deadline, "shim never reached suite")
+            time.sleep(0.01)
+
+        self.fake.update_state(probe_marker="kept")
+        _stdout, stderr = shim.communicate(timeout=30)
+        self.assertEqual(shim.returncode, 0, stderr)
+
+        state = self.fake.state
+        self.assertIn("suite", state["stages"])
+        self.assertEqual(
+            state.get("probe_marker"),
+            "kept",
+            "the shim republished its stale copy over this update",
+        )
 
 
 if __name__ == "__main__":
