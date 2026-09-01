@@ -20,7 +20,13 @@ ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 HARNESS_DIR = os.path.join(ROOT_DIR, "harness")
 sys.path.insert(0, ROOT_DIR)
 
-from tests.audio_fixtures import get_bitrate_kbps, make_test_album, make_test_flac
+from tests.audio_fixtures import (
+    _synth_timeout_seconds,
+    get_bitrate_kbps,
+    make_long_test_flac,
+    make_test_album,
+    make_test_flac,
+)
 
 # ============================================================================
 # Audio fixtures sanity
@@ -56,6 +62,51 @@ class TestAudioFixtures(unittest.TestCase):
             br = get_bitrate_kbps(mp3)
             self.assertLess(br, 210, f"Transcode FLAC V0 bitrate {br}kbps should be < 210")
 
+    def test_long_fixture_carries_the_duration_it_was_asked_for(self):
+        """The long fixture's whole contract is what ffprobe reads back."""
+        with tempfile.TemporaryDirectory() as d:
+            flac = os.path.join(d, "long.flac")
+            make_long_test_flac(flac, duration=800)
+            probed = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "csv=p=0", flac],
+                capture_output=True, text=True, timeout=30, check=True)
+            self.assertAlmostEqual(float(probed.stdout.strip()), 800, delta=1)
+            # Being CHEAP is the other half of the contract, and the only
+            # reason this generator exists — 800 s through make_test_flac
+            # costs 91.9 MB of the shared test tmpfs, this one 2.5 MB.
+            # Without this, mono/8 kHz/one sine can drift back to the
+            # expensive shape and nothing notices (#1313 mutant runner).
+            self.assertLess(os.path.getsize(flac), 8_000_000)
+
+    def test_the_sox_budget_is_not_flat(self):
+        """A flat budget is right at one duration only — which is what put
+        the 800 s caller 3.5x from its own timeout (#1313)."""
+        captured = []
+
+        def _record(cmd, **kwargs):
+            captured.append(kwargs["timeout"])
+            with open(next(a for a in cmd if a.endswith(".flac")), "wb"):
+                pass
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch("tests.audio_fixtures.subprocess.run",
+                           side_effect=_record):
+            make_test_flac(os.path.join(d, "short.flac"), duration=5)
+            make_test_flac(os.path.join(d, "long.flac"), duration=800)
+            make_long_test_flac(os.path.join(d, "cheap.flac"), duration=800)
+
+        # Not-flat and not-below-the-old-floor are the claims; the SLOPE
+        # is deliberately unpinned, because it has no correct value, only
+        # a safe direction (a steeper budget survives, by design).
+        short, long_chain, long_cheap = captured
+        self.assertGreater(long_chain, short)
+        self.assertEqual(long_chain, long_cheap,
+                         "both generators budget through one function")
+        self.assertGreaterEqual(short, 30, "the 5 s default kept its budget")
+        self.assertEqual(short, _synth_timeout_seconds(5))
+
     def test_make_test_album_creates_tracks(self):
         with tempfile.TemporaryDirectory() as d:
             album_dir = os.path.join(d, "album")
@@ -87,8 +138,10 @@ class TestConversionTimeoutWiring(unittest.TestCase):
             os.makedirs(album)
             flac = os.path.join(album, "01 long.flac")
             # > 716s break-even so the budget exceeds the 300s floor and the
-            # assertion actually exercises the scaled branch.
-            make_test_flac(flac, duration=800)
+            # assertion actually exercises the scaled branch. Only the
+            # container duration is load-bearing — the conversion itself is
+            # faked below — so this takes the cheap generator (#1313).
+            make_long_test_flac(flac, duration=800)
             expected = _conversion_timeout_seconds(
                 _probe_duration_seconds(flac))
             self.assertGreater(
