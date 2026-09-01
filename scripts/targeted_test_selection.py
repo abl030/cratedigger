@@ -1412,11 +1412,7 @@ LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
         "tests.test_quality_gate does not exist and no EXACT_PATH_"
         "NEIGHBOURS/prefix rule covers it (issue #1199)"
     ),
-    "lib/dispatch/subprocess_runner.py": (
-        "measured 2026-08-19: zero neighbours -- basename-derived "
-        "tests.test_subprocess_runner does not exist and no EXACT_PATH_"
-        "NEIGHBOURS/prefix rule covers it (issue #1199)"
-    ),
+
     "lib/download_materialization.py": (
         "measured 2026-08-19: zero neighbours -- "
         "tests.test_download_materialization does not exist and no "
