@@ -484,9 +484,12 @@ class _AttemptTally:
     ``EnqueueAttempt(...)`` sites, each repeating ``candidates=`` and
     ``pre_filter_skip_count=``, with the skip count carried in a
     one-element list so a generator could mutate it through the caller's
-    reference. A return that forgot either would blank a request's search
-    history and nothing would fail. Now the shape carries them and the call
-    sites say only what is different about that particular outcome.
+    reference. A return that dropped ``pre_filter_skip_count`` would have
+    blanked that half of a request's search forensics with nothing going
+    red anywhere; ``candidates`` was luckier, covered indirectly by two
+    integration slices that assert the persisted ``search_log`` row. Now
+    the shape carries both and the call sites say only what is different
+    about that particular outcome.
     """
 
     candidates: list[CandidateScore] = field(
@@ -499,18 +502,36 @@ class _AttemptTally:
         self.candidates.extend(match_result.candidates)
         self.pre_filter_skips += match_result.pre_filter_skip_count
 
+    def record_conflicts(self, request_ids: set[int]) -> None:
+        """Absorb one cross-request guard hit (issue #1178).
+
+        A union, not an assignment: the single-album lane can hit the guard
+        on several candidates in one call, and every id it skipped for
+        belongs on the attempt even if a LATER candidate went on to match.
+        """
+        self.conflicting_request_ids |= request_ids
+
     def matched(self, downloads: list[DownloadFile] | None) -> EnqueueAttempt:
         """The attempt found and kept a candidate.
 
-        ``downloads`` is ``None`` on the poll-recovery paths, where the claim
-        outlives an ambiguous slskd answer and the next poll re-derives what
-        actually landed.
+        ``downloads`` is typed optional because ``_ClaimResolution.downloads``
+        is, and Pyright cannot narrow it at the recovery call sites — not
+        because a matched attempt may carry nothing. Every path that reaches
+        here passes a real list (the poll-recovery paths pass
+        ``claim.entry.files``), and it must: ``_try_filetype`` asserts
+        ``attempt.downloads is not None`` the moment ``matched`` is true, so
+        a matched attempt with no downloads takes down the cycle.
         """
         return self._attempt(matched=True, downloads=downloads)
 
     def unmatched(self, *, enqueue_failed: bool = False) -> EnqueueAttempt:
-        """The attempt kept nothing. ``enqueue_failed`` separates "we tried
-        and slskd or the claim refused" from "nothing matched at all"."""
+        """The attempt kept nothing.
+
+        ``enqueue_failed`` separates "something went wrong after we committed
+        to a candidate" — slskd or the claim refusing, a persist failing, an
+        exception out of the enqueue loop — from "nothing matched at all",
+        which is the ordinary result of a search and not a failure.
+        """
         return self._attempt(matched=False, enqueue_failed=enqueue_failed)
 
     def _attempt(
@@ -1513,7 +1534,7 @@ def _try_enqueue_impl(
             check_cross_cycle=check_cross_cycle,
         )
         if conflicting_requests:
-            tally.conflicting_request_ids |= conflicting_requests
+            tally.record_conflicts(conflicting_requests)
             logger.info(
                 "cross-request enqueue conflict (issue #1178): skipping "
                 "%s for album %s from %s -- queue keys already held by "
@@ -1845,7 +1866,7 @@ def _try_multi_enqueue_impl(
             check_cross_cycle=check_cross_cycle,
         )
         if conflicting_requests:
-            tally.conflicting_request_ids |= conflicting_requests
+            tally.record_conflicts(conflicting_requests)
             logger.warning(
                 "MULTI-DISC CROSS-REQUEST CONFLICT (issue #1178): "
                 "request=%s queue keys already held by request(s) %s; "
@@ -1972,6 +1993,13 @@ def _try_multi_enqueue_impl(
                 cancel_and_delete(all_downloads, ctx)
         return tally.unmatched(enqueue_failed=True)
 
+    # Unreachable, and required anyway: every path through the per-disc loop
+    # above either returns or increments ``count_found``, so ``count_found ==
+    # total`` always holds by the time control gets here — but Pyright cannot
+    # prove that, and the function must return an EnqueueAttempt. A mutant
+    # flipping this to ``tally.matched(None)`` therefore survives the whole
+    # suite (issue #1313, mutant runner mutant 6): that is an unreachable
+    # statement, not a coverage gap, and no test can close it.
     return tally.unmatched()
 
 

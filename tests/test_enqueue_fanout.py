@@ -39,6 +39,7 @@ from lib.download_ownership import DownloadOwnershipWriter
 from lib.enqueue import (
     ClaimedQueueKeysRegistry,
     DownloadOwnershipClaim,
+    EnqueueAttempt,
     _enqueue_with_claim_outcome,
     _WorkerPipelineDBSource,
     get_album_tracks,
@@ -952,17 +953,25 @@ def _scored_match(
     matched: bool,
     candidates: int,
     skips: int,
+    empty_after_filter: bool = False,
 ) -> MatchResult:
-    """A MatchResult carrying forensics, matched or not."""
+    """A MatchResult carrying forensics, matched or not.
+
+    ``empty_after_filter`` is a match whose directory holds no enqueueable
+    file — the world both lanes handle with their own "nothing remained
+    after filtering and admission" return. Without it those two return
+    sites are unreachable from any generated world (issue #1313 review,
+    reader F3).
+    """
     file_dir = f"Music\\{username}\\Album"
+    files = (
+        [] if empty_after_filter
+        else [{"filename": "01 - Track.flac", "size": 123}]
+    )
     return MatchResult(
         matched=matched,
         directory=(
-            {
-                "directory": file_dir,
-                "files": [{"filename": "01 - Track.flac", "size": 123}],
-            }
-            if matched else {}
+            {"directory": file_dir, "files": files} if matched else {}
         ),
         file_dir=file_dir if matched else "",
         candidates=[
@@ -973,6 +982,57 @@ def _scored_match(
     )
 
 
+def run_forensics_world(
+    plan: list[tuple[bool, int, int]],
+    *,
+    enqueue_succeeds: bool = True,
+    lane: str = "single",
+    empty_after_filter: bool = False,
+) -> tuple[EnqueueAttempt, list[tuple[int, int]]]:
+    """Drive one real enqueue lane over a per-peer ``(matched, candidates,
+    skips)`` plan, returning the attempt and what ``match_fn`` was asked for.
+
+    ``consumed`` is recorded per call rather than derived from ``plan``, so
+    the expectation follows the lane's real iteration — the single lane walks
+    peers until one is kept, the multi lane takes each disc's first match.
+    Shared by the deterministic pins here and the generated property in
+    ``tests/test_enqueue_admission_generated.py`` (issue #1313 review).
+    """
+    cfg = _make_cfg(browse_top_k=20)
+    users = _ranked_users(len(plan))
+    ctx = _make_ctx(cfg, user_upload_speed=_upload_speeds(users))
+    results = _make_results(users)
+    specs = dict(zip(users, plan, strict=True))
+    consumed: list[tuple[int, int]] = []
+
+    def match_fn(_tracks, _ft, _dirs, username, _ctx):
+        matched, candidates, skips = specs[username]
+        consumed.append((candidates, skips))
+        return _scored_match(
+            username, matched=matched, candidates=candidates, skips=skips,
+            empty_after_filter=empty_after_filter,
+        )
+
+    with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+         patch(
+             "lib.enqueue.slskd_do_enqueue",
+             return_value=[MagicMock()] if enqueue_succeeds else None,
+         ):
+        if lane == "multi":
+            release = MagicMock()
+            release.media = [
+                MagicMock(medium_number=1), MagicMock(medium_number=2)]
+            attempt = try_multi_enqueue(
+                release, _multi_disc_tracks(), results, "flac", ctx,
+                match_fn=match_fn,
+            )
+        else:
+            attempt = try_enqueue(
+                _make_tracks(), results, "flac", ctx, match_fn=match_fn,
+            )
+    return attempt, consumed
+
+
 class TestAttemptReportsItsForensics(unittest.TestCase):
     """Whatever the outcome, an attempt reports what matching cost it.
 
@@ -980,83 +1040,167 @@ class TestAttemptReportsItsForensics(unittest.TestCase):
     the request's search history, and both are populated from the returned
     ``EnqueueAttempt`` regardless of whether anything matched. Before issue
     #1313 every one of the two impls' nineteen return sites repeated the two
-    keyword arguments by hand and no test asserted either of them, so a
-    return that dropped one would blank a request's forensics silently.
+    keyword arguments by hand. Dropping the skip count would have gone
+    unnoticed by every test in the tree; dropping the candidates would have
+    been caught only indirectly, by two integration slices asserting the
+    persisted ``search_log`` row.
     """
 
-    def _run(self, plan, *, enqueue_succeeds: bool = True):
-        cfg = _make_cfg(browse_top_k=20)
-        users = _ranked_users(len(plan))
-        ctx = _make_ctx(cfg, user_upload_speed=_upload_speeds(users))
-        results = _make_results(users)
-        matches = {
-            user: _scored_match(user, **spec)
-            for user, spec in zip(users, plan, strict=True)
-        }
-        asked: list[str] = []
-
-        def match_fn(_tracks, _ft, _dirs, username, _ctx):
-            asked.append(username)
-            return matches[username]
-
-        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-             patch(
-                 "lib.enqueue.slskd_do_enqueue",
-                 return_value=[MagicMock()] if enqueue_succeeds else None,
-             ):
-            attempt = try_enqueue(
-                _make_tracks(), results, "flac", ctx, match_fn=match_fn,
-            )
-        return attempt, asked, plan
-
-    def _assert_reports_every_visit(self, attempt, asked, plan):
-        visited = plan[:len(asked)]
+    def _assert_reports_every_visit(self, attempt, consumed):
         self.assertEqual(
             len(attempt.candidates),
-            sum(spec["candidates"] for spec in visited),
+            sum(candidates for candidates, _ in consumed),
         )
         self.assertEqual(
             attempt.pre_filter_skip_count,
-            sum(spec["skips"] for spec in visited),
+            sum(skips for _, skips in consumed),
         )
 
     def test_a_match_still_reports_the_peers_it_walked_past(self):
         """The decisive world: matching on the second peer must not throw
         away the first peer's skipped dirs, which is the whole reason the
         skip count is accumulated rather than read off the winner."""
-        attempt, asked, plan = self._run([
-            {"matched": False, "candidates": 2, "skips": 3},
-            {"matched": True, "candidates": 1, "skips": 1},
-        ])
+        attempt, consumed = run_forensics_world(
+            [(False, 2, 3), (True, 1, 1)])
 
         self.assertTrue(attempt.matched)
-        self.assertEqual(len(asked), 2)
+        self.assertEqual(len(consumed), 2)
         self.assertEqual(len(attempt.candidates), 3)
         self.assertEqual(attempt.pre_filter_skip_count, 4)
-        self._assert_reports_every_visit(attempt, asked, plan)
+        self._assert_reports_every_visit(attempt, consumed)
 
     def test_an_attempt_that_matches_nothing_still_reports_them_all(self):
-        attempt, asked, plan = self._run([
-            {"matched": False, "candidates": 1, "skips": 2},
-            {"matched": False, "candidates": 3, "skips": 0},
-        ])
+        attempt, consumed = run_forensics_world(
+            [(False, 1, 2), (False, 3, 0)])
 
         self.assertFalse(attempt.matched)
         self.assertEqual(len(attempt.candidates), 4)
         self.assertEqual(attempt.pre_filter_skip_count, 2)
-        self._assert_reports_every_visit(attempt, asked, plan)
+        self._assert_reports_every_visit(attempt, consumed)
 
     def test_a_failed_enqueue_reports_them_too(self):
-        attempt, asked, plan = self._run(
-            [{"matched": True, "candidates": 2, "skips": 5}],
-            enqueue_succeeds=False,
-        )
+        attempt, consumed = run_forensics_world(
+            [(True, 2, 5)], enqueue_succeeds=False)
 
         self.assertFalse(attempt.matched)
         self.assertTrue(attempt.enqueue_failed)
         self.assertEqual(len(attempt.candidates), 2)
         self.assertEqual(attempt.pre_filter_skip_count, 5)
-        self._assert_reports_every_visit(attempt, asked, plan)
+        self._assert_reports_every_visit(attempt, consumed)
+
+    def test_the_multi_disc_lane_reports_every_disc_it_walked(self):
+        """The multi lane restarts matching per disc, so the same peers get
+        asked twice and both walks count. Its fifteen return sites were
+        reached by none of the pins above (issue #1313 review, reader F3)."""
+        attempt, consumed = run_forensics_world(
+            [(False, 1, 2), (True, 2, 1)], lane="multi")
+
+        self.assertGreater(len(consumed), 2)
+        self._assert_reports_every_visit(attempt, consumed)
+
+    def test_conflicts_accumulate_across_candidates_in_one_call(self):
+        """The union is the point: two candidates, two different conflicts.
+
+        Every other assertion on ``conflicting_request_ids`` in this file
+        checks a single-conflict outcome, so degrading the union to an
+        assignment — losing the first candidate's ids — went unnoticed
+        (issue #1313, mutant runner finding 2). The docstring at the guard
+        claims every id skipped for during the WHOLE call is carried.
+        """
+        cfg = _make_cfg(browse_top_k=20)
+        users = _ranked_users(2)
+        ctx = _make_ctx(cfg, user_upload_speed=_upload_speeds(users))
+        results = _make_results(users)
+        matches = {
+            user: _scored_match(user, matched=True, candidates=0, skips=0)
+            for user in users
+        }
+        conflicts = {users[0]: {11}, users[1]: {22}}
+
+        def conflict_for(planned, request_id, _ctx, *, check_cross_cycle=None):
+            return conflicts[planned[0].username]
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch(
+                 "lib.enqueue._cross_request_conflict_ids",
+                 side_effect=conflict_for,
+             ):
+            attempt = try_enqueue(
+                _make_tracks(), results, "flac", ctx,
+                match_fn=lambda _t, _f, _d, u, _c: matches[u],
+            )
+
+        self.assertFalse(attempt.matched)
+        self.assertEqual(attempt.conflicting_request_ids, frozenset({11, 22}))
+
+    def _multi_disc_partial(self, discs_that_match: int):
+        """Drive try_multi_enqueue where only some discs find a folder."""
+        cfg = _make_cfg(browse_top_k=20)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        ctx = _ctx_with_download_ownership(cfg=cfg, db=db)
+        release = MagicMock()
+        release.media = [MagicMock(medium_number=1), MagicMock(medium_number=2)]
+        tracks = _multi_disc_tracks()
+
+        def match_fn(disc_tracks, _ft, _dirs, username, _ctx):
+            disc = disc_tracks[0]["mediumNumber"]
+            return _scored_match(
+                username,
+                matched=disc <= discs_that_match,
+                candidates=1,
+                skips=1,
+            )
+
+        def accept(*, username, files, file_dir, ctx, **_ledger_kwargs):
+            return SlskdEnqueueOutcome(status="accepted", downloads=[
+                DownloadFile(
+                    filename=files[0]["filename"],
+                    id=f"transfer-{username}",
+                    file_dir=file_dir,
+                    username=username,
+                    size=files[0]["size"],
+                ),
+            ])
+
+        with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
+             patch(
+                 "lib.enqueue.slskd_enqueue_with_outcome", side_effect=accept,
+             ):
+            return try_multi_enqueue(
+                release, tracks, _make_results(_ranked_users(2)), "flac", ctx,
+                match_fn=match_fn,
+            ), db
+
+    def test_a_multi_disc_album_missing_a_disc_is_not_a_match(self):
+        """The world no multi-disc test built, and the one that crashes.
+
+        Disc 1 finds a folder, disc 2 does not, so the candidate is
+        incomplete and the attempt must report ``matched=False``. Nothing
+        constructed this world before, so both of the multi lane's
+        not-every-disc returns could report ``matched=True`` with no
+        downloads and the entire enqueue suite stayed green (issue #1313,
+        mutant runner mutants 3 and 6). That is not a cosmetic wrong flag:
+        ``_try_filetype`` asserts ``attempt.downloads is not None`` the
+        moment ``matched`` is true, so it takes the cycle down with a bare
+        AssertionError the next time an album is missing a disc.
+        """
+        attempt, db = self._multi_disc_partial(discs_that_match=1)
+
+        self.assertFalse(attempt.matched)
+        self.assertIsNone(attempt.downloads)
+        self.assertFalse(attempt.enqueue_failed)
+        # Still reports what the walk cost, on the incomplete-candidate path.
+        self.assertTrue(attempt.candidates)
+        self.assertTrue(attempt.pre_filter_skip_count)
+        self.assertEqual(db.request(1)["status"], "wanted")
+
+    def test_a_multi_disc_album_finding_every_disc_still_matches(self):
+        """Must-still-work: the guard above must not refuse a whole album."""
+        attempt, _db = self._multi_disc_partial(discs_that_match=2)
+
+        self.assertTrue(attempt.matched)
+        self.assertIsNotNone(attempt.downloads)
 
 
 class TestDownloadOwnershipPreclaim(unittest.TestCase):

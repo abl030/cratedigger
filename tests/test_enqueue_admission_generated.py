@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import unittest
 from collections.abc import Sequence
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from hypothesis import example, given
 from hypothesis import strategies as st
@@ -23,15 +23,12 @@ from lib.slskd_transfers import SlskdEnqueueOutcome
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 from tests.test_enqueue_fanout import (
+    _candidate_score,
     _const_match,
     _ctx_with_download_ownership,
     _make_cfg,
-    _make_ctx,
-    _make_results,
     _make_tracks,
-    _ranked_users,
-    _scored_match,
-    _upload_speeds,
+    run_forensics_world,
 )
 
 
@@ -134,13 +131,17 @@ def forensics_violations(
     attempt: EnqueueAttempt,
     consumed: list[tuple[int, int]],
 ) -> list[str]:
-    """Every way a returned attempt can under-report what matching cost.
+    """Every way a returned attempt can misreport what matching cost.
 
     ``consumed`` is one ``(candidates, skips)`` pair per ``check_for_match``
     the attempt actually made — recorded by the injected ``match_fn``, so
     the expectation follows the real iteration rather than assuming the
     attempt walked every peer. Accumulating rather than short-circuiting so
     a candidate-count violation cannot hide a skip-count one.
+
+    Both counting clauses are equalities, not floors: over-reporting is as
+    wrong as under-reporting, and a stray second ``record_match`` call is
+    the producible defect that makes it so.
     """
     violations: list[str] = []
     expected_candidates = sum(candidates for candidates, _ in consumed)
@@ -160,36 +161,6 @@ def forensics_violations(
     return violations
 
 
-def _run_forensics_world(
-    plan: list[tuple[bool, int, int]],
-    *,
-    enqueue_succeeds: bool,
-) -> tuple[EnqueueAttempt, list[tuple[int, int]]]:
-    cfg = _make_cfg(browse_top_k=20)
-    users = _ranked_users(len(plan))
-    ctx = _make_ctx(cfg, user_upload_speed=_upload_speeds(users))
-    results = _make_results(users)
-    specs = dict(zip(users, plan, strict=True))
-    consumed: list[tuple[int, int]] = []
-
-    def match_fn(_tracks, _ft, _dirs, username, _ctx):
-        matched, candidates, skips = specs[username]
-        consumed.append((candidates, skips))
-        return _scored_match(
-            username, matched=matched, candidates=candidates, skips=skips,
-        )
-
-    with patch("lib.enqueue._fanout_browse_users", return_value=set()), \
-         patch(
-             "lib.enqueue.slskd_do_enqueue",
-             return_value=[MagicMock()] if enqueue_succeeds else None,
-         ):
-        attempt = try_enqueue(
-            _make_tracks(), results, "flac", ctx, match_fn=match_fn,
-        )
-    return attempt, consumed
-
-
 class TestAttemptForensicsProperty(unittest.TestCase):
     """An attempt reports every match result it consumed, whatever it decides."""
 
@@ -204,40 +175,91 @@ class TestAttemptForensicsProperty(unittest.TestCase):
             max_size=5,
         ),
         enqueue_succeeds=st.booleans(),
+        lane=st.sampled_from(("single", "multi")),
+        empty_after_filter=st.booleans(),
     )
     # The world the deterministic pin names: a peer walked past before the
     # one that matched, whose skips would vanish if any return read the
     # winner's counters instead of the attempt's.
-    @example(plan=[(False, 2, 3), (True, 1, 1)], enqueue_succeeds=True)
+    @example(plan=[(False, 2, 3), (True, 1, 1)], enqueue_succeeds=True,
+             lane="single", empty_after_filter=False)
     # Nothing matches at all: the whole walk is forensics and nothing else.
-    @example(plan=[(False, 1, 2), (False, 3, 0)], enqueue_succeeds=True)
+    @example(plan=[(False, 1, 2), (False, 3, 0)], enqueue_succeeds=True,
+             lane="single", empty_after_filter=False)
     # A match whose enqueue is refused — the failure return path.
-    @example(plan=[(True, 2, 5)], enqueue_succeeds=False)
+    @example(plan=[(True, 2, 5)], enqueue_succeeds=False, lane="single", empty_after_filter=False)
+    # The multi lane: fifteen of the nineteen return sites live there,
+    # and the single-lane-only property reached none of them.
+    @example(plan=[(False, 1, 2), (True, 2, 1)], enqueue_succeeds=True,
+             lane="multi", empty_after_filter=False)
+    # A match whose directory filters down to nothing — each lane's own
+    # "nothing remained after filtering and admission" return, reachable
+    # from no generated world before this dimension existed.
+    @example(plan=[(True, 1, 1)], enqueue_succeeds=True,
+             lane="multi", empty_after_filter=True)
+    @example(plan=[(True, 1, 1)], enqueue_succeeds=True,
+             lane="single", empty_after_filter=True)
     def test_every_consumed_match_is_reported(
-        self, *, plan: list[tuple[bool, int, int]], enqueue_succeeds: bool,
+        self,
+        *,
+        plan: list[tuple[bool, int, int]],
+        enqueue_succeeds: bool,
+        lane: str,
+        empty_after_filter: bool,
     ) -> None:
-        attempt, consumed = _run_forensics_world(
-            plan, enqueue_succeeds=enqueue_succeeds,
+        attempt, consumed = run_forensics_world(
+            plan, enqueue_succeeds=enqueue_succeeds, lane=lane,
+            empty_after_filter=empty_after_filter,
         )
         self.assertEqual(forensics_violations(attempt, consumed), [])
 
 
 class TestForensicsCheckerTripsOnViolations(unittest.TestCase):
-    """Known-bad self-test per clause: each one fires, with its own message."""
+    """Known-bad self-test per clause: each one fires, with its own message.
+
+    Both counting clauses are tested in BOTH directions. Only testing the
+    under-report direction leaves ``!=`` free to weaken to ``<`` unnoticed
+    (issue #1313, mutant runner findings 14 and 15), and over-reporting is a
+    producible defect, not a hypothetical one: recording the same match twice
+    is one stray ``record_match`` call away.
+    """
 
     _CLEAN = EnqueueAttempt(
         matched=False, candidates=(), pre_filter_skip_count=0,
     )
+
+    def _attempt(self, *, candidates: int, skips: int) -> EnqueueAttempt:
+        return EnqueueAttempt(
+            matched=False,
+            candidates=tuple(
+                _candidate_score("peer", f"dir-{i}") for i in range(candidates)
+            ),
+            pre_filter_skip_count=skips,
+        )
 
     def test_dropped_candidate_scores_trip_their_own_clause(self) -> None:
         violations = forensics_violations(self._CLEAN, [(2, 0)])
         self.assertEqual(len(violations), 1)
         self.assertIn("candidate scores dropped", violations[0])
 
+    def test_double_counted_candidate_scores_trip_it_too(self) -> None:
+        violations = forensics_violations(
+            self._attempt(candidates=4, skips=0), [(2, 0)])
+        self.assertEqual(len(violations), 1)
+        self.assertIn("candidate scores dropped", violations[0])
+        self.assertIn("reported 4, consumed 2", violations[0])
+
     def test_dropped_skips_trip_their_own_clause(self) -> None:
         violations = forensics_violations(self._CLEAN, [(0, 3)])
         self.assertEqual(len(violations), 1)
         self.assertIn("pre-filter skips dropped", violations[0])
+
+    def test_double_counted_skips_trip_it_too(self) -> None:
+        violations = forensics_violations(
+            self._attempt(candidates=0, skips=6), [(0, 3)])
+        self.assertEqual(len(violations), 1)
+        self.assertIn("pre-filter skips dropped", violations[0])
+        self.assertIn("reported 6, consumed 3", violations[0])
 
     def test_matched_and_failed_trips_its_own_clause(self) -> None:
         violations = forensics_violations(
