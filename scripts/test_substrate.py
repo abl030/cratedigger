@@ -605,6 +605,13 @@ RECEIPT_HEAD_FIELD = "head"
 RECEIPT_CLEAN_FIELD = "clean"
 RECEIPT_COMMAND_FIELD = "command"
 RECEIPT_OUTPUT_LOG_FIELD = "output.log"
+#: Written by ``_leave_incomplete_receipt`` and holding the name of the
+#: signal that ended the run. Its PRESENCE is the load-bearing part: an
+#: incomplete receipt carrying it had its suite signalled by its own gate,
+#: while one without it lost that gate before any handler could run and may
+#: well have left a suite behind, still holding the admission lock (issue
+#: #1313, residual 1324-7).
+RECEIPT_INTERRUPTED_FIELD = "interrupted"
 #: Staging name for the atomic terminal publication: written in full, then
 #: renamed over ``RECEIPT_TERMINAL_FIELD``, so no reader ever observes a
 #: half-written verdict.
@@ -1112,6 +1119,24 @@ class FinalGateError(RuntimeError):
     """A gate refusal: its message goes to stderr and the CLI exits 2."""
 
 
+# The running gate's own two pieces of state, module-level because a signal
+# handler is the one caller nothing can be passed to. Lowercase because they
+# are mutable, which is also what keeps strict Pyright's
+# reportConstantRedefinition happy. Both stay None outside a gate run, and
+# one gate process runs one suite, so there is nothing here for a second run
+# to collide with.
+#
+# _suite_child_pid is cleared the moment the child has been waited for, so a
+# signal arriving during the tail of _run_gate cannot signal a pid the
+# kernel has already released. It is published on the line after Popen
+# returns, which leaves a window of a few instructions where a signal finds
+# it still None and the suite survives — the same window in which no
+# gate_pid has been recorded either, so the receipt is honestly
+# identity-less rather than wrong.
+_suite_child_pid: int | None = None
+_interrupted_receipt: Path | None = None
+
+
 def _receipt_field(receipt: Path, field: str) -> str:
     """One receipt field, or a refusal naming the field that is missing.
 
@@ -1234,8 +1259,40 @@ def _record_suite_bundle(receipt: Path, output_path: Path) -> bool:
     return True
 
 
-def _leave_incomplete_receipt(_signum: int, _frame: FrameType | None) -> None:
-    """Exit 128 without publishing a terminal verdict.
+def _leave_incomplete_receipt(signum: int, _frame: FrameType | None) -> None:
+    """Take the suite down, name the signal, and exit 128 unpublished.
+
+    An interrupted gate used to leave its suite running (issue #1313,
+    residual 1324-7). CPython's shutdown does not kill a ``Popen`` child —
+    measured, and true under the bash original for the same reason: nothing
+    signalled it. So a helper killed by pid alone left a full canonical
+    suite grinding on, holding ``run_suite``'s exclusive admission lock and
+    its share of the RAM root, with no receipt left that would ever collect
+    its verdict. The operator's re-run then queued behind the very work
+    their interruption abandoned.
+
+    One added signal fixes it, because the suite already knows how to drain.
+    ``_suite_child_pid`` is the coordinator itself: measured, ``nix develop
+    --command bash -c "bash scripts/run_tests.sh"`` execs straight through,
+    so that one pid IS ``scripts/run_test_suite.py`` and its group holds
+    nothing else — every phase runs in a session of its own
+    (``execute_phase``'s ``start_new_session=True``). SIGTERM there reaches
+    that coordinator's own interrupt handler, which signals each active
+    phase group in turn, publishes its summary, and exits, releasing the
+    admission lock. Live receipt ``…ih66v9st`` is the whole sequence from
+    the outside: ``INTERRUPTED: signal 15`` and then a bundle, on a run
+    whose helper was already gone.
+
+    Nothing here changes what a signal aimed at the GATE's process group
+    does; the child stays in it, and that signal still reaches the
+    coordinator directly as it always did. This is purely the case that
+    signal never covered.
+
+    Teardown comes first and the marker second, so a receipt write that
+    fails cannot leave the suite running. Both are best-effort: a child that
+    has already gone (the ordinary terminal Ctrl-C, where the signal reached
+    the whole group at once) raises ``ProcessLookupError``, which is the
+    intended end state, not a failure.
 
     ``os._exit`` rather than ``sys.exit``, because it is the exact analog of
     the shell's ``trap 'exit 128'``: the process is gone at the moment the
@@ -1244,16 +1301,29 @@ def _leave_incomplete_receipt(_signum: int, _frame: FrameType | None) -> None:
     the interrupted call returns to the interpreter, and unwinds through
     every ``finally`` and ``atexit`` handler on the way — any of which could
     alter this exit status or touch the receipt this handler exists to leave
-    untouched and incomplete.
+    incomplete. Skipping the buffer flush costs nothing: the receipt line
+    was flushed explicitly and nothing else has been buffered.
 
-    NOT for the child's safety, and not to suppress output — both were
-    measured, and neither is a reason: CPython's shutdown does not kill a
-    ``Popen`` child (the suite survives either way, for the same reason it
-    did under bash — nothing signals it), and a ``SystemExit`` raised from
-    this handler exits 128 with an empty stderr, no ``ResourceWarning``
-    among it. Skipping the buffer flush costs nothing here either: the
-    receipt line was flushed explicitly and nothing else has been buffered.
+    What no handler can cover: a SIGKILLed helper never runs this, so its
+    suite survives and its receipt carries no marker. That is precisely what
+    ``_status_receipt`` reports on, rather than a gap left silent.
     """
+    if _suite_child_pid is not None:
+        try:
+            os.kill(_suite_child_pid, signal.SIGTERM)
+        except OSError:
+            pass
+    if _interrupted_receipt is not None:
+        try:
+            name = signal.Signals(signum).name
+        except ValueError:
+            name = str(signum)
+        try:
+            _write_receipt_field(
+                _interrupted_receipt, RECEIPT_INTERRUPTED_FIELD, f"{name}\n"
+            )
+        except OSError:
+            pass
     os._exit(_SIGNAL_EXIT_STATUS)
 
 
@@ -1289,7 +1359,14 @@ def _await_suite(receipt: Path, output_path: Path) -> int:
     ``CANONICAL_COMMAND`` is unchanged, so the receipt still records the
     same canonical command and ``status`` still compares it the same way;
     only the launcher around it moved.
+
+    The child's pid is published for ``_leave_incomplete_receipt``, the one
+    caller nothing can hand it to. Deliberately NO ``process_group``: the
+    child stays in the gate's own group, so every signal that reached it
+    before still does, and the handler's SIGTERM is added on top rather than
+    traded for it.
     """
+    global _suite_child_pid
     environment = dict(os.environ)
     environment["CRATEDIGGER_SUITE_OWNS_HEADROOM"] = "1"
     with output_path.open("wb") as log:
@@ -1299,10 +1376,12 @@ def _await_suite(receipt: Path, output_path: Path) -> int:
             stderr=subprocess.STDOUT,
             env=environment,
         )
+        _suite_child_pid = child.pid
     gate_ticks = _proc_start_ticks(child.pid) or ""
     _write_receipt_field(receipt, RECEIPT_GATE_PID_FIELD, f"{child.pid}\n")
     _write_receipt_field(receipt, RECEIPT_GATE_START_TICKS_FIELD, f"{gate_ticks}\n")
     returncode = child.wait()
+    _suite_child_pid = None
     if returncode < 0:
         return _SIGNAL_EXIT_STATUS - returncode
     return returncode
@@ -1363,6 +1442,8 @@ def _run_gate() -> int:
     output_path.write_text("", encoding="utf-8")
 
     print(f"receipt: {receipt}", flush=True)
+    global _interrupted_receipt
+    _interrupted_receipt = receipt
     for gate_signal in _GATE_SIGNALS:
         signal.signal(gate_signal, _leave_incomplete_receipt)
 
@@ -1473,8 +1554,41 @@ def _status_receipt(argument: str) -> int:
     gate_live = _receipt_process_field_live(
         receipt, RECEIPT_GATE_PID_FIELD, RECEIPT_GATE_START_TICKS_FIELD
     )
-    print("exact-active" if helper_live and gate_live else "incomplete")
+    if helper_live and gate_live:
+        print("exact-active")
+        return 0
+    print("incomplete")
+    _print_incompletion_diagnosis(receipt)
     return 0
+
+
+def _print_incompletion_diagnosis(receipt: Path) -> None:
+    """Say on stderr what an ``incomplete`` receipt implies about its suite.
+
+    Stdout stays the single word the ``check`` skill and every caller parse.
+    The distinction this adds is the one an operator actually acts on: a
+    receipt whose gate handled a signal tore its own suite down, so a re-run
+    starts immediately, while one with no marker lost its gate to something
+    no handler survives and may have left a suite holding the admission lock
+    (issue #1313, residual 1324-7). Both still mean "re-run"; only the
+    second means "expect to wait, or look for the orphan first".
+    """
+    interrupted = receipt / RECEIPT_INTERRUPTED_FIELD
+    if interrupted.is_file():
+        signal_name = interrupted.read_text(errors="replace").rstrip("\n")
+        print(
+            f"final gate: interrupted by {signal_name}; its suite was "
+            "signalled, so nothing from this run should still be holding "
+            "the admission lock",
+            file=sys.stderr,
+        )
+        return
+    print(
+        "final gate: no interruption was recorded — this run either is "
+        "still starting or lost its gate to a signal no handler survives, "
+        "in which case its suite may still be running",
+        file=sys.stderr,
+    )
 
 
 def _final_gate(arguments: Sequence[str]) -> int:

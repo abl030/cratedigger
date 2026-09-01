@@ -33,7 +33,14 @@ if [[ "${5:-}" == "bash scripts/run_tests.sh" ]]; then
 fi
 case "$FAKE_NIX_MODE" in
     exit) exit "$FAKE_NIX_EXIT" ;;
-    sleep) sleep 30 ;;
+    # `exec`, not a plain call: production's `nix develop --command bash -c
+    # "bash scripts/run_tests.sh"` execs straight through, so the pid the
+    # gate records IS the suite coordinator (measured 2026-09-01 against a
+    # real gate run: that pid's process group holds exactly one member,
+    # every phase having been put in a session of its own by
+    # run_test_suite.py). A fake that forked instead would let a per-pid
+    # signal look insufficient here in a way it never is there.
+    sleep) exec sleep 30 ;;
     term) kill -TERM "$$" ;;
     kill) kill -KILL "$$" ;;
     dirty) touch "$FAKE_NIX_REPO/dirty" ;;
@@ -75,6 +82,7 @@ class FinalGateReceiptTestCase(unittest.TestCase):
 
     def tearDown(self) -> None:
         for receipt in self.created_receipts:
+            self._reap_suite_child(receipt)
             shutil.rmtree(receipt, ignore_errors=True)
         shutil.rmtree(self.bundle, ignore_errors=True)
         self.fake_bin.cleanup()
@@ -149,6 +157,32 @@ class FinalGateReceiptTestCase(unittest.TestCase):
             time.sleep(0.01)
         self.assertTrue(path.exists(), "helper did not record a gate PID")
         return int(path.read_text())
+
+    @staticmethod
+    def _reap_suite_child(receipt: Path) -> None:
+        """Kill whatever suite a test deliberately abandoned.
+
+        The SIGKILL cases leave a real 30-second `sleep` behind — that is
+        the behaviour under test, and this is what stops each such case
+        holding a process for the rest of the run.
+        """
+        path = receipt / "gate_pid"
+        try:
+            pid = int(path.read_text().strip())
+        except (OSError, ValueError):
+            return
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+    def _await_dead_process(self, pid: int) -> None:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if not Path(f"/proc/{pid}").is_dir():
+                return
+            time.sleep(0.02)
+        self.fail(f"the gate's suite child {pid} survived its interruption")
 
     def test_success_runs_only_the_canonical_suite_and_preserves_output(self) -> None:
         process = self._launch()
@@ -258,16 +292,91 @@ class FinalGateReceiptTestCase(unittest.TestCase):
         self.assertFalse((receipt / "terminal").exists())
         self.assertEqual(self._status(receipt), "incomplete")
 
-    def test_helper_sigterm_leaves_a_surviving_child_incomplete(self) -> None:
+    def test_helper_sigterm_takes_the_suite_down_with_it(self) -> None:
+        """Issue #1313, residual 1324-7. This used to assert the opposite —
+        that the suite SURVIVED a killed gate — and then kill the survivor
+        itself. What that pinned was a full canonical suite running with no
+        receipt left to collect it, holding the admission lock the
+        operator's re-run then queued behind.
+
+        The helper is signalled by PID, not by group, which is the case the
+        old behaviour left uncovered: a group-directed signal always reached
+        the child too, since it never left the gate's group and still
+        doesn't.
+        """
         process = self._launch(mode="sleep")
         receipt = self._receipt_from(process)
         gate_pid = self._gate_pid(receipt)
         os.kill(process.pid, signal.SIGTERM)
         process.communicate(timeout=10)
 
+        self._await_dead_process(gate_pid)
         self.assertFalse((receipt / "terminal").exists())
         self.assertEqual(self._status(receipt), "incomplete")
-        os.kill(gate_pid, signal.SIGKILL)
+
+    def test_an_interrupted_gate_records_the_signal_that_ended_it(self) -> None:
+        """The marker is what tells a later reader that this receipt's suite
+        was torn down rather than abandoned."""
+        process = self._launch(mode="sleep")
+        receipt = self._receipt_from(process)
+        self._gate_pid(receipt)
+        os.kill(process.pid, signal.SIGTERM)
+        process.communicate(timeout=10)
+
+        self.assertEqual((receipt / "interrupted").read_text(), "SIGTERM\n")
+
+    def test_status_names_the_interruption_behind_an_incomplete_receipt(
+        self,
+    ) -> None:
+        """Stdout keeps the one word every caller parses; the diagnosis goes
+        to stderr, where it can say the thing an operator acts on."""
+        process = self._launch(mode="sleep")
+        receipt = self._receipt_from(process)
+        self._gate_pid(receipt)
+        os.kill(process.pid, signal.SIGTERM)
+        process.communicate(timeout=10)
+
+        result = subprocess.run(
+            [str(HELPER), "status", str(receipt)],
+            cwd=self.repo.name,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "incomplete")
+        self.assertIn("interrupted by SIGTERM", result.stderr)
+
+    def test_status_says_an_unmarked_receipt_may_have_left_a_suite_running(
+        self,
+    ) -> None:
+        """The honest half of the same diagnosis: SIGKILL runs no handler,
+        so nothing tore that suite down and nothing recorded a signal. The
+        test kills only the helper, so the fake's own `sleep` really is
+        still running while status is read."""
+        process = self._launch(mode="sleep")
+        receipt = self._receipt_from(process)
+        gate_pid = self._gate_pid(receipt)
+        os.kill(process.pid, signal.SIGKILL)
+        process.communicate(timeout=10)
+
+        result = subprocess.run(
+            [str(HELPER), "status", str(receipt)],
+            cwd=self.repo.name,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "incomplete")
+        self.assertFalse((receipt / "interrupted").exists())
+        self.assertIn("no interruption was recorded", result.stderr)
+        self.assertTrue(
+            Path(f"/proc/{gate_pid}").is_dir(),
+            "this scenario is only real while the abandoned suite is alive",
+        )
 
     def test_child_sigterm_is_incomplete_without_terminal_marker(self) -> None:
         process = self._launch(mode="term")

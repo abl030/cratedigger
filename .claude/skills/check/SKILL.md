@@ -72,6 +72,16 @@ either — only a receipt that is both conclusively finished-or-dead AND older
 than the 7-day retirement floor above is ever removed, and only by a later
 admitted suite run's own reap pass (issue #1208 item 4).
 
+`incomplete` now comes with a stderr line saying which kind it is (issue
+#1313). A gate that handled SIGHUP, SIGINT, or SIGTERM signals its suite's
+whole process group on the way out and records the signal name in the
+receipt's `interrupted` file, so that run left nothing behind and a re-run
+starts straight away. Without that marker the gate lost to something no
+handler survives — SIGKILL, or the host — and its suite may still be
+running, still holding the admission lock a re-run has to wait for. Run the
+gate detached and poll `status` rather than under a tool timeout, which is
+what produces the first kind.
+
 The isolated final-gate worktree must remain exclusively owned for the entire
 gate. The receipt rechecks its HEAD and clean state immediately before terminal
 publication, but it is not a snapshot or protection against a concurrent writer
