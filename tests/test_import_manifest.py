@@ -23,7 +23,13 @@ from lib.import_manifest import (
     tracked_audio_paths_for_downloads,
 )
 from lib.import_queue import IMPORT_JOB_FORCE
+from lib.quality import (
+    ImportResult,
+    SpectralAnalysisDetail,
+    SpectralDetail,
+)
 from lib.quality_evidence import snapshot_audio_files
+from lib.terminal_outcomes import PendingImportTerminalOutcome
 from tests.dispatch_helpers import claim_next_import_job
 from tests.evidence_helpers import make_album_quality_evidence
 from tests.fakes import FakePipelineDB
@@ -440,6 +446,80 @@ class TestForceImportManifestGuard(unittest.TestCase):
         self.assertEqual(
             json.loads(row.validation_result)["failed_path"], "/operator/Album"
         )
+
+    def test_manifest_rejection_audit_preserves_every_nondefault_field(self):
+        """The guard's synchronous rejection is a durable audit contract."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        attempt = ImportAttemptResult(SpectralDetail(
+            candidate=SpectralAnalysisDetail(
+                attempted=True, grade="suspect", bitrate_kbps=96),
+            existing=SpectralAnalysisDetail(
+                attempted=True, grade="genuine", bitrate_kbps=245),
+        ))
+
+        outcome = _guard_reject(
+            _dispatch_db(db), request_id=42, failed_path="/action/Album",
+            audit_source_path="/operator/Album", source_username="peer",
+            attempt_result=attempt, detail="manifest mismatch",
+            scenario="untracked_audio", distance=0.42, import_job_id=None,
+            source_download_log_id=23,
+        )
+
+        self.assertIs(outcome.success, False)
+        self.assertEqual(db.request(42)["status"], "downloading")
+        self.assertEqual(len(db.download_logs), 1)
+        row = db.download_logs[0]
+        self.assertEqual(row.soulseek_username, "peer")
+        self.assertEqual(row.outcome, "rejected")
+        self.assertEqual(row.staged_path, "/action/Album")
+        self.assertEqual(row.source_download_log_id, 23)
+        self.assertEqual(row.beets_distance, 0.42)
+        self.assertEqual(row.beets_scenario, "untracked_audio")
+        self.assertEqual(row.beets_detail, "manifest mismatch")
+        self.assertIsNotNone(row.import_result)
+        self.assertEqual(
+            ImportResult.from_json(row.import_result).spectral,
+            attempt.audit,
+        )
+        self.assertEqual(
+            json.loads(row.validation_result)["failed_path"], "/operator/Album"
+        )
+
+    def test_manifest_rejection_deferred_outcome_preserves_owner_and_audit(self):
+        """The owner-backed path must remain a typed pending terminal outcome."""
+        db = FakePipelineDB()
+        attempt = ImportAttemptResult(SpectralDetail(
+            candidate=SpectralAnalysisDetail(
+                attempted=True, grade="suspect", bitrate_kbps=96),
+            existing=SpectralAnalysisDetail(
+                attempted=True, grade="genuine", bitrate_kbps=245),
+        ))
+
+        outcome = _guard_reject(
+            _dispatch_db(db), request_id=42, failed_path="/action/Album",
+            audit_source_path="/operator/Album", source_username="peer",
+            attempt_result=attempt, detail="manifest mismatch",
+            scenario="untracked_audio", distance=0.42, import_job_id=9,
+            source_download_log_id=23,
+        )
+
+        self.assertIsInstance(outcome.terminal_outcome, PendingImportTerminalOutcome)
+        assert outcome.terminal_outcome is not None
+        pending = outcome.terminal_outcome
+        self.assertEqual(pending.request_id, 42)
+        self.assertEqual(pending.import_job_id, 9)
+        self.assertIsNone(pending.initial_transition)
+        self.assertEqual(pending.audit.outcome, "rejected")
+        self.assertEqual(pending.audit.soulseek_username, "peer")
+        self.assertEqual(pending.audit.staged_path, "/action/Album")
+        self.assertEqual(pending.audit.source_download_log_id, 23)
+        self.assertEqual(pending.audit.beets_detail, "manifest mismatch")
+        self.assertEqual(
+            json.loads(pending.audit.validation_result or "{}")["failed_path"],
+            "/operator/Album",
+        )
+        self.assertIsNotNone(pending.audit.import_result)
 
     def test_force_import_rejects_audio_not_in_origin_manifest(self):
         import msgspec
