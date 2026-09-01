@@ -2536,7 +2536,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
         """Issue #1122, review round 3 (F-A hold): the processing-albums-
         root pin above proves protected_staging_roots protects
         processing_albums_dir, but a site-local mutant reverting
-        lib.download_rejection._delete_rejected_source_cancellable's
+        lib.download_rejection._checkpoint_then_delete_rejected_source's
         protected_parents back to
         frozenset({processing_albums_dir(processing_dir)}) alone survives
         the entire suite -- nothing exercises this call site with a

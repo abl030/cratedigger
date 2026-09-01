@@ -67,7 +67,7 @@ def load_rank_config() -> QualityRankConfig:
     """Runtime ``QualityRankConfig`` (config.ini), falling back to defaults.
 
     The CLI calls this directly — the web process's cached ``_rank_cfg`` is
-    unavailable cross-process. Mirrors ``web/server.py::_rank_cfg``'s loader.
+    unavailable cross-process. Mirrors ``web/overlay.py::_rank_cfg``'s loader.
     """
     try:
         from lib.config import read_runtime_rank_config

@@ -85,7 +85,7 @@ gate `PipelineDB.get_wrong_matches()` filters on:
 1. **Lane A** — `lib.download_rejection._handle_rejected_result`, the shared
    beets-invalid-match / media-readiness reject handler. `move_failed_import_
    curated` for every scenario except `audio_corrupt`, which instead calls
-   `_delete_rejected_source_cancellable` (no move, no `failed_path`) — the
+   `_checkpoint_then_delete_rejected_source` (no move, no `failed_path`) — the
    only scenario `_handle_rejected_result` special-cases (D3).
 2. **Lane B** — `lib.download_rejection._reject_request_auto_import`, the
    pre-dispatch "cannot safely auto-import" guard

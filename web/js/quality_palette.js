@@ -45,7 +45,7 @@ function token(value) {
 }
 
 /** @param {unknown} rank */
-export function qualityRankTone(rank) {
+function qualityRankTone(rank) {
   const normalized = token(rank);
   return QUALITY_RANKS.has(normalized) ? normalized : 'unknown';
 }

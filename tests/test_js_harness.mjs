@@ -14,7 +14,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, rmdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -34,15 +34,34 @@ const TESTS_DIR = path.dirname(fileURLToPath(import.meta.url));
 const HARNESS = path.join(TESTS_DIR, 'js_harness.mjs');
 
 /**
+ * Where an in-repo fixture goes: a subdirectory, not `tests/` itself.
+ *
+ * A fixture has to live inside the repository for the repo-relative identity
+ * assertions to mean anything, and it is removed in a `finally` — but a
+ * SIGKILL in that window leaks the file, and nothing reaps it. Under
+ * `tests/` directly that leak is an untracked `.mjs` sitting among the real
+ * suites (#1319's residual 6); in its own subdirectory it is one line of
+ * `git status` naming a directory whose whole purpose is scratch.
+ */
+const FIXTURE_DIR = path.join(TESTS_DIR, '_harness_fixtures');
+
+/**
  * Run `body` as a suite in a child process and return its result.
  *
- * `inRepo` places the fixture beside the harness so the repo-relative
+ * `inRepo` places the fixture inside the repository so the repo-relative
  * identity is exercised; otherwise it goes to a scratch directory.
  */
 function runFixture(body, { inRepo = false } = {}) {
-  const dir = inRepo ? TESTS_DIR : mkdtempSync(path.join(tmpdir(), 'js-harness-'));
-  // `_`-prefixed: `run_js_checks.sh` globs `test_js_*.mjs`, so an in-repo
-  // fixture must not look like a suite even for the instant it exists.
+  let dir;
+  if (inRepo) {
+    dir = FIXTURE_DIR;
+    mkdirSync(dir, { recursive: true });
+  } else {
+    dir = mkdtempSync(path.join(tmpdir(), 'js-harness-'));
+  }
+  // `_`-prefixed as well: `run_js_checks.sh` globs `test_js_*.mjs`
+  // non-recursively, so an in-repo fixture is already out of its reach on
+  // two counts, and stays so if the glob is ever widened to one of them.
   const file = path.join(dir, `_js_harness_fixture_${process.pid}_${Math.random().toString(36).slice(2)}.mjs`);
   const source = `import { suite, stubGlobals, domStub, element } from ${JSON.stringify(HARNESS)};\n`
     + `const t = suite(import.meta.url);\n${body}\n`;
@@ -59,7 +78,14 @@ function runFixture(body, { inRepo = false } = {}) {
     };
   } finally {
     rmSync(file, { force: true });
-    if (!inRepo) rmSync(dir, { force: true, recursive: true });
+    if (inRepo) {
+      // Non-recursive on purpose: it succeeds once this run's last fixture
+      // is gone and fails harmlessly (ENOTEMPTY) while a leaked one remains,
+      // so the leak stays visible instead of being swept up by its own test.
+      try { rmdirSync(dir); } catch { /* another fixture is still there */ }
+    } else {
+      rmSync(dir, { force: true, recursive: true });
+    }
   }
 }
 
@@ -224,6 +250,46 @@ t.section('checker vocabulary — the failing side of every method');
   t.contains(run.stdout, 'expected a throw, none happened', 'throws() explains a missing throw');
   t.contains(run.stdout, 'expected a rejection, none happened', 'rejects() explains a missing rejection');
   t.contains(run.stdout, 'expected RangeError, got TypeError', 'the wrong error class is named');
+}
+
+t.section('contains and excludes refuse a non-string haystack');
+{
+  // Both used to coerce with String(haystack), which INVERTS an array:
+  // measured, ['ab','cd'].includes('a') is false while
+  // String(['ab','cd']).includes('a') is true. So a mechanical sweep of the
+  // remaining t.ok(x.includes(y)) sites would have turned array ones into
+  // the opposite assertion, silently — the reason #1319 left that sweep
+  // undone. One needle, both directions of the inversion: with the old
+  // coercion `contains` passed where the array says no, and `excludes`
+  // failed where the array says yes. Verified by disabling the guard: the
+  // fixture then reports 1 passed, 1 failed instead of two refusals.
+  const run = runFixture(
+    "t.contains(['ab', 'cd'], 'a', 'the array does not contain it');\n"
+    + "t.excludes(['ab', 'cd'], 'a', 'the array really does exclude it');\n"
+    + 't.done();',
+  );
+  t.equal(run.status, 1, 'an array haystack fails rather than coercing');
+  t.equal(run.markers.length, 2, 'both methods refuse it');
+  t.contains(run.stdout, 't.contains needs a string haystack, got array',
+    'the refusal names the method and the type');
+  t.contains(run.stdout, 't.excludes needs a string haystack, got array',
+    'excludes refuses it too, rather than accusing a correct assertion');
+
+  // Must still work: the string haystacks all 974 existing call sites pass.
+  const ok = runFixture(
+    "t.contains('abc', 'b', 'a string haystack still matches');\n"
+    + "t.excludes('abc', 'z', 'and still excludes');\n"
+    + 't.done();',
+  );
+  t.equal(ok.status, 0, 'a string haystack is unaffected');
+
+  // Anything else is refused by TYPE, not by a list of known-bad ones.
+  const other = runFixture(
+    "t.contains(12345, '234', 'a number is not a string either');\n"
+    + 't.done();',
+  );
+  t.equal(other.status, 1, 'a number haystack is refused, not stringified');
+  t.contains(other.stdout, 'got number', 'the refusal names the real type');
 }
 
 t.section('equal and notEqual are STRICT');

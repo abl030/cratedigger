@@ -187,7 +187,7 @@ export function closeBrowseArtist() {
  * Used by close-artist-view, mode-switch, and as the first step of each
  * new paste resolution.
  */
-export function clearSearchTarget() {
+function clearSearchTarget() {
   state.searchTargetId = null;
   state.searchTargetExpandId = null;
   state.searchTargetSource = null;
