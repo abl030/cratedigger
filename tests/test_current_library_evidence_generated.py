@@ -19,6 +19,35 @@ over generated HAVE worlds (issue #1313). Three invariants:
   spectral; rescanning the lossy copy can rewrite a transcode-like source as
   apparently genuine.
 
+**Only V1 is a falsifiable guard here; V2/V3/V4 are fail-closed
+legislation.** Each was measured against a production mutant, not reasoned
+about:
+
+- **V1 — falsifiable.** Moving the worker's `persist_measured_have_spectral`
+  call to after `mark_import_job_preview_importable` (the exact download_log
+  37206 shape) makes this property RED with V1's own message and the order
+  `['mark_importable', 'persist_have_spectral']`.
+- **V2 — not reached by its own mutant.** Deleting the worker's
+  `isinstance(outcome, CurrentLibraryAuthorityUnavailable)` early return
+  makes the run red, but through an uncaught `AttributeError` on
+  `.existing_spectral_evidence` a few lines later — a crash, never a clean
+  V2 report. The clause legislates for a future writer who handles an
+  unavailable authority WITHOUT returning.
+- **V3 — survives its own mutant.** Deleting `resolved.evidence is None`
+  from `persist_measured_have_spectral`'s guard leaves this property fully
+  GREEN, because `persist_exact_current_spectral_from_attempt` independently
+  short-circuits on a `None` row before touching the DB, so the write-order
+  recorder sees no difference. `TestPersistMeasuredHaveSpectral
+  .test_declines_when_no_have_row_is_linked` is what actually protects that
+  clause; it kills the same mutant.
+- **V4** — see below.
+
+Keeping all four is deliberate: a clause no world reaches today is correct
+legislation for the next writer of this namespace, and the remedy for an
+unreachable clause is a wider strategy, never a deleted clause. What is NOT
+acceptable is presenting them as equally patrolled, which is what this
+paragraph exists to prevent.
+
 **V4 is fail-closed legislation, not a satisfied guard — say so plainly.**
 No world this lane can build violates it, and that was established by
 measurement rather than by reading. R19 identity is pure lineage and says
