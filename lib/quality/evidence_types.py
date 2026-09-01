@@ -19,11 +19,6 @@ from lib.quality.audio_validation import (
 V0_PROBE_LOSSLESS_SOURCE = "lossless_source_v0"
 V0_PROBE_NATIVE_LOSSY_RESEARCH = "native_lossy_research_v0"
 V0_PROBE_ON_DISK_RESEARCH = "on_disk_research_v0"
-V0_PROBE_KINDS = frozenset({
-    V0_PROBE_LOSSLESS_SOURCE,
-    V0_PROBE_NATIVE_LOSSY_RESEARCH,
-    V0_PROBE_ON_DISK_RESEARCH,
-})
 
 EvidenceSubject = Literal["installed", "source"]
 EvidenceProvenance = Literal["measured", "carried"]
