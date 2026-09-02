@@ -3,9 +3,14 @@
 Split out of ``tests/test_fakes.py`` (#1313) so each cluster of the
 fake has its sibling tests beside it.
 """
+import copy
 import unittest
 from datetime import UTC, datetime, timedelta
 
+from lib.pipeline_db import RequestSpectralStateUpdate
+from lib.pipeline_db._shared import REQUEST_METADATA_RESERVED_FIELDS
+from lib.quality import SpectralMeasurement
+from tests.evidence_helpers import make_album_quality_evidence
 from tests.fakes import (
     FakePipelineDB,
 )
@@ -806,6 +811,1014 @@ class TestFakeRequestUniqueMbReleaseId(unittest.TestCase):
         db.seed_request(make_request_row(id=7, mb_release_id="mbid-seeded"))
         with self.assertRaises(psycopg2.errors.UniqueViolation):
             db.add_request("A", "B", "request", mb_release_id="mbid-seeded")
+
+
+class TestFakeRequestLifecycleWrites(unittest.TestCase):
+    """Status transitions and attempt bookkeeping on ``album_requests``."""
+
+    def test_request_creation_race_materializes_only_on_in_lock_lookup(self):
+        db = FakePipelineDB()
+        db.arm_request_creation_race(
+            "race-release", status="imported",
+        )
+
+        self.assertIsNone(db.get_request_by_release_id("race-release"))
+        winner = db.get_request_by_release_id("race-release")
+
+        assert winner is not None
+        self.assertEqual(winner["status"], "imported")
+        again = db.get_request_by_release_id("race-release")
+        assert again is not None
+        self.assertEqual(
+            again["id"],
+            winner["id"],
+        )
+
+    def test_record_attempt_updates_retry_metadata(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
+
+        db.record_attempt(42, "validation", expected_status="wanted")
+
+        row = db.request(42)
+        self.assertEqual(row["validation_attempts"], 1)
+        self.assertIsNotNone(row["last_attempt_at"])
+        self.assertIsNotNone(row["next_retry_after"])
+        self.assertIsNotNone(row["updated_at"])
+        self.assertEqual(db.recorded_attempts, [(42, "validation")])
+
+    def test_record_attempt_rejects_processing_owner_even_when_status_matches(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="processing",
+            active_automation_import_job_id=743,
+        ))
+        before = copy.deepcopy(db.request(42))
+
+        self.assertFalse(db.record_attempt(
+            42,
+            "download",
+            expected_status="processing",
+        ))
+
+        self.assertEqual(db.request(42), before)
+
+    def test_set_downloading_sets_attempt_timestamps(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
+
+        result = db.set_downloading(42, '{"enqueued_at":"2026-01-01T00:00:00+00:00"}')
+
+        self.assertTrue(result)
+        row = db.request(42)
+        self.assertEqual(row["status"], "downloading")
+        self.assertIsNotNone(row["last_attempt_at"])
+        self.assertIsNotNone(row["updated_at"])
+        self.assertEqual(
+            row["active_download_state"],
+            '{"enqueued_at":"2026-01-01T00:00:00+00:00"}',
+        )
+        self.assertEqual(db.status_history, [(42, "downloading")])
+
+    def test_update_download_state_if_downloading_guards_status(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={
+                "filetype": "old",
+                "enqueued_at": "attempt-a",
+                "files": [],
+            },
+        ))
+        db.seed_request(make_request_row(
+            id=43,
+            status="wanted",
+            active_download_state={
+                "filetype": "old",
+                "enqueued_at": "attempt-a",
+                "files": [],
+            },
+        ))
+
+        updated = db.update_download_state_if_downloading(
+            42,
+            '{"filetype":"flac","enqueued_at":"attempt-a","files":[]}',
+            expected_enqueued_at="attempt-a",
+        )
+        blocked = db.update_download_state_if_downloading(
+            43,
+            '{"filetype":"mp3","enqueued_at":"attempt-a","files":[]}',
+            expected_enqueued_at="attempt-a",
+        )
+
+        self.assertTrue(updated)
+        self.assertFalse(blocked)
+        self.assertEqual(
+            db.request(42)["active_download_state"],
+            {
+                "filetype": "flac",
+                "enqueued_at": "attempt-a",
+                "files": [],
+            },
+        )
+        self.assertEqual(
+            db.request(43)["active_download_state"],
+            {
+                "filetype": "old",
+                "enqueued_at": "attempt-a",
+                "files": [],
+            },
+        )
+
+    def test_update_download_state_if_downloading_rejects_stale_witness_unchanged(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={
+                "filetype": "flac",
+                "enqueued_at": "attempt-b",
+                "files": [],
+            },
+        ))
+        before = copy.deepcopy(db.request(42))
+
+        updated = db.update_download_state_if_downloading(
+            42,
+            '{"filetype":"mp3","enqueued_at":"attempt-a","files":[]}',
+            expected_enqueued_at="attempt-a",
+        )
+
+        self.assertFalse(updated)
+        self.assertEqual(db.request(42), before)
+
+    def test_set_update_download_state_error_raises_and_leaves_row_untouched(self):
+        """Issue #564 review: the injection seam mirrors a psycopg2 error
+        at the witnessed UPDATE, records the
+        attempt, never mutates the row; other requests are unaffected."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, status="downloading",
+            active_download_state={
+                "filetype": "flac",
+                "enqueued_at": "attempt-a",
+                "files": [],
+            }))
+        db.seed_request(make_request_row(
+            id=2,
+            status="downloading",
+            mb_release_id="mbid-2",
+            active_download_state={
+                "filetype": "flac",
+                "enqueued_at": "attempt-b",
+                "files": [],
+            },
+        ))
+        boom = RuntimeError("UPDATE failed")
+        db.set_update_download_state_error(1, boom)
+
+        with self.assertRaises(RuntimeError):
+            db.update_download_state_if_downloading(
+                1,
+                '{"filetype":"mp3","enqueued_at":"attempt-a","files":[]}',
+                expected_enqueued_at="attempt-a",
+            )
+
+        # Row 1 untouched; the attempt is recorded.
+        self.assertEqual(
+            db.request(1)["active_download_state"],
+            {
+                "filetype": "flac",
+                "enqueued_at": "attempt-a",
+                "files": [],
+            },
+        )
+        self.assertEqual(len(db.update_download_state_calls), 1)
+        # Other requests still write normally.
+        self.assertTrue(
+            db.update_download_state_if_downloading(
+                2,
+                '{"filetype":"mp3","enqueued_at":"attempt-b","files":[]}',
+                expected_enqueued_at="attempt-b",
+            ))
+        self.assertEqual(
+            db.request(2)["active_download_state"],
+            {
+                "filetype": "mp3",
+                "enqueued_at": "attempt-b",
+                "files": [],
+            },
+        )
+
+    def test_reset_downloading_to_wanted_guards_status_and_preserves_counters(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="downloading",
+            active_download_state={"filetype": "flac"},
+            download_attempts=3,
+        ))
+        db.seed_request(make_request_row(id=43, status="wanted"))
+
+        reset = db.reset_downloading_to_wanted(42)
+        blocked = db.reset_downloading_to_wanted(43)
+
+        self.assertTrue(reset)
+        self.assertFalse(blocked)
+        self.assertEqual(db.request(42)["status"], "wanted")
+        self.assertIsNone(db.request(42)["active_download_state"])
+        self.assertEqual(db.request(42)["download_attempts"], 3)
+        self.assertEqual(db.status_history, [(42, "wanted")])
+
+    def test_wanted_resets_accept_explicit_previous_bitrate(self):
+        """Fake parity: explicit history wins over derived old-min capture."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="unsearchable",
+            min_bitrate=320,
+            prev_min_bitrate=192,
+        ))
+        db.seed_request(make_request_row(
+            id=43,
+            status="downloading",
+            min_bitrate=245,
+            prev_min_bitrate=128,
+        ))
+
+        self.assertTrue(db.reset_to_wanted(
+            42,
+            expected_status="unsearchable",
+            min_bitrate=224,
+            prev_min_bitrate=256,
+        ))
+        self.assertTrue(db.reset_downloading_to_wanted(
+            43,
+            min_bitrate=192,
+            prev_min_bitrate=None,
+        ))
+
+        self.assertEqual(db.request(42)["min_bitrate"], 224)
+        self.assertEqual(db.request(42)["prev_min_bitrate"], 256)
+        self.assertEqual(db.request(43)["min_bitrate"], 192)
+        self.assertIsNone(db.request(43)["prev_min_bitrate"])
+
+    def test_spectral_state_update_fields_apply(self):
+        """The typed spectral payload lands through ``update_request_fields``
+        — the production shape since the ``update_spectral_state`` wrapper
+        (last reachable only from tests) was deleted with the dead
+        measurement-side stamp writer."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42))
+
+        update = RequestSpectralStateUpdate(
+            current=SpectralMeasurement(grade="genuine", bitrate_kbps=None),
+        )
+        db.update_request_fields(42, **update.as_update_fields())
+
+        row = db.request(42)
+        self.assertEqual(row["current_spectral_grade"], "genuine")
+        self.assertIsNone(row["current_spectral_bitrate"])
+
+    def test_clear_on_disk_quality_fields_matches_real_db(self):
+        """FakePipelineDB must mirror PipelineDB.clear_on_disk_quality_fields:
+        zero current evidence + on-disk spectral + verified_lossless,
+        preserve min_bitrate and last_download_spectral_* (those aren't
+        on-disk state).
+        """
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            min_bitrate=320,
+            verified_lossless=True,
+            current_spectral_grade="likely_transcode",
+            current_spectral_bitrate=160,
+            last_download_spectral_grade="suspect",
+            last_download_spectral_bitrate=192,
+            current_evidence_id=743,
+        ))
+
+        db.clear_on_disk_quality_fields(42)
+
+        row = db.request(42)
+        self.assertFalse(row["verified_lossless"])
+        self.assertIsNone(row["current_spectral_grade"])
+        self.assertIsNone(row["current_spectral_bitrate"])
+        self.assertIsNone(row["current_evidence_id"])
+        # min_bitrate preserved as baseline for next gate.
+        self.assertEqual(row["min_bitrate"], 320)
+        # Recent download's spectral is an audit trail, not on-disk state.
+        self.assertEqual(row["last_download_spectral_grade"], "suspect")
+        self.assertEqual(row["last_download_spectral_bitrate"], 192)
+
+    def test_clear_on_disk_quality_fields_rejects_processing_owner(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            status="processing",
+            active_automation_import_job_id=743,
+            verified_lossless=True,
+            current_spectral_grade="genuine",
+            current_spectral_bitrate=245,
+        ))
+        before = copy.deepcopy(db.request(42))
+
+        db.clear_on_disk_quality_fields(42)
+
+        self.assertEqual(db.request(42), before)
+
+    def test_set_marked_incomplete_mirrors_real_outcomes(self):
+        """Issue #1241: the fake's outcome vocabulary and idempotence must
+        mirror ``PipelineDB.set_marked_incomplete`` (real-PG round-trip in
+        tests/test_pipeline_db.py::TestSetMarkedIncompleteRoundTrip)."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="imported"))
+        db.seed_request(make_request_row(id=43, status="replaced"))
+
+        self.assertEqual(db.set_marked_incomplete(999, marked=True), "not_found")
+        self.assertEqual(db.set_marked_incomplete(43, marked=True), "replaced")
+
+        self.assertEqual(db.set_marked_incomplete(42, marked=True), "marked")
+        row = db.get_request(42)
+        assert row is not None
+        stamp = row["marked_incomplete_at"]
+        self.assertIsNotNone(stamp)
+        self.assertEqual(
+            db.set_marked_incomplete(42, marked=True), "already_marked"
+        )
+        row = db.get_request(42)
+        assert row is not None
+        self.assertEqual(row["marked_incomplete_at"], stamp)
+
+        self.assertEqual(db.set_marked_incomplete(42, marked=False), "cleared")
+        row = db.get_request(42)
+        assert row is not None
+        self.assertIsNone(row["marked_incomplete_at"])
+        self.assertEqual(
+            db.set_marked_incomplete(42, marked=False), "already_clear"
+        )
+
+    def test_request_marked_incomplete_mirrors_the_narrow_read(self):
+        """Issue #1241: the dispatch decision path's scalar read — a
+        missing row reads as unmarked, never an error."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="imported"))
+        self.assertFalse(db.request_marked_incomplete(42))
+        self.assertFalse(db.request_marked_incomplete(999))
+        db.set_marked_incomplete(42, marked=True)
+        self.assertTrue(db.request_marked_incomplete(42))
+        db.set_marked_incomplete(42, marked=False)
+        self.assertFalse(db.request_marked_incomplete(42))
+
+
+class TestFakeRequestMetadataGuards(unittest.TestCase):
+    """The metadata writers' refusals: reserved fields, malformed values,
+    lifecycle columns, and the empty-update compare-and-set.
+    """
+
+    def test_empty_request_field_update_is_a_read_only_cas(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=41, status="wanted"))
+        db.seed_request(make_request_row(id=42, status="replaced"))
+        active_before = copy.deepcopy(db.request(41))
+        replaced_before = copy.deepcopy(db.request(42))
+
+        self.assertTrue(db.update_request_fields(41))
+        self.assertTrue(db.update_request_fields(
+            41, expected_status="wanted",
+        ))
+        self.assertFalse(db.update_request_fields(
+            41, expected_status="unsearchable",
+        ))
+        self.assertFalse(db.update_request_fields(42))
+        self.assertFalse(db.update_request_fields(
+            42, expected_status="replaced",
+        ))
+        self.assertFalse(db.update_request_fields(999))
+        self.assertFalse(db.update_request_fields(
+            999, expected_status="wanted",
+        ))
+
+        self.assertEqual(db.request(41), active_before)
+        self.assertEqual(db.request(42), replaced_before)
+
+    def test_metadata_update_rejects_every_reserved_field(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=41, status="wanted"))
+        before = copy.deepcopy(db.request(41))
+
+        for field in sorted(REQUEST_METADATA_RESERVED_FIELDS):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "reserved lifecycle/identity fields",
+                ):
+                    db.update_request_fields(41, **{
+                        field: "replaced" if field == "status" else "smuggled",
+                    })
+                self.assertEqual(db.request(41), before)
+
+        with self.assertRaises(ValueError):
+            db.update_request_fields(41, status="unsearchable")
+        self.assertEqual(db.request(41), before)
+
+    def test_metadata_writers_reject_malformed_and_lifecycle_fields(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=41, status="wanted"))
+        before = copy.deepcopy(db.request(41))
+
+        for writer in (
+            lambda: db.update_request_fields(
+                41, **{"reasoning, status": "smuggled"},
+            ),
+            lambda: db.update_status(
+                41, "imported", active_download_state="{}",
+            ),
+        ):
+            with self.subTest(writer=writer):
+                with self.assertRaises(ValueError):
+                    writer()
+                self.assertEqual(db.request(41), before)
+
+    def test_reset_writers_reject_noncanonical_metadata(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=41, status="downloading"))
+        before = copy.deepcopy(db.request(41))
+
+        with self.assertRaises(ValueError):
+            db.reset_to_wanted(41, reasoning="smuggled")
+        with self.assertRaises(ValueError):
+            db.reset_downloading_to_wanted(41, reasoning="smuggled")
+        self.assertEqual(db.request(41), before)
+
+    def test_spectral_fields_cannot_report_missing_or_replaced_success(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="replaced"))
+        before = copy.deepcopy(db.request(42))
+        fields = RequestSpectralStateUpdate(
+            current=SpectralMeasurement(grade="genuine", bitrate_kbps=320),
+        ).as_update_fields()
+
+        self.assertFalse(db.update_request_fields(42, **fields))
+        self.assertFalse(db.update_request_fields(999, **fields))
+        self.assertEqual(db.request(42), before)
+
+
+class TestFakeRequestMergeRekey(unittest.TestCase):
+    """``update_request_release_for_merge`` and ``merge_rekey_collision``.
+
+    Two of the four also assert on evidence rows the rekey carries with it.
+    Both verbs belong to the requests cluster, which is what puts all four
+    here rather than under evidence.
+    """
+
+    def test_merge_rekey_moves_only_an_owned_processing_row(self):
+        """Fake mirror of ``PipelineDB.update_request_release_for_merge``."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=41,
+            mb_release_id="merged-id",
+            status="processing",
+            active_automation_import_job_id=7,
+        ))
+        db.seed_request(make_request_row(id=42, mb_release_id="wanted-id"))
+
+        self.assertTrue(db.update_request_release_for_merge(
+            41,
+            old_release_id="merged-id",
+            new_release_id="survivor-id",
+            expected_import_job_id=7,
+        ))
+        self.assertEqual(db.request(41)["mb_release_id"], "survivor-id")
+        self.assertEqual(
+            db.update_request_release_for_merge_calls,
+            [(41, "merged-id", "survivor-id", 7)],
+        )
+
+        # A stale identity, a foreign owner, an unowned row, and a survivor
+        # another request already holds all fail closed without writing.
+        self.assertFalse(db.update_request_release_for_merge(
+            41,
+            old_release_id="merged-id",
+            new_release_id="another-id",
+            expected_import_job_id=7,
+        ))
+        self.assertFalse(db.update_request_release_for_merge(
+            41,
+            old_release_id="survivor-id",
+            new_release_id="another-id",
+            expected_import_job_id=8,
+        ))
+        self.assertFalse(db.update_request_release_for_merge(
+            42,
+            old_release_id="wanted-id",
+            new_release_id="another-id",
+            expected_import_job_id=7,
+        ))
+        self.assertFalse(db.update_request_release_for_merge(
+            41,
+            old_release_id="survivor-id",
+            new_release_id="wanted-id",
+            expected_import_job_id=7,
+        ))
+        self.assertEqual(db.request(41)["mb_release_id"], "survivor-id")
+        self.assertEqual(db.request(42)["mb_release_id"], "wanted-id")
+
+        for old_id, new_id in (
+            ("survivor-id", "survivor-id"), ("", "x"), ("x", ""),
+        ):
+            with self.assertRaises(ValueError):
+                db.update_request_release_for_merge(
+                    41,
+                    old_release_id=old_id,
+                    new_release_id=new_id,
+                    expected_import_job_id=7,
+                )
+
+    def test_merge_rekey_moves_the_requests_evidence_with_it(self):
+        """Production moves both tables in one transaction; so does the fake."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=41,
+            mb_release_id="merged-id",
+            status="processing",
+            active_automation_import_job_id=7,
+        ))
+        evidence = make_album_quality_evidence(mb_release_id="merged-id")
+        db.upsert_album_quality_evidence(evidence)
+        stored = db.find_album_quality_evidence(
+            mb_release_id="merged-id",
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+
+        self.assertTrue(db.update_request_release_for_merge(
+            41,
+            old_release_id="merged-id",
+            new_release_id="survivor-id",
+            expected_import_job_id=7,
+        ))
+
+        self.assertIsNone(db.find_album_quality_evidence(
+            mb_release_id="merged-id",
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        ))
+        moved = db.find_album_quality_evidence(
+            mb_release_id="survivor-id",
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert moved is not None
+        self.assertEqual(moved.id, stored.id)
+        by_id = db.load_album_quality_evidence_by_id(stored.id)
+        assert by_id is not None
+        self.assertEqual(by_id.mb_release_id, "survivor-id")
+
+    def test_merge_rekey_refuses_a_fingerprint_collision_at_the_survivor(self):
+        """Mirrors UNIQUE (mb_release_id, snapshot_fingerprint): nothing moves."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=41,
+            mb_release_id="merged-id",
+            status="processing",
+            active_automation_import_job_id=7,
+        ))
+        for release_id in ("merged-id", "survivor-id"):
+            db.upsert_album_quality_evidence(
+                make_album_quality_evidence(mb_release_id=release_id),
+            )
+        fingerprint = make_album_quality_evidence(
+            mb_release_id="merged-id",
+        ).snapshot_fingerprint
+
+        self.assertFalse(db.update_request_release_for_merge(
+            41,
+            old_release_id="merged-id",
+            new_release_id="survivor-id",
+            expected_import_job_id=7,
+        ))
+
+        self.assertEqual(db.request(41)["mb_release_id"], "merged-id")
+        self.assertIsNotNone(db.find_album_quality_evidence(
+            mb_release_id="merged-id", snapshot_fingerprint=fingerprint,
+        ))
+        self.assertIsNotNone(db.find_album_quality_evidence(
+            mb_release_id="survivor-id", snapshot_fingerprint=fingerprint,
+        ))
+
+    def test_merge_rekey_collision_reports_both_documented_refusals(self):
+        """The pre-check reads the same state the write refuses on (#1080).
+
+        ``merge_rekey_collision`` exists so the seam never retags the shared
+        Beets library for a rekey that is already refused. Fake and production
+        must agree on both causes, and — critically — the fake's pre-check and
+        its own write must not drift apart: every world this reports blocked,
+        the write must refuse.
+        """
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=41,
+            mb_release_id="merged-id",
+            status="processing",
+            active_automation_import_job_id=7,
+        ))
+
+        clear = db.merge_rekey_collision(
+            41, old_release_id="merged-id", new_release_id="survivor-id",
+        )
+        self.assertFalse(clear.blocked)
+        self.assertIsNone(clear.rival_request_id)
+        self.assertEqual(clear.colliding_fingerprints, ())
+        self.assertEqual(clear.detail(), "")
+
+        # A rival request at the survivor — production's UNIQUE(mb_release_id).
+        # Any row counts, including a frozen ``replaced`` ancestor.
+        db.seed_request(make_request_row(
+            id=42, mb_release_id="survivor-id", status="replaced",
+        ))
+        rival = db.merge_rekey_collision(
+            41, old_release_id="merged-id", new_release_id="survivor-id",
+        )
+        self.assertTrue(rival.blocked)
+        self.assertEqual(rival.rival_request_id, 42)
+        self.assertIn("42", rival.detail())
+        # The write refuses the same world, so the pre-check never promises
+        # something the write would then take back.
+        self.assertFalse(db.update_request_release_for_merge(
+            41,
+            old_release_id="merged-id",
+            new_release_id="survivor-id",
+            expected_import_job_id=7,
+        ))
+
+        # An evidence fingerprint already at the survivor — production's
+        # UNIQUE (mb_release_id, snapshot_fingerprint).
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=41,
+            mb_release_id="merged-id",
+            status="processing",
+            active_automation_import_job_id=7,
+        ))
+        evidence = make_album_quality_evidence(mb_release_id="merged-id")
+        for release_id in ("merged-id", "survivor-id"):
+            db.upsert_album_quality_evidence(
+                make_album_quality_evidence(mb_release_id=release_id),
+            )
+        collision = db.merge_rekey_collision(
+            41, old_release_id="merged-id", new_release_id="survivor-id",
+        )
+        self.assertTrue(collision.blocked)
+        self.assertIsNone(collision.rival_request_id)
+        self.assertEqual(
+            collision.colliding_fingerprints, (evidence.snapshot_fingerprint,),
+        )
+        self.assertIn("evidence already exists", collision.detail())
+        self.assertFalse(db.update_request_release_for_merge(
+            41,
+            old_release_id="merged-id",
+            new_release_id="survivor-id",
+            expected_import_job_id=7,
+        ))
+
+
+class TestFakeRequestRows(unittest.TestCase):
+    """Row creation, ordering and deletion, including the delete cascade.
+
+    The cascade tests assert across download_log, search_plan, misc and
+    evidence; ``delete_request`` itself is the requests cluster's.
+    """
+
+    def test_add_request_assigns_monotonic_id(self):
+        db = FakePipelineDB()
+        rid1 = db.add_request("Artist A", "Album A", source="request")
+        rid2 = db.add_request("Artist B", "Album B", source="request")
+        self.assertEqual((rid1, rid2), (1, 2))
+        self.assertEqual(db.request(rid1)["artist_name"], "Artist A")
+        self.assertEqual(db.request(rid2)["status"], "wanted")
+
+    def test_add_request_seeds_full_row_shape(self):
+        """Codex R7: rows must carry the DB-defaulted columns
+        production readers index directly (``beets_distance``,
+        ``*_attempts``, spectral + verified_lossless)
+        so fake-backed tests don't raise ``KeyError`` where Postgres
+        would return NULL/0."""
+        db = FakePipelineDB()
+        rid = db.add_request("X", "Y", source="request")
+        row = db.request(rid)
+        for key in (
+            "beets_distance", "beets_scenario",
+            "search_attempts", "download_attempts", "validation_attempts",
+            "last_download_spectral_grade", "current_spectral_grade",
+            "current_lossless_source_v0_probe_avg_bitrate",
+            "verified_lossless", "min_bitrate", "prev_min_bitrate",
+            "search_filetype_override", "target_format",
+            "active_download_state",
+        ):
+            self.assertIn(key, row,
+                          f"add_request row missing '{key}' — "
+                          "production readers index it directly")
+        self.assertEqual(row["search_attempts"], 0)
+        self.assertEqual(row["download_attempts"], 0)
+        self.assertEqual(row["validation_attempts"], 0)
+        self.assertFalse(row["verified_lossless"])
+
+    def test_add_request_coexists_with_seeded_ids(self):
+        """Seeded ids must advance the auto-increment cursor so
+        ``add_request`` cannot collide."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42))
+        rid = db.add_request("X", "Y", source="request")
+        self.assertEqual(rid, 43)
+
+    def test_sort_mixes_seeded_iso_strings_and_added_datetimes(self):
+        """``make_request_row`` seeds ISO strings, ``add_request``
+        stores datetimes — the fake must normalise them so sorts
+        don't raise ``TypeError`` on mixed input (codex R2)."""
+        db = FakePipelineDB()
+        # Seeded: ISO string timestamps.
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        # Added: datetime timestamps.
+        db.add_request("Artist", "Album", source="request")
+        # Both of these would crash on ``str < datetime`` without
+        # normalisation.
+        rows = db.get_by_status("wanted")
+        self.assertEqual(len(rows), 2)
+
+    def test_delete_request_removes_row_and_tracks(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1))
+        db.set_tracks(1, [{"track_number": 1, "title": "T"}])
+        db.delete_request(1)
+        self.assertNotIn(1, db._requests)
+        self.assertEqual(db.get_tracks(1), [])
+
+    def test_delete_request_cascades_to_child_tables(self):
+        """Real SQL has ``ON DELETE CASCADE`` from album_requests to
+        download_log, search_log, source_denylist, and the search plans with
+        their items. The fake must prune those too so tests cannot observe an
+        impossible state where orphaned child rows survive their parent
+        (codex R2).
+
+        The plan arm is asserted here as well as from the plan side in
+        ``tests/test_fakes_search_plan.py``. The cascade code lives in the
+        requests cluster, so without this a mutant there survives everything
+        selection pulls for a change to that file (#1313 review runner, R3).
+        """
+        from lib.pipeline_db import SearchPlanItemInput
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1))
+        db.seed_request(make_request_row(id=2, mb_release_id="mb-survivor"))
+        db.log_download(1, outcome="success")
+        db.log_download(2, outcome="success")
+        db.log_search(1, outcome="found")
+        db.log_search(2, outcome="no_match")
+        db.add_denylist(1, "badguy")
+        db.add_denylist(2, "other")
+        doomed_plan = db.create_successful_search_plan(
+            request_id=1, generator_id="g1",
+            items=[SearchPlanItemInput(ordinal=0, strategy="default", query="Q0")])
+        kept_plan = db.create_successful_search_plan(
+            request_id=2, generator_id="g1",
+            items=[SearchPlanItemInput(ordinal=0, strategy="default", query="Q1")])
+
+        db.delete_request(1)
+
+        self.assertEqual([e.request_id for e in db.download_logs], [2])
+        self.assertEqual([e.request_id for e in db.search_logs], [2])
+        self.assertEqual([e.request_id for e in db.denylist], [2])
+        self.assertEqual(list(db.search_plans), [kept_plan])
+        self.assertEqual(
+            {it.plan_id for it in db.search_plan_items.values()}, {kept_plan})
+        self.assertNotEqual(doomed_plan, kept_plan)
+
+    def test_delete_request_does_not_cascade_evidence_post_021(self):
+        """Migration 021: evidence is content-addressed. Deleting a request
+        no longer removes evidence rows — addressing FKs go ``ON DELETE SET
+        NULL`` so the row survives the parent's removal.
+        """
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1))
+        log_id = db.log_download(1, outcome="rejected")
+        evidence = make_album_quality_evidence(mb_release_id="mb-delete-1")
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_download_log_candidate_evidence(log_id, persisted.id)
+
+        db.delete_request(1)
+
+        # Evidence rows survive; the parent and its child download_log are
+        # gone via the cascade rules earlier in delete_request.
+        self.assertIsNotNone(db.load_album_quality_evidence_by_id(persisted.id))
+
+
+class TestFakeRequestReads(unittest.TestCase):
+    """The request read models: get_wanted, status filters and counts,
+    artist lookup, the long-tail cohort, and the #426 recency window and
+    search mirrors.
+    """
+
+    def test_get_downloading(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="downloading"))
+        db.seed_request(make_request_row(id=2, status="wanted"))
+        db.seed_request(make_request_row(id=3, status="downloading"))
+
+        rows = db.get_downloading()
+        self.assertEqual(len(rows), 2)
+        ids = {r["id"] for r in rows}
+        self.assertEqual(ids, {1, 3})
+
+    def test_get_wanted_does_not_prioritize_zero_attempts(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted",
+                                          search_attempts=5))
+        db.seed_request(make_request_row(id=2, status="wanted",
+                                          search_attempts=0))
+        db.seed_request(make_request_row(id=3, status="imported"))
+        rows = db.get_wanted()
+        self.assertEqual([r["id"] for r in rows], [1, 2])
+        self.assertEqual(
+            [r["id"] for r in db.get_wanted(limit=1)], [1])
+
+    def test_get_wanted_skips_albums_inside_retry_window(self):
+        db = FakePipelineDB()
+        future = datetime.now(UTC) + timedelta(hours=1)
+        db.seed_request(make_request_row(
+            id=1, status="wanted", next_retry_after=future))
+        db.seed_request(make_request_row(id=2, status="wanted"))
+        rows = db.get_wanted()
+        self.assertEqual([r["id"] for r in rows], [2])
+
+    def test_get_wanted_tie_break_is_set_not_order(self):
+        """The real DB randomises order; callers assert set membership."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, status="wanted", search_attempts=0))
+        db.seed_request(make_request_row(
+            id=2, status="wanted", search_attempts=0))
+        db.seed_request(make_request_row(
+            id=3, status="wanted", search_attempts=0))
+        rows = db.get_wanted()
+        self.assertEqual({r["id"] for r in rows}, {1, 2, 3})
+
+    def test_get_by_status_sorts_by_created_at(self):
+        db = FakePipelineDB()
+        now = datetime.now(UTC)
+        db.seed_request(make_request_row(
+            id=1, status="wanted", created_at=now + timedelta(seconds=2)))
+        db.seed_request(make_request_row(
+            id=2, status="wanted", created_at=now))
+        rows = db.get_by_status("wanted")
+        self.assertEqual([r["id"] for r in rows], [2, 1])
+
+    def test_get_by_status_recent_window(self):
+        db = FakePipelineDB()
+        ids = []
+        for i in range(3):
+            ids.append(db.add_request(
+                artist_name=f"A{i}", album_title=f"T{i}", source="request",
+                mb_release_id=f"win-{i}", status="imported"))
+        db.update_request_fields(ids[0], reasoning="touched")
+
+        rows = db.get_by_status("imported", limit=2, newest_first=True)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["id"], ids[0])
+        # Default shape unchanged.
+        self.assertEqual(len(db.get_by_status("imported")), 3)
+
+    def test_count_by_status(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        db.seed_request(make_request_row(id=2, status="wanted"))
+        db.seed_request(make_request_row(id=3, status="imported"))
+        self.assertEqual(
+            db.count_by_status(), {"wanted": 2, "imported": 1})
+
+    def test_count_by_status_preserves_none_bucket(self):
+        """Real SQL ``GROUP BY status`` keeps NULL as its own key; the
+        fake must not collapse it to an empty string."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status=None))
+        db.seed_request(make_request_row(id=2, status="wanted"))
+        self.assertEqual(db.count_by_status(), {None: 1, "wanted": 1})
+
+    def test_list_requests_by_artist_prefers_mb_artist_id_and_legacy_fallback(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1,
+            artist_name="Test Artist",
+            album_title="Exact MBID",
+            mb_artist_id="artist-1234-uuid",
+        ))
+        db.seed_request(make_request_row(
+            id=2,
+            artist_name="Test Artist",
+            album_title="Legacy Name Match",
+            mb_artist_id=None,
+        ))
+        db.seed_request(make_request_row(
+            id=3,
+            artist_name="Test Artist",
+            album_title="Other MBID",
+            mb_artist_id="other-artist-uuid",
+        ))
+
+        rows = db.list_requests_by_artist("Test Artist", "artist-1234-uuid")
+
+        self.assertEqual([row["id"] for row in rows], [1, 2])
+
+    def test_list_requests_by_artist_name_only_matches_substring(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1,
+            artist_name="The National",
+            album_title="Boxer",
+            year=2007,
+        ))
+        db.seed_request(make_request_row(
+            id=2,
+            artist_name="The National",
+            album_title="Sleep Well Beast",
+            year=2017,
+        ))
+        db.seed_request(make_request_row(
+            id=3,
+            artist_name="Nation of Language",
+            album_title="Introduction, Presence",
+            year=2020,
+        ))
+
+        rows = db.list_requests_by_artist("The National")
+
+        self.assertEqual([row["id"] for row in rows], [1, 2])
+
+    def test_search_requests_matches_artist_and_album(self):
+        db = FakePipelineDB()
+        db.add_request(
+            artist_name="The Mountain Goats", album_title="Tallahassee",
+            source="request", mb_release_id="f-sr-1", status="imported")
+        db.add_request(
+            artist_name="Goat", album_title="World Music",
+            source="request", mb_release_id="f-sr-2", status="wanted")
+
+        self.assertEqual(
+            [r["mb_release_id"] for r in db.search_requests("mountain")],
+            ["f-sr-1"])
+        self.assertEqual(
+            [r["mb_release_id"] for r in db.search_requests("world mus")],
+            ["f-sr-2"])
+        self.assertEqual(
+            {r["mb_release_id"] for r in db.search_requests("goat")},
+            {"f-sr-1", "f-sr-2"})
+        self.assertEqual(db.search_requests("  "), [])
+        self.assertEqual(
+            [r["mb_release_id"]
+             for r in db.search_requests("goat", status="wanted")],
+            ["f-sr-2"])
+
+    def test_get_long_tail_cohort_returns_only_wanted_stamped(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, status="wanted", mb_release_id="rel-1"))
+        db.seed_request(make_request_row(
+            id=2, status="imported", mb_release_id="rel-2"))
+        db.seed_request(make_request_row(
+            id=3, status="wanted", mb_release_id="rel-3"))
+        # Row 3 has an in-flight youtube rescue.
+        db.insert_youtube_running(
+            request_id=3, browse_id="MPREb_x", audio_playlist_id=None,
+            yt_url="https://music.youtube.com/playlist?list=x",
+            expected_track_count=10,
+        )
+        rows = db.get_long_tail_cohort()
+        self.assertEqual([r["id"] for r in rows], [1, 3])
+        by_id = {r["id"]: r for r in rows}
+        self.assertFalse(by_id[1]["in_flight_rescue"])
+        self.assertTrue(by_id[3]["in_flight_rescue"])
+        # Projection is narrow — must not carry the full request row.
+        self.assertNotIn("reasoning", by_id[1])
+        self.assertIn("target_format", by_id[1])
+
+    def test_get_long_tail_request_single_id(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=5, status="wanted", mb_release_id="rel-5"))
+        db.seed_request(make_request_row(
+            id=6, status="imported", mb_release_id="rel-6"))
+        row = db.get_long_tail_request(5)
+        assert row is not None
+        self.assertEqual(row["id"], 5)
+        self.assertFalse(row["in_flight_rescue"])
+        # Non-wanted and missing ids return None.
+        self.assertIsNone(db.get_long_tail_request(6))
+        self.assertIsNone(db.get_long_tail_request(999))
 
 
 if __name__ == "__main__":

@@ -4,10 +4,12 @@ Split out of ``tests/test_fakes.py`` (#1313) so each cluster of the
 fake has its sibling tests beside it.
 """
 import unittest
+from datetime import timedelta
 
 from lib.import_execution import ExecutionLeaseSnapshot, ProcessIdentity
 from tests.dispatch_helpers import (
     claim_next_import_job,
+    claim_next_import_preview_job,
     handoff_automation_owner,
 )
 from tests.fakes import (
@@ -848,6 +850,603 @@ class TestFakeMergeRekeyOperatorClaimFence(unittest.TestCase):
         row = db.request(41)
         assert row is not None
         self.assertEqual(row["mb_release_id"], self.MERGED)
+
+
+class TestFakeImportJobStubLifecycle(unittest.TestCase):
+    """The import-job queue stubs mirror the real claim/complete lifecycle
+    on both the automation and preview lanes.
+    """
+
+    def test_import_job_queue_methods_mirror_core_lifecycle(self):
+        from lib.import_queue import IMPORT_JOB_FORCE
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
+        first = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key="force:42",
+            payload={"download_log_id": 1, "failed_path": "/tmp/force"},
+        )
+        duplicate = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key="force:42",
+            payload={"download_log_id": 1, "failed_path": "/tmp/force"},
+        )
+        self.assertEqual(first.id, duplicate.id)
+        self.assertTrue(duplicate.deduped)
+        self.assertEqual(db.count_import_jobs_by_status(), {"queued": 1})
+        db.mark_import_job_preview_importable(
+            first.id,
+            preview_result={"verdict": "would_import"},
+            message="ready",
+        )
+
+        claimed = claim_next_import_job(db, worker_id="fake-worker")
+        assert claimed is not None
+        self.assertEqual(claimed.status, "running")
+        self.assertEqual(claimed.attempts, 1)
+        self.assertEqual(claimed.worker_id, "fake-worker")
+
+        requeued = db.recover_running_import_jobs(
+            requeue_message="retry",
+            recovery_message="recovery required",
+        )
+        self.assertEqual([job.id for job in requeued], [claimed.id])
+        self.assertEqual(requeued[0].status, "queued")
+        self.assertIsNone(requeued[0].worker_id)
+
+        claimed = claim_next_import_job(db, worker_id="fake-worker-2")
+        assert claimed is not None
+        self.assertEqual(claimed.status, "running")
+        self.assertEqual(claimed.attempts, 2)
+        self.assertEqual(claimed.worker_id, "fake-worker-2")
+
+        completed = db.mark_import_job_completed(
+            claimed.id,
+            result={"success": True},
+            message="done",
+        )
+        assert completed is not None
+        self.assertEqual(completed.status, "completed")
+
+        later = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key="force:42",
+            payload={"download_log_id": 1, "failed_path": "/tmp/force"},
+        )
+        self.assertNotEqual(first.id, later.id)
+        failed = db.mark_import_job_failed(
+            later.id,
+            error="boom",
+            message="failed",
+        )
+        assert failed is not None
+        self.assertEqual(failed.status, "failed")
+
+    def test_import_job_queue_defaults_to_preview_waiting(self):
+        from lib.import_queue import IMPORT_JOB_FORCE
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
+        queued = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key="force:fresh",
+            payload={"download_log_id": 1, "failed_path": "/tmp/force"},
+        )
+
+        self.assertEqual(queued.preview_status, "waiting")
+        self.assertIsNone(queued.preview_message)
+        self.assertIsNone(queued.preview_completed_at)
+        self.assertIsNone(queued.importable_at)
+        # Preview worker can claim it; importer cannot.
+        self.assertIsNone(claim_next_import_job(db, worker_id="importer"))
+        claimed = claim_next_import_preview_job(db, worker_id="preview")
+        assert claimed is not None
+        self.assertEqual(claimed.id, queued.id)
+
+    def test_import_job_preview_methods_mirror_core_lifecycle(self):
+        from lib.import_queue import IMPORT_JOB_FORCE
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
+        db.seed_request(make_request_row(id=43, status="wanted"))
+        queued = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key="force:preview",
+            payload={"download_log_id": 1, "failed_path": "/tmp/force"},
+        )
+        self.assertEqual(queued.preview_status, "waiting")
+
+        claimed = claim_next_import_preview_job(db, worker_id="fake-preview")
+        assert claimed is not None
+        self.assertEqual(claimed.status, "queued")
+        self.assertEqual(claimed.preview_status, "running")
+        self.assertEqual(claimed.preview_attempts, 1)
+        self.assertEqual(claimed.preview_worker_id, "fake-preview")
+        self.assertTrue(db.heartbeat_import_job_preview(claimed.id))
+
+        importable = db.mark_import_job_preview_importable(
+            claimed.id,
+            preview_result={"verdict": "would_import"},
+            message="Preview would import",
+        )
+        assert importable is not None
+        self.assertEqual(importable.preview_status, "evidence_ready")
+        self.assertEqual(importable.preview_result, {"verdict": "would_import"})
+        self.assertIsNotNone(importable.importable_at)
+
+        rejected = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=43,
+            dedupe_key="force:preview-reject",
+            payload={"download_log_id": 1, "failed_path": "/tmp/reject"},
+        )
+        failed = db.mark_import_job_preview_failed(
+            rejected.id,
+            preview_status="confident_reject",
+            error="spectral_reject",
+            preview_result={
+                "verdict": "confident_reject",
+                "reason": "spectral_reject",
+            },
+            message="Preview rejected: spectral_reject",
+        )
+        assert failed is not None
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(failed.preview_status, "confident_reject")
+        self.assertEqual(failed.preview_error, "spectral_reject")
+        self.assertEqual(failed.error, "spectral_reject")
+
+    def test_requeue_import_job_for_preview_flips_running_back_to_waiting(self):
+        from lib.import_queue import IMPORT_JOB_FORCE
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="wanted"))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key="force:requeue-fake",
+            payload={"download_log_id": 1, "failed_path": "/tmp/force"},
+        )
+        db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={"verdict": "would_import"},
+            message="ready",
+        )
+        claimed = claim_next_import_job(db, worker_id="importer")
+        assert claimed is not None
+        self.assertEqual(claimed.status, "running")
+        prior_attempts = claimed.attempts
+        prior_preview_attempts = claimed.preview_attempts
+
+        updated = db.requeue_import_job_for_preview(
+            claimed.id,
+            reason="candidate evidence missing",
+        )
+
+        assert updated is not None
+        self.assertEqual(updated.status, "queued")
+        self.assertEqual(updated.preview_status, "waiting")
+        self.assertIsNone(updated.worker_id)
+        self.assertIsNone(updated.started_at)
+        self.assertIsNone(updated.heartbeat_at)
+        self.assertIsNone(updated.preview_message)
+        self.assertIsNone(updated.preview_error)
+        self.assertEqual(updated.message, "candidate evidence missing")
+        # Counters preserved.
+        self.assertEqual(updated.attempts, prior_attempts)
+        self.assertEqual(updated.preview_attempts, prior_preview_attempts)
+
+        # Candidate selection owns the requeue delay.
+        self.assertIsNone(claim_next_import_preview_job(
+            db, worker_id="preview-too-soon"))
+        row = next(row for row in db._import_jobs if row["id"] == claimed.id)
+        row["updated_at"] -= timedelta(seconds=61)
+        preview = claim_next_import_preview_job(db, worker_id="preview-1")
+        assert preview is not None
+        self.assertEqual(preview.id, claimed.id)
+
+    def test_requeue_import_job_for_preview_idempotent_when_not_running(self):
+        from lib.import_queue import IMPORT_JOB_FORCE
+
+        db = FakePipelineDB()
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key="force:requeue-fake-idem",
+            payload={"download_log_id": 1, "failed_path": "/tmp/force"},
+        )
+        # Not yet claimed by importer (preview_status='waiting', status='queued').
+        result = db.requeue_import_job_for_preview(
+            job.id,
+            reason="not running",
+        )
+        self.assertIsNone(result)
+
+    def test_automation_commands_require_exact_owner_stage_and_lease(self):
+        from lib.import_execution import (
+            ExecutionLeaseSnapshot,
+            ProcessIdentity,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42,
+            mb_release_id="fake-owner-lease",
+            status="wanted",
+        ))
+        job = handoff_automation_owner(
+            db,
+            42,
+            canonical_path="/processing/albums/fake-owner-lease",
+        )
+        preview_lease = ExecutionLeaseSnapshot(
+            host_boot_id="boot-a",
+            invocation_id="preview-a",
+            systemd_unit="cratedigger-import-preview.service",
+            worker=ProcessIdentity(pid=101, start_ticks=1001),
+        )
+        stale_preview_lease = ExecutionLeaseSnapshot(
+            host_boot_id="boot-a",
+            invocation_id="preview-stale",
+            systemd_unit="cratedigger-import-preview.service",
+            worker=ProcessIdentity(pid=102, start_ticks=1002),
+        )
+
+        self.assertIsNone(claim_next_import_preview_job(db, worker_id="no-lease"))
+        claimed_preview = claim_next_import_preview_job(db, worker_id="preview",
+        execution_lease=preview_lease,)
+        assert claimed_preview is not None
+        self.assertEqual(
+            claimed_preview.execution_invocation_id,
+            preview_lease.invocation_id,
+        )
+        self.assertEqual(db.requeue_stale_import_preview_jobs(
+            older_than=timedelta(seconds=-1),
+            message="heartbeat age is not automation proof",
+        ), [])
+        self.assertEqual(db.requeue_running_import_preview_jobs(
+            message="process restart is not automation proof",
+        ), [])
+        self.assertFalse(db.heartbeat_import_job_preview(
+            job.id,
+            expected_execution_lease=stale_preview_lease,
+        ))
+        self.assertFalse(db.set_import_job_candidate_evidence(
+            job.id,
+            77,
+            expected_execution_lease=stale_preview_lease,
+        ))
+        self.assertTrue(db.set_import_job_candidate_evidence(
+            job.id,
+            77,
+            expected_execution_lease=preview_lease,
+        ))
+        self.assertIsNotNone(db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={"verdict": "would_import"},
+            expected_execution_lease=preview_lease,
+        ))
+
+        importer_lease = ExecutionLeaseSnapshot(
+            host_boot_id="boot-a",
+            invocation_id="importer-a",
+            systemd_unit="cratedigger-importer.service",
+            worker=ProcessIdentity(pid=201, start_ticks=2001),
+        )
+        claimed_import = claim_next_import_job(db, worker_id="importer",
+        execution_lease=importer_lease,)
+        assert claimed_import is not None
+        self.assertFalse(db.heartbeat_import_job(
+            job.id,
+            expected_execution_lease=preview_lease,
+        ))
+        self.assertTrue(db.heartbeat_import_job(
+            job.id,
+            expected_execution_lease=importer_lease,
+        ))
+
+        # A wrong stage/status cannot borrow even the exact execution lease.
+        db._requests[42]["status"] = "wanted"
+        self.assertFalse(db.heartbeat_import_job(
+            job.id,
+            expected_execution_lease=importer_lease,
+        ))
+        db._requests[42]["status"] = "processing"
+
+    def test_automation_startup_recovery_requires_exact_dead_proof(self):
+        from lib.import_execution import (
+            ExecutionLeaseSnapshot,
+            ExecutionLivenessDecision,
+            ExecutionLivenessEvidence,
+            ProcessIdentity,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=44,
+            mb_release_id="fake-startup-recovery",
+            status="wanted",
+        ))
+        job = handoff_automation_owner(db, 44)
+        lease = ExecutionLeaseSnapshot(
+            host_boot_id="boot-old",
+            invocation_id="preview-old",
+            systemd_unit="cratedigger-import-preview.service",
+            worker=ProcessIdentity(pid=501, start_ticks=5001),
+        )
+        assert claim_next_import_preview_job(db, worker_id="preview",
+        execution_lease=lease,) is not None
+
+        exact_evidence = ExecutionLivenessEvidence(
+            lease=lease,
+            current_host_boot_id="boot-new",
+            boot_error=None,
+            worker=None,
+            beets=None,
+            invocation=None,
+            cgroup=None,
+        )
+        live = ExecutionLivenessDecision(
+            status="live",
+            reason="still alive",
+            evidence=exact_evidence,
+        )
+        self.assertIsNone(db.recover_automation_import_job(
+            job.id,
+            expected_execution_lease=lease,
+            decision=live,
+            requeue_message="requeue",
+            recovery_message="operator recovery",
+        ))
+
+        stale_lease = ExecutionLeaseSnapshot(
+            host_boot_id="boot-old",
+            invocation_id="preview-other",
+            systemd_unit=lease.systemd_unit,
+            worker=lease.worker,
+        )
+        stale_dead = ExecutionLivenessDecision(
+            status="dead",
+            reason="different invocation ended",
+            evidence=ExecutionLivenessEvidence(
+                lease=stale_lease,
+                current_host_boot_id="boot-new",
+                boot_error=None,
+                worker=None,
+                beets=None,
+                invocation=None,
+                cgroup=None,
+            ),
+        )
+        self.assertIsNone(db.recover_automation_import_job(
+            job.id,
+            expected_execution_lease=lease,
+            decision=stale_dead,
+            requeue_message="requeue",
+            recovery_message="operator recovery",
+        ))
+
+        dead = ExecutionLivenessDecision(
+            status="dead",
+            reason="prior boot ended",
+            evidence=exact_evidence,
+        )
+        recovered = db.recover_automation_import_job(
+            job.id,
+            expected_execution_lease=lease,
+            decision=dead,
+            requeue_message="requeue",
+            recovery_message="operator recovery",
+        )
+        assert recovered is not None
+        self.assertEqual(recovered.status, "queued")
+        self.assertEqual(recovered.preview_status, "waiting")
+        self.assertIsNone(recovered.execution_invocation_id)
+
+
+class TestFakeTerminalForceWrongMatchCleanupJobs(unittest.TestCase):
+    """``list_terminal_force_wrong_match_cleanup_jobs`` mirrors a SQL
+    predicate with several independent arms, so it gets its own class.
+    """
+
+    def test_list_terminal_force_wrong_match_cleanup_jobs_mirrors_sql_predicate(
+        self,
+    ) -> None:
+        """Issue #1122: the fake must select the same rows the real SQL does.
+
+        Real-PG proof of the same predicate lives in
+        ``tests/test_pipeline_db.py`` — this pins the fake against an
+        IDENTICAL scenario matrix so the two never silently drift
+        (test-fidelity.md's fake-vs-SQL predicate drift class). Covers the
+        review-round corrections: MAJOR-1 (success-keyed, not
+        presence-keyed), MAJOR-2/3 (the era-AND-lane marker excludes every
+        historical/non-adjudicating shape by construction).
+        """
+        from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1))
+
+        def _force_job(suffix: str):
+            return db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=1,
+                dedupe_key=f"force-wrong-match-predicate:{suffix}",
+                payload=force_import_payload(
+                    download_log_id=1,
+                    failed_path="/tmp/predicate-source",
+                ),
+            )
+
+        # -- completed arm --------------------------------------------------
+
+        completed_missing = _force_job("completed-missing")
+        db.mark_import_job_completed(
+            completed_missing.id,
+            result={
+                "success": True, "message": "done", "deferred": False,
+                "code": None, "post_commit_wrong_match_scenario": None,
+            },
+            message="done",
+        )
+
+        completed_failed_receipt = _force_job("completed-failed-receipt")
+        db.mark_import_job_completed(
+            completed_failed_receipt.id,
+            result={
+                "success": True, "message": "done", "deferred": False,
+                "code": None, "post_commit_wrong_match_scenario": None,
+                "wrong_match_dismissal": {
+                    "success": False, "error": "path_unavailable: EACCES",
+                },
+            },
+            message="done",
+        )
+
+        completed_successful_receipt = _force_job("completed-successful-receipt")
+        db.mark_import_job_completed(
+            completed_successful_receipt.id,
+            result={
+                "success": True, "message": "done", "deferred": False,
+                "code": None, "post_commit_wrong_match_scenario": None,
+                "wrong_match_dismissal": {"success": True},
+            },
+            message="done",
+        )
+
+        # -- failed arm -------------------------------------------------
+
+        failed_missing = _force_job("failed-missing")
+        db.mark_import_job_failed(
+            failed_missing.id,
+            error="beets rejected: audio_corrupt",
+            result={
+                "success": False, "message": "rejected", "deferred": False,
+                "code": None,
+                "post_commit_wrong_match_scenario": "audio_corrupt",
+            },
+            message="rejected",
+        )
+
+        failed_failed_receipt = _force_job("failed-failed-receipt")
+        db.mark_import_job_failed(
+            failed_failed_receipt.id,
+            error="beets rejected: audio_corrupt",
+            result={
+                "success": False, "message": "rejected", "deferred": False,
+                "code": None,
+                "post_commit_wrong_match_scenario": "audio_corrupt",
+                "cleanup": {
+                    "success": False, "outcome": "deleted_operator_force_source",
+                    "error": "path_unavailable: EACCES",
+                },
+            },
+            message="rejected",
+        )
+
+        failed_successful_receipt = _force_job("failed-successful-receipt")
+        db.mark_import_job_failed(
+            failed_successful_receipt.id,
+            error="beets rejected",
+            result={
+                "success": False, "message": "rejected", "deferred": False,
+                "code": None,
+                "post_commit_wrong_match_scenario": "high_distance",
+                "cleanup": {
+                    "success": True,
+                    "outcome": "preserved_operator_force_source",
+                },
+            },
+            message="rejected",
+        )
+
+        failed_requeue = _force_job("failed-requeue")
+        db.mark_import_job_failed(
+            failed_requeue.id,
+            error="requeue failed",
+            result={
+                "success": False, "message": "requeue UPDATE failed",
+                "deferred": False, "code": "requeue_failed",
+                "post_commit_wrong_match_scenario": None,
+            },
+            message="requeue UPDATE failed",
+        )
+
+        failed_requeue_exhausted = _force_job("failed-requeue-exhausted")
+        db.mark_import_job_failed(
+            failed_requeue_exhausted.id,
+            error="preview/import requeue budget exhausted",
+            result={
+                "success": False, "message": "budget exhausted",
+                "deferred": False, "code": "requeue_exhausted",
+                "post_commit_wrong_match_scenario": None,
+            },
+            message="budget exhausted",
+        )
+
+        failed_deferred = _force_job("failed-deferred")
+        db.mark_import_job_failed(
+            failed_deferred.id,
+            error="Another import is already in progress",
+            result={
+                "success": False,
+                "message": "Another import is already in progress",
+                "deferred": True, "code": None,
+                "post_commit_wrong_match_scenario": None,
+            },
+            message="Another import is already in progress",
+        )
+
+        # -- historical / non-adjudicating shapes (MAJOR-2/3) ------------
+
+        historical_completed = _force_job("historical-completed-no-marker")
+        db.mark_import_job_completed(
+            historical_completed.id,
+            result={"success": True},
+            message="done",
+        )
+
+        historical_failed = _force_job("historical-failed-no-marker")
+        db.mark_import_job_failed(
+            historical_failed.id,
+            error="RuntimeError: boom",
+            result={"success": False},
+            message="Executor crashed",
+        )
+
+        # A genuinely NULL ``result`` column has no public-API constructor
+        # on the fake either (``mark_import_job_failed`` always writes
+        # ``result or {}``) — reach into the fake's own row store directly,
+        # mirroring the real-PG test's raw ``UPDATE ... result = NULL``.
+        historical_null_result = _force_job("historical-null-result")
+        db.mark_import_job_failed(historical_null_result.id, error="boom")
+        for row in db._import_jobs:
+            if row["id"] == historical_null_result.id:
+                row["result"] = None
+                break
+
+        selected = {
+            job.id
+            for job in db.list_terminal_force_wrong_match_cleanup_jobs()
+        }
+        self.assertIn(completed_missing.id, selected)
+        self.assertIn(completed_failed_receipt.id, selected)
+        self.assertNotIn(completed_successful_receipt.id, selected)
+        self.assertIn(failed_missing.id, selected)
+        self.assertIn(failed_failed_receipt.id, selected)
+        self.assertNotIn(failed_successful_receipt.id, selected)
+        self.assertNotIn(failed_requeue.id, selected)
+        self.assertNotIn(failed_requeue_exhausted.id, selected)
+        self.assertNotIn(failed_deferred.id, selected)
+        self.assertNotIn(historical_completed.id, selected)
+        self.assertNotIn(historical_failed.id, selected)
+        self.assertNotIn(historical_null_result.id, selected)
 
 
 if __name__ == "__main__":
