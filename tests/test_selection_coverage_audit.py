@@ -734,7 +734,7 @@ def silently_lost_selection(
     return losses
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def measured_rule_losses(
     rule: SelectionRule, repo_root: Path
 ) -> tuple[tuple[str, tuple[str, ...]], ...]:
