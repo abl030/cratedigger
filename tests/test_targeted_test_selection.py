@@ -978,12 +978,14 @@ class TestSelectionRuleTable(unittest.TestCase):
         self.assertIn("a route regresses the route audits", rule_line)
         self.assertIn("      tests.web.test_routes_youtube", report)
         self.assertIn("      tests.web.test_route_audit", report)
-        # The whole sentence, as a line: `web/` is policed by no root rule,
-        # and a reader who only sees "policed by: nothing" does not learn
-        # that zero neighbours here would be silent rather than fatal.
+        # The whole sentence, as a line: the web/ ROOT_COVERAGE_RULES row
+        # (issue #1355 item 8) polices `.py` under web/, including
+        # web/routes/ — so a route file resolving zero neighbours would now
+        # raise, not go silent. A reader who only sees "the web/ row" and
+        # not the registry name would not learn what admits an exception.
         self.assertIn(
-            "  policed by: nothing — no ROOT_COVERAGE_RULES row covers this "
-            "root and suffix, so resolving zero neighbours here is silent",
+            "  policed by: the web/ row — zero neighbours here raises "
+            "unless WEB_MODULES_WITHOUT_SELECTION_COVERAGE admits the path",
             report,
         )
 
@@ -1010,12 +1012,31 @@ class TestSelectionRuleTable(unittest.TestCase):
     def test_explain_says_so_when_no_mechanism_matches_at_all(self) -> None:
         """A path outside every root and every rule. The line is the whole
         answer for it, so it is asserted as a line, not as a substring.
+
+        Also asserts the sibling "policed by: nothing" line: `docs/` has no
+        `ROOT_COVERAGE_RULES` row at all, so `_root_coverage_lines`' own
+        ``if not covering:`` branch fires here — the ONLY path in this
+        module's fixtures where it does (issue #1355 item 8's mutmut breadth
+        pass: a planted `if covering:` mutant survived every other assertion
+        in this file, because every other `explain_path` call here targets a
+        POLICED path).
         """
         report = explain_path("docs/mirrors.md", REPO_ROOT)
 
         self.assertIn("  (no mechanism matched this path)", report)
+        self.assertIn(
+            "  policed by: nothing — no ROOT_COVERAGE_RULES row covers this "
+            "root and suffix, so resolving zero neighbours here is silent",
+            report,
+        )
         self.assertNotIn(
             "  (no mechanism matched this path)",
+            explain_path("lib/download.py", REPO_ROOT),
+        )
+        # lib/download.py IS policed (the lib/ row) -- the "nothing" line
+        # must not appear for it, only the "policed by: the lib/ row" one.
+        self.assertNotIn(
+            "  policed by: nothing",
             explain_path("lib/download.py", REPO_ROOT),
         )
 

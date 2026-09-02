@@ -2,14 +2,17 @@
 
 `scripts/targeted_test_selection.py::ROOT_COVERAGE_RULES` is the table
 behind the fail-closed selection contract: one row per repository root that
-polices under-selection (`tests/`, `lib/`, `scripts/`), each naming the file
-suffixes it covers, its admitted-gap registry, and the exact message an
-unmapped path raises. This module replaces the two structurally identical
+polices under-selection, each naming the file suffixes it covers, its
+admitted-gap registry, and the exact message an unmapped path raises.
+Started with three rows (`tests/`, `lib/`, `scripts/`); issue #1355 item 8
+carried the same contract to every remaining production root —
+`migrations/`, `nix/`, `web/`, `harness/`, and the top level — for eight
+rows total. This module replaces the two structurally identical
 twin audits (`tests/test_lib_selection_coverage_audit.py` and
 `tests/test_scripts_selection_coverage_audit.py`, eleven matching methods
 differing essentially by the token `lib`↔`scripts`) with one parameterized
 audit that derives its rows FROM that table — no root is named by hand, so
-a fourth row is audited the moment it is added.
+a ninth row is audited the moment it is added.
 
 Four registry contracts, all driving the REAL resolution functions rather
 than a reimplementation:
@@ -28,8 +31,9 @@ than a reimplementation:
 3. every registry entry is well formed — a non-empty rationale, and a path
    that still exists on disk.
 
-Contracts 1 and 2 run over `AUDITED_RULES` only — the `lib/` and
-`scripts/` rows. `SHARED_MODULES_WITHOUT_COVERAGE` gets contracts 0 and 3,
+Contracts 1 and 2 run over `AUDITED_RULES` only — every row except `tests/`
+(the one row whose registry early-returns; see `EXPECTED_ADMITTED_SELECTS_
+NOTHING`). `SHARED_MODULES_WITHOUT_COVERAGE` gets contracts 0 and 3,
 and its ROW additionally drives the three known-bad self-tests that iterate
 the whole table (both unmapped-path probes and the no-false-admission
 probe); its own both-directions exactness lives in
@@ -57,12 +61,23 @@ scripts audit).
 
 Contract D is C at the other granularity, and it closes issue #1331's first
 residual: a rule row is data exactly as an entry is, and deleting one was
-silent wherever nothing raised in consequence. Over `migrations/`, `nix/`,
-`web/`, `harness/` and the top level nothing CAN raise, because no
-`ROOT_COVERAGE_RULES` row polices those roots — though "nothing raises" is
-not the same as "every matched file goes quiet": `prefix:harness/` also
-matches `lib/beets.py` through its `exact_paths`, and that one does fail
-closed on the lib/ row. Over a policed root the loss is silent at the files
+silent wherever nothing raised in consequence. Before issue #1355 item 8,
+`migrations/`, `nix/`, `web/`, `harness/` and the top level had no
+`ROOT_COVERAGE_RULES` row at all, so nothing could raise there regardless of
+what a row's deletion cost — though "nothing raises" was never the same as
+"every matched file goes quiet": `prefix:harness/` also matches
+`lib/beets.py` through its `exact_paths`, and that one already failed
+closed on the pre-existing lib/ row. Item 8 gave those five roots a row too,
+which caught most — but not all — of that population: `basename:web/*.py`,
+`basename:<top-level>.py`, `prefix:migrations/`, and `prefix:web/routes/`
+are now fully caught (removed from `MASKABLE_RULE_PINS` entirely), while
+`prefix:nix/` and `prefix:harness/` still silently lose SOME files — the
+ones that carry their own hand-authored `EXACT_PATH_NEIGHBOURS` entry (which
+keeps resolving something even with the row gone) or, for `nix/`, the two
+top-level `flake.nix`/`flake.lock` files its `exact_paths` also matches,
+which the `nix/` root row's own `covers()` cannot reach (they are not UNDER
+`nix/`) and the `<top-level>` row does not either (it polices only `.py`).
+Over a policed root the loss is silent at the files
 something else still resolves for, whether that is a basename probe, another
 prefix rule, or a hand-authored entry.
 
@@ -124,6 +139,11 @@ EXPECTED_ADMITTED_SELECTS_NOTHING: dict[str, bool] = {
     "tests": True,
     "lib": False,
     "scripts": False,
+    "migrations": False,
+    "nix": False,
+    "web": False,
+    "harness": False,
+    "<top-level>": False,
 }
 
 #: The other scope-deciding column, anchored the same way and for the same
@@ -139,6 +159,34 @@ EXPECTED_SUFFIXES: dict[str, tuple[str, ...]] = {
     "tests": (".py",),
     "lib": (".py",),
     "scripts": (".py", ".sh"),
+    "migrations": (".sql",),
+    "nix": (".nix", ".json"),
+    "web": (".py",),
+    "harness": (".py", ".sh"),
+    "<top-level>": (".py",),
+}
+
+#: Whether an audited row's registry may legitimately hold zero entries
+#: (issue #1355 item 8). `migrations/`, `nix/`, and `harness/` are each
+#: matched by an unconditional prefix rule with no suffix filter — every
+#: real or synthetic path under those roots resolves real neighbours today
+#: (measured 2026-09-02), so there is no genuine gap to register, and
+#: fabricating one to satisfy an "always non-empty" rule would be a false
+#: admission. `<top-level>` is empty for a different, ordinary reason: both
+#: currently-tracked top-level `.py` files already resolve. `lib`,
+#: `scripts`, and `web` are expected non-empty because each names at least
+#: one real, currently-unresolved file. Anchored outside `ROOT_COVERAGE_
+#: RULES` for the same reason as the two columns above: a row silently
+#: emptied of its only real entry must be caught here, not waved through by
+#: its own now-empty registry agreeing with itself.
+EXPECTED_REGISTRY_MAY_BE_EMPTY: dict[str, bool] = {
+    "lib": False,
+    "scripts": False,
+    "migrations": True,
+    "nix": True,
+    "web": False,
+    "harness": True,
+    "<top-level>": True,
 }
 
 #: The rows whose admitted gaps do NOT early-return: full resolution runs
@@ -196,14 +244,18 @@ def shared_neighbour_sets() -> dict[str, tuple[str, ...]]:
 #: probe goes one level deeper. Each directory is chosen to dodge every
 #: `PREFIX_RULES` row under that root (`tests/fakes/`,
 #: `tests/structural_audits/`, `tests/world_model/`, `lib/pipeline_db/`,
-#: `lib/quality/`, `scripts/phase_parsers/` all resolve neighbours
-#: unconditionally and would make the probe resolve rather than raise).
-#: Keyed by root, so a new rule with no
-#: entry here fails with a KeyError rather than silently skipping.
+#: `lib/quality/`, `scripts/phase_parsers/`, `web/routes/` all resolve
+#: neighbours unconditionally and would make the probe resolve rather than
+#: raise). Keyed by root, so a new rule with no
+#: entry here fails with a KeyError rather than silently skipping — except
+#: `UNCONDITIONALLY_SHADOWED_ROOTS` and `top_level` rows, which
+#: `test_unmapped_nested_path_fails_closed_with_its_name` skips before ever
+#: indexing this dict.
 NESTED_PROBE_DIRS: dict[str, str] = {
     "tests": "_probe_dir",
     "lib": "dispatch",
     "scripts": "pipeline_cli",
+    "web": "_probe_dir",
 }
 
 #: The literal phrase each row's unmapped message must open with. Held
@@ -213,6 +265,27 @@ UNMAPPED_MESSAGE_MARKERS: dict[str, str] = {
     "tests": "unmapped shared test module",
     "lib": "unmapped lib module",
     "scripts": "unmapped scripts module",
+    "migrations": "unmapped migration",
+    "nix": "unmapped nix module",
+    "web": "unmapped web module",
+    "harness": "unmapped harness module",
+    "<top-level>": "unmapped top-level module",
+}
+
+#: Roots whose ROOT_COVERAGE_RULES row is shadowed by an UNCONDITIONAL
+#: SELECTION_RULES prefix rule (no suffix filter, fixed `neighbours`) —
+#: migrations/, nix/, and harness/ (issue #1355 item 8). Every real or
+#: synthetic path under these roots resolves through the named prefix rule
+#: today, so no probe — nested or not — can make the root row itself raise
+#: while that rule stays in SELECTION_RULES. The two generic probe tests
+#: below skip these roots for exactly that reason;
+#: `test_root_rule_catches_an_unconditionally_shadowed_root_if_its_prefix_rule_is_removed`
+#: proves their real protective purpose instead, through the same `without=`
+#: DI seam `TestMaskableRulePins` uses to measure a row's deletion.
+UNCONDITIONALLY_SHADOWED_ROOTS: dict[str, str] = {
+    "migrations": "prefix:migrations/",
+    "nix": "prefix:nix/",
+    "harness": "prefix:harness/",
 }
 
 #: Per-root fabricated path for the stale-registration self-test: a path the
@@ -226,6 +299,11 @@ STALE_PROBE_PATHS: dict[str, tuple[str, str]] = {
         "scripts/targeted_test_selection.py",
         "tests.test_targeted_test_selection",
     ),
+    "migrations": ("migrations/001_initial.sql", "tests.test_migrator"),
+    "nix": ("nix/module.nix", "tests.test_nix_module"),
+    "web": ("web/cache.py", "tests.test_web_cache"),
+    "harness": ("harness/import_one.py", "tests.test_harness_beets2_contract"),
+    "<top-level>": ("album_source.py", "tests.test_album_source"),
 }
 
 #: Contract C. Every EXACT_PATH_NEIGHBOURS entry whose silent deletion no
@@ -249,12 +327,6 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
     "tests/js_harness.mjs": (
         "tests.test_js_suite_audit",
         "tests.test_suite_coordinator",
-    ),
-    # No rule polices a top-level file, so nothing catches this deletion.
-    "cratedigger.py": (
-        "tests.test_slskd_searches",
-        "tests.test_search_exec",
-        "tests.test_cycle_startup",
     ),
     # The basename probe resolves tests.test_download regardless,
     # masking the loss of the harvest DB-propagation coverage (#1312).
@@ -435,15 +507,6 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
         "tests.test_deploy_pin_script",
         "tests.test_deploy_pin_generated",
     ),
-    # No rule polices web/ at all, so nothing catches these deletions.
-    "web/server.py": (
-        "tests.web.test_server_endpoints",
-        "tests.web.test_server_threading",
-        "tests.web.test_server_cache",
-        "tests.web.test_request_security",
-        "tests.web.test_runtime",
-        "tests.test_beets_config_startup",
-    ),
     # The basename probe still resolves tests.web.test_runtime, masking
     # the loss of the two HTTP-boundary modules.
     "web/runtime.py": (
@@ -451,20 +514,6 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
         "tests.test_web_runtime_generated",
         "tests.web.test_server_threading",
         "tests.web.test_server_endpoints",
-    ),
-    # No rule polices web/ at all.
-    "web/discogs.py": (
-        "tests.test_discogs_api",
-        "tests.test_discogs_api_generated",
-        "tests.test_web_dev_server",
-        "tests.test_discogs_artist_concurrency",
-    ),
-    "web/wrong_match_file_service.py": (
-        "tests.test_wrong_match_file_service",
-        "tests.web.test_routes_imports",
-        "tests.test_path_authority_generated",
-        "tests.test_protected_path_truth_generated",
-        "tests.test_render_differential",
     ),
     "web/wrong_match_queue_view.py": (
         "tests.web.test_wrong_match_queue_view",
@@ -515,19 +564,6 @@ MASKABLE_RULE_PINS: dict[str, dict[str, tuple[str, ...]]] = {
     "basename:scripts/*.py": {
         "scripts/phase_parsers/pyright_checks.py": ("tests.test_pyright_checks",),
     },
-    # No ROOT_COVERAGE_RULES row polices web/, so every one of this row's
-    # losses is silent. Two paths because the row derives two templates and
-    # no single file loses both.
-    "basename:web/*.py": {
-        "web/cache.py": ("tests.test_web_cache",),
-        "web/request_security.py": ("tests.web.test_request_security",),
-    },
-    # No rule polices a top-level file. album_source.py is the only path
-    # this row resolves anything for — cratedigger.py has a hand-authored
-    # entry instead.
-    "basename:<top-level>.py": {
-        "album_source.py": ("tests.test_album_source",),
-    },
     # The basename probe keeps resolving a cluster's own tests, so the loss
     # of the shared boundary contracts is silent. transfer_ledger.py covers
     # both channels: the five neighbours and the mirrored fake's self-tests.
@@ -535,19 +571,6 @@ MASKABLE_RULE_PINS: dict[str, dict[str, tuple[str, ...]]] = {
         "lib/pipeline_db/transfer_ledger.py": (
             "tests.test_fakes",
             "tests.test_fakes_transfer_ledger",
-            "tests.test_pipeline_db",
-            "tests.test_pipeline_db_column_contract",
-            "tests.test_pipeline_db_write_audit",
-            "tests.test_read_projection_audit",
-        ),
-    },
-    # No rule polices migrations/, and nothing else resolves a .sql file at
-    # all: without this row every one of the 82 migrations selects nothing
-    # and no audit says so.
-    "prefix:migrations/": {
-        "migrations/001_initial.sql": (
-            "tests.test_fakes",
-            "tests.test_migrator",
             "tests.test_pipeline_db",
             "tests.test_pipeline_db_column_contract",
             "tests.test_pipeline_db_write_audit",
@@ -577,25 +600,27 @@ MASKABLE_RULE_PINS: dict[str, dict[str, tuple[str, ...]]] = {
             "tests.test_suite_coordinator",
         ),
     },
-    # No rule polices web/, and the web basename row excludes web/routes/,
-    # so deleting this one silently drops every route file to zero.
-    "prefix:web/routes/": {
-        "web/routes/pipeline.py": (
-            "tests.test_js_payload_contract_audit",
-            "tests.test_pydantic_route_audit",
-            "tests.web.test_route_audit",
-            "tests.web.test_routes_pipeline",
-        ),
-    },
-    # No rule polices nix/, .nix or .lock, so this row is the only thing
-    # selecting the module contract for a module or flake change.
+    # The nix/ ROOT_COVERAGE_RULES row (issue #1355 item 8) now catches
+    # nix/module.nix going silent on its own — but `exact_paths=("flake.nix",
+    # "flake.lock")` reaches two files this row ALSO matches that live at
+    # the TOP LEVEL, not under nix/, so the nix/ root row's `covers()` never
+    # applies to them and the `<top-level>` row polices only `.py`. Neither
+    # file this row's own suffix set (`.nix`) could name even exists at the
+    # top level — flake.nix's suffix happens to be `.nix` too, which is a
+    # coincidence of the two roots sharing a suffix, not a reason either
+    # root rule reaches it.
     "prefix:nix/": {
-        "nix/module.nix": ("tests.test_nix_module",),
+        "flake.nix": ("tests.test_nix_module",),
     },
-    # No rule polices harness/ and no basename probe reaches it. The row's
-    # own deletion IS reported, but at lib/beets.py — its exact_paths
-    # sibling, which fails closed on the lib/ row — while all six harness
-    # files go quiet.
+    # The harness/ ROOT_COVERAGE_RULES row (issue #1355 item 8) now catches
+    # three of the six harness/ files going silent (beets_harness.py,
+    # delete_album.py, run_beets_harness.sh have no other entry). The other
+    # three carry their own hand-authored EXACT_PATH_NEIGHBOURS entry, which
+    # keeps resolving something even with this row gone — so THEIR loss of
+    # tests.test_harness_beets2_contract specifically stays silent.
+    # lib/beets.py, this row's `exact_paths` sibling, was already caught by
+    # the pre-existing lib/ row before this change (a different mechanism
+    # entirely, unaffected by adding the harness/ row).
     "prefix:harness/": {
         "harness/import_one.py": ("tests.test_harness_beets2_contract",),
     },
@@ -662,17 +687,9 @@ def rule_matcher(rule: SelectionRule) -> dict[str, object]:
 MASKABLE_RULE_MATCHERS: dict[str, dict[str, object]] = {
     "basename:lib/*.py": {"root": "lib", "suffixes": (".py",)},
     "basename:scripts/*.py": {"root": "scripts", "suffixes": (".py",)},
-    "basename:web/*.py": {
-        "root": "web",
-        "suffixes": (".py",),
-        "excluded_prefixes": ("web/routes/",),
-    },
-    "basename:<top-level>.py": {"top_level": True, "suffixes": (".py",)},
     "prefix:lib/pipeline_db/": {"prefixes": ("lib/pipeline_db/",)},
-    "prefix:migrations/": {"prefixes": ("migrations/",)},
     "prefix:tests/fakes/": {"prefixes": ("tests/fakes/",)},
     "prefix:scripts/phase_parsers/": {"prefixes": ("scripts/phase_parsers/",)},
-    "prefix:web/routes/": {"prefixes": ("web/routes/",)},
     "prefix:nix/": {
         "prefixes": ("nix/",),
         "exact_paths": ("flake.nix", "flake.lock"),
@@ -1089,8 +1106,19 @@ class TestRootCoverageRegistriesAreExact(unittest.TestCase):
                 )
 
     def test_every_registry_has_something_real_to_check(self) -> None:
+        """Non-empty unless `EXPECTED_REGISTRY_MAY_BE_EMPTY` admits it.
+
+        A row backed by an unconditional prefix rule (migrations/, nix/,
+        harness/) has no genuine gap to register today, and `<top-level>`
+        currently has none either — see that anchor's own comment. Every
+        other audited row must still name something real: an
+        "always non-empty" registry that quietly emptied would be exactly
+        as invisible as it was before this anchor existed.
+        """
         for rule in AUDITED_RULES:
             with self.subTest(root=rule.root):
+                if EXPECTED_REGISTRY_MAY_BE_EMPTY[rule.root]:
+                    continue
                 self.assertTrue(rule.registry, rule.registry_name)
 
     def test_every_policed_file_resolves_or_is_registered(self) -> None:
@@ -1116,16 +1144,41 @@ class TestRootCoverageRegistriesAreExact(unittest.TestCase):
         """
         for rule in AUDITED_RULES:
             for suffix in rule.suffixes:
-                files = sorted(
-                    path
-                    for path in (REPO_ROOT / rule.root).rglob(f"*{suffix}")
-                    if "__pycache__" not in path.parts
-                )
+                if rule.top_level:
+                    # A top-level row's files are direct children of the
+                    # repository root, never a recursive walk — mirrors
+                    # `rule_candidate_paths`' own `iterdir()` handling of
+                    # `SelectionRule.top_level`.
+                    files = sorted(
+                        path
+                        for path in REPO_ROOT.iterdir()
+                        if path.is_file() and path.suffix == suffix
+                    )
+                else:
+                    files = sorted(
+                        path
+                        for path in (REPO_ROOT / rule.root).rglob(f"*{suffix}")
+                        if "__pycache__" not in path.parts
+                    )
                 with self.subTest(root=rule.root, suffix=suffix):
                     self.assertTrue(
                         files,
                         f"expected {rule.root}/**/*{suffix} files to exist",
                     )
+                    if rule.top_level:
+                        # Pins the walk itself, not just what it resolves:
+                        # a `rglob("*")` regression here would still find
+                        # every OTHER root's files resolving something
+                        # (they are all separately policed), so nothing
+                        # would raise and the loop below would stay quiet
+                        # (issue #1355 item 8 review, mutant runner finding
+                        # F1 — measured survivor, not a hypothetical one).
+                        self.assertTrue(
+                            all(len(p.relative_to(REPO_ROOT).parts) == 1
+                                for p in files),
+                            "top-level walk returned a nested path — "
+                            "this branch must use iterdir(), never rglob()",
+                        )
                 for path in files:
                     relative = path.relative_to(REPO_ROOT).as_posix()
                     with self.subTest(path=relative):
@@ -1329,9 +1382,14 @@ class TestMaskableRulePins(unittest.TestCase):
     Contract C answers this for `EXACT_PATH_NEIGHBOURS`; a `SELECTION_RULES`
     row had no equivalent (issue #1331 residual 1), so deleting one was
     silent for exactly the files whose basename collides with an existing
-    test module — and completely silent for a row over a root no
-    `ROOT_COVERAGE_RULES` row polices, which is `migrations/`, `nix/`,
-    `web/`, `harness/` and the top level.
+    test module — and, before issue #1355 item 8 gave every root a
+    `ROOT_COVERAGE_RULES` row, completely silent for a row over
+    `migrations/`, `nix/`, `web/`, `harness/`, or the top level too. Item 8
+    closed most of that: of those five roots' rows, only `prefix:nix/` and
+    `prefix:harness/` still silently lose SOME of their matched files today
+    (their own comments in `MASKABLE_RULE_PINS` below say exactly which,
+    and why) — the six pinned rows over `lib/`/`scripts/`/`tests/` were
+    never part of this population and are unaffected either way.
     """
 
     def test_pin_keys_are_exactly_the_measured_maskable_rule_set(self) -> None:
@@ -1477,7 +1535,11 @@ class TestSelectionCoverageCheckersTripOnViolations(unittest.TestCase):
     checker quiet on a genuine gap`) deliberately drive each audited row's
     real registry — they prove a real admitted gap behaves correctly, and
     depend on today's registries holding a genuine, non-stale gap, which
-    `TestRootCoverageRegistriesAreExact` independently proves.
+    `TestRootCoverageRegistriesAreExact` independently proves. A row whose
+    registry is legitimately empty (`EXPECTED_REGISTRY_MAY_BE_EMPTY`) has no
+    real gap to drive and is skipped in those three controls — at least one
+    other row still exercises each control, which is what proves the
+    mechanism itself, not any one row's data.
     """
 
     def test_unmapped_top_level_path_fails_closed_with_its_own_message(
@@ -1488,12 +1550,25 @@ class TestSelectionCoverageCheckersTripOnViolations(unittest.TestCase):
         belongs to is what catches two rows' messages being swapped. The
         probe need not exist on disk — `_changed_path_neighbours` never
         stats its own target, only candidate test modules.
+
+        Two carve-outs, both explained where they are DATA, not here:
+        `UNCONDITIONALLY_SHADOWED_ROOTS` roots can never make this probe
+        raise while their shadowing prefix rule exists (proved instead by
+        `test_root_rule_catches_an_unconditionally_shadowed_root_if_its_prefix_rule_is_removed`),
+        and a `top_level` row's probe has no directory component to prefix
+        with the root name.
         """
         for rule in ROOT_COVERAGE_RULES:
+            if rule.root in UNCONDITIONALLY_SHADOWED_ROOTS:
+                continue
             marker = UNMAPPED_MESSAGE_MARKERS[rule.root]
             self.assertTrue(rule.unmapped_message.startswith(marker))
             for suffix in rule.suffixes:
-                probe = f"{rule.root}/_totally_unmapped_probe{suffix}"
+                probe = (
+                    f"_totally_unmapped_probe{suffix}"
+                    if rule.top_level
+                    else f"{rule.root}/_totally_unmapped_probe{suffix}"
+                )
                 expected = rule.unmapped_message.format(path=probe)
                 with (
                     self.subTest(root=rule.root, suffix=suffix),
@@ -1507,8 +1582,16 @@ class TestSelectionCoverageCheckersTripOnViolations(unittest.TestCase):
         `len(path.parts) == 2` mutant (issue #1199 review F2). Each probe
         here is nested one level deeper, in a directory no prefix rule
         covers, so only the real first-component guard makes it raise.
+
+        Excludes `UNCONDITIONALLY_SHADOWED_ROOTS` for the same reason as the
+        sibling test above. Excludes `top_level` rows too: `covers()`
+        requires `len(path.parts) == 1` for such a row, so a nested path can
+        never be one of ITS OWN matches in the first place — there is no
+        "one level deeper" for a file with no directory component at all.
         """
         for rule in ROOT_COVERAGE_RULES:
+            if rule.root in UNCONDITIONALLY_SHADOWED_ROOTS or rule.top_level:
+                continue
             nested_dir = NESTED_PROBE_DIRS[rule.root]
             for suffix in rule.suffixes:
                 probe = (
@@ -1520,11 +1603,41 @@ class TestSelectionCoverageCheckersTripOnViolations(unittest.TestCase):
                 ):
                     _changed_path_neighbours(probe, REPO_ROOT)
 
+    def test_root_rule_catches_an_unconditionally_shadowed_root_if_its_prefix_rule_is_removed(
+        self,
+    ) -> None:
+        """Proves the real value of a `UNCONDITIONALLY_SHADOWED_ROOTS` row:
+        drop its shadowing prefix rule through the same `without=` DI seam
+        `TestMaskableRulePins` uses, and the root row now catches every file
+        in that root going silently under-selected — exactly what would
+        happen in production if that prefix rule were ever deleted or
+        narrowed. `selection_or_refusal` returns `None` on the fail-closed
+        raise and never touches the real production tables.
+        """
+        rules_by_name = {rule.name: rule for rule in SELECTION_RULES}
+        for root, shadowing_rule_name in UNCONDITIONALLY_SHADOWED_ROOTS.items():
+            rule = next(r for r in ROOT_COVERAGE_RULES if r.root == root)
+            shadowing_rule = rules_by_name[shadowing_rule_name]
+            for suffix in rule.suffixes:
+                probe = f"{root}/_shadow_removed_probe{suffix}"
+                with self.subTest(root=root, suffix=suffix):
+                    self.assertIsNone(
+                        selection_or_refusal(
+                            probe, REPO_ROOT, without=shadowing_rule
+                        )
+                    )
+
     def test_admitted_gap_log_names_the_path_and_its_rationale(self) -> None:
         """The loud stderr line must name BOTH the registered path AND its
         registered rationale — not merely print SOME line.
+
+        Skips a row whose registry is legitimately empty (see
+        `EXPECTED_REGISTRY_MAY_BE_EMPTY`) — there is no real registered
+        entry to grab, so this row has nothing to prove here.
         """
         for rule in AUDITED_RULES:
+            if not rule.registry:
+                continue
             registered = next(iter(rule.registry))
             rationale = rule.registry[registered]
             buffer = io.StringIO()
@@ -1541,8 +1654,14 @@ class TestSelectionCoverageCheckersTripOnViolations(unittest.TestCase):
     def test_registered_gap_with_zero_neighbours_does_not_raise(self) -> None:
         """Must-still-work: a genuinely zero-neighbour path that IS
         registered proceeds (ambient-only selection), never raises.
+
+        Skips a row whose registry is legitimately empty (see
+        `EXPECTED_REGISTRY_MAY_BE_EMPTY`) — there is no real registered
+        entry to grab, so this row has nothing to prove here.
         """
         for rule in AUDITED_RULES:
+            if not rule.registry:
+                continue
             registered = next(iter(rule.registry))
             with self.subTest(root=rule.root, path=registered):
                 self.assertEqual(
@@ -1565,6 +1684,7 @@ class TestSelectionCoverageCheckersTripOnViolations(unittest.TestCase):
                 registry_name=rule.registry_name,
                 admitted_selects_nothing=rule.admitted_selects_nothing,
                 unmapped_message=rule.unmapped_message,
+                top_level=rule.top_level,
             )
 
             with self.subTest(root=rule.root):
@@ -1578,8 +1698,15 @@ class TestSelectionCoverageCheckersTripOnViolations(unittest.TestCase):
     def test_stale_registration_checker_is_quiet_on_a_genuine_gap(self) -> None:
         """Must-still-work: a fabricated registry entry that genuinely
         resolves zero neighbours produces no violation.
+
+        Skips a row whose registry is legitimately empty (see
+        `EXPECTED_REGISTRY_MAY_BE_EMPTY`) — there is no real zero-neighbour
+        path to build the fabricated entry from, so this row has nothing to
+        prove here.
         """
         for rule in AUDITED_RULES:
+            if not rule.registry:
+                continue
             registered = next(iter(rule.registry))
             fabricated = RootCoverageRule(
                 root=rule.root,
@@ -1588,6 +1715,7 @@ class TestSelectionCoverageCheckersTripOnViolations(unittest.TestCase):
                 registry_name=rule.registry_name,
                 admitted_selects_nothing=rule.admitted_selects_nothing,
                 unmapped_message=rule.unmapped_message,
+                top_level=rule.top_level,
             )
 
             with self.subTest(root=rule.root, path=registered):
@@ -1651,13 +1779,23 @@ class TestSelectionCoverageCheckersTripOnViolations(unittest.TestCase):
         mutant alive: one gating that fabricated note on
         `relative_path.endswith(".sh")` survived the whole suite, because
         the scripts row's first suffix is `.py`.
+
+        Skips `UNCONDITIONALLY_SHADOWED_ROOTS` for the same reason as the
+        two sibling unmapped-path pins: no probe can raise there while the
+        shadowing prefix rule exists.
         """
         marker = "admitted selection gap"
         self.assertIn(marker, ADMITTED_GAP_MESSAGE)
 
         for rule in ROOT_COVERAGE_RULES:
+            if rule.root in UNCONDITIONALLY_SHADOWED_ROOTS:
+                continue
             for suffix in rule.suffixes:
-                probe = f"{rule.root}/_unregistered_probe{suffix}"
+                probe = (
+                    f"_unregistered_probe{suffix}"
+                    if rule.top_level
+                    else f"{rule.root}/_unregistered_probe{suffix}"
+                )
                 buffer = io.StringIO()
                 with self.subTest(root=rule.root, suffix=suffix):
                     with (
@@ -2003,13 +2141,16 @@ class TestSelectionCoverageCheckersTripOnViolations(unittest.TestCase):
             "scripts/_policed_probe.py": ("tests.test_pipeline_db",),
             # Policed, but the lib/pipeline_db/ prefix rule keeps resolving.
             "lib/pipeline_db/_masked_probe.py": ("tests.test_pipeline_db",),
-            # No rule polices web/ at all.
-            "web/_unpoliced_probe.py": ("tests.test_pipeline_db",),
+            # The web/ row polices only `.py` (issue #1355 item 8) — `.js`
+            # selection is not governed by this mechanism at all (the
+            # ambient JS phase runs unconditionally), so no rule polices
+            # this root+suffix combination.
+            "web/_unpoliced_probe.js": ("tests.test_pipeline_db",),
         }
 
         self.assertEqual(
             maskable_entry_paths(fabricated, REPO_ROOT),
-            {"lib/pipeline_db/_masked_probe.py", "web/_unpoliced_probe.py"},
+            {"lib/pipeline_db/_masked_probe.py", "web/_unpoliced_probe.js"},
         )
 
 

@@ -651,14 +651,16 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_web_dev_server",
         "tests.test_discogs_artist_concurrency",
     ),
-    # web/server.py resolves nothing on its own: no tests.test_server or
-    # tests.web.test_server exists, and no ROOT_COVERAGE_RULES row polices
-    # ``web/``, so an edit to the web entrypoint selected zero neighbours
-    # (found while moving its module globals onto WebRuntime, #1313). The
-    # named modules are the ones a solo change to this file most plausibly
-    # regresses: the Handler's dispatch/keep-alive/threading behaviour, the
-    # request-security envelope it applies before dispatch, and main()'s
-    # admission ordering.
+    # web/server.py resolves nothing on its own: neither tests.test_server
+    # nor tests.web.test_server exists (found while moving its module
+    # globals onto WebRuntime, #1313). At the time, no ROOT_COVERAGE_RULES
+    # row policed ``web/`` either, so the gap was doubly silent; #1355 item
+    # 8 added that row, which now fails closed if this entry is ever
+    # deleted (measured in MASKABLE_ENTRY_PINS — this path is no longer
+    # pinned there). The named modules are the ones a solo change to this
+    # file most plausibly regresses: the Handler's dispatch/keep-alive/
+    # threading behaviour, the request-security envelope it applies before
+    # dispatch, and main()'s admission ordering.
     "web/server.py": (
         "tests.web.test_server_endpoints",
         "tests.web.test_server_threading",
@@ -680,6 +682,91 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.web.test_runtime",
         "tests.test_web_runtime_generated",
         "tests.web.test_server_threading",
+        "tests.web.test_server_endpoints",
+    ),
+    # The nine entries below (including web/index_document.py, appended
+    # after library_artist_service.py) were found by issue #1355 item 8's
+    # population of WEB_MODULES_WITHOUT_SELECTION_COVERAGE: each resolved
+    # zero neighbours (neither tests.test_web_<stem> nor
+    # tests.web.test_<stem> exists), but each has real coverage under a
+    # name the basename probe cannot derive. Every neighbour below was
+    # verified by READING the referencing test — its own import statement
+    # where one exists, the real call path where it does not (api_bases.py's
+    # tests.test_pipeline_cli entry, and tests.test_web_dev_server, a named
+    # deterministic sibling that imports nothing from the module itself) —
+    # never by grepping the filename. web/overlay.py's stem collides with
+    # the unrelated tests/test_overlay.py (which imports
+    # web.routes._overlay, not web.overlay), so a bare tests.test_<stem>
+    # probe is NOT trustworthy here and this file deliberately widens no
+    # derived template to add it. (A pre-review draft of this same series
+    # DID grep instead of reading for web/index_document.py, scoped to
+    # tests/*.py only — missing tests/web/*.py entirely — and wrongly
+    # admitted it as a registry gap; see that entry's own comment.)
+    "web/classify.py": (
+        # Verified: tests/test_classify_producer_audit.py imports
+        # web.classify directly (Rule C's own producer audit for this
+        # exact module).
+        "tests.test_classify_producer_audit",
+        "tests.test_classify_producer_audit_generated",
+    ),
+    "web/mb.py": (
+        # Verified: tests/test_mb_api.py's import block reads
+        # ``from web.mb import (...)``.
+        "tests.test_mb_api",
+    ),
+    "web/artist_search.py": (
+        # Verified: tests/test_artist_identity_search_generated.py imports
+        # merge_exact_artist_identities from web.artist_search.
+        "tests.test_artist_identity_search_generated",
+    ),
+    "web/download_history_view.py": (
+        # Verified: both modules import build_recents_download_log_rows (or
+        # its siblings) from web.download_history_view directly.
+        "tests.test_web_recents",
+        "tests.test_web_recents_generated",
+    ),
+    "web/api_bases.py": (
+        # Verified by reading each import. tests/test_mb_artist_pagination_
+        # generated.py imports PUBLIC_MB_WS2_BASE directly and asserts
+        # against it. tests/test_web_dev_server_generated.py imports the
+        # whole module, reads PUBLIC_MB_ORIGIN, and mutates
+        # web.api_bases.PUBLIC_MB_WS2_BASE as a seam — its deterministic
+        # sibling tests/test_web_dev_server.py is named alongside it.
+        # tests/test_pipeline_cli.py::
+        # test_non_quarantine_main_still_configures_mirror_api_bases is the
+        # only one that reaches configure_api_bases_from_runtime_config
+        # itself, the module's one process-startup wiring function (see its
+        # own module docstring) — not a claim that it is the only name any
+        # test imports from this module, which the first two entries below
+        # disprove.
+        "tests.test_mb_artist_pagination_generated",
+        "tests.test_web_dev_server_generated",
+        "tests.test_web_dev_server",
+        "tests.test_pipeline_cli",
+    ),
+    "web/library_album_row.py": (
+        # Verified: tests/test_library_album_row.py imports
+        # LibraryAlbumRow from web.library_album_row.
+        "tests.test_library_album_row",
+    ),
+    "web/library_album_detail_service.py": (
+        # Verified: tests/test_library_album_detail_service.py's import
+        # block reads ``from web.library_album_detail_service import``.
+        "tests.test_library_album_detail_service",
+    ),
+    "web/library_artist_service.py": (
+        # Verified: tests/test_library_artist_service.py's import block
+        # reads ``from web.library_artist_service import``.
+        "tests.test_library_artist_service",
+    ),
+    # web/index_document.py was WRONGLY admitted as a registry gap in an
+    # earlier draft of this same change — a grep scoped to tests/*.py
+    # (non-recursive) missed tests/web/*.py entirely (issue #1355 item 8
+    # review, reader finding 1). tests/web/test_server_endpoints.py imports
+    # render_index_document directly in two tests: a Hypothesis property
+    # asserting the footer-selection logic tracks only explicit insecure
+    # mode, and a pin on its RuntimeError for a duplicate footer marker.
+    "web/index_document.py": (
         "tests.web.test_server_endpoints",
     ),
     # cratedigger.py is a single top-level file (``len(path.parts) == 1``),
@@ -1618,6 +1705,62 @@ SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
 }
 
 
+#: `migrations/`'s admitted-gap registry (issue #1355 item 8). Empty:
+#: `prefix:migrations/` matches every path under `migrations/` regardless of
+#: suffix, so every one of the 82 tracked `.sql` files resolves real
+#: neighbours today (measured 2026-09-02). The row exists to fail closed the
+#: day that prefix rule is narrowed or deleted, not because a current
+#: migration is under-covered.
+MIGRATIONS_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {}
+
+#: `nix/`'s admitted-gap registry (issue #1355 item 8). Empty for the same
+#: reason as migrations/ above: `prefix:nix/` matches every path under
+#: `nix/` regardless of suffix, so all 11 tracked `.nix`/`.json` files
+#: resolve today (measured 2026-09-02).
+NIX_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {}
+
+#: `harness/`'s admitted-gap registry (issue #1355 item 8). Empty for the
+#: same reason: `prefix:harness/` matches every path under `harness/`
+#: regardless of suffix, so all 6 tracked `.py`/`.sh` files resolve today
+#: (measured 2026-09-02).
+HARNESS_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {}
+
+#: `web/`'s admitted-gap registry (issue #1355 item 8). Unlike migrations/
+#: nix/harness above, web/*.py coverage is basename-derived (existence of
+#: tests.test_web_<stem> / tests.web.test_<stem>), so it genuinely misses
+#: real files. Measured 2026-09-02: 41 tracked web/*.py files exist; 22 are
+#: under web/routes/, covered unconditionally by prefix:web/routes/. Of the
+#: remaining 19, 10 resolved zero neighbours. Nine had real coverage under
+#: a name the basename probe cannot derive and got an EXACT_PATH_NEIGHBOURS
+#: entry instead (classify.py, mb.py, artist_search.py, download_history_view.py,
+#: api_bases.py, library_album_row.py, library_album_detail_service.py,
+#: library_artist_service.py, index_document.py — see those entries below
+#: for the verified real consumer of each; index_document.py's own entry
+#: was added after review found the first draft had wrongly admitted it as
+#: a gap on a grep that missed tests/web/*.py). This one is the genuine gap.
+#:
+#: `.js` files under web/js/ are deliberately NOT policed by this row (see
+#: the ROOT_COVERAGE_RULES comment on the web row): targeted selection only
+#: narrows which PYTHON test modules a run selects, and
+#: scripts/run_targeted_tests.py runs the complete JavaScript phase
+#: unconditionally on every targeted invocation regardless of what Python
+#: selection returns — the same reason no ROOT_COVERAGE_RULES row has ever
+#: policed tests/js_harness.mjs's own `.mjs` suffix.
+WEB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
+    "web/__init__.py": (
+        "measured 2026-09-02: zero neighbours -- the file is empty (0 "
+        "bytes), so there is no logic to regress and no test module was "
+        "ever written for it"
+    ),
+}
+
+#: Top-level's admitted-gap registry (issue #1355 item 8). Empty: both
+#: tracked top-level `.py` files (album_source.py via the basename probe,
+#: cratedigger.py via its EXACT_PATH_NEIGHBOURS entry below) resolve real
+#: neighbours today (measured 2026-09-02).
+TOP_LEVEL_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {}
+
+
 #: The stderr line a registered, genuinely zero-neighbour path logs instead
 #: of raising. One template for every non-early-returning rule below, so
 #: the rules that use it cannot drift in wording.
@@ -1631,14 +1774,16 @@ ADMITTED_GAP_MESSAGE = (
 class RootCoverageRule:
     """One repository root's fail-closed zero-neighbour contract.
 
-    The three roots that police under-selection (`tests/`, `lib/`,
+    The three roots that first policed under-selection (`tests/`, `lib/`,
     `scripts/`) had three structurally identical branches in
     `_changed_path_neighbours`, each with its own registry and its own
     error string (issue #1278 item 9). This is that shape as data: a root,
     the file suffixes it polices, its admitted-gap registry, and the exact
-    message an unmapped path raises. The registries themselves stay
-    hand-maintained data — nothing here infers coverage from an import
-    graph.
+    message an unmapped path raises. Issue #1355 item 8 carried the same
+    shape to every remaining production root — `migrations/`, `nix/`,
+    `web/`, `harness/`, and the top level — rather than adding a second
+    selection mechanism. The registries themselves stay hand-maintained
+    data — nothing here infers coverage from an import graph.
 
     Every column is behavioural — this is a table production reads, not
     documentation. Two of them decide this table's own SCOPE, which is why
@@ -1652,10 +1797,18 @@ class RootCoverageRule:
     The `tests/` registry early-returns BEFORE resolution
     (a registration must not be a lookalike neighbour set — issue #1081),
     so a registered `tests/` path never reaches the post-resolution branch
-    at all. The `lib/` and `scripts/` registries do not early-return: full
+    at all. Every other row's registry does not early-return: full
     resolution runs first, and a registered path merely logs
     `ADMITTED_GAP_MESSAGE` on the way out, so a path that later gains real
     coverage selects it immediately (issues #1199, #1248).
+
+    `top_level` (issue #1355 item 8) makes a row match a bare filename with
+    no directory component — `path.parts[:1] == (self.root,)` can never be
+    true for such a path, since a top-level file's ONLY path component is
+    its own name, never a literal root string. Mirrors the identical field
+    on `SelectionRule` (`basename:<top-level>.py`); `root` on a top-level
+    row is a display label only (`"<top-level>"`, matching that naming
+    convention), never a real directory `covers` walks.
     """
 
     root: str
@@ -1664,9 +1817,12 @@ class RootCoverageRule:
     registry_name: str
     admitted_selects_nothing: bool
     unmapped_message: str
+    top_level: bool = False
 
     def covers(self, path: PurePosixPath) -> bool:
         """True when this rule polices ``path``'s root and file suffix."""
+        if self.top_level:
+            return len(path.parts) == 1 and path.suffix in self.suffixes
         return path.parts[:1] == (self.root,) and path.suffix in self.suffixes
 
 
@@ -1721,6 +1877,89 @@ ROOT_COVERAGE_RULES: tuple[RootCoverageRule, ...] = (
         unmapped_message=(
             "unmapped scripts module: {path} resolves zero "
             "test neighbours — add an EXACT_PATH_NEIGHBOURS entry or a "
+            "prefix rule for it in scripts/targeted_test_selection.py"
+        ),
+    ),
+    # The five rows below (issue #1355 item 8) carry the same fail-closed
+    # policy to every remaining production root. migrations/, nix/ and
+    # harness/ are each matched by an UNCONDITIONAL prefix rule
+    # (`prefix:migrations/`, `prefix:nix/`, `prefix:harness/` — no suffix
+    # filter, fixed `neighbours`), so under today's SELECTION_RULES no real
+    # or synthetic path under these roots can ever resolve zero: these three
+    # rows are currently dormant coverage, not currently-firing coverage.
+    # Their value is provable only by removing the shadowing prefix rule
+    # through the DI seam (see
+    # tests/test_selection_coverage_audit.py's
+    # test_root_rule_catches_an_unconditionally_shadowed_root_if_its_prefix_rule_is_removed)
+    # — deleting one of those three prefix rules today would silently
+    # under-select every file in its root; after this change it raises
+    # instead. web/ and the top level are different: their coverage is
+    # basename-derived (existence of a differently-shaped test module), so
+    # a real orphaned file resolves zero TODAY, and these two rows fire on
+    # real, unmodified selection.
+    RootCoverageRule(
+        root="migrations",
+        suffixes=(".sql",),
+        registry=MIGRATIONS_WITHOUT_SELECTION_COVERAGE,
+        registry_name="MIGRATIONS_WITHOUT_SELECTION_COVERAGE",
+        admitted_selects_nothing=False,
+        unmapped_message=(
+            "unmapped migration: {path} resolves zero test "
+            "neighbours — add an EXACT_PATH_NEIGHBOURS entry or a "
+            "prefix rule for it in scripts/targeted_test_selection.py"
+        ),
+    ),
+    RootCoverageRule(
+        root="nix",
+        suffixes=(".nix", ".json"),
+        registry=NIX_MODULES_WITHOUT_SELECTION_COVERAGE,
+        registry_name="NIX_MODULES_WITHOUT_SELECTION_COVERAGE",
+        admitted_selects_nothing=False,
+        unmapped_message=(
+            "unmapped nix module: {path} resolves zero test "
+            "neighbours — add an EXACT_PATH_NEIGHBOURS entry or a "
+            "prefix rule for it in scripts/targeted_test_selection.py"
+        ),
+    ),
+    RootCoverageRule(
+        root="web",
+        # `.js` is deliberately excluded — see the WEB_MODULES_WITHOUT_
+        # SELECTION_COVERAGE comment above: JavaScript selection is not
+        # governed by this Python-module-neighbour mechanism at all, so
+        # policing it here would raise for files the ambient JS phase
+        # already covers in full on every targeted run.
+        suffixes=(".py",),
+        registry=WEB_MODULES_WITHOUT_SELECTION_COVERAGE,
+        registry_name="WEB_MODULES_WITHOUT_SELECTION_COVERAGE",
+        admitted_selects_nothing=False,
+        unmapped_message=(
+            "unmapped web module: {path} resolves zero test "
+            "neighbours — add an EXACT_PATH_NEIGHBOURS entry or a "
+            "prefix rule for it in scripts/targeted_test_selection.py"
+        ),
+    ),
+    RootCoverageRule(
+        root="harness",
+        suffixes=(".py", ".sh"),
+        registry=HARNESS_MODULES_WITHOUT_SELECTION_COVERAGE,
+        registry_name="HARNESS_MODULES_WITHOUT_SELECTION_COVERAGE",
+        admitted_selects_nothing=False,
+        unmapped_message=(
+            "unmapped harness module: {path} resolves zero test "
+            "neighbours — add an EXACT_PATH_NEIGHBOURS entry or a "
+            "prefix rule for it in scripts/targeted_test_selection.py"
+        ),
+    ),
+    RootCoverageRule(
+        root="<top-level>",
+        top_level=True,
+        suffixes=(".py",),
+        registry=TOP_LEVEL_MODULES_WITHOUT_SELECTION_COVERAGE,
+        registry_name="TOP_LEVEL_MODULES_WITHOUT_SELECTION_COVERAGE",
+        admitted_selects_nothing=False,
+        unmapped_message=(
+            "unmapped top-level module: {path} resolves zero test "
+            "neighbours — add an EXACT_PATH_NEIGHBOURS entry or a "
             "prefix rule for it in scripts/targeted_test_selection.py"
         ),
     ),
@@ -2558,6 +2797,14 @@ def _root_coverage_lines(
             "root and suffix, so resolving zero neighbours here is silent"
         )
     for rule in covering:
+        # Every current row's root strings are distinct and a `top_level`
+        # row can never also match a rooted path (issue #1355 item 8
+        # review), so `covering` holds at most one rule for every one of
+        # the 1,647 tracked files, measured directly — not an invariant
+        # anything here enforces. A future row that overlaps another
+        # (e.g. a second `web` row policing a different suffix) would make
+        # this `continue` start mattering; it would still be correct, since
+        # each matching rule's own message belongs on its own line.
         rationale = rule.registry.get(relative_path)
         if rationale is None:
             lines.append(
