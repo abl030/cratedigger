@@ -3988,8 +3988,18 @@ class TestImportPreviewScanBackoffParity(unittest.TestCase):
     the Python agree, and nothing compared them — the two hand-written
     pins next door fix attempts at 1 and at 2454, which is the first
     doubling and the cap, leaving every doubling between them free. Base
-    2 could become base 3 in the SQL and 213 tests stayed green (#1313
-    residual 1314-3).
+    2 could become base 3 in the SQL and nothing in the six-module
+    selection for that file noticed — 863 tests today, of which the four
+    failures are all this class's own subtests (#1313 residual 1314-3).
+
+    Parity is the whole claim, and it is narrower than the policy: both
+    sides read ``IMPORT_PREVIEW_REQUEUE_INITIAL_DELAY`` and its
+    neighbours, so a change to a shared constant moves the SQL and the
+    expectation together and is invisible here by construction (measured:
+    collapsing ``IMPORT_PREVIEW_REQUEUE_MAX_EXPONENT`` to 0 flattens the
+    curve to 60s forever and passes). The policy's own shape is held by
+    ``tests/test_import_queue.py::TestImportPreviewRequeuePolicy``, which
+    kills that one.
     """
 
     def setUp(self):
@@ -4010,13 +4020,24 @@ class TestImportPreviewScanBackoffParity(unittest.TestCase):
     def tearDown(self):
         self.db.close()
 
-    #: Seconds either side of the due moment. A round trip through the
-    #: scan takes milliseconds, but ``NOW()`` advances between the UPDATE
-    #: that ages the row and the SELECT that reads it, so the "not due
-    #: yet" side needs more slack than doc1's worst scheduling hiccup.
+    #: Seconds either side of the due moment. The "already due" probe is
+    #: safe at any positive margin, since ``NOW()`` only advances; the
+    #: "not due yet" probe is the one this number decides, and it is a
+    #: two-sided budget. Too small and the test flakes when more than
+    #: MARGIN_SECONDS passes between the UPDATE that ages the row and the
+    #: SELECT that reads it. Too large and it stops noticing a mutant that
+    #: SHORTENS the delay by less than the margin. 5s buys a wide flake
+    #: margin for two statements on one connection while still catching a
+    #: constant knocked down by a tenth.
     MARGIN_SECONDS = 5
 
     def _age_row(self, *, attempts: int, seconds_ago: float) -> None:
+        """Write the two columns the scan's backoff window reads.
+
+        A real requeue is one producer of this row shape and cannot reach
+        most of the curve; the scan sees only ``attempts`` and
+        ``updated_at`` on a queued/waiting row, which is what this writes.
+        """
         self.db._execute("""
             UPDATE import_jobs
             SET attempts = %s, updated_at = NOW() - make_interval(secs => %s)
@@ -4029,7 +4050,7 @@ class TestImportPreviewScanBackoffParity(unittest.TestCase):
             for candidate in self.db.peek_import_preview_job_candidates(limit=10)
         )
 
-    def test_scan_admits_a_requeued_row_exactly_when_the_policy_says_it_is_due(
+    def test_scan_admits_an_attempted_row_exactly_when_the_policy_says_it_is_due(
         self,
     ) -> None:
         # Derived from the policy, not hand-listed: one attempt count per

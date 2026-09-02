@@ -211,12 +211,19 @@ def _files_strategy() -> st.SearchStrategy[tuple[tuple[str, str, bool], ...]]:
 #: world the uniform version could draw is still drawable — this steers
 #: the budget, it does not filter (#1313). Measured: the uniform strategy
 #: authorized a write 1 time in 400 and never once through the release
-#: entry. With this weighting the derandomized suite tier's 150 examples
-#: reach 8 album writes and 41 authority failures, and still 0 release
-#: writes — that one cell is carried by its ``@example`` pin at the
-#: gating tier and by the draw itself at fuzz depth (17 release writes in
-#: 1,000 examples). Do not read those pins as belt-and-braces; for the
-#: release write the pin IS the belt.
+#: entry.
+#:
+#: Re-measured for #1313 batch E, because adding an ``@example`` reseeds
+#: the whole derandomized sweep — Hypothesis digests the decorated source,
+#: so every count below moves whenever a pin is added or removed, and any
+#: figure here is a snapshot of one tree. Over the 165 examples the gating
+#: tier now runs: 7 album writes, 1 release write, 4 refused release
+#: locks, 12 DB-identity mismatches, 5 absent DB identities, 7 albums with
+#: nothing readable diverging, and all four reachable (entry, authority
+#: site) cells. Every arm a checker clause decides on is non-zero there,
+#: which was not true before those pins: the release write is thin enough
+#: to depend on its own ``@example``, so do not read these pins as
+#: belt-and-braces. Re-run the arm census after touching a pin.
 _MOSTLY_TRUE = st.sampled_from((True, True, True, False))
 
 
@@ -716,14 +723,33 @@ class TestTagSyncProperties(unittest.TestCase):
         # The DB-identity guard's own world: the album holds one real
         # MusicBrainz id and the caller authorized a different one, so the
         # lane must refuse instead of writing a stale identity into files.
-        # Measured (#1313 residual 1332-5): the derandomized suite tier
-        # reaches that refusal 0 times in its 162 examples, while fuzz
-        # depth reaches it 65 times in 2,012 — the 4 suite-tier worlds
-        # that could have are all short-circuited by an earlier authority
-        # failure. Without this pin, A4 and W1's identity half are
-        # patrolled only at fuzz depth. The release entry meets the same
-        # guard through the same mediator.
+        # Measured before this pin existed (#1313 residual 1332-5): the
+        # derandomized suite tier reached that refusal 0 times in its 162
+        # examples while fuzz depth reached it tens of times per 2,000 —
+        # the 4 suite-tier worlds that could have were all short-circuited
+        # by an earlier authority failure. Without this pin A4 and W1's
+        # identity half are patrolled only at fuzz depth. The release
+        # entry meets the same guard through the same mediator.
         expected=THIRD_ID,
+    ))
+    @example(world=_world(
+        # A4's other producer: an album whose DB identity is empty. The
+        # refusal is db_identity_absent, and a mutant relabelling it
+        # beets_unavailable passes every W and V clause. Pinned because
+        # this arm is a casualty of the pin above: adding an @example
+        # reseeds the whole derandomized sweep (Hypothesis digests the
+        # decorated source), and the arm went from 1 drawn example to 0
+        # (#1313 batch E, mutant runner S2 and reader F1).
+        db_identity="",
+    ))
+    @example(world=_world(
+        # The refused RELEASE lock, the one refusal V4 polices that the
+        # derandomized tier never drew: 0 examples on `ce493ba8` and 0
+        # with the two pins above, because it needs an otherwise fully
+        # authorized write world AND the lock denied. Pre-existing rather
+        # than a casualty of those pins, and pinned here because the arm
+        # census that found it is this PR's own (#1313 batch E).
+        lock_granted=False,
     ))
     def test_write_gating_and_verdict(self, world: SyncWorld) -> None:
         run = run_sync_world(world)
@@ -996,17 +1022,26 @@ class TestCheckersTripOnViolations(unittest.TestCase):
             final_tags={"/library/a/01.opus": OLD_TAG},
             close_calls=1,
         )
-        violations = authority_violations(run)
-        self.assertTrue(
-            any(v.startswith("A2") and "'resolve'" in v for v in violations),
-            violations,
+        # Asserted whole: the message names both sites, so a substring
+        # check on either one is satisfied by a clause that transposed
+        # them (measured by the #1313 batch E mutant runner, MC2).
+        self.assertIn(
+            "A2: the authority was set to fail at 'read' and fired at "
+            "'resolve'",
+            authority_violations(run),
         )
 
     def test_a2_stays_quiet_when_the_named_site_is_never_reached(self) -> None:
         """Q3: the album entry never resolves a release, so a world that
         asks for a dead resolution produces no failure at all. A2 must
-        read what fired, not what the world asked for."""
-        run = self._base_run(world=_world(authority_failure="resolve"))
+        read what fired, not what the world asked for.
+
+        Driven through the real service rather than a hand-built run: a
+        constructed empty site tuple only proves an empty loop iterates
+        zero times (#1313 batch E, reader F6).
+        """
+        run = run_sync_world(_world(authority_failure="resolve"))
+        self.assertEqual(run.authority_raise_sites, ())
         self.assertEqual(authority_violations(run), [])
 
     def test_a3_trips_when_a_dead_site_names_the_wrong_album(self) -> None:
@@ -1018,6 +1053,25 @@ class TestCheckersTripOnViolations(unittest.TestCase):
                 outcome=RESULT_BEETS_UNAVAILABLE, album_id=ALBUM_ID,
             ),
             write_calls=(), authority_raise_sites=("resolve",),
+            final_tags={"/library/a/01.opus": OLD_TAG},
+            close_calls=1,
+        )
+        violations = authority_violations(run)
+        self.assertTrue(
+            any(v.startswith("A3") for v in violations), violations,
+        )
+        self.assertEqual([v for v in violations if not v.startswith("A3")], [])
+
+    def test_a3_trips_when_the_read_site_reports_no_album(self) -> None:
+        """The read happens inside the album lane on both entries, so it
+        always has an album to name. Without this the ``site == "read"``
+        arm of the mapping has no deterministic pin at all — dropping it
+        was killed only by the property (#1313 batch E, mutant runner
+        MC3)."""
+        run = self._base_run(
+            world=_world(entry="owned_release", authority_failure="read"),
+            result=TagSyncResult(outcome=RESULT_BEETS_UNAVAILABLE),
+            write_calls=(), authority_raise_sites=("read",),
             final_tags={"/library/a/01.opus": OLD_TAG},
             close_calls=1,
         )
@@ -1057,7 +1111,14 @@ class TestCheckersTripOnViolations(unittest.TestCase):
         )
         violations = authority_violations(run)
         self.assertTrue(any(v.startswith("A4") for v in violations), violations)
+        # A4 is the only clause with anything to say about this run, in
+        # its own family and in every other. Asserted rather than traced
+        # (#1313 batch E, reader F7).
+        self.assertEqual([v for v in violations if not v.startswith("A4")], [])
         self.assertEqual(verdict_violations(run), [])
+        self.assertEqual(write_gating_violations(run), [])
+        self.assertEqual(release_resolution_violations(run), [])
+        self.assertEqual(lifecycle_violations(run), [])
 
     def test_l1_trips_when_the_borrowed_entry_closes_a_lent_handle(
         self,
