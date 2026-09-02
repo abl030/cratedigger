@@ -1071,6 +1071,26 @@ class TestLiveBugReproductions(unittest.TestCase):
         self.assertEqual(locked["stage2_import"], "lossless_source_locked")
         self.assertFalse(locked["imported"])
 
+    def test_issue_1355_corrupt_and_nested_denylists_the_peer(self):
+        """Issue #1355 item 1: a candidate that is both corrupt AND nested
+        must reject as audio_corrupt (not nested_layout) and denylist its
+        peer. measure_preimport_state derives folder layout from a single
+        path enumeration before it runs the audio-integrity decode, so a
+        real download can carry both facts; a peer whose upload decodes as
+        garbage must not escape the denylist just because its folder also
+        happens to be nested (dispatch_actions.decision_denylists denylists
+        audio_corrupt but not nested_layout)."""
+        result = full_pipeline_decision(
+            is_flac=False, min_bitrate=256, is_cbr=False,
+            audio_corrupt=True, has_nested_audio=True,
+        )
+        self.assertEqual(result["preimport_audio"], "reject_corrupt")
+        self.assertIsNone(result["preimport_nested"])
+        self.assertFalse(result["imported"])
+        self.assertTrue(result["denylisted"])
+        self.assertEqual(result["final_status"], "wanted")
+        self.assertTrue(result["keep_searching"])
+
 
 class TestWavvesAacCodecBlindSpectral(unittest.TestCase):
     """Issue #829's opening defect, as a decision-consequence pin.
@@ -1554,6 +1574,29 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
     # generated parity property in tests/test_quality_generated.py.
     _build_candidate = staticmethod(build_parity_candidate_evidence)
     _build_current = staticmethod(build_parity_current_evidence)
+
+    def test_issue_1355_corrupt_and_nested_denylists_the_peer_via_evidence(self):
+        """Parity twin of TestLiveBugReproductions' issue #1355 item 1 case,
+        run through full_pipeline_decision_from_evidence — the function
+        production dispatch actually calls."""
+        from lib.quality import (
+            evidence_decision_name,
+            full_pipeline_decision_from_evidence,
+        )
+
+        candidate = self._build_candidate(
+            is_flac=False, min_bitrate=256, is_cbr=False,
+            audio_corrupt=True, folder_layout="nested",
+        )
+        result = full_pipeline_decision_from_evidence(candidate, None)
+
+        self.assertEqual(result["preimport_audio"], "reject_corrupt")
+        self.assertIsNone(result["preimport_nested"])
+        self.assertFalse(result["imported"])
+        self.assertTrue(result["denylisted"])
+        self.assertEqual(result["final_status"], "wanted")
+        self.assertTrue(result["keep_searching"])
+        self.assertEqual(evidence_decision_name(result), "audio_corrupt")
 
     def test_request_3182_spectral_class_stays_with_the_encode_via_evidence(self):
         """Parity twin of the 6233/342 role-invariance reproduction.
@@ -4475,6 +4518,42 @@ class TestPreimportFactRejects(unittest.TestCase):
         self.assertIsNone(r["preimport_bad_hash"])
         self.assertIsNone(r["preimport_nested"])
         self.assertEqual(evidence_decision_name(r), "audio_corrupt")
+
+    def test_classify_full_pipeline_decision_matches_evidence_priority(self):
+        """Issue #1355 item 1, third site: ``classify_full_pipeline_decision``
+        (preview/cleanup display) must name the same fact
+        ``evidence_decision_name`` (dispatch) does, for every adjacent pair
+        in the shared priority order (audio_corrupt > bad_audio_hash >
+        nested_layout > empty_fileset > mixed_source). No real decision
+        dict can carry two of these keys as reject values any more, so
+        this drives the classifier's own pure contract directly on
+        hand-built dicts rather than through either twin. A regression
+        here would only resurface if some future writer ever populates two
+        of these keys again, which is exactly the landmine this pins
+        against: the audio/nested pair was the original bug, and review
+        found the classifier's bad_hash/nested pair independently
+        reordered too before this test existed.
+        """
+        from lib.quality import classify_full_pipeline_decision
+
+        cases = (
+            ("audio_corrupt over nested_layout",
+             {"preimport_audio": "reject_corrupt",
+              "preimport_nested": "reject_nested"},
+             "audio_corrupt"),
+            ("bad_audio_hash over nested_layout",
+             {"preimport_bad_hash": "reject_bad_hash",
+              "preimport_nested": "reject_nested"},
+             "bad_audio_hash"),
+        )
+        for desc, keys, expected in cases:
+            with self.subTest(desc=desc):
+                decision = {**keys, "imported": False}
+                verdict, cleanup_eligible, reason = (
+                    classify_full_pipeline_decision(decision))
+                self.assertEqual(verdict, "confident_reject")
+                self.assertTrue(cleanup_eligible)
+                self.assertEqual(reason, expected)
 
     def test_preimport_fact_reject_keeps_searching(self):
         """The mode-blind reducer reports the shared self-healing outcome."""

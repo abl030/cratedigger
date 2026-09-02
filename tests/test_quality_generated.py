@@ -3764,6 +3764,167 @@ class TestGeneratedEvidenceDecider(unittest.TestCase):
 
 
 # ===========================================================================
+# Twin precedence parity — issue #1355 item 1. The flat simulator twin and
+# the evidence-pipeline twin must agree on which folder/audio-integrity fact
+# wins, and on the resulting denylist outcome, whenever a candidate carries
+# audio_corrupt and/or nested_layout. They used to independently encode the
+# ordering and disagreed on exactly the combined world.
+# ===========================================================================
+
+@dataclass(frozen=True)
+class PreimportTwinWorld:
+    """The two folder/audio-integrity facts plus the incidental format
+    dimensions needed to drive both decision twins for issue #1355 item 1.
+    """
+    audio_corrupt: bool
+    has_nested_audio: bool
+    is_flac: bool
+    min_bitrate: int
+    is_cbr: bool
+
+
+@st.composite
+def preimport_corrupt_or_nested_worlds(draw) -> PreimportTwinWorld:
+    return PreimportTwinWorld(
+        audio_corrupt=draw(st.booleans()),
+        has_nested_audio=draw(st.booleans()),
+        is_flac=draw(st.booleans()),
+        min_bitrate=draw(_bitrates(max_value=2000)),
+        is_cbr=draw(st.booleans()),
+    )
+
+
+def _flat_twin_preimport_result(world: PreimportTwinWorld) -> dict[str, object]:
+    return full_pipeline_decision(
+        is_flac=world.is_flac,
+        min_bitrate=world.min_bitrate,
+        is_cbr=world.is_cbr,
+        audio_corrupt=world.audio_corrupt,
+        has_nested_audio=world.has_nested_audio,
+    )
+
+
+def _evidence_twin_preimport_result(world: PreimportTwinWorld) -> dict[str, object]:
+    candidate = build_parity_candidate_evidence(
+        is_flac=world.is_flac,
+        min_bitrate=world.min_bitrate,
+        is_cbr=world.is_cbr,
+        audio_corrupt=world.audio_corrupt,
+        folder_layout="nested" if world.has_nested_audio else "flat",
+    )
+    return full_pipeline_decision_from_evidence(candidate, None)
+
+
+def preimport_twin_precedence_violations(
+    flat_result: dict[str, object],
+    evidence_result: dict[str, object],
+) -> list[str]:
+    """Both violation clauses for the issue #1355 item 1 twin-precedence
+    invariant: the two decision twins must agree on the reject reason and
+    on the resulting denylist outcome.
+
+    Accumulates rather than short-circuiting (house convention) so one
+    generated world tripping both clauses reports both.
+    """
+    violations: list[str] = []
+    flat_name = evidence_decision_name(flat_result)
+    evidence_name = evidence_decision_name(evidence_result)
+    if flat_name != evidence_name:
+        violations.append(
+            f"reject reason diverged: flat={flat_name!r} "
+            f"evidence={evidence_name!r}")
+    if flat_result["denylisted"] != evidence_result["denylisted"]:
+        violations.append(
+            "denylist outcome diverged: "
+            f"flat={flat_result['denylisted']!r} "
+            f"evidence={evidence_result['denylisted']!r}")
+    return violations
+
+
+class TestGeneratedPreimportTwinPrecedence(unittest.TestCase):
+    """Issue #1355 item 1: the flat simulator and the evidence pipeline must
+    agree on which folder/audio-integrity fact wins, and therefore on the
+    denylist consequence, whenever a candidate carries audio_corrupt and/or
+    nested_layout."""
+
+    @given(world=preimport_corrupt_or_nested_worlds())
+    @example(world=PreimportTwinWorld(
+        audio_corrupt=True, has_nested_audio=True,
+        is_flac=False, min_bitrate=256, is_cbr=False,
+    ))
+    def test_twins_agree_on_corrupt_and_nested_precedence(
+        self, world: PreimportTwinWorld,
+    ):
+        if not (world.audio_corrupt or world.has_nested_audio):
+            return
+        flat = _flat_twin_preimport_result(world)
+        evidence = _evidence_twin_preimport_result(world)
+        violations = preimport_twin_precedence_violations(flat, evidence)
+        self.assertEqual(violations, [], f"{violations} for world {world!r}")
+        if world.audio_corrupt:
+            self.assertEqual(evidence_decision_name(flat), "audio_corrupt")
+            self.assertTrue(flat["denylisted"])
+
+
+class TestPreimportTwinPrecedenceChecker(unittest.TestCase):
+    """Known-bad self-tests for ``preimport_twin_precedence_violations``,
+    per clause (code-quality.md § Testing — Red/Green TDD)."""
+
+    _WORLD = PreimportTwinWorld(
+        audio_corrupt=True, has_nested_audio=True,
+        is_flac=False, min_bitrate=256, is_cbr=False,
+    )
+
+    def _agreeing_pair(self) -> tuple[dict[str, object], dict[str, object]]:
+        return (
+            _flat_twin_preimport_result(self._WORLD),
+            _evidence_twin_preimport_result(self._WORLD),
+        )
+
+    def test_reject_reason_clause_trips_on_a_planted_mismatch(self):
+        """Q1: the clause fires when the reject reasons diverge."""
+        flat, evidence = self._agreeing_pair()
+        planted_flat = dict(flat)
+        planted_flat["preimport_audio"] = None
+        planted_flat["preimport_nested"] = "reject_nested"
+        violations = preimport_twin_precedence_violations(planted_flat, evidence)
+        self.assertTrue(
+            any(v.startswith("reject reason diverged") for v in violations),
+            violations,
+        )
+
+    def test_denylist_clause_trips_on_a_planted_mismatch(self):
+        """Q1: the clause fires when the denylist outcomes diverge."""
+        flat, evidence = self._agreeing_pair()
+        planted_flat = dict(flat)
+        planted_flat["denylisted"] = False
+        violations = preimport_twin_precedence_violations(planted_flat, evidence)
+        self.assertTrue(
+            any(v.startswith("denylist outcome diverged") for v in violations),
+            violations,
+        )
+
+    def test_clauses_stay_quiet_on_an_agreeing_pair(self):
+        """Q3: both clauses stay quiet on a pair that really agrees, for
+        both a fired-fact world and a clean world."""
+        flat, evidence = self._agreeing_pair()
+        self.assertEqual(
+            preimport_twin_precedence_violations(flat, evidence), [])
+
+        clean_world = PreimportTwinWorld(
+            audio_corrupt=False, has_nested_audio=False,
+            is_flac=False, min_bitrate=256, is_cbr=False,
+        )
+        self.assertEqual(
+            preimport_twin_precedence_violations(
+                _flat_twin_preimport_result(clean_world),
+                _evidence_twin_preimport_result(clean_world),
+            ),
+            [],
+        )
+
+
+# ===========================================================================
 # Harness self-tests (RED/GREEN of the fuzzer itself) — each invariant
 # checker must trip on a planted violating decision, and a planted-bad
 # decider must be caught end-to-end through the Hypothesis machinery.
@@ -7293,21 +7454,27 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     def test_classification_checker_trips_on_a_fact_named_for_dispatch(self):
         """The name clause, which the classification clause short-circuits past.
 
-        Both facts are really present, so ``classify_full_pipeline_decision``
-        answers with the higher-priority ``nested_layout`` while
-        ``evidence_decision_name`` answers ``audio_corrupt`` — the two
-        production functions disagreeing about the same dict.
+        Before issue #1355 item 1, ``classify_full_pipeline_decision`` and
+        ``evidence_decision_name`` independently encoded the audio_corrupt-
+        vs-nested_layout precedence and disagreed on a dict carrying both
+        facts — the same class of bug the issue exists to remove. Both now
+        route through the one shared ``preimport_corrupt_outranks_nested``
+        precedence and neither twin's dict can carry both keys as reject
+        values, so no real dict can trigger this clause any more. Exercise
+        it through the checker's own name_fn injection seam instead, on an
+        ordinary single-fact dict.
         """
-        both = {
+        nested_only = {
             "preimport_nested": "reject_nested",
-            "preimport_audio": "reject_corrupt",
             "imported": False,
         }
         with self.assertRaisesRegex(
                 AssertionError,
                 r"^integrity fact nested_layout named 'audio_corrupt' for "
                 r"dispatch$"):
-            assert_classification_coherent(both, "preimport_nested")
+            assert_classification_coherent(
+                nested_only, "preimport_nested",
+                name_fn=lambda _decision: "audio_corrupt")
 
     def test_classification_checker_trips_on_a_planted_classifier(self):
         """The three clauses keyed on what the classifiers RETURN.

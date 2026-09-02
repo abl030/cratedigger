@@ -56,6 +56,7 @@ from lib.quality.evidence_types import (
 from lib.quality.filetypes import has_mixed_lossless_and_lossy
 from lib.quality.gates import (
     preimport_audio_gate,
+    preimport_corrupt_outranks_nested,
     preimport_nested_gate,
     spectral_gate_trigger,
 )
@@ -103,12 +104,21 @@ def candidate_preimport_reject_fact(
     verdict.  Action admission also uses this classifier so a concrete early
     fact can reach that reducer without being mistaken for a reusable spectral
     cache entry.
+
+    The audio_corrupt/nested_layout choice runs through
+    ``preimport_corrupt_outranks_nested`` (issue #1355 item 1) — the same
+    function ``full_pipeline_decision`` calls — rather than two independent
+    if-chains that could drift apart again.
     """
-    if candidate.audio_corrupt:
+    corrupt_or_nested = preimport_corrupt_outranks_nested(
+        audio_corrupt=candidate.audio_corrupt,
+        nested_layout=candidate.folder_layout == "nested",
+    )
+    if corrupt_or_nested == "audio_corrupt":
         return "audio_corrupt"
     if candidate.matched_bad_audio_hash_id is not None:
         return "bad_audio_hash"
-    if candidate.folder_layout == "nested":
+    if corrupt_or_nested == "nested_layout":
         return "nested_layout"
     effective_audio_file_count = (
         len(candidate.files) if candidate.files else candidate.audio_file_count
@@ -336,26 +346,42 @@ def full_pipeline_decision(
         return _finalize_denylist(result)
 
     # --- Preimport gates (issue #91) ---
-    # Ordering mirrors the live flow: lib.dispatch.dispatch_import_from_db
-    # checks inspection.has_nested_audio *before* calling
-    # measure_preimport_state, so a nested corrupt
-    # folder is rejected as nested_layout (not audio_corrupt). The nested
-    # gate is normally unreachable for automation because that path flattens
-    # downloads upstream in process_completed_album. Caller identity does not
-    # change the verdict if nested evidence reaches the reducer.
-    nested_outcome = preimport_nested_gate(has_nested_audio)
-    result["preimport_nested"] = nested_outcome
-    if nested_outcome == "reject_nested":
-        result["final_status"] = "wanted"
-        result["keep_searching"] = True
-        return _finalize_denylist(result)
-
+    # Corrupt audio outranks folder shape (issue #1355 item 1): both facts
+    # are independently derived from the same measurement pass
+    # (measure_preimport_state derives folder layout from a single path
+    # enumeration, then separately runs the audio-integrity decode), so
+    # either can be true regardless of the other, and both can land on the
+    # same persisted evidence row. preimport_corrupt_outranks_nested is the
+    # ONE function that decides which fact a decision reports when a
+    # candidate carries both — the same function
+    # candidate_preimport_reject_fact calls for the evidence twin, so the
+    # two twins cannot independently re-diverge on this ordering.
+    #
+    # This used to check nested before corrupt, on the theory that
+    # lib.dispatch.dispatch_import_from_db pre-checked has_nested_audio
+    # before ever measuring. That direct-measurement dispatch architecture
+    # was retired: dispatch now reads persisted evidence and never measures
+    # at all (measure_and_persist_candidate_evidence is the only producer of
+    # candidate facts), so there is no live ordering left to mirror except
+    # this one.
     audio_outcome = preimport_audio_gate(audio_check_mode, audio_corrupt)
-    result["preimport_audio"] = audio_outcome
-    if audio_outcome == "reject_corrupt":
+    nested_outcome = preimport_nested_gate(has_nested_audio)
+    corrupt_or_nested = preimport_corrupt_outranks_nested(
+        audio_corrupt=audio_outcome == "reject_corrupt",
+        nested_layout=nested_outcome == "reject_nested",
+    )
+    if corrupt_or_nested == "audio_corrupt":
+        result["preimport_audio"] = audio_outcome
         result["final_status"] = "wanted"
         result["keep_searching"] = True
         return _finalize_denylist(result)
+    if corrupt_or_nested == "nested_layout":
+        result["preimport_nested"] = nested_outcome
+        result["final_status"] = "wanted"
+        result["keep_searching"] = True
+        return _finalize_denylist(result)
+    result["preimport_audio"] = audio_outcome
+    result["preimport_nested"] = nested_outcome
 
     # --- Codec-aware spectral interpretation (issue #829 Phase 5 PR2b) ---
     # Computed ONCE per side, here, and consumed by every seam below. No
@@ -1329,15 +1355,27 @@ def classify_quality_import_stages(
 def classify_full_pipeline_decision(
     decision: dict[str, object],
 ) -> tuple[str, bool, str | None]:
-    """Classify a full pipeline decision dict for preview/cleanup display."""
+    """Classify a full pipeline decision dict for preview/cleanup display.
 
-    if decision.get("preimport_nested") == "reject_nested":
-        return "confident_reject", True, "nested_layout"
+    Checks the five folder/audio-integrity keys in exactly the priority
+    order ``evidence_decision_name`` uses (audio_corrupt > bad_audio_hash >
+    nested_layout > empty_fileset > mixed_source) and
+    ``preimport_corrupt_outranks_nested`` decides the first two facts for
+    both twins (issue #1355 item 1). Neither twin's dict can carry more
+    than one of these keys as a reject value any more, so this ordering
+    has no live consequence today, but a third independently-authored
+    order over the same keys is exactly the shape that bit this decision
+    before, first the audio/nested pair, then (found in review) this
+    bad_hash/nested pair too.
+    """
+
     if decision.get("preimport_audio") == "reject_corrupt":
         return "confident_reject", True, "audio_corrupt"
     # U11: bad-hash and empty-fileset early-exit rejects.
     if decision.get("preimport_bad_hash") == "reject_bad_hash":
         return "confident_reject", True, "bad_audio_hash"
+    if decision.get("preimport_nested") == "reject_nested":
+        return "confident_reject", True, "nested_layout"
     if decision.get("preimport_empty_fileset") == "reject_empty":
         return "confident_reject", True, "empty_fileset"
     if decision.get("preimport_mixed_source") == "reject_mixed_source":

@@ -1508,21 +1508,32 @@ class TestFullPipelinePreimportGates(unittest.TestCase):
         self.assertTrue(r["keep_searching"])
         self.assertIsNone(r["stage2_import"])
 
-    def test_nested_wins_over_audio(self):
-        # Live ordering (dispatch_import_from_db): nested check runs *before*
-        # measure_preimport_state is even called, so a corrupt-AND-nested
-        # folder is reported as nested_layout, not audio_corrupt. The simulator
-        # must short-circuit the same way so operators are sent to the
-        # right remediation (flatten the folder).
+    def test_corrupt_wins_over_nested(self):
+        # Issue #1355 item 1. Corrupt audio outranks folder shape, matching
+        # candidate_preimport_reject_fact (the evidence twin production
+        # dispatch actually calls). The two facts are independently derived
+        # from the same measurement pass and are not mutually exclusive, so
+        # a real download can carry both. A prior version of this test
+        # asserted the opposite ordering on a false claim that
+        # dispatch_import_from_db pre-checks has_nested_audio before
+        # measuring — that direct-measurement architecture doesn't exist
+        # any more; dispatch reads persisted evidence and never measures.
+        # Getting this ordering right matters beyond which key the dict
+        # sets: dispatch_actions.decision_denylists denylists
+        # "audio_corrupt" but not "nested_layout", so the wrong ordering
+        # let a garbage-decoding peer's folder shape spare it a denylist.
         r = full_pipeline_decision(
             is_flac=False, min_bitrate=256, is_cbr=False,
             audio_check_mode="normal", audio_corrupt=True,
             has_nested_audio=True)
-        self.assertEqual(r["preimport_nested"], "reject_nested")
-        # Audio gate never ran.
-        self.assertIsNone(r["preimport_audio"])
+        self.assertEqual(r["preimport_audio"], "reject_corrupt")
+        # Nested gate is superseded, not evaluated as the reject reason.
+        self.assertIsNone(r["preimport_nested"])
         self.assertFalse(r["imported"])
         self.assertEqual(r["final_status"], "wanted")
+        self.assertTrue(r["keep_searching"])
+        self.assertTrue(r["denylisted"])
+        self.assertEqual(evidence_decision_name(r), "audio_corrupt")
 
 
 class TestFullPipelineContract(unittest.TestCase):
