@@ -474,6 +474,152 @@ t.section('stubGlobals restore is idempotent');
   delete globalThis.__harnessTwice;
 }
 
+// Section scoping only exists in a real suite with real `section()` calls,
+// and asserting it from inside THIS suite would mean stubbing a global here
+// and reading it back after our own section boundary — which is the very
+// boundary under test. So each of the four below runs a child fixture and
+// reads what that child reported (issue #1346).
+
+t.section('a stub installed in a section is released at the next section');
+{
+  const run = runFixture([
+    "globalThis.__probe = 'baseline';",
+    "t.section('one');",
+    "stubGlobals({ __probe: 'section one' });",
+    "t.equal(globalThis.__probe, 'section one', 'installed');",
+    "t.section('two');",
+    "t.equal(globalThis.__probe, 'baseline', 'released at the boundary');",
+    't.done();',
+  ].join('\n'));
+  t.equal(run.markers.length, 0, 'the fixture reports no failure');
+  t.equal(run.status, 0, 'the fixture exits clean');
+}
+
+t.section('a key absent before its section is deleted at the boundary');
+{
+  const run = runFixture([
+    "t.section('one');",
+    "stubGlobals({ __absentInSection: 'x' });",
+    "t.section('two');",
+    "t.equal(Object.prototype.hasOwnProperty.call(globalThis, '__absentInSection'),",
+    "  false, 'an absent key is deleted, not left as undefined');",
+    't.done();',
+  ].join('\n'));
+  t.equal(run.markers.length, 0, 'the fixture reports no failure');
+  t.equal(run.status, 0, 'the fixture exits clean');
+}
+
+t.section('two stubs of one key in a section unwind to the pre-section value');
+{
+  const run = runFixture([
+    "globalThis.__stack = 'base';",
+    "t.section('one');",
+    "stubGlobals({ __stack: 'first' });",
+    "stubGlobals({ __stack: 'second' });",
+    "t.equal(globalThis.__stack, 'second', 'the later stub wins');",
+    "t.section('two');",
+    "t.equal(globalThis.__stack, 'base', 'both unwind, newest first');",
+    't.done();',
+  ].join('\n'));
+  t.equal(run.markers.length, 0, 'the fixture reports no failure');
+  t.equal(run.status, 0, 'the fixture exits clean');
+}
+
+t.section('a stub installed before the first section lives until done()');
+{
+  // The release happens INSIDE `done()`, after the last assertion the
+  // fixture can make, so the fixture checks it from an exit handler. The
+  // harness registers its own guard first, at `suite()` time, so this one
+  // runs second and sees a finished suite.
+  // The LAST section's stub is released by `done()` too, and that half went
+  // untested until PR #1352's mutant runner removed `releaseSectionStubs()`
+  // from `done()` and watched the suite stay green. Both are checked here.
+  const run = runFixture([
+    "globalThis.__baseline = 'before';",
+    "globalThis.__lastSection = 'before';",
+    "stubGlobals({ __baseline: 'module scope' });",
+    "t.section('one');",
+    "t.equal(globalThis.__baseline, 'module scope', 'survives a boundary');",
+    "t.section('two');",
+    "t.equal(globalThis.__baseline, 'module scope', 'and the next one');",
+    "stubGlobals({ __lastSection: 'last section' });",
+    "t.equal(globalThis.__lastSection, 'last section', 'the last section stubs too');",
+    'process.on(\'exit\', () => {',
+    "  const released = globalThis.__baseline === 'before'",
+    "    && globalThis.__lastSection === 'before';",
+    "  process.stdout.write(released ? 'ALL_RELEASED\\n'",
+    "    : `LEAKED baseline=${globalThis.__baseline} last=${globalThis.__lastSection}\\n`);",
+    '});',
+    't.done();',
+  ].join('\n'));
+  t.equal(run.markers.length, 0, 'the fixture reports no failure');
+  t.contains(run.stdout, 'ALL_RELEASED',
+    'done() hands back the module-scope stub AND the last section\'s');
+}
+
+t.section('an explicit restore is not undone by the section boundary');
+{
+  const run = runFixture([
+    "globalThis.__early = 'base';",
+    "t.section('one');",
+    "const g = stubGlobals({ __early: 'stub' });",
+    'g.restore();',
+    "globalThis.__early = 'set after restore';",
+    "t.section('two');",
+    "t.equal(globalThis.__early, 'set after restore',",
+    "  'the boundary does not re-apply an already-restored stub');",
+    't.done();',
+  ].join('\n'));
+  t.equal(run.markers.length, 0, 'the fixture reports no failure');
+  t.equal(run.status, 0, 'the fixture exits clean');
+}
+
+t.section('restoring an outer stub hands back the one nested inside it');
+{
+  // The world the section above cannot reach, and the one that was
+  // genuinely broken: a section stubs the same key twice, then restores the
+  // OLDER handle. The younger handle's saved value is now stale, and a
+  // boundary that faithfully re-installed it brought the first mock back
+  // from the dead — after the block had explicitly disposed of it.
+  // `test_js_release_actions.mjs` has this shape twice, and the leak was
+  // found by PR #1352's reader, not by the section above.
+  const run = runFixture([
+    "globalThis.__nested = 'original';",
+    "t.section('one');",
+    "const outer = stubGlobals({ __nested: 'outer' });",
+    "stubGlobals({ __nested: 'inner' });",
+    "t.equal(globalThis.__nested, 'inner', 'the inner stub is installed');",
+    'outer.restore();',
+    "t.equal(globalThis.__nested, 'original',",
+    "  'restoring the outer handle unwinds the inner one too');",
+    "t.section('two');",
+    "t.equal(globalThis.__nested, 'original',",
+    "  'and the boundary does not resurrect either of them');",
+    't.done();',
+  ].join('\n'));
+  t.equal(run.markers.length, 0, 'the fixture reports no failure');
+  t.equal(run.status, 0, 'the fixture exits clean');
+}
+
+t.section('a second suite in one process is refused, not silently allowed');
+{
+  // The registries are module state, so two suites in one process share
+  // them: the second one's `done()` would release the first's module-scope
+  // stubs. The audit checks only that a file CALLS `suite(...)`.
+  const run = runFixture([
+    "import { suite as secondSuite } from " + JSON.stringify(HARNESS) + ";",
+    'let refused = null;',
+    'try {',
+    '  secondSuite(import.meta.url);',
+    '} catch (e) { refused = e.message; }',
+    "t.ok(refused && refused.includes('called twice in one process'),",
+    "  `a second suite() throws: ${refused}`);",
+    't.done();',
+  ].join('\n'));
+  t.equal(run.markers.length, 0, 'the fixture reports no failure');
+  t.equal(run.status, 0, 'the fixture exits clean');
+}
+
 t.section('domStub resolves seeded ids and nothing else');
 {
   const button = element({ textContent: 'Go' });

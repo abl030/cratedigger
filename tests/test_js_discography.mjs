@@ -1,5 +1,14 @@
 /**
  * Unit tests for web/js/discography.js pure helpers.
+ *
+ * `renderReleaseDetail` is the composed entry `browse.js` calls and this
+ * suite drives it. `renderPressingRow` and `statusChipHtml` keep direct
+ * calls (issue #1346): neither is a leaf of that entry at all. They hang
+ * off `loadReleaseGroup`, which reaches them only after an async fetch,
+ * and `statusChipHtml` is a further hop inside `renderPressingRow`.
+ * `renderRgRow` belongs to `artist_page.renderArtistSections`, driven in
+ * `tests/test_js_artist_page.mjs`.
+ *
  * Run with: node tests/test_js_discography.mjs
  */
 

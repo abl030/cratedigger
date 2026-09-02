@@ -35,7 +35,6 @@ import {
   longTailSetImported,
   longTailSetIntent,
   renderSpectralFragment,
-  renderYoutubeBody,
 } from '../web/js/long_tail_console.js';
 import { loadLongTail, renderLongTailRow } from '../web/js/long_tail.js';
 import { renderPipeline, setPipelineView } from '../web/js/pipeline.js';

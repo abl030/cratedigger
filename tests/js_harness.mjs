@@ -69,6 +69,9 @@ const REPO_ROOT = path.resolve(
 const writeOut = process.stdout.write.bind(process.stdout);
 const writeErr = process.stderr.write.bind(process.stderr);
 
+/** Has `suite()` already run in this process? See its guard for why. */
+let suiteBuilt = false;
+
 /**
  * Every character that would split one marker into two on the reading
  * side.
@@ -219,6 +222,21 @@ function errorMismatchDetail(thrown, expected) {
  * @returns {any} the checker; call `done()` exactly once, last.
  */
 export function suite(moduleUrl) {
+  // One suite per process is an assumption the stub registries below rest
+  // on: they are module state, so a second suite's `done()` would release
+  // the first's module-scope stubs and inherit its section flag. Nothing
+  // enforced it (PR #1352 reader, F13), and the audit only checks that a
+  // file CALLS `suite(...)`, never that it calls it once. This is the
+  // enforcement — cheap, and it cannot bite the harness's own fixtures,
+  // which run in child processes.
+  if (suiteBuilt) {
+    throw new Error(
+      'js_harness: suite() called twice in one process. Each suite owns the '
+      + 'global-stub registries, so a second one silently releases the '
+      + "first's stubs. Run the second suite as a child process.",
+    );
+  }
+  suiteBuilt = true;
   const file = path.relative(REPO_ROOT, fileURLToPath(moduleUrl));
   let passed = 0;
   let failed = 0;
@@ -261,8 +279,15 @@ export function suite(moduleUrl) {
   }
 
   const checker = {
-    /** Label the assertions that follow; also printed as a header. */
+    /**
+     * Label the assertions that follow; also printed as a header.
+     *
+     * Also the boundary that hands back every global stubbed since the
+     * previous one — see `stubGlobals`.
+     */
     section(label) {
+      releaseSectionStubs();
+      sectionsHaveStarted = true;
       section = String(label);
       writeOut(`${section}\n`);
       return checker;
@@ -404,6 +429,8 @@ export function suite(moduleUrl) {
      */
     done() {
       finished = true;
+      releaseSectionStubs();
+      releaseModuleStubs();
       writeOut(`\n${passed} passed, ${failed} failed\n`);
       writeOut(`${DONE_MARKER}\t${file}\t${passed}\t${failed}\n`);
       if (failed > 0) process.exitCode = 1;
@@ -425,12 +452,75 @@ export function suite(moduleUrl) {
 }
 
 /**
- * Install global stubs and hand back a restorer.
+ * Stubs installed since the last `section()`, newest last.
+ *
+ * One suite runs per process — `scripts/run_js_checks.sh` invokes `node`
+ * once per file, and the harness's own fixtures spawn children rather than
+ * building a second suite in-process — so one registry per module load is
+ * one registry per suite.
+ */
+const sectionStubs = [];
+
+/** Stubs installed before the first `section()`: the file's baseline world. */
+const moduleStubs = [];
+
+let sectionsHaveStarted = false;
+
+function releaseStubs(handles) {
+  // Detach the whole list first, then unwind newest-first. Detaching is
+  // what makes each `restore()` below a plain restore: it finds itself
+  // already gone from the registry and does not try to unwind its own
+  // nested handles, which this loop is already doing in order.
+  const pending = handles.splice(0);
+  for (let i = pending.length - 1; i >= 0; i -= 1) pending[i].restore();
+}
+
+function releaseSectionStubs() {
+  releaseStubs(sectionStubs);
+}
+
+function releaseModuleStubs() {
+  releaseStubs(moduleStubs);
+}
+
+/**
+ * Install global stubs for the rest of this section.
  *
  * Replaces the hand-written dance this repository had at hundreds of
  * sites — save `globalThis.document`, assign a stub, remember to put the
  * old value back — which was also silently unbalanced in places, leaking
  * one test's DOM into the next.
+ *
+ * **The harness owns the restore, and the section is the scope.** Every
+ * stub installed after a `section()` is handed back at the next
+ * `section()`, and the last section's at `done()`. Stubs installed BEFORE
+ * the first `section()` are the file's baseline world — the `document` a
+ * module needs at evaluation time, say — and live until `done()`.
+ *
+ * The returned `restore()` is still there for a block that wants its world
+ * back earlier. It hands back everything stubbed after it as well, because
+ * those were stubbed inside its world: without that, restoring an outer
+ * handle leaves an inner one holding a saved value that is now stale, and
+ * the boundary faithfully re-installs it, so a mock comes back from the
+ * dead after the block explicitly disposed of it. Calling `restore()` twice
+ * is a no-op.
+ *
+ * Section scope is the point rather than a convenience. 104 sites across
+ * six suites assigned `globalThis.fetch` bare and restored nothing, so a
+ * section that installed no `fetch` of its own silently answered from the
+ * previous section's mock (issue #1346). Making the boundary the harness's
+ * job means a block cannot inherit by forgetting: it either installs its
+ * own or reads whatever was there before the file started.
+ *
+ * That second case is not automatically loud, and the first draft of this
+ * comment claimed it was. For `fetch` specifically, node defines a real
+ * one, so a fire-and-forget chain that outlives its section calls it —
+ * and while every URL in these suites is a relative path, so it throws
+ * `Failed to parse URL` before any socket opens, production's own `catch`
+ * then swallows the throw. Measured across all 24 suites: three such calls
+ * on `main`, three after this change. A section that renders is a section
+ * that fetches, so it owes a stub of its own rather than a boundary to
+ * catch it (PR #1352 reader, F2).
  *
  * A key absent from `globalThis` before the call is DELETED on restore,
  * not set to `undefined`, so `typeof globalThis.x === 'undefined'` and
@@ -447,8 +537,20 @@ export function stubGlobals(values) {
       : { present: false, value: undefined });
     globalThis[key] = values[key];
   }
-  return {
+  const owner = sectionsHaveStarted ? sectionStubs : moduleStubs;
+  const handle = {
     restore() {
+      // Anything stubbed AFTER this handle was stubbed inside its world, so
+      // hand those back first. Without this, restoring an outer handle
+      // leaves an inner one holding a saved value that is now stale, and
+      // the section boundary faithfully re-installs it: the mock comes
+      // back from the dead after the block explicitly disposed of it.
+      // `test_js_release_actions.mjs` has exactly that shape twice.
+      const at = owner.indexOf(handle);
+      if (at !== -1) {
+        const nested = owner.splice(at);
+        for (let i = nested.length - 1; i > 0; i -= 1) nested[i].restore();
+      }
       for (const [key, previous] of saved) {
         if (previous.present) globalThis[key] = previous.value;
         else delete globalThis[key];
@@ -456,6 +558,8 @@ export function stubGlobals(values) {
       saved.clear();
     },
   };
+  owner.push(handle);
+  return handle;
 }
 
 /**
@@ -491,7 +595,7 @@ export function element(initial = {}) {
   // exists to replace, which is a fake diverging from the real edge
   // (`.claude/rules/test-fidelity.md` Rule B in spirit).
   const attributes = new Map();
-  return {
+  const node = {
     id: '',
     textContent: '',
     innerHTML: '',
@@ -523,6 +627,35 @@ export function element(initial = {}) {
     insertAdjacentHTML() {},
     ...initial,
   };
+  if (!Object.prototype.hasOwnProperty.call(initial, 'classList')) {
+    // A real `classList`, not three no-op methods: `toggleExpand` decides
+    // whether to collapse or load by reading `contains('open')` back, so a
+    // stub that only accepts writes makes every panel open twice and never
+    // close. Four suites hand-rolled this shape.
+    //
+    // It reads and writes `className` rather than a private Set, because in
+    // a real DOM they ARE the same data. The first version kept a separate
+    // Set, so an element seeded `element({className: 'lt-item'})` answered
+    // `classList.contains('lt-item')` with FALSE — a fake diverging from
+    // the real edge, which is the shape `.claude/rules/test-fidelity.md`
+    // Rule B exists to stop (PR #1352 reader, F10).
+    const names = () => String(node.className || '').split(/\s+/).filter(Boolean);
+    node.classList = {
+      contains(name) { return names().includes(name); },
+      add(name) {
+        if (!names().includes(name)) node.className = [...names(), name].join(' ');
+      },
+      remove(name) {
+        node.className = names().filter(each => each !== name).join(' ');
+      },
+      toggle(name) {
+        if (names().includes(name)) node.classList.remove(name);
+        else node.classList.add(name);
+        return names().includes(name);
+      },
+    };
+  }
+  return node;
 }
 
 /**

@@ -55,7 +55,7 @@ function metadataHtmlIsEscaped(html, value) {
 
 function installStorage() {
   const values = new Map();
-  globalThis.localStorage = {
+  stubGlobals({ localStorage: {
     getItem(key) {
       return values.has(key) ? values.get(key) : null;
     },
@@ -68,18 +68,52 @@ function installStorage() {
     clear() {
       values.clear();
     },
-  };
+  } });
   return values;
 }
 
 /**
  * Drain pending microtasks. Used after a call that kicks off a
  * fire-and-forget background chain (the render-time triage attach —
- * issue #1106) so a test can let it settle to a terminal state before
- * the next test block reassigns `globalThis.fetch` — an un-drained
- * chain would otherwise keep polling into a LATER test's mock.
+ * issue #1106) so a test can let it settle to a terminal state before the
+ * section ends.
+ *
+ * An un-drained chain used to keep polling into a LATER section's mock.
+ * Since #1346 the harness hands `fetch` back at the section boundary, so it
+ * polls node's real `fetch` instead — which throws `Failed to parse URL` on
+ * these relative paths before any socket opens, and production's own
+ * `catch` swallows it. Louder than answering the next test's mock, but
+ * still silent, so draining is still the answer rather than a formality.
  * @param {number} [times]
  */
+/**
+ * Answer the render-time triage probe, and nothing else.
+ *
+ * `renderWrongMatches` starts a fire-and-forget triage attach (#1106), so a
+ * section that renders is a section that fetches, whether it means to or
+ * not. Sections asserting only rendered HTML used to leave `fetch` alone
+ * and silently inherit the previous section's mock; since #1346 the harness
+ * hands `fetch` back at the boundary, so they reached node's real one
+ * instead. Neither is a stub anyone chose. This is: idle status, and a
+ * throw for any other URL, so a section that starts fetching something
+ * unexpected says so rather than drifting.
+ */
+function stubIdleTriageFetch() {
+  return stubGlobals({ fetch: async (url) => {
+    if (String(url) === '/api/wrong-matches/triage/status') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          state: 'idle', started_at: null, finished_at: null,
+          error: null, summary: null,
+        }),
+      };
+    }
+    throw new Error(`unexpected fetch in a render-only section: ${url}`);
+  } });
+}
+
 async function flushMicrotasks(times = 30) {
   for (let i = 0; i < times; i += 1) {
     await Promise.resolve();
@@ -120,11 +154,11 @@ function installDom() {
     'wm-bulk-triage-btn': cleanupBtn,
     'wm-bulk-triage-stop-btn': stopBtn,
   };
-  globalThis.document = domStub(elements);
-  globalThis.setTimeout = (fn) => {
+  stubGlobals({ document: domStub(elements) });
+  stubGlobals({ setTimeout: (fn) => {
     fn();
     return 0;
-  };
+  } });
   return { wrongMatches, toast, elements, stopBtn, cleanupBtn };
 }
 
@@ -153,7 +187,7 @@ async function runPoll(job, logId) {
   const calls = [];
   const dom = installDom();
   renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
-  globalThis.fetch = async (url) => {
+  stubGlobals({ fetch: async (url) => {
     calls.push(url);
     if (String(url).startsWith('/api/import-jobs/')) {
       return {
@@ -162,7 +196,7 @@ async function runPoll(job, logId) {
       };
     }
     throw new Error(`unexpected fetch: ${url}`);
-  };
+  } });
   const btn = { textContent: '', style: {} };
   await pollImportJob(17, btn, logId);
   return { calls, dom, btn };
@@ -299,6 +333,7 @@ t.section('converge helpers classify green candidates');
 t.section('renderWrongMatches() shows threshold controls and green state');
 {
   installStorage();
+  stubIdleTriageFetch();
   const dom = installDom();
   renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
   t.contains(dom.wrongMatches.innerHTML, 'Loosen', 'renders threshold input');
@@ -322,11 +357,13 @@ t.section('renderWrongMatches() shows threshold controls and green state');
   setWrongMatchConvergeThreshold(42, 230);
   t.contains(dom.wrongMatches.innerHTML, '3 green', 'threshold edit updates green count');
   t.contains(dom.wrongMatches.innerHTML, 'Converge (3)', 'threshold edit updates converge count');
+  await flushMicrotasks();
 }
 
 t.section('renderWrongMatches() keeps converge usable with active import jobs');
 {
   installStorage();
+  stubIdleTriageFetch();
   const dom = installDom();
   const data = JSON.parse(JSON.stringify(wrongMatchesData()));
   data.groups[0].import_jobs = [{
@@ -345,6 +382,7 @@ t.section('renderWrongMatches() keeps converge usable with active import jobs');
 t.section('setWrongMatchConvergeThreshold() updates expanded group in place');
 {
   installStorage();
+  stubIdleTriageFetch();
   const dom = installDom();
   renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
   const originalHtml = dom.wrongMatches.innerHTML;
@@ -368,16 +406,21 @@ t.section('setWrongMatchConvergeThreshold() updates expanded group in place');
   t.equal(elements.get('wm-green-count-42').textContent, '3 green', 'updates green count badge');
   t.equal(elements.get('wm-converge-btn-42').textContent, 'Converge (3)', 'updates converge button text');
   t.excludes(String(elements.get('wm-entry-green-102').style.cssText || ''), 'display:none', 'newly green entry badge is shown');
+  await flushMicrotasks();
 }
 
 t.section('convergeWrongMatches() posts selected threshold and removes row in place');
 {
   installStorage();
+  // Before the render, not after: the render's own triage attach fetches
+  // immediately, so a stub installed below it arrives too late and the
+  // probe reaches node's real `fetch`.
+  stubIdleTriageFetch();
   const dom = installDom();
   renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
   setWrongMatchConvergeThreshold(42, 180);
   const calls = [];
-  globalThis.fetch = async (url, options = {}) => {
+  stubGlobals({ fetch: async (url, options = {}) => {
     calls.push({ url, options });
     if (url === '/api/wrong-matches/converge') {
       return {
@@ -398,7 +441,7 @@ t.section('convergeWrongMatches() posts selected threshold and removes row in pl
       };
     }
     throw new Error(`unexpected fetch: ${url}`);
-  };
+  } });
   const btn = { disabled: false, textContent: 'Converge', style: {} };
   await convergeWrongMatches(42, btn);
   t.equal(calls[0].url, '/api/wrong-matches/converge', 'posts to converge endpoint');
@@ -418,8 +461,8 @@ t.section('deleteWrongMatch() posts one row and removes it in place — no full 
   const dom = installDom();
   renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
   const calls = [];
-  globalThis.confirm = () => true;
-  globalThis.fetch = async (url, options = {}) => {
+  stubGlobals({ confirm: () => true });
+  stubGlobals({ fetch: async (url, options = {}) => {
     calls.push({ url, options });
     if (url === '/api/wrong-matches/delete') {
       return {
@@ -433,7 +476,7 @@ t.section('deleteWrongMatch() posts one row and removes it in place — no full 
       };
     }
     throw new Error(`unexpected fetch: ${url}`);
-  };
+  } });
   const btn = { disabled: false, textContent: 'Delete', style: {} };
   await deleteWrongMatch(100, btn);
   t.equal(calls[0].url, '/api/wrong-matches/delete', 'posts to row delete endpoint');
@@ -453,8 +496,8 @@ t.section('deleteWrongMatchGroup() posts request id and removes the group in pla
   const dom = installDom();
   renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
   const calls = [];
-  globalThis.confirm = () => true;
-  globalThis.fetch = async (url, options = {}) => {
+  stubGlobals({ confirm: () => true });
+  stubGlobals({ fetch: async (url, options = {}) => {
     calls.push({ url, options });
     if (url === '/api/wrong-matches/delete-group') {
       return {
@@ -470,7 +513,7 @@ t.section('deleteWrongMatchGroup() posts request id and removes the group in pla
       };
     }
     throw new Error(`unexpected fetch: ${url}`);
-  };
+  } });
   const btn = { disabled: false, textContent: 'Delete All (3)', style: {} };
   await deleteWrongMatchGroup(42, btn);
   t.equal(calls[0].url, '/api/wrong-matches/delete-group', 'posts to group delete endpoint');
@@ -494,18 +537,18 @@ t.section('delete controls handle cancel and failures');
   renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
 
   let calls = [];
-  globalThis.confirm = () => false;
-  globalThis.fetch = async (url, options = {}) => {
+  stubGlobals({ confirm: () => false });
+  stubGlobals({ fetch: async (url, options = {}) => {
     calls.push({ url, options });
     throw new Error(`unexpected fetch: ${url}`);
-  };
+  } });
   const cancelBtn = { disabled: false, textContent: 'Delete', style: {} };
   await deleteWrongMatch(100, cancelBtn);
   t.equal(calls.length, 0, 'row delete cancel does not fetch');
   t.equal(cancelBtn.disabled, false, 'row delete cancel leaves button enabled');
 
-  globalThis.confirm = () => true;
-  globalThis.fetch = async (url, options = {}) => {
+  stubGlobals({ confirm: () => true });
+  stubGlobals({ fetch: async (url, options = {}) => {
     calls.push({ url, options });
     if (url === '/api/wrong-matches/delete') {
       return {
@@ -514,33 +557,33 @@ t.section('delete controls handle cancel and failures');
       };
     }
     throw new Error(`unexpected fetch: ${url}`);
-  };
+  } });
   const failBtn = { disabled: false, textContent: 'Delete', style: {} };
   await deleteWrongMatch(100, failBtn);
   t.equal(failBtn.disabled, false, 'row delete API failure restores button enabled');
   t.equal(failBtn.textContent, 'Delete', 'row delete API failure restores button text');
   t.equal(dom.toast.className, 'toast error', 'row delete API failure shows error toast');
 
-  globalThis.fetch = async () => {
+  stubGlobals({ fetch: async () => {
     throw new Error('network down');
-  };
+  } });
   const errorBtn = { disabled: false, textContent: 'Delete', style: {} };
   await deleteWrongMatch(100, errorBtn);
   t.equal(errorBtn.disabled, false, 'row delete fetch exception restores button enabled');
   t.equal(errorBtn.textContent, 'Delete', 'row delete fetch exception restores button text');
 
   calls = [];
-  globalThis.confirm = () => false;
-  globalThis.fetch = async (url, options = {}) => {
+  stubGlobals({ confirm: () => false });
+  stubGlobals({ fetch: async (url, options = {}) => {
     calls.push({ url, options });
     throw new Error(`unexpected fetch: ${url}`);
-  };
+  } });
   const cancelGroupBtn = { disabled: false, textContent: 'Delete All (3)', style: {} };
   await deleteWrongMatchGroup(42, cancelGroupBtn);
   t.equal(calls.length, 0, 'group delete cancel does not fetch');
 
-  globalThis.confirm = () => true;
-  globalThis.fetch = async (url, options = {}) => {
+  stubGlobals({ confirm: () => true });
+  stubGlobals({ fetch: async (url, options = {}) => {
     calls.push({ url, options });
     if (url === '/api/wrong-matches/delete-group') {
       return {
@@ -549,16 +592,16 @@ t.section('delete controls handle cancel and failures');
       };
     }
     throw new Error(`unexpected fetch: ${url}`);
-  };
+  } });
   const failGroupBtn = { disabled: false, textContent: 'Delete All (3)', style: {} };
   await deleteWrongMatchGroup(42, failGroupBtn);
   t.equal(failGroupBtn.disabled, false, 'group delete API failure restores button enabled');
   t.equal(failGroupBtn.textContent, 'Delete All (3)', 'group delete API failure restores button text');
   t.equal(dom.toast.className, 'toast error', 'group delete API failure shows error toast');
 
-  globalThis.fetch = async () => {
+  stubGlobals({ fetch: async () => {
     throw new Error('network down');
-  };
+  } });
   const errorGroupBtn = { disabled: false, textContent: 'Delete All (3)', style: {} };
   await deleteWrongMatchGroup(42, errorGroupBtn);
   t.equal(errorGroupBtn.disabled, false, 'group delete fetch exception restores button enabled');
@@ -573,11 +616,11 @@ t.section('bulkTriageWrongMatches() posts full-queue confirmation and refreshes'
   renderWrongMatches(data, dom.wrongMatches);
   t.contains(dom.wrongMatches.innerHTML, 'Cleanup Wrong Matches (3)', 'renders full-queue cleanup button');
   const calls = [];
-  globalThis.confirm = () => true;
+  stubGlobals({ confirm: () => true });
   // The sweep runs server-side on a background thread; the client polls.
   // Collapse the poll delay so the test doesn't sleep for real.
   const globals = stubGlobals({ setTimeout: (fn) => { fn(); return 0; } });
-  globalThis.fetch = async (url, options = {}) => {
+  stubGlobals({ fetch: async (url, options = {}) => {
     calls.push({ url, options });
     if (url === '/api/wrong-matches/triage') {
       return {
@@ -622,17 +665,19 @@ t.section('bulkTriageWrongMatches() posts full-queue confirmation and refreshes'
       };
     }
     throw new Error(`unexpected fetch: ${url}`);
-  };
+  } });
   // The Stop button is enabled the moment the sweep starts (before the
   // first status poll even fires) and disabled again once it's done.
   let stopBtnEnabledDuringSweep = null;
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = async (url, options) => {
+  // Not node's real fetch: the mock this section installed a few lines
+  // above, which this second stub wraps to observe the button mid-sweep.
+  const innerFetch = globalThis.fetch;
+  stubGlobals({ fetch: async (url, options) => {
     if (stopBtnEnabledDuringSweep === null) {
       stopBtnEnabledDuringSweep = dom.stopBtn.disabled === false;
     }
-    return realFetch(url, options);
-  };
+    return innerFetch(url, options);
+  } });
   // #1106: both toolbar buttons are looked up by id at mutation time,
   // never held as a captured node — bulkTriageWrongMatches() no longer
   // takes a button argument at all.
@@ -662,9 +707,9 @@ t.section('bulkTriageWrongMatches() handles a restart-lost sweep as partial, not
   const dom = installDom();
   const data = wrongMatchesData();
   renderWrongMatches(data, dom.wrongMatches);
-  globalThis.confirm = () => true;
+  stubGlobals({ confirm: () => true });
   const globals = stubGlobals({ setTimeout: (fn) => { fn(); return 0; } });
-  globalThis.fetch = async (url, _options = {}) => {
+  stubGlobals({ fetch: async (url, _options = {}) => {
     if (url === '/api/wrong-matches/triage') {
       return {
         ok: true,
@@ -694,7 +739,7 @@ t.section('bulkTriageWrongMatches() handles a restart-lost sweep as partial, not
       };
     }
     throw new Error(`unexpected fetch: ${url}`);
-  };
+  } });
   await bulkTriageWrongMatches();
   t.equal(dom.cleanupBtn.disabled, true, 'restart-lost sweep leaves Cleanup disabled (queue is empty post-refresh)');
   t.contains(dom.toast.textContent, 'status lost', 'restart-lost sweep explains the lost status');
@@ -709,9 +754,9 @@ t.section('bulkTriageWrongMatches() reports a cancelled sweep distinctly from co
   const dom = installDom();
   const data = wrongMatchesData();
   renderWrongMatches(data, dom.wrongMatches);
-  globalThis.confirm = () => true;
+  stubGlobals({ confirm: () => true });
   const globals = stubGlobals({ setTimeout: (fn) => { fn(); return 0; } });
-  globalThis.fetch = async (url, _options = {}) => {
+  stubGlobals({ fetch: async (url, _options = {}) => {
     if (url === '/api/wrong-matches/triage') {
       return {
         ok: true,
@@ -756,7 +801,7 @@ t.section('bulkTriageWrongMatches() reports a cancelled sweep distinctly from co
       };
     }
     throw new Error(`unexpected fetch: ${url}`);
-  };
+  } });
   await bulkTriageWrongMatches();
   t.equal(dom.cleanupBtn.disabled, true, 'cancelled sweep leaves Cleanup disabled (queue is empty post-refresh)');
   t.equal(dom.stopBtn.disabled, true, 'Stop button is disabled once the sweep reaches a terminal state');
@@ -773,7 +818,7 @@ t.section('stopWrongMatchTriage() posts to the cancel endpoint and stays disable
   const dom = installDom();
   const globals = stubGlobals({ setTimeout: (fn) => { fn(); return 0; } });
   const calls = [];
-  globalThis.fetch = async (url, options = {}) => {
+  stubGlobals({ fetch: async (url, options = {}) => {
     calls.push({ url, options });
     if (url === '/api/wrong-matches/triage/cancel') {
       return { ok: true, status: 200, json: async () => ({ state: 'running' }) };
@@ -789,7 +834,7 @@ t.section('stopWrongMatchTriage() posts to the cancel endpoint and stays disable
         summary: { processed: 1, deleted: 1, cancelled: true },
       }),
     };
-  };
+  } });
   // #1106: no button argument — always the currently-registered node.
   await stopWrongMatchTriage();
   t.equal(calls[0].url, '/api/wrong-matches/triage/cancel', 'posts to the canonical cancel route');
@@ -806,9 +851,9 @@ t.section('stopWrongMatchTriage() re-enables the button when the request itself 
 {
   installStorage();
   const dom = installDom();
-  globalThis.fetch = async () => {
+  stubGlobals({ fetch: async () => {
     throw new Error('network down');
-  };
+  } });
   await stopWrongMatchTriage();
   t.equal(dom.stopBtn.disabled, false, 'a failed cancel request restores the button enabled');
   t.equal(dom.stopBtn.textContent, 'Stop', 'a failed cancel request restores the button label');
@@ -833,7 +878,7 @@ t.section('stopWrongMatchTriage() mutates the CURRENTLY registered Stop node, ne
     textContent: 'Stop',
   });
   dom.elements['wm-bulk-triage-stop-btn'] = freshStopBtn;
-  globalThis.fetch = async (url) => {
+  stubGlobals({ fetch: async (url) => {
     if (url === '/api/wrong-matches/triage/cancel') {
       return { ok: true, status: 200, json: async () => ({ state: 'running' }) };
     }
@@ -847,7 +892,7 @@ t.section('stopWrongMatchTriage() mutates the CURRENTLY registered Stop node, ne
         summary: { processed: 1, deleted: 1, cancelled: true },
       }),
     };
-  };
+  } });
   await stopWrongMatchTriage();
   t.equal(freshStopBtn.disabled, true, 'the currently-registered node is mutated');
   t.equal(freshStopBtn.textContent, 'Stopping...', 'the currently-registered node shows the in-flight label');
@@ -863,9 +908,9 @@ t.section('bulkTriageWrongMatches() surfaces a failed sweep and restores the but
   const dom = installDom();
   const data = wrongMatchesData();
   renderWrongMatches(data, dom.wrongMatches);
-  globalThis.confirm = () => true;
+  stubGlobals({ confirm: () => true });
   const globals = stubGlobals({ setTimeout: (fn) => { fn(); return 0; } });
-  globalThis.fetch = async (url, _options = {}) => {
+  stubGlobals({ fetch: async (url, _options = {}) => {
     if (url === '/api/wrong-matches/triage') {
       return {
         ok: true,
@@ -887,7 +932,7 @@ t.section('bulkTriageWrongMatches() surfaces a failed sweep and restores the but
       };
     }
     throw new Error(`unexpected fetch: ${url}`);
-  };
+  } });
   await bulkTriageWrongMatches();
   t.equal(dom.cleanupBtn.disabled, false, 'failed sweep restores button enabled');
   t.equal(dom.cleanupBtn.textContent, 'Cleanup Wrong Matches (3)', 'failed sweep restores button text off the still-current count');
@@ -1367,7 +1412,7 @@ t.section('maybeLoadWrongMatchExplorer() lazy-loads explorer tags and audio on <
     return elements.get(id) || null;
   };
   const calls = [];
-  globalThis.fetch = async (url) => {
+  stubGlobals({ fetch: async (url) => {
     calls.push(String(url));
     return {
       ok: true,
@@ -1399,7 +1444,7 @@ t.section('maybeLoadWrongMatchExplorer() lazy-loads explorer tags and audio on <
         }],
       }),
     };
-  };
+  } });
 
   // Entry expand alone is cheap — no fetch.
   await toggleWrongMatchEntry('wm-entry-100', 100);
@@ -1450,7 +1495,7 @@ t.section('maybeLoadWrongMatchExplorer() renders the honest copy for a refused l
     return elements.get(id) || null;
   };
   const calls = [];
-  globalThis.fetch = async (url) => ({
+  stubGlobals({ fetch: async (url) => ({
     ok: (calls.push(String(url)), true),
     status: 200,
     json: async () => ({
@@ -1470,7 +1515,7 @@ t.section('maybeLoadWrongMatchExplorer() renders the honest copy for a refused l
       ordered_by: 'folder',
       files: [],
     }),
-  });
+  }) });
 
   await maybeLoadWrongMatchExplorer(200, { open: true });
 
@@ -1508,7 +1553,7 @@ t.section('maybeLoadWrongMatchExplorer() surfaces a 503 refusal reason instead o
     if (id === 'toast') return dom.toast;
     return elements.get(id) || null;
   };
-  globalThis.fetch = async () => ({
+  stubGlobals({ fetch: async () => ({
     ok: false,
     status: 503,
     json: async () => ({
@@ -1516,7 +1561,7 @@ t.section('maybeLoadWrongMatchExplorer() surfaces a 503 refusal reason instead o
         + '(quarantine path is contained but unavailable: cannot open '
         + '/x/wrong_matches/Album: Permission denied)',
     }),
-  });
+  }) });
 
   await maybeLoadWrongMatchExplorer(201, { open: true });
 
@@ -1553,7 +1598,7 @@ t.section('maybeLoadWrongMatchExplorer() surfaces a whole-root 422 refusal, neve
     if (id === 'toast') return dom.toast;
     return elements.get(id) || null;
   };
-  globalThis.fetch = async () => ({
+  stubGlobals({ fetch: async () => ({
     ok: false,
     status: 422,
     json: async () => ({
@@ -1561,7 +1606,7 @@ t.section('maybeLoadWrongMatchExplorer() surfaces a whole-root 422 refusal, neve
         + '(quarantine path is contained but unavailable: unsafe symlink: '
         + '/x/wrong_matches/Album)',
     }),
-  });
+  }) });
 
   await maybeLoadWrongMatchExplorer(205, { open: true });
 
@@ -1595,7 +1640,7 @@ t.section('maybeLoadWrongMatchExplorer() treats a PARTIAL listing as repairable 
   };
   const calls = [];
   let refused = true;
-  globalThis.fetch = async (url) => ({
+  stubGlobals({ fetch: async (url) => ({
     ok: (calls.push(String(url)), true),
     status: 200,
     json: async () => (refused ? {
@@ -1634,7 +1679,7 @@ t.section('maybeLoadWrongMatchExplorer() treats a PARTIAL listing as repairable 
         playable: false, size_bytes: 10, tags: {},
       }],
     }),
-  });
+  }) });
 
   await maybeLoadWrongMatchExplorer(202, { open: true });
   t.contains(mount.innerHTML, '1 entry could not be read',
@@ -1960,8 +2005,8 @@ t.section('a partial group delete asks for attention and re-renders');
   // candidate that survived.
   const dom = installDom();
   const calls = [];
-  global.confirm = () => true;
-  global.fetch = async (url, options) => {
+  stubGlobals({ confirm: () => true });
+  stubGlobals({ fetch: async (url, options) => {
     calls.push({ url, options });
     if (url === '/api/wrong-matches/delete-group') {
       return {
@@ -1990,7 +2035,7 @@ t.section('a partial group delete asks for attention and re-renders');
       return { ok: true, json: async () => ({ groups: [] }) };
     }
     throw new Error(`unexpected fetch: ${url}`);
-  };
+  } });
   const btn = { disabled: false, textContent: 'Delete All (2)', style: {} };
   await deleteWrongMatchGroup(42, btn);
 
@@ -2077,14 +2122,14 @@ t.section('deleteWrongMatchGroup() restores the actionable-aware label on every 
   }
 
   installStorage();
-  global.confirm = () => true;
+  stubGlobals({ confirm: () => true });
 
   // Path A: a non-2xx but "summarised" response that is neither `status:
   // 'ok'` nor `remaining: 0` takes the partial-outcome restore branch.
   {
     const dom = installDom();
     renderWrongMatches(partiallyUnavailableGroup(), dom.wrongMatches);
-    global.fetch = async (url) => {
+    stubGlobals({ fetch: async (url) => {
       if (url === '/api/wrong-matches/delete-group') {
         return {
           ok: false, status: 503,
@@ -2092,7 +2137,7 @@ t.section('deleteWrongMatchGroup() restores the actionable-aware label on every 
         };
       }
       return { ok: true, json: async () => ({ groups: [] }) };
-    };
+    } });
     const btn = { disabled: false, textContent: 'Delete All (2 of 3)', style: {} };
     await deleteWrongMatchGroup(42, btn);
     t.equal(btn.textContent, 'Delete All (2 of 3)',
@@ -2106,9 +2151,9 @@ t.section('deleteWrongMatchGroup() restores the actionable-aware label on every 
   {
     const dom = installDom();
     renderWrongMatches(partiallyUnavailableGroup(), dom.wrongMatches);
-    global.fetch = async () => ({
+    stubGlobals({ fetch: async () => ({
       ok: false, json: async () => ({ error: 'cleanup_lock_unavailable' }),
-    });
+    }) });
     const btn = { disabled: false, textContent: 'Delete All (2 of 3)', style: {} };
     await deleteWrongMatchGroup(42, btn);
     t.equal(btn.textContent, 'Delete All (2 of 3)',
@@ -2121,7 +2166,7 @@ t.section('deleteWrongMatchGroup() restores the actionable-aware label on every 
   {
     const dom = installDom();
     renderWrongMatches(partiallyUnavailableGroup(), dom.wrongMatches);
-    global.fetch = async () => { throw new Error('network down'); };
+    stubGlobals({ fetch: async () => { throw new Error('network down'); } });
     const btn = { disabled: false, textContent: 'Delete All (2 of 3)', style: {} };
     await deleteWrongMatchGroup(42, btn);
     t.equal(btn.textContent, 'Delete All (2 of 3)',
@@ -2137,7 +2182,7 @@ t.section('deleteWrongMatchGroup() restores the actionable-aware label on every 
     const dead = JSON.parse(JSON.stringify(wrongMatchesData()));
     for (const entry of dead.groups[0].entries) entry.path_unavailable = true;
     renderWrongMatches(dead, dom.wrongMatches);
-    global.fetch = async () => { throw new Error('network down'); };
+    stubGlobals({ fetch: async () => { throw new Error('network down'); } });
     const btn = { disabled: false, textContent: 'Delete All (0 of 3)', style: {} };
     await deleteWrongMatchGroup(42, btn);
     t.equal(btn.disabled, true,
@@ -2205,10 +2250,10 @@ t.section('refreshWrongMatches() discovers an already-running sweep and enables 
   const dom = installDom();
   renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
   let confirmCalls = 0;
-  globalThis.confirm = () => { confirmCalls += 1; return true; };
+  stubGlobals({ confirm: () => { confirmCalls += 1; return true; } });
   const globals = stubGlobals({ setTimeout: (fn) => { fn(); return 0; } });
   let statusCalls = 0;
-  globalThis.fetch = async (url) => {
+  stubGlobals({ fetch: async (url) => {
     if (url === '/api/wrong-matches') {
       return { ok: true, status: 200, json: async () => wrongMatchesData() };
     }
@@ -2238,7 +2283,7 @@ t.section('refreshWrongMatches() discovers an already-running sweep and enables 
       };
     }
     throw new Error(`unexpected fetch: ${url}`);
-  };
+  } });
   const refreshBtn = { disabled: false, textContent: 'Refresh' };
   await refreshWrongMatches(refreshBtn);
   t.equal(dom.stopBtn.disabled, false, 'discovering a running sweep on refresh enables Stop');
@@ -2268,7 +2313,7 @@ t.section('loadWrongMatches() discovers an already-running sweep on initial load
   // terminate deliberately afterward so the winning follower settles
   // before this test block ends.
   let forceTerminal = false;
-  globalThis.fetch = async (url) => {
+  stubGlobals({ fetch: async (url) => {
     if (url === '/api/wrong-matches') {
       return { ok: true, status: 200, json: async () => wrongMatchesData() };
     }
@@ -2292,7 +2337,7 @@ t.section('loadWrongMatches() discovers an already-running sweep on initial load
       };
     }
     throw new Error(`unexpected fetch: ${url}`);
-  };
+  } });
   // loadWrongMatches() caches on a module-scoped `_loaded` flag, so this
   // must stay the only call to it in this file — a second call would
   // silently no-op against the flag this one sets.
@@ -2324,7 +2369,7 @@ t.section('a NEW sweep discovered while an OLDER one\'s terminal handling is sti
   let tellATeminate = false;
   let aTerminalConsumed = false;
   let tellBTerminate = false;
-  globalThis.fetch = async (url) => {
+  stubGlobals({ fetch: async (url) => {
     if (url === '/api/wrong-matches') {
       return { ok: true, status: 200, json: async () => wrongMatchesData() };
     }
@@ -2368,7 +2413,7 @@ t.section('a NEW sweep discovered while an OLDER one\'s terminal handling is sti
         error: 'sweep B blew up', summary: null,
       }),
     };
-  };
+  } });
 
   await refreshWrongMatches();
   t.equal(dom.stopBtn.disabled, false, 'discovering sweep A running enables Stop');
@@ -2405,7 +2450,7 @@ t.section('a status fetch that fails once retries after ~3s and recovers (#1106 
   // race an exact-count assertion against however many extra loop
   // iterations flushMicrotasks happens to unwind.
   let stayRunning = true;
-  globalThis.fetch = async (url) => {
+  stubGlobals({ fetch: async (url) => {
     if (url === '/api/wrong-matches') {
       return { ok: true, status: 200, json: async () => wrongMatchesData() };
     }
@@ -2433,7 +2478,7 @@ t.section('a status fetch that fails once retries after ~3s and recovers (#1106 
       };
     }
     throw new Error(`unexpected fetch: ${url}`);
-  };
+  } });
 
   await refreshWrongMatches();
   t.equal(dom.stopBtn.disabled, true,
@@ -2453,7 +2498,7 @@ t.section('a status fetch that fails twice (initial + retry) paints the conserva
   const dom = installDom();
   renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
   const globals = stubGlobals({ setTimeout: (fn) => { fn(); return 0; } });
-  globalThis.fetch = async (url) => {
+  stubGlobals({ fetch: async (url) => {
     if (url === '/api/wrong-matches') {
       return { ok: true, status: 200, json: async () => wrongMatchesData() };
     }
@@ -2461,7 +2506,7 @@ t.section('a status fetch that fails twice (initial + retry) paints the conserva
       throw new Error('network down');
     }
     throw new Error(`unexpected fetch: ${url}`);
-  };
+  } });
 
   await refreshWrongMatches();
   await flushMicrotasks(50);
@@ -2506,7 +2551,7 @@ t.section('a follower skips terminal handling when its poll result names a DIFFE
   const CLAIMED = '2026-08-12T00:00:00+00:00';
   const DIFFERENT = '2026-08-12T05:00:00+00:00';
   let statusCalls = 0;
-  globalThis.fetch = async (url) => {
+  stubGlobals({ fetch: async (url) => {
     if (url === '/api/wrong-matches') {
       return { ok: true, status: 200, json: async () => wrongMatchesData() };
     }
@@ -2535,7 +2580,7 @@ t.section('a follower skips terminal handling when its poll result names a DIFFE
       };
     }
     throw new Error(`unexpected fetch: ${url}`);
-  };
+  } });
 
   await refreshWrongMatches();
   await flushMicrotasks(50);
@@ -2556,7 +2601,7 @@ t.section('a literal-null status body degrades instead of aborting loadWrongMatc
   invalidateWrongMatches();
   const globals = stubGlobals({ setTimeout: (fn) => { fn(); return 0; } });
   let queueFetched = false;
-  globalThis.fetch = async (url) => {
+  stubGlobals({ fetch: async (url) => {
     if (url === '/api/wrong-matches') {
       queueFetched = true;
       return { ok: true, status: 200, json: async () => wrongMatchesData() };
@@ -2567,7 +2612,7 @@ t.section('a literal-null status body degrades instead of aborting loadWrongMatc
       return { ok: true, status: 200, json: async () => null };
     }
     throw new Error(`unexpected fetch: ${url}`);
-  };
+  } });
 
   await loadWrongMatches();
 
@@ -2585,7 +2630,7 @@ t.section('retryTriageStatusOnce() is single-flight — a second concurrent call
   installDom();
   const globals = stubGlobals({ setTimeout: (fn) => { fn(); return 0; } });
   let statusCalls = 0;
-  globalThis.fetch = async (url) => {
+  stubGlobals({ fetch: async (url) => {
     if (url === '/api/wrong-matches/triage/status') {
       statusCalls += 1;
       return {
@@ -2597,7 +2642,7 @@ t.section('retryTriageStatusOnce() is single-flight — a second concurrent call
       };
     }
     throw new Error(`unexpected fetch: ${url}`);
-  };
+  } });
 
   // Two concurrent retry attempts -- without the single-flight guard,
   // both would independently sleep and fetch, doubling the request

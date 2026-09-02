@@ -1,5 +1,18 @@
 /**
  * Unit tests for web/js/util.js — pure utility functions.
+ *
+ * It also holds the HTML tests for fragments belonging to four other
+ * modules, and those call their renderers directly on purpose (issue
+ * #1346). Each of those modules HAS a composed entry, and each entry is
+ * driven where it belongs: `openReplacePicker` in
+ * `tests/test_js_release_actions.mjs`, `renderLabelDetail` in
+ * `tests/test_js_labels.mjs`, `renderConsoleShell` and `renderLongTailBody`
+ * here. What the direct calls cover is the fragment's own HTML, which is
+ * cheaper and sharper read one fragment at a time than as a needle in a
+ * whole modal. The five long-tail-console panel bodies could not be
+ * reached through the shell anyway: it renders `renderPanelLoading`
+ * placeholders and the bodies arrive later from three separate endpoints.
+ *
  * Run with: node tests/test_js_util.mjs
  */
 

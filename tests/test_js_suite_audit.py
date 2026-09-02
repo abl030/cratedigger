@@ -31,6 +31,7 @@ import unittest
 from pathlib import Path
 
 from tests._source_pins import pinned_source
+from tests.structural_audits.js_ast import bare_global_assignments
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUN_TESTS_SH = os.path.join(REPO_ROOT, "scripts", "run_tests.sh")
@@ -205,6 +206,35 @@ def test_bag_violations(name: str, source: str) -> list[str]:
 def _raw_source(path: Path) -> str:
     """Read ``path`` verbatim. See ``test_bag_violations`` for why."""
     return path.read_text(encoding="utf-8")
+
+
+# The one suite allowed to assign a global bare. `tests/test_js_harness.mjs`
+# tests `stubGlobals` itself: proving that an existing global is restored by
+# identity, and that a second restore does not re-apply a stale value, both
+# need a global set OUTSIDE the helper under test. Every key it writes is
+# deleted afterwards — three assignments, two `delete`s, because two of the
+# assignments write the same key.
+_BARE_GLOBAL_ASSIGNMENT_ALLOWED = frozenset({"test_js_harness.mjs"})
+
+
+def global_assignment_violations(name: str, source: str) -> list[str]:
+    """Every global a suite mutates without handing it back.
+
+    `stubGlobals` is the only sanctioned way, and since issue #1346 the
+    harness releases what it installed at the next `section()` and at
+    `done()` — so a stub reaches exactly the block that installed it. A bare
+    assignment opts out of that silently: it survives every later section,
+    and a section that installs no `fetch` of its own answers from whichever
+    mock ran last. 104 sites across six suites were in that state, including
+    two whole files with no restore of any kind.
+    """
+    if name in _BARE_GLOBAL_ASSIGNMENT_ALLOWED:
+        return []
+    return [
+        f"{name}:{found.line} assigns {found.root}.{found.key} directly; "
+        "install it with stubGlobals({...}) instead"
+        for found in bare_global_assignments(source, origin=name)
+    ]
 
 
 class TestNoModuleShipsATestBag(unittest.TestCase):
@@ -468,6 +498,170 @@ class TestEveryJsSuiteUsesTheSharedHarness(unittest.TestCase):
             "t.done();\n"
         )
         self.assertEqual(harness_violations("test_js_x.mjs", source), [])
+
+
+class TestNoSuiteMutatesAGlobalWithoutRestoringIt(unittest.TestCase):
+    """A stub belongs to the block that installed it (issue #1346).
+
+    Six suites assigned `globalThis.fetch` and friends bare, 104 sites, and
+    restored nothing: `test_js_browse.mjs` and `test_js_pipeline.mjs`
+    contained no restore of any kind, so every section after the first ran
+    against whichever mock happened to be installed last. Nothing failed
+    from it, because each section that used `fetch` also installed one —
+    the leak was latent, one forgotten line from being real, and invisible
+    to every check the repository had.
+
+    The sweep put all 104 behind `stubGlobals`, whose restore the harness
+    now owns. This audit is what stops the next one: a bare assignment
+    passes perfectly well on its own, exactly like a bespoke harness did.
+    """
+
+    def test_no_suite_assigns_a_global_directly(self) -> None:
+        names = sorted(_js_suite_names_on_disk())
+        self.assertTrue(names, "no tests/test_js_*.mjs files found")
+        violations: list[str] = []
+        for name in names:
+            source = _raw_source(Path(TESTS_DIR) / name)
+            violations.extend(global_assignment_violations(name, source))
+        self.assertEqual(
+            violations,
+            [],
+            "install browser globals with stubGlobals({...}): "
+            + "; ".join(violations),
+        )
+
+    def test_the_harness_module_itself_assigns_no_global(self) -> None:
+        """`js_harness.mjs` is not a suite, so the scan above skips it.
+
+        It writes `globalThis[key]` from inside `stubGlobals`, through a
+        computed subscript the scanner reports as `[computed]` — so this
+        names the exact expected count rather than asserting zero.
+        """
+        found = bare_global_assignments(
+            _raw_source(Path(TESTS_DIR) / "js_harness.mjs"),
+            origin="js_harness.mjs",
+        )
+        self.assertEqual(
+            [(item.root, item.key) for item in found],
+            [("globalThis", "[computed]"), ("globalThis", "[computed]")],
+            "stubGlobals installs and restores through globalThis[key]; a "
+            "third global write in the harness is a new mutation path",
+        )
+
+    def test_the_allowlisted_suite_really_needs_its_allowance(self) -> None:
+        """A stale allowance is worse than none — it hides a real regression."""
+        for name in sorted(_BARE_GLOBAL_ASSIGNMENT_ALLOWED):
+            with self.subTest(suite=name):
+                source = _raw_source(Path(TESTS_DIR) / name)
+                self.assertTrue(
+                    bare_global_assignments(source, origin=name),
+                    f"{name} is allowlisted but assigns no global; drop it "
+                    "from _BARE_GLOBAL_ASSIGNMENT_ALLOWED",
+                )
+                self.assertEqual(
+                    global_assignment_violations(name, source),
+                    [],
+                    f"the allowance for {name} is not being applied",
+                )
+
+    # One world per spelling the clause must catch. Each is minimal: the
+    # only global write in it is the one named.
+    KNOWN_BAD = (
+        ("member assignment", "globalThis.fetch = async () => ({});\n",
+         "assigns globalThis.fetch directly"),
+        ("computed key", "globalThis['fetch'] = async () => ({});\n",
+         "assigns globalThis.[computed] directly"),
+        ("augmented assignment", "globalThis.counter += 1;\n",
+         "assigns globalThis.counter directly"),
+        ("the node `global` alias", "global.confirm = () => true;\n",
+         "assigns global.confirm directly"),
+        ("the `self` alias", "self.document = {};\n",
+         "assigns self.document directly"),
+        ("inside a block", "{\n  globalThis.fetch = null;\n}\n",
+         "assigns globalThis.fetch directly"),
+        ("inside a helper function",
+         "function install() {\n  globalThis.document = {};\n}\n",
+         "assigns globalThis.document directly"),
+        # The four below walked straight past the first version of this
+        # clause while its docstring claimed every spelling was covered.
+        # PR #1352's reader drove the real function over 22 worlds and
+        # found them; `++` is the pointed one, because the commit message
+        # held up `+= 1` as proof the audit was not defeated by the one
+        # spelling that slips through.
+        ("postfix increment", "globalThis.counter++;\n",
+         "assigns globalThis.counter directly"),
+        ("prefix decrement", "--globalThis.counter;\n",
+         "assigns globalThis.counter directly"),
+        ("object destructuring target",
+         "({ fetch: globalThis.fetch } = source);\n",
+         "assigns globalThis.fetch directly"),
+        ("array destructuring target", "[globalThis.fetch] = [stub];\n",
+         "assigns globalThis.fetch directly"),
+        ("a for-of loop header",
+         "for (globalThis.key of ['a']) {\n  noop();\n}\n",
+         "assigns globalThis.key directly"),
+        ("a for-in loop header",
+         "for (globalThis.key in source) {\n  noop();\n}\n",
+         "assigns globalThis.key directly"),
+    )
+
+    def test_each_spelling_trips_the_clause(self) -> None:
+        for label, source, expected in self.KNOWN_BAD:
+            with self.subTest(world=label):
+                violations = global_assignment_violations(
+                    "test_js_x.mjs", source
+                )
+                self.assertEqual(
+                    len(violations),
+                    1,
+                    f"{label} should report exactly one site, got {violations}",
+                )
+                self.assertIn(expected, violations[0])
+
+    def test_a_conforming_world_trips_nothing(self) -> None:
+        """Everything a suite legitimately does that LOOKS like the bad shape.
+
+        Without this the clause could report every property assignment in
+        the tree and still pass its known-bad worlds. The `window.toast`
+        line is the live case: three suites write onto a `window` stub they
+        installed a line earlier, and none of them mutates anything shared.
+        """
+        source = (
+            "import { stubGlobals, suite } from './js_harness.mjs';\n"
+            "const t = suite(import.meta.url);\n"
+            "const globals = stubGlobals({ window: {}, fetch: null });\n"
+            "window.toast = () => {};\n"
+            "const state = { fetch: null };\n"
+            "state.fetch = async () => ({});\n"
+            "let localThis = 0;\n"
+            "localThis = 1;\n"
+            "delete globalThis.leftover;\n"
+            "// globalThis.fetch = 'a comment is not a write';\n"
+            "globals.restore();\n"
+            "t.done();\n"
+        )
+        self.assertEqual(global_assignment_violations("test_js_x.mjs", source), [])
+
+    def test_the_alias_hole_is_real_and_stays_review_s_job(self) -> None:
+        """A write THROUGH an alias is not reported, and the docstring says so.
+
+        The conforming world above used to carry a bare `const alias =
+        globalThis;` and assert the string was present in a string the test
+        itself built, which proved nothing about the audit (PR #1352 reader,
+        F14). The hole is real, so pin it as a hole: a write through the
+        alias is the shape that gets past this grammar, and naming it here
+        is what stops someone reading the clause as airtight.
+        """
+        source = (
+            "const alias = globalThis;\n"
+            "alias.fetch = async () => ({});\n"
+        )
+        self.assertEqual(
+            global_assignment_violations("test_js_x.mjs", source),
+            [],
+            "a write through an alias is outside the declared grammar; if "
+            "this starts failing, the docstring's stated bound is stale",
+        )
 
 
 class TestJsSuiteAudit(unittest.TestCase):
