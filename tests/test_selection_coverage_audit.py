@@ -354,6 +354,22 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
         "tests.test_sidecar_service",
         "tests.test_current_evidence_authority_generated",
     ),
+    # The dedicated basename candidate masks deletion of the wider outcome
+    # writer/caller/world-model selection established by #1321.
+    "lib/dispatch/outcome_actions.py": (
+        "tests.test_outcome_actions",
+        "tests.test_outcome_actions_generated",
+        "tests.test_do_mark",
+        "tests.test_import_dispatch",
+        "tests.test_integration_slices",
+        "tests.test_terminal_outcome_callers",
+        "tests.test_album_source",
+        "tests.test_importer_job_kinds",
+        "tests.test_import_manifest",
+        "tests.test_dispatch_from_db",
+        "tests.test_dispatch_core",
+        "tests.test_dispatch_outcomes_generated",
+    ),
     # Basename probe resolves tests.test_surface_outcomes.
     "lib/surface_outcomes.py": (
         "tests.test_surface_outcomes",
