@@ -125,3 +125,4 @@
 - [#1313 architecture register OPEN](project_1313_architecture_register.md) — 2026-09-01 review; 6 strong candidates, top pick JobLane collapse; de-dupe here first
 - [#1313 register CLOSED](project_1313_register_closed.md) — 2026-09-02: 22 PRs live-verified (b54a8b30); triage-then-fan-out sweep pattern; 2 operator rule questions open; leftovers #1346-#1348
 - [mutmut ADOPTED](project_mutmut_evaluation.md) — PRs #1318+#1320 merged 2026-09-01; #1317 closed; whole-repo convergence register OPEN at #1321
+- [Git measurement hazards](feedback_git_measurement_hazards.md) — reset --soft vs advanced origin/main stages reverts; git log --all counts abandoned branches

@@ -474,6 +474,33 @@ class _FakePipelineDBBase:
 
 
     @staticmethod
+    def _live_beets_child_refuses(lease: ExecutionLeaseSnapshot | None) -> bool:
+        """Whether a Beets child on the caller's lease refuses this call.
+
+        Production spells this as an unconditional early return above the
+        SQL: ``heartbeat_import_job_preview``,
+        ``mark_import_job_preview_importable``,
+        ``authorize_import_job_launch`` and
+        ``set_import_job_candidate_evidence`` each refuse before their
+        statement runs, and none of those statements' non-automation arms
+        re-checks the child. (Their shapes differ — two spell
+        ``job_type <> 'automation_import'``, one adds a preview-status
+        term, and ``authorize_import_job_launch`` has no ``<>`` arm at all
+        but three positive per-type arms. What they share is that not one
+        of them reads ``execution_beets_pid``.) So for a force, local or
+        YouTube job this guard is the whole enforcement, and nesting it
+        inside an automation arm lets every other type through
+        mid-Beets-mutation.
+
+        One predicate rather than a clause repeated at each caller, so the
+        rule cannot be dropped from one of them the way it was from four
+        (issue #1347). ``_candidate_job_type_routes`` reads it too, where
+        it was already spelled correctly for the two candidate scans
+        (#1313).
+        """
+        return lease is not None and lease.beets is not None
+
+    @staticmethod
     def _execution_lease_matches(
         row,
         lease: ExecutionLeaseSnapshot | None,

@@ -6263,7 +6263,12 @@ class TestPollActiveDownloads(unittest.TestCase):
         jobs = fake_db.list_import_jobs()
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0].preview_status, "waiting")
-        self.assertIsNone(jobs[0].preview_message)
+        # Completion publishes through handoff_automation_import, whose INSERT
+        # omits preview_message and so takes migration 018's DEFAULT. The
+        # literal rather than the fake's constant, so this still fails if the
+        # fake drifts. Asserted as None until #1347, which was the enqueue
+        # writer's shape on a row this path never uses.
+        self.assertEqual(jobs[0].preview_message, "Preview gate disabled")
         claimed = claim_next_import_preview_job(fake_db, worker_id="preview",
         execution_lease=ExecutionLeaseSnapshot(
             host_boot_id="download-test-boot",

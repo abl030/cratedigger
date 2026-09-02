@@ -3371,6 +3371,40 @@ class TestAutomationImportHandoff(unittest.TestCase):
                         fake.list_import_jobs(request_id=fake_id),
                         [],
                     )
+                else:
+                    # The committed branch used to stop at the outcome, so
+                    # nothing compared the row the handoff actually creates
+                    # and the fake drifted (#1347). handoff_automation_import
+                    # omits preview_message, preview_completed_at and
+                    # importable_at from its column list, so migrations
+                    # 005/018's DEFAULTs fire here and NOT in the two writers
+                    # that name them. Timestamps compare as set-or-not, since
+                    # the two databases stamp their own clocks.
+                    real_job, = self.db.list_import_jobs(request_id=real_id)
+                    fake_job, = fake.list_import_jobs(request_id=fake_id)
+                    self.assertEqual(
+                        real_job.preview_status, fake_job.preview_status,
+                    )
+                    self.assertEqual(
+                        real_job.preview_message, fake_job.preview_message,
+                    )
+                    self.assertEqual(
+                        real_job.preview_completed_at is None,
+                        fake_job.preview_completed_at is None,
+                    )
+                    self.assertEqual(
+                        real_job.importable_at is None,
+                        fake_job.importable_at is None,
+                    )
+                    # And the values themselves, so this is a shape pin and
+                    # not merely an agreement pin: a fake that mirrored a
+                    # wrong production value would pass the four above.
+                    self.assertEqual(real_job.preview_status, "waiting")
+                    self.assertEqual(
+                        real_job.preview_message, "Preview gate disabled",
+                    )
+                    self.assertIsNotNone(real_job.preview_completed_at)
+                    self.assertIsNotNone(real_job.importable_at)
 
     def test_real_witness_guard_mutant_is_killed(self):
         other = self.db.__class__(TEST_DSN)

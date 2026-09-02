@@ -525,8 +525,21 @@ Key fields:
 - `preview_attempts`, `preview_worker_id`, `preview_started_at`,
   `preview_heartbeat_at`, `preview_completed_at` — async preview claim and
   recovery metadata.
-- `importable_at TIMESTAMPTZ` — set when preview produces `evidence_ready`; the
-  serial importer claims only queued `evidence_ready` jobs.
+- `importable_at TIMESTAMPTZ` — the candidate scan's sort key (`ORDER BY
+  importable_at ASC NULLS LAST`); the serial importer claims only queued
+  `evidence_ready` jobs. When it gets set depends on which writer created the
+  row, because `mark_import_job_preview_importable` only `COALESCE`s it.
+  `enqueue_import_job` and `enqueue_youtube_import_and_mark_success` write it
+  NULL at insert, so a force, local or YouTube job takes its
+  preview-completion time. `handoff_automation_import` omits it from its
+  column list, so migrations 005/018's `DEFAULT NOW()` fires and an automation
+  job keeps its **handoff** time instead. Measured 2026-09-02 over rows created
+  since 2026-07-31: all 1,350 automation jobs have `importable_at =
+  created_at`, and none of the 92 other jobs do. The same omission applies to
+  `preview_message` (`DEFAULT 'Preview gate disabled'`) and
+  `preview_completed_at` (`DEFAULT NOW()`), so a fresh automation job carries
+  both while sitting at `preview_status = 'waiting'`; unlike `importable_at`,
+  those two are overwritten once preview finishes.
 
 On importer/preview startup, a pre-existing automation execution changes only
 after the shared liveness probe positively proves its persisted execution
