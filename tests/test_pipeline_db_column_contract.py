@@ -186,10 +186,15 @@ class TestCycleMetricsInsertStatement(unittest.TestCase):
         self.assertEqual(" ".join(_INSERT_CYCLE_METRICS.split()), self.EXPECTED)
 
     def test_every_column_has_its_own_placeholder(self) -> None:
-        """A count mismatch here is the failure mode of a hand-edited
-        VALUES list, and the reason the placeholders are generated."""
+        """One placeholder per column, counted in what production BUILDS.
+
+        Counting ``EXPECTED``'s own placeholders instead would compare two
+        things this test file owns and leave the generated VALUES list a
+        bystander: an extra ``%s`` in production passed that version
+        (review mutant M23).
+        """
         self.assertEqual(
-            self.EXPECTED.count("%s"), len(_CYCLE_METRIC_COLUMNS))
+            _INSERT_CYCLE_METRICS.count("%s"), len(_CYCLE_METRIC_COLUMNS))
 
 
 class TestWritePayloadColumnContract(unittest.TestCase):

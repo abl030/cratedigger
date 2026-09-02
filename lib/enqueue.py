@@ -121,12 +121,19 @@ class FindDownloadMetrics:
     """What one album's find_download walk cost, carried back to the owner.
 
     A strict subset of ``lib.cycle_counters.CycleCounters``, by the same
-    names: five of these also land on the walk's ``search_log`` row as
+    names. Five of them also land on the walk's ``search_log`` row as
     per-search attribution, and the owner thread adds all eight into its
-    own cycle counters. The three cache counters a worker can accumulate
-    but this value does not carry (``cache_errors``,
-    ``cache_fuse_tripped``, ``cache_write_errors``) are therefore counted
-    only when the drain happens on the owner's context.
+    own cycle counters.
+
+    The three cache counters here are vestigial, and were before issue
+    #1348 touched this (review F7): every peer-cache drain goes through
+    ``lib.browse.BrowseCoordinator``, which holds the OWNER's context
+    because ``prepare_find_download_context`` builds the coordinator from
+    it, and the one drain path that takes a caller's context
+    (``cache_browsed_directory``) is reached from ``lib.matching`` only
+    when ``ctx.peer_cache is None``, where the write returns before
+    draining. So a worker's own cache counters are always zero and the
+    owner's merge of them adds nothing.
     """
 
     browse_time_s: float = 0.0

@@ -138,6 +138,12 @@ class TestPhase1ContextForwarding(unittest.TestCase):
         self.assertIs(phase1.cooled_down_users, owner.cooled_down_users)
         self.assertIs(phase1.pipeline_db_source, phase1_source)
         self.assertIsNot(phase1.pipeline_db_source, owner.pipeline_db_source)
+        # The counters go the other way: NOT shared (#1348). Phase 1
+        # accumulates nothing any consumer of it reads, and the owner
+        # merges worker totals into its own value, so an alias here
+        # would be a second writer on the object the cycle summary and
+        # the cycle_metrics row are built from.
+        self.assertIsNot(phase1.counters, owner.counters)
 
 
 class TestContextAccumulators(unittest.TestCase):
@@ -228,10 +234,13 @@ class TestFormatCycleSummary(unittest.TestCase):
     def test_every_declared_counter_reaches_the_line(self):
         """Declaring a counter and forgetting to log it is now impossible.
 
-        This one IS derived, deliberately: it is the half that catches a
-        counter ADDED to the value type, where ``EXPECTED_LINE`` cannot
-        help because a human wrote it. The two together cover both
-        directions — a token vanishing, and a counter never arriving.
+        This one IS derived, and its value is narrower than it looks: a
+        counter ADDED to the value type already fails ``EXPECTED_LINE``,
+        which a human wrote and which no new token can satisfy (measured,
+        review F5). What this catches instead is a renderer that stops
+        deriving — one that goes back to naming counters by hand and
+        omits one, where both line pins would be updated to match and
+        this would not.
         """
         line = format_cycle_summary(self.POPULATED, elapsed_s=99.9)
         for name in COUNTER_NAMES:
@@ -416,8 +425,10 @@ class TestCloseOutSteps(unittest.TestCase):
 
     def test_record_cycle_metrics_persists_every_context_accumulator(self):
         # A distinct value per counter, derived from the declaration so a
-        # newly declared counter is covered the day it lands: a swapped
-        # forward fails, not only a dropped one.
+        # newly declared counter is covered the day it lands. One
+        # `counters=` argument replaced sixteen forwards, so what this
+        # now catches is the value arriving in the wrong column, or not
+        # arriving.
         db = FakePipelineDB()
         ctx = self._ctx(db)
         forwarded = {

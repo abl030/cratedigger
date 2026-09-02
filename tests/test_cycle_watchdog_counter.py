@@ -40,15 +40,19 @@ class TestCycleSummaryWatchdogField(unittest.TestCase):
     many searches were killed. Replaces the removed
     `cycle_deadline_skipped=` field — old field name MUST NOT appear."""
 
+    # Assert the whole token, not a substring of the line: `assertIn`
+    # against the raw line is satisfied by `...killed=0.0` too, so a
+    # change that rendered this integer count as a float survived both
+    # tests (review mutant M19).
     def test_zero_emitted(self):
         line = format_cycle_summary(CycleCounters(), elapsed_s=412.3)
-        self.assertIn("cycle_searches_watchdog_killed=0", line)
+        self.assertIn("cycle_searches_watchdog_killed=0", line.split(" "))
         self.assertNotIn("cycle_deadline_skipped", line)
 
     def test_three_emitted(self):
         line = format_cycle_summary(
             CycleCounters(cycle_searches_watchdog_killed=3), elapsed_s=611.0)
-        self.assertIn("cycle_searches_watchdog_killed=3", line)
+        self.assertIn("cycle_searches_watchdog_killed=3", line.split(" "))
 
 
 class TestLogSearchResultIncrementsCounter(unittest.TestCase):

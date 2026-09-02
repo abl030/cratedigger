@@ -27,9 +27,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("cratedigger")
 
-#: The prefix log scrapers match on. ``scripts/verify_cratedigger_cycle.sh``
-#: and the runbook in ``docs/nixos-module.md`` both look for this substring
-#: and nothing else, so the tokens after it may grow, but this may not move.
+#: The head of the summary line. ``scripts/verify_cratedigger_cycle.sh``
+#: and the runbook in ``docs/nixos-module.md`` both match on
+#: ``Cratedigger cycle complete`` -- a proper prefix of this constant,
+#: which also carries the trailing ``in`` -- and on nothing else, so the
+#: tokens after it may grow but those first three words may not move.
 CYCLE_COMPLETE_PREFIX = "Cratedigger cycle complete in"
 
 

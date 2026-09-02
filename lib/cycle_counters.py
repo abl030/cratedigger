@@ -1,23 +1,36 @@
 """The per-cycle counters, declared once (issue #1348).
 
-One cratedigger cycle accumulates sixteen numbers. Three things consume
-them, and each used to spell all sixteen names out by hand: the
-operator-facing summary line, the ``cycle_metrics`` row, and the
-per-album ``FindDownloadMetrics`` an enqueue worker hands back to the
-owner thread. With the declaration order below fixed, all three derive
-from it, so adding a counter is one edit here plus the operator-line
-expectation in ``tests/test_cycle_summary.py``.
+One cratedigger cycle accumulates sixteen numbers. Two consumers used to
+spell all sixteen names out by hand and now derive them from the
+declaration below: the operator-facing summary line and the
+``cycle_metrics`` INSERT. A third, ``lib.enqueue.FindDownloadMetrics``,
+still hand-declares the eight it carries back from a worker; it is a
+projection by name, not a derivation.
 
 The declaration order IS the summary line's token order and the
 ``cycle_metrics`` INSERT's column order. It also matches the column
 order migration 011 created, which is not load-bearing (the INSERT names
 its columns) but is worth keeping so the row reads like the log line.
 
-The counters are ordinary numbers, so nothing here is shared by
-reference the way ``CratediggerContext``'s caches and coordinator are.
-A cycle owns one instance; ``lib.enqueue.prepare_find_download_context``
-gives each worker its own, and the owner merges the worker's totals back
-in through ``FindDownloadMetrics``.
+**Adding a counter is not one edit.** It is this declaration, a
+``migrations/NNN`` ``ALTER TABLE cycle_metrics ADD COLUMN`` (without it
+the derived INSERT raises ``UndefinedColumn`` on the first cycle after
+deploy), and the literals that exist so the derivation cannot quietly
+agree with itself: ``EXPECTED_ORDER`` and the zero-defaults count in
+``tests/test_cycle_counters.py``, both full-line pins in
+``tests/test_cycle_summary.py``, and ``EXPECTED`` in
+``tests/test_pipeline_db_column_contract.py``. What derivation buys is
+that every one of those failures is LOUD; before it, the line and the
+row could each silently drop a counter.
+
+A cycle owns one instance and each find_download worker gets its own.
+Nothing forwards it: unlike ``folder_cache`` or ``browse_coordinator``,
+which ``prepare_find_download_context`` deliberately shares by
+reference, a shared counters value would be double-counted the moment
+the owner merged a worker's ``FindDownloadMetrics`` back into it. That
+is a property of the derivations, not of the type -- this object is
+exactly as shareable as any other -- so it is asserted at both
+derivations rather than assumed here.
 """
 from __future__ import annotations
 
@@ -43,7 +56,7 @@ class CycleCounters:
     search_time_s: float = 0.0
 
     # Redis peer-cache outcomes, drained off the cache by
-    # lib/peer_cache.py::drain_stats_into_counters.
+    # lib/peer_cache.py::drain_stats_into_context.
     cache_pos_hits: int = 0
     cache_neg_hits: int = 0
     cache_misses: int = 0

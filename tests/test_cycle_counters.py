@@ -105,11 +105,14 @@ class TestFloatCounterNamesFailsClosed(unittest.TestCase):
         )
 
     def test_the_live_declaration_is_all_numeric(self):
+        """Subset, not equality: an all-int or all-float declaration is a
+        legitimate future, and `_float_counter_names` already fails
+        closed on a third type."""
         declared = {
             str(field.type) for field in dataclasses.fields(CycleCounters)
         }
-        self.assertEqual(
-            sorted(declared), ["float", "int"],
+        self.assertLessEqual(
+            declared, {"int", "float"},
             "a counter declared as something else would change how the "
             "summary line and the cycle_metrics row render it",
         )

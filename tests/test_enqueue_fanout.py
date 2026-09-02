@@ -841,6 +841,15 @@ class TestFindDownloadWorkerContext(unittest.TestCase):
         self.assertEqual(worker_ctx.denied_users_cache[1], {"blocked"})
         self.assertIs(worker_ctx.folder_cache, ctx.folder_cache)
         self.assertIs(worker_ctx.browse_coordinator, ctx.browse_coordinator)
+        # The counters are the scratch that must NOT be shared (#1348).
+        # A worker fills its own and the owner adds the totals back in
+        # through FindDownloadMetrics, so an aliased value would count
+        # this album's browse time, peers and waves twice, on every
+        # album, in both the parallel and serial paths. This is the
+        # adapter that decides it; a two-fresh-contexts test cannot.
+        self.assertIsNot(worker_ctx.counters, ctx.counters)
+        worker_ctx.counters.peers_browsed += 4
+        self.assertEqual(ctx.counters.peers_browsed, 0)
         # #1178 PR2 review F1: the same-cycle registry MUST be the same
         # object, not a fresh one per worker -- a fresh registry per
         # worker silently degrades the guard to cross-cycle-only, which

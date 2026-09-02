@@ -188,11 +188,14 @@ class CratediggerContext:
     one would only rename what those two functions already spell out field
     by field.
 
-    ``counters`` is the one part that DID separate (issue #1348), and that
-    objection is exactly what it escapes: the counters are ints and floats,
-    so they cannot be shared by reference at all. Each worker gets a fresh
-    value and the owner merges the totals back through
-    ``lib.enqueue.FindDownloadMetrics``.
+    ``counters`` is the one part that DID separate (issue #1348), and it
+    escapes that objection by not being forwarded at all: each worker
+    gets a fresh value and the owner merges the totals back through
+    ``lib.enqueue.FindDownloadMetrics``. Note this is a property of the
+    two derivations, not of the type. The value is a mutable object, as
+    shareable as ``folder_cache``; passing ``counters=`` to a derived
+    context would double-count every merged counter. Both derivations
+    assert they do not.
     """
 
     collaborators: Collaborators
@@ -256,9 +259,10 @@ class CratediggerContext:
 
     # --- Per-cycle counters (issue #1348). ---
     # Every number the cycle accumulates, declared once in
-    # lib/cycle_counters.py. The summary line, the cycle_metrics row and
-    # lib.enqueue.FindDownloadMetrics all read this value; none of them
-    # enumerates the counter names by hand any more.
+    # lib/cycle_counters.py. The summary line and the cycle_metrics row
+    # are both built from that declaration rather than from their own
+    # hand-kept lists; FindDownloadMetrics still names the eight it
+    # projects.
     counters: CycleCounters = field(default_factory=CycleCounters)
 
     # --- Cycle wall-clock anchors. ---

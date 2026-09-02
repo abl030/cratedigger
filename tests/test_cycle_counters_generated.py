@@ -1,21 +1,25 @@
 """Generated proof that a cycle's counters say the same thing everywhere.
 
-The invariant: for any counters value, the number an operator reads in the
-summary line, the number stored in that counter's ``cycle_metrics``
-column, and the number carried back on ``FindDownloadMetrics`` are the
-same number. Three consumers derive from one declaration
-(``lib.cycle_counters``), and that is the property their agreement rests
-on -- not on three hand-kept lists agreeing, which is how
-``search_time_s=`` came to be logged but asserted nowhere (issue #1348).
+The invariant: for any counters value, the number an operator reads in
+the summary line and the number carried back on ``FindDownloadMetrics``
+are that counter's own number. Both consumers read one declaration
+(``lib.cycle_counters``), and that is what their agreement rests on --
+not on hand-kept lists agreeing, which is how ``search_time_s=`` came to
+be logged but asserted nowhere (issue #1348).
 
-Scope, stated plainly: the row here is written through
-``FakePipelineDB.record_cycle_metrics``, which mirrors production's
-derived column list. The real PostgreSQL boundary is covered by the
-deterministic round-trip in
-``tests/test_pipeline_db.py::TestPipelineDashboardMetrics``; what this
-patrols is agreement across the three adapters over a wide value space,
-including the negatives, half-way roundings and large magnitudes no
-hand-written world would think to try.
+Scope, stated plainly. The third consumer, the ``cycle_metrics`` row, is
+deliberately NOT patrolled here. Writing it through ``FakePipelineDB``
+would make the subject the fake's own mirror rather than production
+(CLAUDE.md forbids property-testing test machinery), and the checker
+would re-derive the very expression the fake builds the row with, so no
+world could fail it (review F6). The production write is pinned instead
+against real PostgreSQL, with a distinct value per counter read back
+from its own column, in
+``tests/test_pipeline_db.py::TestPipelineDashboardMetrics``.
+
+What this adds over those pins is value space: negatives, negative zero,
+half-way roundings and large magnitudes no hand-written world would
+think to try.
 """
 from __future__ import annotations
 
@@ -33,7 +37,6 @@ from lib.cycle_counters import (
 )
 from lib.cycle_summary import CYCLE_COMPLETE_PREFIX, format_cycle_summary
 from lib.enqueue import FindDownloadMetrics
-from tests.fakes import FakePipelineDB
 
 #: Whole-number floats and half-way values included on purpose: ``.1f``
 #: rounds half to even, and a renderer that reached for ``round()`` or
@@ -65,6 +68,14 @@ def line_token_violations(counters: CycleCounters, line: str) -> list[str]:
 
     Accumulating rather than raising at the first violation: with sixteen
     counters, a short-circuit would let one masked failure hide fifteen.
+
+    One direction this cannot patrol, stated so nobody credits it with
+    more than it does: the expected format is computed from the same
+    ``FLOAT_COUNTER_NAMES`` the renderer reads, so a change to WHICH
+    counters are floats moves both sides together and this stays quiet
+    (review mutant M4b). That split is pinned deterministically instead,
+    by ``test_float_counters_are_exactly_the_four_durations`` and by both
+    ``EXPECTED_LINE`` pins in ``tests/test_cycle_summary.py``.
     """
     violations: list[str] = []
     tokens = dict(
@@ -78,20 +89,6 @@ def line_token_violations(counters: CycleCounters, line: str) -> list[str]:
         elif tokens[name] != expected:
             violations.append(
                 f"{name}: line says {tokens[name]!r}, value is {expected!r}")
-    return violations
-
-
-def row_value_violations(counters: CycleCounters,
-                         row: dict[str, object]) -> list[str]:
-    """Every counter missing from the persisted row or in the wrong column."""
-    violations: list[str] = []
-    for name in COUNTER_NAMES:
-        if name not in row:
-            violations.append(f"{name}: no column in the cycle_metrics row")
-        elif row[name] != getattr(counters, name):
-            violations.append(
-                f"{name}: row holds {row[name]!r}, value is "
-                f"{getattr(counters, name)!r}")
     return violations
 
 
@@ -112,18 +109,14 @@ class TestCountersAgreeAcrossConsumers(unittest.TestCase):
     @example(counters=CycleCounters(search_time_s=6.25))
     @example(counters=CycleCounters(browse_time_s=-0.0, peers_browsed=-1))
     @given(counters=counter_worlds())
-    def test_line_row_and_projection_carry_the_same_numbers(
+    def test_line_and_projection_carry_the_same_numbers(
         self, counters: CycleCounters,
     ) -> None:
-        db = FakePipelineDB()
         line = format_cycle_summary(counters, elapsed_s=12.5)
-        db.record_cycle_metrics(cycle_total_s=12.5, counters=counters,
-                                wanted_total=0)
         metrics = FindDownloadMetrics.from_counters(counters)
 
         violations = (
             line_token_violations(counters, line)
-            + row_value_violations(counters, db.cycle_metrics[0])
             + projection_violations(counters, metrics)
         )
         self.assertEqual(violations, [], "\n".join(violations))
@@ -147,7 +140,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     """Known-bad self-tests: each checker clause, with its own message.
 
     A checker that has never accused anything is unfalsifiable until
-    proven otherwise, and these three accumulate rather than raise, so
+    proven otherwise, and both of these accumulate rather than raise, so
     every clause has to be reached on its own.
     """
 
@@ -170,28 +163,6 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             line_token_violations(
                 counters, format_cycle_summary(counters, elapsed_s=1.0)),
             [])
-
-    def test_row_checker_names_a_missing_column(self):
-        self.assertIn(
-            "fanout_waves: no column in the cycle_metrics row",
-            row_value_violations(CycleCounters(), {}))
-
-    def test_row_checker_names_a_swapped_column(self):
-        counters = CycleCounters(peers_browsed=3, fanout_waves=9)
-        row: dict[str, object] = {
-            name: getattr(counters, name) for name in COUNTER_NAMES}
-        row["peers_browsed"] = 9
-        self.assertIn(
-            "peers_browsed: row holds 9, value is 3",
-            row_value_violations(counters, row))
-
-    def test_row_checker_is_quiet_on_a_faithful_row(self):
-        counters = CycleCounters(peers_browsed=3, fanout_waves=9)
-        db = FakePipelineDB()
-        db.record_cycle_metrics(cycle_total_s=1.0, counters=counters,
-                                wanted_total=0)
-        self.assertEqual(
-            row_value_violations(counters, db.cycle_metrics[0]), [])
 
     def test_projection_checker_names_a_swapped_field(self):
         counters = CycleCounters(browse_time_s=1.0, match_time_s=2.0)
