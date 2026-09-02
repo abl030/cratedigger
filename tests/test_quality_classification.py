@@ -4519,27 +4519,41 @@ class TestPreimportFactRejects(unittest.TestCase):
         self.assertIsNone(r["preimport_nested"])
         self.assertEqual(evidence_decision_name(r), "audio_corrupt")
 
-    def test_classify_full_pipeline_decision_agrees_audio_corrupt_wins(self):
+    def test_classify_full_pipeline_decision_matches_evidence_priority(self):
         """Issue #1355 item 1, third site: ``classify_full_pipeline_decision``
         (preview/cleanup display) must name the same fact
-        ``evidence_decision_name`` (dispatch) does. No real decision dict
-        can carry both ``preimport_audio`` and ``preimport_nested`` as
-        reject values any more, so this drives the classifier's own pure
-        contract directly on a hand-built dict rather than through either
-        twin — a real regression here would only resurface if some future
-        writer ever populates both keys again, which is exactly the
-        landmine this pins against."""
+        ``evidence_decision_name`` (dispatch) does, for every adjacent pair
+        in the shared priority order (audio_corrupt > bad_audio_hash >
+        nested_layout > empty_fileset > mixed_source). No real decision
+        dict can carry two of these keys as reject values any more, so
+        this drives the classifier's own pure contract directly on
+        hand-built dicts rather than through either twin. A regression
+        here would only resurface if some future writer ever populates two
+        of these keys again, which is exactly the landmine this pins
+        against: the audio/nested pair was the original bug, and review
+        found the classifier's bad_hash/nested pair independently
+        reordered too before this test existed.
+        """
         from lib.quality import classify_full_pipeline_decision
 
-        both = {
-            "preimport_audio": "reject_corrupt",
-            "preimport_nested": "reject_nested",
-            "imported": False,
-        }
-        verdict, cleanup_eligible, reason = classify_full_pipeline_decision(both)
-        self.assertEqual(verdict, "confident_reject")
-        self.assertTrue(cleanup_eligible)
-        self.assertEqual(reason, "audio_corrupt")
+        cases = (
+            ("audio_corrupt over nested_layout",
+             {"preimport_audio": "reject_corrupt",
+              "preimport_nested": "reject_nested"},
+             "audio_corrupt"),
+            ("bad_audio_hash over nested_layout",
+             {"preimport_bad_hash": "reject_bad_hash",
+              "preimport_nested": "reject_nested"},
+             "bad_audio_hash"),
+        )
+        for desc, keys, expected in cases:
+            with self.subTest(desc=desc):
+                decision = {**keys, "imported": False}
+                verdict, cleanup_eligible, reason = (
+                    classify_full_pipeline_decision(decision))
+                self.assertEqual(verdict, "confident_reject")
+                self.assertTrue(cleanup_eligible)
+                self.assertEqual(reason, expected)
 
     def test_preimport_fact_reject_keeps_searching(self):
         """The mode-blind reducer reports the shared self-healing outcome."""

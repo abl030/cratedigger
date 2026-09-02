@@ -1357,22 +1357,25 @@ def classify_full_pipeline_decision(
 ) -> tuple[str, bool, str | None]:
     """Classify a full pipeline decision dict for preview/cleanup display.
 
-    Checks ``preimport_audio`` before ``preimport_nested`` — the same
-    precedence ``evidence_decision_name`` uses and
-    ``preimport_corrupt_outranks_nested`` decides for both twins (issue
-    #1355 item 1). Neither twin's dict can carry both keys as reject
-    values any more, so this ordering has no live consequence today, but a
-    third independently-authored order over the same two keys is exactly
-    the shape that bit this decision before.
+    Checks the five folder/audio-integrity keys in exactly the priority
+    order ``evidence_decision_name`` uses (audio_corrupt > bad_audio_hash >
+    nested_layout > empty_fileset > mixed_source) and
+    ``preimport_corrupt_outranks_nested`` decides the first two facts for
+    both twins (issue #1355 item 1). Neither twin's dict can carry more
+    than one of these keys as a reject value any more, so this ordering
+    has no live consequence today, but a third independently-authored
+    order over the same keys is exactly the shape that bit this decision
+    before, first the audio/nested pair, then (found in review) this
+    bad_hash/nested pair too.
     """
 
     if decision.get("preimport_audio") == "reject_corrupt":
         return "confident_reject", True, "audio_corrupt"
-    if decision.get("preimport_nested") == "reject_nested":
-        return "confident_reject", True, "nested_layout"
     # U11: bad-hash and empty-fileset early-exit rejects.
     if decision.get("preimport_bad_hash") == "reject_bad_hash":
         return "confident_reject", True, "bad_audio_hash"
+    if decision.get("preimport_nested") == "reject_nested":
+        return "confident_reject", True, "nested_layout"
     if decision.get("preimport_empty_fileset") == "reject_empty":
         return "confident_reject", True, "empty_fileset"
     if decision.get("preimport_mixed_source") == "reject_mixed_source":

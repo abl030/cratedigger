@@ -956,10 +956,11 @@ def measure_preimport_state(
     # walk. Only the read-only classify lane
     # (``lib.import_preview.preview_import_from_path``) uses its own
     # inspection to reject on ``has_nested_audio`` before ever calling this
-    # function; the measure-and-persist lane passes one along purely for
-    # the bitrate/VBR hints and lets ``folder_layout`` fall out of this
-    # function's own measurement like every other fact (issue #1355 item
-    # 1). Auto path passes None and does the walk here.
+    # function; the measure-and-persist lane passes one along for the
+    # bitrate/VBR hints AND as a second nested-layout witness OR'd into
+    # ``folder_layout`` below (issue #1355 item 1) — it never rejects on
+    # that witness before measuring, unlike the classify lane. Auto path
+    # passes None and does the walk here.
     inspection: LocalFileInspection | None = None
     if "mp3" in filetype_band and "flac" not in filetype_band:
         inspection = (precomputed_inspection if precomputed_inspection is not None
