@@ -517,8 +517,13 @@ class TestEveryParserSelectsThisModule(unittest.TestCase):
     carries that deletion-visibility contract for every rule row, this one
     included (issue #1313, batch D). What stays here is what a one-path pin
     cannot say: the package's own file list, and that ALL six parsers reach
-    the dialect tests. Deleting the row goes red in both places; narrowing
-    its prefix to a subset of the package goes red only here.
+    the dialect tests.
+
+    Deleting the row goes red in both places. Narrowing it so that
+    `pyright_checks.py` still matches while its siblings stop — a longer
+    string prefix, an `excluded_prefixes` entry — goes red only here, because
+    the pin watches one path and the measurement only looks at files the row
+    still matches.
     """
 
     def test_each_parser_module_resolves_the_dialect_tests(self) -> None:

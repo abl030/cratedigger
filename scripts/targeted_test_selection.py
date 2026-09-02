@@ -1865,6 +1865,15 @@ BASENAME_RULES: tuple[SelectionRule, ...] = (
 #: difference is currently unobservable and the row order below is not
 #: pinned by anything — what IS pinned is the stage order: table entry, then
 #: self-selector, then basename, then these.
+#:
+#: No row here constrains `root`, `top_level` or `suffixes`, so `matches`
+#: short-circuits before it ever reads the `PurePosixPath` argument for one
+#: of these rows. That is why passing a bogus `path` to a prefix row's
+#: `matches` is an equivalent mutation today (issue #1329 residual 8, and a
+#: mutmut survivor in every breadth pass over this file). It stops being
+#: equivalent the moment a row uses one of those three fields — this note is
+#: the warning that the safety is a property of the data below, not of the
+#: matcher.
 PREFIX_RULES: tuple[SelectionRule, ...] = (
     SelectionRule(
         name="prefix:lib/pipeline_db/",
