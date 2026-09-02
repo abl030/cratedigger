@@ -81,8 +81,6 @@ ALLOWLIST: dict[str, str] = {
         "status transition + rescue timestamp",
     "record_attempt":
         "counter increment + timestamp",
-    "record_cycle_metrics":
-        "scalar metrics, no dict payload",
     "record_non_consuming_search_attempt":
         "counter increment + timestamp",
     "set_downloading":

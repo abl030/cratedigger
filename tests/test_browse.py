@@ -310,7 +310,7 @@ class TestFanoutBrowseHappyPath(unittest.TestCase):
         self.assertEqual(result.browse_attempts, 0)
         self.assertEqual(ctx.peer_observations, set())
         self.assertEqual(result.negative_skips, set())
-        self.assertEqual(ctx.cache_pos_hits, 1)
+        self.assertEqual(ctx.counters.cache_pos_hits, 1)
 
     def test_redis_negative_hit_skips_slskd_without_hot_cache_write(self):
         slskd = FakeSlskdAPI()
@@ -327,7 +327,7 @@ class TestFanoutBrowseHappyPath(unittest.TestCase):
         self.assertEqual(result.browse_attempts, 0)
         self.assertEqual(ctx.peer_observations, set())
         self.assertEqual(result.negative_skips, {("user1", "A")})
-        self.assertEqual(ctx.cache_neg_hits, 1)
+        self.assertEqual(ctx.counters.cache_neg_hits, 1)
 
     def test_empty_browse_writes_persistent_negative(self):
         slskd = FakeSlskdAPI()

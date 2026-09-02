@@ -17,6 +17,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from lib.beets_db import BeetsAlbumIdentityRow
+from lib.cycle_counters import CycleCounters
 from lib.library_completeness import (
     CompletenessAlbum,
     CompletenessCounts,
@@ -261,15 +262,21 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
         from datetime import timedelta
         base = datetime.now(UTC)
         self.db.record_cycle_metrics(
-            cycle_total_s=300.0, browse_time_s=20.0, match_time_s=10.0,
-            search_time_s=240.0, peers_browsed=8, fanout_waves=2,
-            find_download_queued=4, find_download_completed=4,
+            cycle_total_s=300.0,
+            counters=CycleCounters(
+                browse_time_s=20.0, match_time_s=10.0, search_time_s=240.0,
+                peers_browsed=8, fanout_waves=2,
+                find_download_queued=4, find_download_completed=4,
+            ),
             completed_at=base - timedelta(hours=2), wanted_total=12,
         )
         self.db.record_cycle_metrics(
-            cycle_total_s=320.0, browse_time_s=22.0, match_time_s=11.0,
-            search_time_s=250.0, peers_browsed=9, fanout_waves=3,
-            find_download_queued=3, find_download_completed=3,
+            cycle_total_s=320.0,
+            counters=CycleCounters(
+                browse_time_s=22.0, match_time_s=11.0, search_time_s=250.0,
+                peers_browsed=9, fanout_waves=3,
+                find_download_queued=3, find_download_completed=3,
+            ),
             completed_at=base - timedelta(minutes=5), wanted_total=10,
         )
         # One found search (match-rate series) + enough no_match rows on

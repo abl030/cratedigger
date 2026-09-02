@@ -734,7 +734,7 @@ def _log_search_result(
     # passes through here, so this is the single increment site for both
     # the parallel pipeline and the serial fallback.
     if getattr(result, "watchdog_fired", False):
-        ctx.cycle_searches_watchdog_killed += 1
+        ctx.counters.cycle_searches_watchdog_killed += 1
     request_id = getattr(album, "db_request_id", None)
     if not request_id:
         return
@@ -993,14 +993,14 @@ def _apply_find_download_result(
         result.peers_browsed = metrics.peers_browsed
         result.peers_browsed_lazy = metrics.peers_browsed_lazy
         result.fanout_waves = metrics.fanout_waves
-        ctx.browse_time_s += metrics.browse_time_s
-        ctx.match_time_s += metrics.match_time_s
-        ctx.peers_browsed += metrics.peers_browsed
-        ctx.peers_browsed_lazy += metrics.peers_browsed_lazy
-        ctx.fanout_waves += metrics.fanout_waves
-        ctx.cache_pos_hits += metrics.cache_pos_hits
-        ctx.cache_neg_hits += metrics.cache_neg_hits
-        ctx.cache_misses += metrics.cache_misses
+        ctx.counters.browse_time_s += metrics.browse_time_s
+        ctx.counters.match_time_s += metrics.match_time_s
+        ctx.counters.peers_browsed += metrics.peers_browsed
+        ctx.counters.peers_browsed_lazy += metrics.peers_browsed_lazy
+        ctx.counters.fanout_waves += metrics.fanout_waves
+        ctx.counters.cache_pos_hits += metrics.cache_pos_hits
+        ctx.counters.cache_neg_hits += metrics.cache_neg_hits
+        ctx.counters.cache_misses += metrics.cache_misses
     elif find_result.metrics is not None:
         raise AssertionError("find_download metrics require owner context merge")
     if find_result.outcome == "found":
@@ -1175,7 +1175,7 @@ def _search_and_queue_parallel(
         find_ctx = prepare_find_download_context(album, ctx, result)
         future = find_pool.submit(find_download, album, find_ctx)
         find_inflight[future] = (album, result)
-        ctx.find_download_queued += 1
+        ctx.counters.find_download_queued += 1
 
     def _apply_find_future(
         future: Future[FindDownloadResult], *, log_search: bool = True,
@@ -1189,7 +1189,7 @@ def _search_and_queue_parallel(
         _apply_find_download_result(
             album, result, find_result, failed_grab, grab_list, ctx,
         )
-        ctx.find_download_completed += 1
+        ctx.counters.find_download_completed += 1
         if log_search:
             try:
                 _log_search_result(album, result, ctx)
@@ -1215,7 +1215,7 @@ def _search_and_queue_parallel(
             _apply_find_future(future)
         elapsed = time.time() - drain_start
         find_merge_time_s += elapsed
-        ctx.find_download_drain_time_s += elapsed
+        ctx.counters.find_download_drain_time_s += elapsed
 
     def _drain_find_after_owner_exception() -> None:
         nonlocal find_pool, find_merge_time_s
@@ -1236,7 +1236,7 @@ def _search_and_queue_parallel(
                 logger.exception("Failed to merge find_download result after owner crash")
         elapsed = time.time() - drain_start
         find_merge_time_s += elapsed
-        ctx.find_download_drain_time_s += elapsed
+        ctx.counters.find_download_drain_time_s += elapsed
 
     try:
         with ThreadPoolExecutor(max_workers=max_inflight) as pool:
@@ -1332,7 +1332,7 @@ def _search_and_queue_parallel(
     # to the per-cycle accumulator so the cycle summary can split it from
     # browse/match. Includes both submit (network round-trip) and collect
     # (poll + result merge) since both are gated by slskd's pipeline depth.
-    ctx.search_time_s += max(0.0, wall_elapsed - find_merge_time_s)
+    ctx.counters.search_time_s += max(0.0, wall_elapsed - find_merge_time_s)
 
     try:
         if find_inflight:
@@ -1342,7 +1342,7 @@ def _search_and_queue_parallel(
                     _apply_find_future(future)
                 except Exception:
                     logger.exception("Failed to merge find_download result")
-            ctx.find_download_drain_time_s += time.time() - find_drain_start
+            ctx.counters.find_download_drain_time_s += time.time() - find_drain_start
     finally:
         if find_pool is not None:
             find_pool.shutdown(wait=True)
@@ -1571,7 +1571,7 @@ def run_cycle(
     # Per-cycle watchdog counter (issue #212). Reset at cycle start;
     # incremented by `_log_search_result` for every SearchResult whose
     # `watchdog_fired=True`.
-    ctx.cycle_searches_watchdog_killed = 0
+    ctx.counters.cycle_searches_watchdog_killed = 0
 
     # --- Phase 0 convergence ---
     # Run the ordered pre-phase steps (cooldown load, search-plan
