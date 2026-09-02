@@ -1449,5 +1449,237 @@ class TestFakeTerminalForceWrongMatchCleanupJobs(unittest.TestCase):
         self.assertNotIn(historical_null_result.id, selected)
 
 
+class TestFakeBeetsChildRefusalIsNotAutomationOnly(unittest.TestCase):
+    """A live Beets child refuses every job type, not just automation.
+
+    Four production methods spell that rule as an unconditional early
+    return above their SQL, so for a force, local or YouTube job the
+    Python guard is the whole enforcement: none of those statements'
+    non-automation arms reads ``execution_beets_pid`` at all. The fake
+    folded each one into its automation arm, where a non-automation row
+    short-circuits past it.
+
+    This is the shape #1313 already fixed at the two candidate scans
+    (``test_a_live_beets_child_refuses_every_candidate_type``); it did not
+    reach these four. Measured on the 2026-09-02 #1347 pass by driving the
+    real ``PipelineDB`` and the fake through the same helper against an
+    ephemeral PostgreSQL: production wrote nothing, the fake advanced the
+    row.
+    """
+
+    def _lease(self, beets: bool) -> ExecutionLeaseSnapshot:
+        return ExecutionLeaseSnapshot(
+            host_boot_id="boot-beets-child",
+            invocation_id="invocation-beets-child",
+            systemd_unit="cratedigger-import-preview-worker.service",
+            worker=ProcessIdentity(pid=711, start_ticks=7011),
+            beets=ProcessIdentity(pid=712, start_ticks=7012) if beets else None,
+        )
+
+    def _previewing_youtube_job(self, db: FakePipelineDB, request_id: int):
+        """A non-automation row parked at ``queued``/``running``."""
+        from lib.import_queue import IMPORT_JOB_YOUTUBE
+
+        db.seed_request(make_request_row(
+            id=request_id,
+            mb_release_id=f"fake-beets-child-{request_id}",
+            status="wanted",
+        ))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_YOUTUBE,
+            request_id=request_id,
+            payload={
+                "staged_path": "/incoming/album",
+                "request_id": request_id,
+                "browse_id": "MPREb_beets_child",
+                "download_log_id": 1,
+            },
+        )
+        claimed = db.claim_import_preview_job_candidate(
+            job.id, worker_id="preview",
+        )
+        assert claimed is not None
+        return claimed
+
+    def test_a_live_beets_child_refuses_a_non_automation_preview_heartbeat(
+        self,
+    ) -> None:
+        db = FakePipelineDB()
+        job = self._previewing_youtube_job(db, 4501)
+
+        # Must still work: a lease with no child refreshes the stamp, so
+        # the refusal below is a refusal and not a dead fixture.
+        self.assertTrue(db.heartbeat_import_job_preview(
+            job.id, expected_execution_lease=self._lease(beets=False),
+        ))
+        before = db.get_import_job(job.id)
+        assert before is not None
+
+        self.assertFalse(db.heartbeat_import_job_preview(
+            job.id, expected_execution_lease=self._lease(beets=True),
+        ))
+        after = db.get_import_job(job.id)
+        assert after is not None
+        self.assertEqual(
+            after.preview_heartbeat_at, before.preview_heartbeat_at,
+        )
+
+    def test_a_live_beets_child_refuses_a_non_automation_importable_mark(
+        self,
+    ) -> None:
+        db = FakePipelineDB()
+        job = self._previewing_youtube_job(db, 4502)
+
+        self.assertIsNone(db.mark_import_job_preview_importable(
+            job.id, expected_execution_lease=self._lease(beets=True),
+        ))
+        blocked = db.get_import_job(job.id)
+        assert blocked is not None
+        self.assertEqual(blocked.preview_status, "running")
+
+        # Must still work: the same call without a child hands the row on.
+        self.assertIsNotNone(db.mark_import_job_preview_importable(
+            job.id, expected_execution_lease=self._lease(beets=False),
+        ))
+        handed_on = db.get_import_job(job.id)
+        assert handed_on is not None
+        self.assertEqual(handed_on.preview_status, "evidence_ready")
+
+    def test_a_live_beets_child_refuses_a_non_automation_launch(self) -> None:
+        """The Beets launch fence — the highest-stakes member of the four."""
+        from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
+        from tests.evidence_helpers import make_album_quality_evidence
+
+        db = FakePipelineDB()
+        source_path = "/failed/beets-child-launch"
+        db.seed_request(make_request_row(
+            id=4503, mb_release_id="release-beets-child", status="wanted",
+        ))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=4503,
+            payload=force_import_payload(
+                download_log_id=4503, failed_path=source_path,
+            ),
+        )
+        evidence = make_album_quality_evidence(
+            mb_release_id="release-beets-child", source_path=source_path,
+        )
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id="release-beets-child",
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_import_job_candidate_evidence(job.id, persisted.id)
+        assert db.mark_import_job_preview_importable(job.id) is not None
+        claimed = claim_next_import_job(db, worker_id="importer")
+        assert claimed is not None
+
+        self.assertIsNone(db.authorize_import_job_launch(
+            claimed.id,
+            request_id=4503,
+            release_id="release-beets-child",
+            source_path=source_path,
+            expected_execution_lease=self._lease(beets=True),
+        ))
+        refused = db.get_import_job(claimed.id)
+        assert refused is not None
+        self.assertIsNone(refused.beets_launch_authorized_at)
+
+        # Must still work: no child, and the same call authorizes.
+        self.assertIsNotNone(db.authorize_import_job_launch(
+            claimed.id,
+            request_id=4503,
+            release_id="release-beets-child",
+            source_path=source_path,
+            expected_execution_lease=self._lease(beets=False),
+        ))
+        authorized = db.get_import_job(claimed.id)
+        assert authorized is not None
+        self.assertIsNotNone(authorized.beets_launch_authorized_at)
+
+
+class TestFakeAutomationHandoffRowShape(unittest.TestCase):
+    """The handoff INSERT's column list, which the fake used to flatten.
+
+    ``handoff_automation_import``'s INSERT names seven columns and omits
+    ``preview_message``, ``preview_completed_at`` and ``importable_at``, so
+    migrations 005/018's DEFAULTs fire and a fresh automation job is born
+    carrying ``'Preview gate disabled'`` and two ``NOW()`` stamps. The
+    other two writers into this table (``enqueue_import_job`` and
+    ``enqueue_youtube_import_and_mark_success``) name the same three and
+    write explicit NULLs, so every non-automation job is born with NULLs.
+    The fake ran all of them through one ``_append_import_job`` that
+    hard-coded NULL, erasing the difference.
+
+    Live evidence is ``importable_at``, not ``preview_message``. The
+    message DEFAULT is transient: ``mark_import_job_preview_importable``
+    overwrites ``preview_message`` with the preview lane's own text, so no
+    settled row still shows it. ``importable_at`` survives because that
+    same writer only ``COALESCE``s it. Of the rows created since
+    2026-07-31 (measured 2026-09-02, the settled cohort after
+    ``handoff_automation_import`` shipped on 2026-07-29), all 1,350
+    ``automation_import`` rows carry ``importable_at = created_at`` and
+    not one of the 92 force/youtube/local rows does.
+
+    Do not cite the 7,558 rows whose ``preview_message`` still reads
+    ``'Preview gate disabled'`` as evidence for this: every one was
+    created between 2026-04-25 and 2026-05-12, before
+    ``handoff_automation_import`` existed, and all 7,558 carry
+    ``preview_status = 'would_import'`` where the handoff explicitly
+    writes ``'waiting'``. They come from the pre-#898 ``enqueue_import_job``,
+    which omitted ``preview_status`` too. The #1347 review round caught
+    that misattribution.
+
+    The asymmetry is production's to keep or change, not the fake's to
+    smooth over: ``importable_at`` is the candidate scan's sort key
+    (``ORDER BY importable_at ASC NULLS LAST``), so an automation job
+    sorts by its handoff time while a force job sorts by its
+    preview-completion time. Flattening it in the fake let a test pin a
+    queue order production does not produce.
+    """
+
+    def test_handoff_leaves_the_three_defaulted_columns_to_the_database(
+        self,
+    ) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=4504, mb_release_id="fake-handoff-shape", status="wanted",
+        ))
+        job = handoff_automation_owner(db, 4504)
+
+        self.assertEqual(job.preview_status, "waiting")
+        self.assertEqual(job.preview_message, "Preview gate disabled")
+        self.assertIsNotNone(job.preview_completed_at)
+        self.assertIsNotNone(job.importable_at)
+
+    def test_enqueue_still_writes_those_three_columns_as_null(self) -> None:
+        """The other writer, so the pin above is a difference, not a default.
+
+        ``test_import_job_queue_defaults_to_preview_waiting`` asserts the
+        same four values; this one exists for the contrast, and reads as
+        half of a pair with the handoff pin above rather than on its own.
+        """
+        from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=4505, mb_release_id="fake-enqueue-shape", status="wanted",
+        ))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=4505,
+            payload=force_import_payload(
+                download_log_id=4505, failed_path="/failed/enqueue-shape",
+            ),
+        )
+
+        self.assertEqual(job.preview_status, "waiting")
+        self.assertIsNone(job.preview_message)
+        self.assertIsNone(job.preview_completed_at)
+        self.assertIsNone(job.importable_at)
+
+
 if __name__ == "__main__":
     unittest.main()
