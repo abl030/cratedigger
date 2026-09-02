@@ -208,6 +208,20 @@ function nonStringHaystack(method, haystack) {
   return `t.${method} needs a string haystack, got ${kind}: ${show(haystack)}`;
 }
 
+/**
+ * Refuse a non-array haystack for `anyContains`/`noneContains`.
+ *
+ * The mirror of `nonStringHaystack`, and it exists for the same reason:
+ * `'/api/x'.some` is not a function, so a caller who passed one string
+ * instead of the recorded list would get a TypeError that kills the whole
+ * suite rather than a named failing assertion.
+ */
+function nonArrayHaystack(method, haystacks) {
+  if (Array.isArray(haystacks)) return '';
+  return `t.${method} needs an array of strings, got `
+    + `${typeof haystacks}: ${show(haystacks)}`;
+}
+
 function errorMismatchDetail(thrown, expected) {
   const got = thrown && thrown.constructor && thrown.constructor.name;
   return expected instanceof RegExp
@@ -341,6 +355,41 @@ export function suite(moduleUrl) {
         !haystack.includes(needle),
         message,
         `${show(needle)} unexpectedly present in ${show(haystack)}`,
+      );
+    },
+    /**
+     * Substring containment across a LIST of strings: did any of them
+     * contain `needle`?
+     *
+     * The motivating haystack is a recorded call log — the fetch URLs a
+     * test collected while driving production. `t.ok(urls.some(u =>
+     * u.includes(x)), …)` answers the same question and then throws the
+     * evidence away: the failure reads "expected truthy, got false" and
+     * never says which URLs WERE requested, which is the only thing you
+     * want at that moment.
+     *
+     * Distinct from `contains`, which takes one string, and from
+     * `array.includes(value)`, which is exact membership and stays a plain
+     * `t.ok` — see `nonStringHaystack` for why that split exists.
+     */
+    anyContains(haystacks, needle, message) {
+      const refusal = nonArrayHaystack('anyContains', haystacks);
+      if (refusal) return record(false, message, refusal);
+      return record(
+        haystacks.some(item => String(item).includes(needle)),
+        message,
+        `no entry contains ${show(needle)}; got ${show(haystacks)}`,
+      );
+    },
+    /** The negation of `anyContains`, naming the entry that matched. */
+    noneContains(haystacks, needle, message) {
+      const refusal = nonArrayHaystack('noneContains', haystacks);
+      if (refusal) return record(false, message, refusal);
+      const hit = haystacks.find(item => String(item).includes(needle));
+      return record(
+        hit === undefined,
+        message,
+        `${show(needle)} unexpectedly present in ${show(hit)}`,
       );
     },
     match(value, pattern, message) {
@@ -574,10 +623,13 @@ export function stubGlobals(values) {
  * `fakeElement`, `test_js_util.mjs`'s session-overlay node and
  * `test_js_convergence.mjs`'s button), which is why `isConnected`,
  * `children`, `focused` and the attribute map live here rather than in seven
- * files. It is deliberately not their UNION: `insertAdjacentElement` stays
- * hand-rolled at 12 sites because each closes over that test's own
- * `inserted` array, and `append`, `tag`, `type`, `listeners` and `closest`
- * have one caller each. Seed them through `initial`.
+ * files. `insertAdjacentElement` used to be excluded for closing over each
+ * test's own `inserted` array; seeding that array as `inserted` covers it,
+ * and five sites across five suites now do (issue #1346). The seven that
+ * remain are all in `test_js_release_actions.mjs`, on hand-rolled object
+ * literals and classes rather than on this factory, so adopting them is a
+ * different change. `append`, `tag`, `type`, `listeners` and `closest` still
+ * have one caller each — seed them through `initial`.
  *
  * A fresh node is `isConnected: false`, as in a real DOM: it is connected
  * by `appendChild`, by a caller's `insertAdjacentElement`, or by seeding
@@ -625,6 +677,18 @@ export function element(initial = {}) {
     hasAttribute(name) { return attributes.has(name); },
     addEventListener() {},
     insertAdjacentHTML() {},
+    // Seed `inserted: <array>` and every child inserted into this element
+    // is recorded there, which is the hand-rolled shape eight sites across
+    // five suites wrote out in full. Position is ignored on purpose: a real
+    // `afterend` insert makes a SIBLING, not a child, so pushing into
+    // `children` would be less faithful than not modelling it at all. What
+    // a real insertion does observably to the child, and what production
+    // reads back, is `isConnected`.
+    insertAdjacentElement(_position, child) {
+      child.isConnected = true;
+      if (Array.isArray(this.inserted)) this.inserted.push(child);
+      return child;
+    },
     ...initial,
   };
   if (!Object.prototype.hasOwnProperty.call(initial, 'classList')) {

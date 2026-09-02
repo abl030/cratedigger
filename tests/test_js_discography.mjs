@@ -186,10 +186,7 @@ t.section('addRelease() — processing exists response exposes exact owner recov
     const made = element({
       tag,
       isConnected: tag === 'button',
-      insertAdjacentElement(_position, child) {
-        child.isConnected = true;
-        mounted.push(child);
-      },
+      inserted: mounted,
     });
     created.push(made);
     return made;

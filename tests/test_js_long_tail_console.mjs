@@ -575,10 +575,7 @@ for (const scenario of [
   const control = element({
     textContent: scenario.name,
     isConnected: true,
-    insertAdjacentElement(_position, child) {
-      child.isConnected = true;
-      inserted.push(child);
-    },
+    inserted,
   });
   control.setAttribute('data-pipeline-request-id', String(scenario.requestId));
   const live = element();

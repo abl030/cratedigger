@@ -46,10 +46,7 @@ function fakeDomElement(
   const node = element({
     textContent,
     isConnected,
-    insertAdjacentElement(_position, child) {
-      child.isConnected = true;
-      inserted.push(child);
-    },
+    inserted,
   });
   if (requestId != null) {
     node.setAttribute('data-pipeline-request-id', String(requestId));
