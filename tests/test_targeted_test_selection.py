@@ -829,6 +829,43 @@ class TestSelectionRuleTable(unittest.TestCase):
                 prefix_rules=(),
             )
 
+        # A SUBSTITUTE row, not an empty table. Removing rows cannot tell
+        # whether the basename stage really reads the passed table: the
+        # rows are disjoint, so a stage that ignored the kwarg would still
+        # match the same row whenever the outer lookup found one at all,
+        # and two survivors said so (the `basename_rules=` forward dropped
+        # at `_direct_test_candidates`' own call to `_basename_rule`, and
+        # at this function's call to `_direct_test_candidates`). Only a
+        # table naming a DIFFERENT row for the same path separates them.
+        substitute = SelectionRule(
+            name="basename:_substitute_probe",
+            description="a substitute basename row, for this pin only",
+            root="lib",
+            suffixes=(".py",),
+            derived=("tests.test_targeted_test_selection",),
+        )
+        substituted = [
+            (source.name, source.modules)
+            for source in resolve_attributed_neighbours(
+                download,
+                PurePosixPath(download),
+                REPO_ROOT,
+                basename_rules=(substitute,),
+            )
+            if source.name == substitute.name
+        ]
+
+        self.assertEqual(
+            substituted,
+            [(substitute.name, ("tests.test_targeted_test_selection",))],
+        )
+        self.assertEqual(
+            _direct_test_candidates(
+                PurePosixPath(download), basename_rules=(substitute,)
+            ),
+            ("tests.test_targeted_test_selection",),
+        )
+
     def test_attribution_names_the_mechanism_behind_every_module(self) -> None:
         """Three mechanisms fire for one path, and each names what it added.
 
