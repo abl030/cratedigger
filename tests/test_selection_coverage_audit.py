@@ -79,6 +79,7 @@ it is a deterministic audit, no generated property.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import functools
 import io
 import re
@@ -557,6 +558,77 @@ MASKABLE_RULE_PINS: dict[str, dict[str, tuple[str, ...]]] = {
             "tests.test_quality_generated",
         ),
     },
+}
+
+
+#: The `SelectionRule` fields that decide WHICH paths a row matches, derived
+#: from the dataclass rather than hand-listed, so a new matcher field joins
+#: the frozen set the moment it exists. `neighbours` and `derived` are
+#: excluded because they decide what a matched path GETS, which
+#: `MASKABLE_RULE_PINS` already watches.
+MATCHER_FIELDS: tuple[str, ...] = tuple(
+    field.name
+    for field in dataclasses.fields(SelectionRule)
+    if field.name not in {"name", "description", "neighbours", "derived"}
+)
+
+
+def rule_matcher(rule: SelectionRule) -> dict[str, object]:
+    """A row's path conditions, minus every field left at its default.
+
+    Dropping the defaults keeps the frozen copy in `MASKABLE_RULE_MATCHERS`
+    short enough to read, and loses nothing: a field that gains a value, or
+    loses one, changes the dict either way.
+    """
+    defaults = {
+        field.name: field.default for field in dataclasses.fields(SelectionRule)
+    }
+    return {
+        name: getattr(rule, name)
+        for name in MATCHER_FIELDS
+        if getattr(rule, name) != defaults[name]
+    }
+
+
+#: Contract D's second half, and the answer to the review's one high finding.
+#: `MASKABLE_RULE_PINS` proves a row still CONTRIBUTES what it should to the
+#: paths it names. It says nothing about the paths it no longer matches:
+#: adding `excluded_prefixes=("web/routes/library", "web/routes/triage")` to
+#: `prefix:web/routes/` left `web/routes/triage.py` selecting nothing at all,
+#: with all 125 tests green (measured, review runner M30). Over a policed
+#: root the root rule catches that; over `migrations/`, `nix/`, `web/`,
+#: `harness/` and the top level nothing does, and those are exactly the roots
+#: contract D exists for.
+#:
+#: So the matchers of every pinned row are frozen here. The measurement side
+#: cannot catch this on its own — `rule_candidate_paths` derives its walk
+#: FROM the matchers, so a narrowed row shrinks the population it is judged
+#: against rather than showing a loss. An external anchor is the only thing
+#: that can, the same reasoning `EXPECTED_SUFFIXES` records for
+#: `ROOT_COVERAGE_RULES` one table over.
+MASKABLE_RULE_MATCHERS: dict[str, dict[str, object]] = {
+    "basename:lib/*.py": {"root": "lib", "suffixes": (".py",)},
+    "basename:scripts/*.py": {"root": "scripts", "suffixes": (".py",)},
+    "basename:web/*.py": {
+        "root": "web",
+        "suffixes": (".py",),
+        "excluded_prefixes": ("web/routes/",),
+    },
+    "basename:<top-level>.py": {"top_level": True, "suffixes": (".py",)},
+    "prefix:lib/pipeline_db/": {"prefixes": ("lib/pipeline_db/",)},
+    "prefix:migrations/": {"prefixes": ("migrations/",)},
+    "prefix:tests/fakes/": {"prefixes": ("tests/fakes/",)},
+    "prefix:scripts/phase_parsers/": {"prefixes": ("scripts/phase_parsers/",)},
+    "prefix:web/routes/": {"prefixes": ("web/routes/",)},
+    "prefix:nix/": {
+        "prefixes": ("nix/",),
+        "exact_paths": ("flake.nix", "flake.lock"),
+    },
+    "prefix:harness/": {
+        "prefixes": ("harness/",),
+        "exact_paths": ("lib/beets.py",),
+    },
+    "prefix:lib/quality/": {"prefixes": ("lib/quality/",)},
 }
 
 
@@ -1264,6 +1336,38 @@ class TestMaskableRulePins(unittest.TestCase):
                     "restore what the row contributed.",
                 )
 
+    def test_every_pinned_rows_matchers_are_frozen(self) -> None:
+        """The loss pins watch what a row gives the paths it names; this
+        watches which paths it matches at all.
+
+        Narrowing a row over an unpoliced root deletes real selection with
+        nothing else objecting, and the loss pins cannot see it: their
+        measurement walks the row's OWN matchers, so narrowing shrinks the
+        population rather than showing a loss. Both tables cover the same
+        rows, so a pin added to one and not the other is red here.
+        """
+        self.assertEqual(
+            sorted(MASKABLE_RULE_MATCHERS),
+            sorted(MASKABLE_RULE_PINS),
+            "every maskable row needs both a loss pin and a frozen matcher",
+        )
+
+        rules = {rule.name: rule for rule in SELECTION_RULES}
+        for name, expected in MASKABLE_RULE_MATCHERS.items():
+            rule = rules.get(name)
+            if rule is None:
+                # The sibling test owns the "row is gone" message.
+                continue
+            with self.subTest(rule=name):
+                self.assertEqual(
+                    rule_matcher(rule),
+                    expected,
+                    f"{name}'s path conditions changed. No fail-closed rule "
+                    "watches which files this row matches, so narrowing it "
+                    "silently drops whatever stopped matching — update the "
+                    "frozen matcher here deliberately, or restore the row.",
+                )
+
     def test_every_pin_covers_every_channel_the_row_can_silently_lose(
         self,
     ) -> None:
@@ -1649,6 +1753,33 @@ class TestSelectionCoverageCheckersTripOnViolations(unittest.TestCase):
             ),
             {},
         )
+
+    def test_selection_or_refusal_swallows_only_the_fail_closed_refusal(
+        self,
+    ) -> None:
+        """Widening its `except ValueError` to `except Exception` survived
+        every other test (review runner F2), and the helper's whole job is
+        telling a fail-closed refusal apart from a resolution: anything else
+        swallowed would quietly reclassify a broken resolver as "this path
+        refuses" and drop rows out of the maskable set.
+
+        A `derived` template naming a field the formatter has no value for
+        raises `KeyError` inside the real `render_derived`, which is a
+        producible world rather than a patched one.
+        """
+        exploding = SelectionRule(
+            name="prefix:_exploding_probe",
+            description="probe",
+            exact_paths=("lib/_exploding_probe.py",),
+            derived=("tests.test_{no_such_field}",),
+        )
+
+        with self.assertRaises(KeyError):
+            selection_or_refusal(
+                "lib/_exploding_probe.py",
+                REPO_ROOT,
+                prefix_rules=(*PREFIX_RULES, exploding),
+            )
 
     def test_silent_loss_checker_skips_a_path_already_failing_closed(
         self,

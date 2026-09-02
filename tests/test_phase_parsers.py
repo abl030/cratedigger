@@ -519,11 +519,12 @@ class TestEveryParserSelectsThisModule(unittest.TestCase):
     cannot say: the package's own file list, and that ALL six parsers reach
     the dialect tests.
 
-    Deleting the row goes red in both places. Narrowing it so that
-    `pyright_checks.py` still matches while its siblings stop — a longer
-    string prefix, an `excluded_prefixes` entry — goes red only here, because
-    the pin watches one path and the measurement only looks at files the row
-    still matches.
+    Deleting the row, and narrowing it so that `pyright_checks.py` still
+    matches while its siblings stop, both go red in both places: the pins
+    watch what the pinned path loses AND freeze every pinned row's path
+    conditions. What is still only here is the per-file evidence — that all
+    six parsers really do reach the dialect tests, against this package's own
+    file list, rather than one sampled path standing in for the rest.
     """
 
     def test_each_parser_module_resolves_the_dialect_tests(self) -> None:

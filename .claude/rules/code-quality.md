@@ -492,9 +492,11 @@ another prefix rule, or a hand-authored entry — which is how
 `scripts/phase_parsers/pyright_checks.py` would quietly fall back to a
 module written for a different script. A pin names sample paths and what
 each stops selecting, one per contribution channel the row can silently
-lose; a row that matches no real file, or contributes to none of the files
-it matches, is refused outright, since either would measure clean while
-selecting nothing. Before adding a hand-authored entry, ask what
+lose, and `MASKABLE_RULE_MATCHERS` freezes the same row's path conditions,
+because a narrowed matcher shrinks the population the measurement judges
+the row against rather than showing a loss. A row that matches no real
+file, or contributes to none of the files it matches, is refused outright,
+since either would measure clean while selecting nothing. Before adding a hand-authored entry, ask what
 the path already resolves:
 `nix-shell --run "python3 scripts/targeted_test_selection.py explain <path>"`
 names the mechanism behind every selected module, every module a rule
