@@ -9,6 +9,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from tests.fakes.subprocess_env import inherited_environment
+
 _SHIM_MODULE = r'''# Shared body for the daily-flake-update fake git/nix/nix-shell commands.
 # Imported by a tiny stub (never executed directly as __main__) so CPython
 # compiles it once and caches the bytecode in __pycache__ across every fake
@@ -332,7 +334,7 @@ class FakeDailyFlakeUpdateCommands:
     def environment(
         self, *, extra_env: dict[str, str] | None = None
     ) -> dict[str, str]:
-        env = os.environ.copy()
+        env = inherited_environment()
         env.update(
             {
                 "PATH": f"{self.fake_bin}:{env['PATH']}",

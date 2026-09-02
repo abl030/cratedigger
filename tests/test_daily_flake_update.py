@@ -12,9 +12,11 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from pathlib import Path
+from unittest.mock import patch
 
 from tests._source_pins import pinned_source
 from tests.fakes.daily_flake_update import FakeDailyFlakeUpdateCommands
+from tests.fakes.subprocess_env import BYTECODE_CACHE_OPT_OUT_VARS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "daily_flake_update.sh"
@@ -506,13 +508,25 @@ class TestDailyFlakeUpdateFakeShimCaching(unittest.TestCase):
         # `main()` appends to `state["events"]` before any branch dispatch, so
         # a stub that imports `_shim` but never calls `main()` leaves it empty
         # regardless of exit code.
-        proc = subprocess.run(
-            [str(self.fake.fake_bin / "git"), "diff", "--quiet", "--", "flake.lock"],
-            env=self.fake.environment(),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        # Run with the opt-outs SET, not merely with whatever the reviewer
+        # happened to export. A mutant runner must set
+        # PYTHONDONTWRITEBYTECODE=1, so this used to be a standing collision
+        # between two house rules; the fixture now drops both variables and
+        # this is where that is proved (issue #1313 residual 1329-2).
+        with patch.dict(
+            os.environ,
+            {name: "1" for name in BYTECODE_CACHE_OPT_OUT_VARS},
+        ):
+            proc = subprocess.run(
+                [
+                    str(self.fake.fake_bin / "git"),
+                    "diff", "--quiet", "--", "flake.lock",
+                ],
+                env=self.fake.environment(),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
         self.assertEqual(proc.returncode, 1, proc.stderr)
         self.assertIn(
             ["git", "diff", "--quiet", "--", "flake.lock"],
@@ -523,9 +537,9 @@ class TestDailyFlakeUpdateFakeShimCaching(unittest.TestCase):
         self.assertEqual(
             len(cached), 1,
             "expected the shim's bytecode to be cached in __pycache__ "
-            f"after one call, found {cached} -- check for an ambient "
-            "PYTHONDONTWRITEBYTECODE or PYTHONPYCACHEPREFIX in your "
-            "environment, either of which silently defeats this caching",
+            f"after one call, found {cached} -- the fixture's own "
+            "environment() is what must drop PYTHONDONTWRITEBYTECODE and "
+            "PYTHONPYCACHEPREFIX, both of which silently defeat this caching",
         )
 
     def test_command_stub_fails_loudly_without_the_shared_shim_module(self) -> None:
