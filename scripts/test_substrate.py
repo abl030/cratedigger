@@ -1126,13 +1126,17 @@ class FinalGateError(RuntimeError):
 # one gate process runs one suite, so there is nothing here for a second run
 # to collide with.
 #
-# _suite_child_pid is cleared the moment the child has been waited for, so a
-# signal arriving during the tail of _run_gate cannot signal a pid the
-# kernel has already released. It is published on the line after Popen
-# returns, which leaves a window of a few instructions where a signal finds
-# it still None and the suite survives — the same window in which no
-# gate_pid has been recorded either, so the receipt is honestly
-# identity-less rather than wrong.
+# _suite_child_pid is cleared on the statement after child.wait() returns,
+# which narrows — but does not close — the window where the tail of
+# _run_gate could signal a pid the kernel has already released and handed
+# out again. Publication has the mirror-image window: it happens on the line
+# after Popen returns, so a signal a few instructions earlier finds None and
+# the suite survives. In THAT window no gate_pid has been recorded either,
+# and status reads the two together, so the receipt is incomplete-with-no-
+# identity; it does still write the interruption marker, which by itself
+# would say the suite was signalled when nothing was (review round, reader
+# finding 8). Both windows are instruction-wide and neither is drivable
+# deterministically; they are recorded here rather than guarded.
 _suite_child_pid: int | None = None
 _interrupted_receipt: Path | None = None
 
@@ -1274,25 +1278,28 @@ def _leave_incomplete_receipt(signum: int, _frame: FrameType | None) -> None:
     One added signal fixes it, because the suite already knows how to drain.
     ``_suite_child_pid`` is the coordinator itself: measured, ``nix develop
     --command bash -c "bash scripts/run_tests.sh"`` execs straight through,
-    so that one pid IS ``scripts/run_test_suite.py`` and its group holds
-    nothing else — every phase runs in a session of its own
-    (``execute_phase``'s ``start_new_session=True``). SIGTERM there reaches
-    that coordinator's own interrupt handler, which signals each active
-    phase group in turn, publishes its summary, and exits, releasing the
-    admission lock. Live receipt ``…ih66v9st`` is the whole sequence from
-    the outside: ``INTERRUPTED: signal 15`` and then a bundle, on a run
-    whose helper was already gone.
+    so that one pid IS ``scripts/run_test_suite.py``, and no part of the
+    suite under it shares its process group — every phase runs in a session
+    of its own (``execute_phase``'s ``start_new_session=True``). SIGTERM
+    there reaches that coordinator's own interrupt handler, which signals
+    each active phase group in turn, publishes its summary, and exits,
+    releasing the admission lock. Live receipt ``…ih66v9st`` is the whole
+    sequence from the outside: ``INTERRUPTED: signal 15`` and then a bundle,
+    on a run whose helper was already gone.
 
     Nothing here changes what a signal aimed at the GATE's process group
     does; the child stays in it, and that signal still reaches the
     coordinator directly as it always did. This is purely the case that
     signal never covered.
 
-    Teardown comes first and the marker second, so a receipt write that
-    fails cannot leave the suite running. Both are best-effort: a child that
-    has already gone (the ordinary terminal Ctrl-C, where the signal reached
-    the whole group at once) raises ``ProcessLookupError``, which is the
-    intended end state, not a failure.
+    Both steps are best-effort and independently guarded: a child that has
+    already gone (the ordinary terminal Ctrl-C, where the signal reached the
+    whole group at once) raises ``ProcessLookupError``, which is the intended
+    end state rather than a failure. Teardown is written first for the case
+    that guard cannot catch — a receipt write that HANGS rather than raising,
+    on a wedged filesystem — since an ordinary write failure is caught either
+    way and does not change the outcome. Ordering is cheap insurance here,
+    not a claim any test can drive.
 
     ``os._exit`` rather than ``sys.exit``, because it is the exact analog of
     the shell's ``trap 'exit 128'``: the process is gone at the moment the
@@ -1558,37 +1565,48 @@ def _status_receipt(argument: str) -> int:
         print("exact-active")
         return 0
     print("incomplete")
-    _print_incompletion_diagnosis(receipt)
+    _print_incompletion_diagnosis(receipt, gate_live=gate_live)
     return 0
 
 
-def _print_incompletion_diagnosis(receipt: Path) -> None:
+def _print_incompletion_diagnosis(receipt: Path, *, gate_live: bool) -> None:
     """Say on stderr what an ``incomplete`` receipt implies about its suite.
 
     Stdout stays the single word the ``check`` skill and every caller parse.
-    The distinction this adds is the one an operator actually acts on: a
-    receipt whose gate handled a signal tore its own suite down, so a re-run
-    starts immediately, while one with no marker lost its gate to something
-    no handler survives and may have left a suite holding the admission lock
-    (issue #1313, residual 1324-7). Both still mean "re-run"; only the
-    second means "expect to wait, or look for the orphan first".
+    Two independent facts decide the advice, and the operator acts on the
+    second at least as much as the first (issue #1313, residual 1324-7).
+
+    The marker says whether this run's gate got to signal its suite before
+    it went. ``gate_live`` says whether that suite is STILL RUNNING — and it
+    routinely is right after an interruption, because the gate signals and
+    exits without waiting while the coordinator takes its time draining
+    phases and publishing a summary, holding the admission lock throughout.
+    Reporting only the marker would confidently announce a free lock in
+    exactly the window an operator is most likely to look (review round,
+    reader finding 1).
     """
     interrupted = receipt / RECEIPT_INTERRUPTED_FIELD
     if interrupted.is_file():
         signal_name = interrupted.read_text(errors="replace").rstrip("\n")
+        tail = (
+            "and is still draining — expect to wait for the admission lock"
+            if gate_live
+            else "and has exited"
+        )
         print(
             f"final gate: interrupted by {signal_name}; its suite was "
-            "signalled, so nothing from this run should still be holding "
-            "the admission lock",
+            f"signalled {tail}",
             file=sys.stderr,
         )
         return
-    print(
-        "final gate: no interruption was recorded — this run either is "
-        "still starting or lost its gate to a signal no handler survives, "
-        "in which case its suite may still be running",
-        file=sys.stderr,
+    tail = (
+        "and its suite is still running, holding the admission lock"
+        if gate_live
+        else "— this run either is still starting, or lost its gate to a "
+        "signal no handler survives, in which case a suite of its own may "
+        "have outlived it"
     )
+    print(f"final gate: no interruption was recorded {tail}", file=sys.stderr)
 
 
 def _final_gate(arguments: Sequence[str]) -> int:

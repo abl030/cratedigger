@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -10,6 +12,60 @@ from tests.fakes.subprocess_env import (
     BYTECODE_CACHE_OPT_OUT_VARS,
     inherited_environment,
 )
+
+
+class BytecodeCacheOptOutNamesTestCase(unittest.TestCase):
+    """Each name is proved against CPython, which is what produces the effect.
+
+    Everything else in this file derives its expectations from the constant,
+    so pointing the constant at plausible near-misses
+    (``PYTHONDONTWRITEBYTECODES``, ``PYTHON_PYCACHEPREFIX``) left all ten
+    tests green whenever the reviewer's own shell happened not to export the
+    real variable (review round, mutant M10). Rule C's shape: the trigger's
+    producer is the interpreter, so ask the interpreter.
+    """
+
+    def _interpreter_reports(self, name: str, value: str, expression: str) -> str:
+        environment = {
+            key: item
+            for key, item in os.environ.items()
+            if key not in BYTECODE_CACHE_OPT_OUT_VARS
+        }
+        environment[name] = value
+        result = subprocess.run(
+            [sys.executable, "-c", f"import sys; print({expression})"],
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip()
+
+    def test_the_dont_write_name_really_disables_the_write(self) -> None:
+        name = "PYTHONDONTWRITEBYTECODE"
+
+        self.assertIn(name, BYTECODE_CACHE_OPT_OUT_VARS)
+        self.assertEqual(
+            self._interpreter_reports(name, "1", "sys.dont_write_bytecode"),
+            "True",
+        )
+
+    def test_the_cache_prefix_name_really_moves_the_cache(self) -> None:
+        name = "PYTHONPYCACHEPREFIX"
+
+        self.assertIn(name, BYTECODE_CACHE_OPT_OUT_VARS)
+        self.assertEqual(
+            self._interpreter_reports(name, "/tmp/elsewhere", "sys.pycache_prefix"),
+            "/tmp/elsewhere",
+        )
+
+    def test_no_other_name_is_stripped(self) -> None:
+        """Must still work: this drops exactly the two proved above. A third
+        entry would silently remove something the fixtures may need."""
+        self.assertEqual(
+            set(BYTECODE_CACHE_OPT_OUT_VARS),
+            {"PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX"},
+        )
 
 
 class InheritedEnvironmentTestCase(unittest.TestCase):
