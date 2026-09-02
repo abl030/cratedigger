@@ -478,14 +478,33 @@ component) — and, since #1278 item 9, so does a changed
 commit that made it a wrapper — through item 6's PR1 and everything
 earlier, editing that file selected nothing), and they now resolve through
 the same `tests.test_<stem>` basename probe or fail closed like their `.py`
-siblings. All three roots are one `ROOT_COVERAGE_RULES` table — root,
-policed suffixes, registry, whether admitted gaps early-return, and the
-unmapped-path message — audited by one parameterized
+siblings. Issue #1355 item 8 carried the same fail-closed contract to every
+remaining production root: `migrations/` (`.sql`), `nix/` (`.nix`, `.json`),
+`web/` (`.py` only — `.js` selection is not governed by this mechanism at
+all, since `scripts/run_targeted_tests.py` runs the complete JavaScript
+phase unconditionally on every targeted invocation regardless of Python
+selection), `harness/` (`.py`, `.sh`), and the top level (`.py`, via a
+`top_level` field mirroring `SelectionRule`'s own). All eight roots are one
+`ROOT_COVERAGE_RULES` table — root, policed suffixes, registry, whether
+admitted gaps early-return, and the unmapped-path message — audited by one
+parameterized
 `tests/test_selection_coverage_audit.py` that derives its rows from that
-table (with the scope-deciding columns anchored outside it) and proves the
-`lib/`/`scripts/` registries exact in both directions; the `tests/`
+table (with the scope-deciding columns anchored outside it) and proves every
+non-early-returning registry exact in both directions; the `tests/`
 registry's exactness stays with `tests/test_targeted_test_selection.py` and
-`tests/test_negative_coverage_audit.py`. That audit also polices
+`tests/test_negative_coverage_audit.py`. Three of the five new registries
+(`MIGRATIONS_WITHOUT_SELECTION_COVERAGE`, `NIX_MODULES_WITHOUT_SELECTION_
+COVERAGE`, `HARNESS_MODULES_WITHOUT_SELECTION_COVERAGE`) are legitimately
+empty: an unconditional `SELECTION_RULES` prefix rule with no suffix filter
+already resolves every real or synthetic file in those three roots today,
+so their new root row is currently dormant — protection against that prefix
+rule someday being narrowed or deleted, proved through the resolver's own
+`without=` DI seam rather than a live probe (`EXPECTED_REGISTRY_MAY_BE_
+EMPTY`, `UNCONDITIONALLY_SHADOWED_ROOTS`, and
+`test_root_rule_catches_an_unconditionally_shadowed_root_if_its_prefix_rule_is_removed`
+in that same audit). `web/` and the top level are different: their coverage
+is basename-derived, so a real orphaned file resolves zero TODAY and their
+row fires on ordinary, unmodified selection. That audit also polices
 `EXACT_PATH_NEIGHBOURS` itself: every named
 module exists, no entry is fully redundant with what the path resolves
 without it, and every entry whose deletion no fail-closed rule would catch
@@ -505,11 +524,15 @@ selection that hit the rule. Since #1331 residual 1 those rows also carry
 the deletion-visibility contract the entries have: `MASKABLE_RULE_PINS`
 pins every row whose deletion at least one file it matches would not
 report, measured by removing the row through the resolver's own DI seam and
-asking the real fail-closed contract what happens. 12 of the 15 rows are in
-that state. Over an unpoliced root (`migrations/`, `nix/`, `web/`,
-`harness/`, the top level) nothing can raise at all, so the loss is silent
-even when the file drops to zero neighbours. Over a policed root it is
-silent at the files something else still resolves for — a basename probe,
+asking the real fail-closed contract what happens. 8 of the 15 rows are in
+that state (down from 12 before issue #1355 item 8 gave every root a
+`ROOT_COVERAGE_RULES` row: `basename:web/*.py`, `basename:<top-level>.py`,
+`prefix:migrations/`, and `prefix:web/routes/` are now fully caught, and
+`prefix:nix/` and `prefix:harness/` are pinned at a narrower set of paths
+than before — see those rows' own comments in
+`tests/test_selection_coverage_audit.py::MASKABLE_RULE_PINS` for exactly
+which paths still lose silently and why). The loss is silent at the files
+something else still resolves for — a basename probe,
 another prefix rule, or a hand-authored entry — which is how
 `scripts/phase_parsers/pyright_checks.py` would quietly fall back to a
 module written for a different script. A pin names sample paths and what
