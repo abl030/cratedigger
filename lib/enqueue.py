@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from cratedigger import SlskdDirectory, TrackRecord
     from lib.config import CratediggerConfig
     from lib.context import CratediggerContext
+    from lib.cycle_counters import CycleCounters
     from lib.search import SearchResult
 
 
@@ -117,6 +118,17 @@ class EnqueueAttempt:
 
 @dataclass(frozen=True)
 class FindDownloadMetrics:
+    """What one album's find_download walk cost, carried back to the owner.
+
+    A strict subset of ``lib.cycle_counters.CycleCounters``, by the same
+    names: five of these also land on the walk's ``search_log`` row as
+    per-search attribution, and the owner thread adds all eight into its
+    own cycle counters. The three cache counters a worker can accumulate
+    but this value does not carry (``cache_errors``,
+    ``cache_fuse_tripped``, ``cache_write_errors``) are therefore counted
+    only when the drain happens on the owner's context.
+    """
+
     browse_time_s: float = 0.0
     match_time_s: float = 0.0
     peers_browsed: int = 0
@@ -127,16 +139,17 @@ class FindDownloadMetrics:
     cache_misses: int = 0
 
     @classmethod
-    def from_context(cls, ctx: CratediggerContext) -> FindDownloadMetrics:
+    def from_counters(cls, counters: CycleCounters) -> FindDownloadMetrics:
+        """Project this walk's counters out of the worker's whole value."""
         return cls(
-            browse_time_s=ctx.browse_time_s,
-            match_time_s=ctx.match_time_s,
-            peers_browsed=ctx.peers_browsed,
-            peers_browsed_lazy=ctx.peers_browsed_lazy,
-            fanout_waves=ctx.fanout_waves,
-            cache_pos_hits=ctx.cache_pos_hits,
-            cache_neg_hits=ctx.cache_neg_hits,
-            cache_misses=ctx.cache_misses,
+            browse_time_s=counters.browse_time_s,
+            match_time_s=counters.match_time_s,
+            peers_browsed=counters.peers_browsed,
+            peers_browsed_lazy=counters.peers_browsed_lazy,
+            fanout_waves=counters.fanout_waves,
+            cache_pos_hits=counters.cache_pos_hits,
+            cache_neg_hits=counters.cache_neg_hits,
+            cache_misses=counters.cache_misses,
         )
 
 
@@ -292,7 +305,7 @@ def _with_metrics(
         outcome=result.outcome,
         grab_entry=result.grab_entry,
         candidates=result.candidates,
-        metrics=FindDownloadMetrics.from_context(ctx),
+        metrics=FindDownloadMetrics.from_counters(ctx.counters),
         pre_filter_skip_count=result.pre_filter_skip_count,
         conflicting_request_ids=result.conflicting_request_ids,
     )
@@ -1383,8 +1396,8 @@ def _iter_wave_matches(
 
     Side effects: records every ``check_for_match`` result into the caller's
     ``tally`` — matched or not, since a skipped dir is forensics too — and
-    bumps primary fan-out browse timing and ``ctx.fanout_waves`` /
-    ``ctx.peers_browsed``.
+    bumps primary fan-out browse timing and ``ctx.counters.fanout_waves`` /
+    ``ctx.counters.peers_browsed``.
 
     Caller is responsible for stopping iteration (``break``) once a match is
     enqueued; the generator stops fan-out work as soon as iteration stops.
@@ -1413,13 +1426,13 @@ def _iter_wave_matches(
                 )
             finally:
                 elapsed = time.monotonic() - t0
-                ctx.browse_time_s += elapsed
-            ctx.fanout_waves += 1
+                ctx.counters.browse_time_s += elapsed
+            ctx.counters.fanout_waves += 1
             browse_attempts = getattr(browse_result, "browse_attempts", len(work))
             negative_skip_items = set(getattr(browse_result, "negative_skips", ()))
             ctx.peer_cache_negative_skips.update(negative_skip_items)
             negative_skips = len(negative_skip_items)
-            ctx.peers_browsed += browse_attempts
+            ctx.counters.peers_browsed += browse_attempts
             n_returned = sum(
                 1 for (u, d) in work if d in ctx.folder_cache.get(u, {})
             )
@@ -1487,8 +1500,8 @@ def _try_enqueue_impl(
     artist_name = album.artist_name
 
     eligible, user_dirs = _eligible_user_dirs(results, allowed_filetype, album_id, ctx)
-    peers_before = ctx.peers_browsed
-    waves_before = ctx.fanout_waves
+    peers_before = ctx.counters.peers_browsed
+    waves_before = ctx.counters.fanout_waves
 
     had_enqueue_failure = False
     # Issue #1196 item 2: the tally's conflicting ids are the union of every
@@ -1589,8 +1602,8 @@ def _try_enqueue_impl(
                     artist_name, album_name, allowed_filetype, "single",
                     matched=True, match_wave=match_wave,
                     eligible=len(eligible),
-                    peers=ctx.peers_browsed - peers_before,
-                    waves=ctx.fanout_waves - waves_before,
+                    peers=ctx.counters.peers_browsed - peers_before,
+                    waves=ctx.counters.fanout_waves - waves_before,
                 )
                 return tally.matched(downloads)
             if resolution.status == "poll_recovery":
@@ -1598,8 +1611,8 @@ def _try_enqueue_impl(
                     artist_name, album_name, allowed_filetype, "single",
                     matched=True, match_wave=match_wave,
                     eligible=len(eligible),
-                    peers=ctx.peers_browsed - peers_before,
-                    waves=ctx.fanout_waves - waves_before,
+                    peers=ctx.counters.peers_browsed - peers_before,
+                    waves=ctx.counters.fanout_waves - waves_before,
                 )
                 return tally.matched(resolution.downloads)
             if resolution.status == "verified_no_acceptance":
@@ -1646,8 +1659,8 @@ def _try_enqueue_impl(
                         artist_name, album_name, allowed_filetype, "single",
                         matched=True, match_wave=match_wave,
                         eligible=len(eligible),
-                        peers=ctx.peers_browsed - peers_before,
-                        waves=ctx.fanout_waves - waves_before,
+                        peers=ctx.counters.peers_browsed - peers_before,
+                        waves=ctx.counters.fanout_waves - waves_before,
                     )
                     return tally.matched(recovery.downloads)
                 had_enqueue_failure = True
@@ -1663,8 +1676,8 @@ def _try_enqueue_impl(
         artist_name, album_name, allowed_filetype, "single",
         matched=False, match_wave=match_wave,
         eligible=len(eligible),
-        peers=ctx.peers_browsed - peers_before,
-        waves=ctx.fanout_waves - waves_before,
+        peers=ctx.counters.peers_browsed - peers_before,
+        waves=ctx.counters.fanout_waves - waves_before,
     )
     return tally.unmatched(enqueue_failed=had_enqueue_failure)
 
@@ -1744,8 +1757,8 @@ def _try_multi_enqueue_impl(
     used_sources: set[tuple[str, str]] = set()
     for disk in split_release:
         ctx.negative_matches.clear()
-        peers_before = ctx.peers_browsed
-        waves_before = ctx.fanout_waves
+        peers_before = ctx.counters.peers_browsed
+        waves_before = ctx.counters.fanout_waves
         remaining_user_dirs = {
             dirs_username: [
                 dir_name for dir_name in dirs
@@ -1766,8 +1779,8 @@ def _try_multi_enqueue_impl(
                 f"multi-disc{disk['disk_no']}",
                 matched=False, match_wave=None,
                 eligible=len(eligible),
-                peers=ctx.peers_browsed - peers_before,
-                waves=ctx.fanout_waves - waves_before,
+                peers=ctx.counters.peers_browsed - peers_before,
+                waves=ctx.counters.fanout_waves - waves_before,
             )
             return tally.unmatched()
         username, match_result, match_wave = first_match
@@ -1791,8 +1804,8 @@ def _try_multi_enqueue_impl(
                 f"multi-disc{disk['disk_no']}",
                 matched=False, match_wave=match_wave,
                 eligible=len(eligible),
-                peers=ctx.peers_browsed - peers_before,
-                waves=ctx.fanout_waves - waves_before,
+                peers=ctx.counters.peers_browsed - peers_before,
+                waves=ctx.counters.fanout_waves - waves_before,
             )
             return tally.unmatched()
         _log_album_browse(
@@ -1800,8 +1813,8 @@ def _try_multi_enqueue_impl(
             f"multi-disc{disk['disk_no']}",
             matched=True, match_wave=match_wave,
             eligible=len(eligible),
-                peers=ctx.peers_browsed - peers_before,
-                waves=ctx.fanout_waves - waves_before,
+                peers=ctx.counters.peers_browsed - peers_before,
+                waves=ctx.counters.fanout_waves - waves_before,
         )
         disk["source"] = (username, directory, match_result.file_dir)
         used_sources.add((username, match_result.file_dir))

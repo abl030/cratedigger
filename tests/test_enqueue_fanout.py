@@ -734,9 +734,9 @@ class TestWaveShape(unittest.TestCase):
                 _make_tracks(), results, "flac", ctx, match_fn=_always_nomatch,
             )
 
-        self.assertGreater(ctx.browse_time_s, 0.0)
-        self.assertEqual(ctx.fanout_waves, 1)
-        self.assertEqual(ctx.peers_browsed, 2)
+        self.assertGreater(ctx.counters.browse_time_s, 0.0)
+        self.assertEqual(ctx.counters.fanout_waves, 1)
+        self.assertEqual(ctx.counters.peers_browsed, 2)
 
     def test_primary_negative_skips_are_visible_to_matching(self):
         cfg = _make_cfg(browse_top_k=20)
@@ -760,7 +760,7 @@ class TestWaveShape(unittest.TestCase):
                 _make_tracks(), results, "flac", ctx, match_fn=fake_match,
             )
 
-        self.assertEqual(ctx.peers_browsed, 0)
+        self.assertEqual(ctx.counters.peers_browsed, 0)
         self.assertEqual(ctx.peer_cache_negative_skips, {(user, file_dir)})
 
 

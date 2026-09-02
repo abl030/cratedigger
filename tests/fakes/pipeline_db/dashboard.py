@@ -12,6 +12,7 @@ from typing import (
     Any,
 )
 
+from lib.cycle_counters import COUNTER_NAMES, CycleCounters, counter_values
 from lib.pipeline_db import (
     UnfindableRunMetricsPresentation,
     UnfindableRunMetricsRow,
@@ -43,24 +44,9 @@ class _FakeDashboardMixin(_FakePipelineDBBase):
         self,
         *,
         cycle_total_s: float,
+        counters: CycleCounters | None = None,
         started_at: datetime | None = None,
         completed_at: datetime | None = None,
-        browse_time_s: float = 0.0,
-        match_time_s: float = 0.0,
-        search_time_s: float = 0.0,
-        cache_pos_hits: int = 0,
-        cache_neg_hits: int = 0,
-        cache_misses: int = 0,
-        cache_errors: int = 0,
-        cache_fuse_tripped: int = 0,
-        cache_write_errors: int = 0,
-        peers_browsed: int = 0,
-        peers_browsed_lazy: int = 0,
-        fanout_waves: int = 0,
-        cycle_searches_watchdog_killed: int = 0,
-        find_download_queued: int = 0,
-        find_download_completed: int = 0,
-        find_download_drain_time_s: float = 0.0,
         wanted_total: int | None = None,
     ) -> int:
         wanted_snapshot = (
@@ -72,22 +58,13 @@ class _FakeDashboardMixin(_FakePipelineDBBase):
             "started_at": started_at,
             "created_at": completed_at or _utcnow(),
             "cycle_total_s": cycle_total_s,
-            "browse_time_s": browse_time_s,
-            "match_time_s": match_time_s,
-            "search_time_s": search_time_s,
-            "cache_pos_hits": cache_pos_hits,
-            "cache_neg_hits": cache_neg_hits,
-            "cache_misses": cache_misses,
-            "cache_errors": cache_errors,
-            "cache_fuse_tripped": cache_fuse_tripped,
-            "cache_write_errors": cache_write_errors,
-            "peers_browsed": peers_browsed,
-            "peers_browsed_lazy": peers_browsed_lazy,
-            "fanout_waves": fanout_waves,
-            "cycle_searches_watchdog_killed": cycle_searches_watchdog_killed,
-            "find_download_queued": find_download_queued,
-            "find_download_completed": find_download_completed,
-            "find_download_drain_time_s": find_download_drain_time_s,
+            # Same source as production's INSERT column list, so a counter
+            # cannot reach one store and not the other.
+            **dict(zip(
+                COUNTER_NAMES,
+                counter_values(counters or CycleCounters()),
+                strict=True,
+            )),
             "wanted_total": wanted_snapshot,
         }
         self.cycle_metrics.append(row)

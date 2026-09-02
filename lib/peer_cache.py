@@ -282,12 +282,18 @@ def connect_from_config(cfg: CratediggerConfig) -> PeerCache:
 
 
 def merge_stats_into_context(ctx: Any, stats: PeerCacheStats) -> None:
-    ctx.cache_pos_hits += stats.cache_pos_hits
-    ctx.cache_neg_hits += stats.cache_neg_hits
-    ctx.cache_misses += stats.cache_misses
-    ctx.cache_errors += stats.cache_errors
-    ctx.cache_fuse_tripped += stats.cache_fuse_tripped
-    ctx.cache_write_errors += stats.cache_write_errors
+    """Add a drained cache's six outcome counts into the cycle's counters.
+
+    ``PeerCacheStats`` names its fields after the counters it feeds, so
+    each line below reads the same name on both sides.
+    """
+    counters = ctx.counters
+    counters.cache_pos_hits += stats.cache_pos_hits
+    counters.cache_neg_hits += stats.cache_neg_hits
+    counters.cache_misses += stats.cache_misses
+    counters.cache_errors += stats.cache_errors
+    counters.cache_fuse_tripped += stats.cache_fuse_tripped
+    counters.cache_write_errors += stats.cache_write_errors
 
 
 def drain_stats_into_context(ctx: Any, cache: PeerCache | None) -> None:

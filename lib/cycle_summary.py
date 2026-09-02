@@ -1,11 +1,12 @@
 """Cycle close-out reporting: the summary line and its persisted twins.
 
 The three registered end-of-cycle steps below (summary line, cycle-metrics
-row, browsed-peer roster) read the per-cycle accumulators off the context and
-the wall-clock anchors ``cycle_started_at``/``cycle_start`` that
-``cratedigger.run_cycle`` sets as the cycle body starts. Failures deliberately
-propagate to ``lib/convergence.py``: the registry owns cycle-preserving
-failure isolation.
+row, browsed-peer roster) read ``ctx.counters`` and the wall-clock anchors
+``cycle_started_at``/``cycle_start`` that ``cratedigger.run_cycle`` sets as
+the cycle body starts. The line and the row are both derived from
+``lib.cycle_counters``, so they cannot disagree about which counters exist.
+Failures deliberately propagate to ``lib/convergence.py``: the registry owns
+cycle-preserving failure isolation.
 """
 from __future__ import annotations
 
@@ -14,44 +15,49 @@ import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from lib.cycle_counters import (
+    COUNTER_NAMES,
+    FLOAT_COUNTER_NAMES,
+    CycleCounters,
+    counter_values,
+)
+
 if TYPE_CHECKING:
     from lib.context import CratediggerContext
 
 logger = logging.getLogger("cratedigger")
 
+#: The prefix log scrapers match on. ``scripts/verify_cratedigger_cycle.sh``
+#: and the runbook in ``docs/nixos-module.md`` both look for this substring
+#: and nothing else, so the tokens after it may grow, but this may not move.
+CYCLE_COMPLETE_PREFIX = "Cratedigger cycle complete in"
 
-def format_cycle_summary(ctx: CratediggerContext, elapsed_s: float) -> str:
+
+def format_cycle_summary(counters: CycleCounters, elapsed_s: float) -> str:
     """Render the per-cycle summary line.
 
     Prefix preserves the existing human-readable string so log scrapers
-    parsing 'Cratedigger cycle complete in Ns' continue to match. New keys
-    are appended as space-separated `key=value` pairs.
+    parsing 'Cratedigger cycle complete in Ns' continue to match. Every
+    counter follows as a space-separated ``key=value`` pair, in
+    declaration order, floats to one decimal place. Nothing here lists
+    the counters: declaring one in ``lib.cycle_counters`` logs it.
     """
+    tokens = [
+        f"{name}={value:.1f}" if name in FLOAT_COUNTER_NAMES
+        else f"{name}={value}"
+        for name, value in zip(
+            COUNTER_NAMES, counter_values(counters), strict=True)
+    ]
     return (
-        f"Cratedigger cycle complete in {elapsed_s:.1f}s "
-        f"browse_time_s={ctx.browse_time_s:.1f} "
-        f"match_time_s={ctx.match_time_s:.1f} "
-        f"search_time_s={ctx.search_time_s:.1f} "
-        f"cache_pos_hits={ctx.cache_pos_hits} "
-        f"cache_neg_hits={ctx.cache_neg_hits} "
-        f"cache_misses={ctx.cache_misses} "
-        f"cache_errors={ctx.cache_errors} "
-        f"cache_fuse_tripped={ctx.cache_fuse_tripped} "
-        f"cache_write_errors={ctx.cache_write_errors} "
-        f"peers_browsed={ctx.peers_browsed} "
-        f"peers_browsed_lazy={ctx.peers_browsed_lazy} "
-        f"fanout_waves={ctx.fanout_waves} "
-        f"cycle_searches_watchdog_killed={ctx.cycle_searches_watchdog_killed} "
-        f"find_download_queued={ctx.find_download_queued} "
-        f"find_download_completed={ctx.find_download_completed} "
-        f"find_download_drain_time_s={ctx.find_download_drain_time_s:.1f} "
-        f"cycle_total_s={elapsed_s:.1f}"
+        f"{CYCLE_COMPLETE_PREFIX} {elapsed_s:.1f}s "
+        + " ".join(tokens)
+        + f" cycle_total_s={elapsed_s:.1f}"
     )
 
 
 def log_cycle_summary(ctx: CratediggerContext) -> str:
     """Registered end-of-cycle step: emit the canonical summary line."""
-    line = format_cycle_summary(ctx, time.time() - ctx.cycle_start)
+    line = format_cycle_summary(ctx.counters, time.time() - ctx.cycle_start)
     logger.info(line)
     return line
 
@@ -60,25 +66,10 @@ def record_cycle_metrics_cycle(ctx: CratediggerContext) -> None:
     """Registered end-of-cycle step: persist the cycle-metrics row."""
     db = ctx.pipeline_db_source._get_db()
     db.record_cycle_metrics(
+        counters=ctx.counters,
         started_at=ctx.cycle_started_at,
         completed_at=datetime.now(UTC),
         cycle_total_s=time.time() - ctx.cycle_start,
-        browse_time_s=ctx.browse_time_s,
-        match_time_s=ctx.match_time_s,
-        search_time_s=ctx.search_time_s,
-        cache_pos_hits=ctx.cache_pos_hits,
-        cache_neg_hits=ctx.cache_neg_hits,
-        cache_misses=ctx.cache_misses,
-        cache_errors=ctx.cache_errors,
-        cache_fuse_tripped=ctx.cache_fuse_tripped,
-        cache_write_errors=ctx.cache_write_errors,
-        peers_browsed=ctx.peers_browsed,
-        peers_browsed_lazy=ctx.peers_browsed_lazy,
-        fanout_waves=ctx.fanout_waves,
-        cycle_searches_watchdog_killed=ctx.cycle_searches_watchdog_killed,
-        find_download_queued=ctx.find_download_queued,
-        find_download_completed=ctx.find_download_completed,
-        find_download_drain_time_s=ctx.find_download_drain_time_s,
     )
 
 

@@ -3,7 +3,7 @@
 Replaces the rolled-back `cycle_deadline_skipped` counter that fed the
 removed `cycle_max_runtime_s` cycle-entry gate.
 
-`ctx.cycle_searches_watchdog_killed` accumulates one increment per
+`ctx.counters.cycle_searches_watchdog_killed` accumulates one increment per
 `SearchResult` whose `watchdog_fired=True` and is surfaced in the
 cycle-summary log line so operators can spot stuck-search firing rates
 (healthy steady-state is 0–1 per cycle; >3 sustained warrants
@@ -15,6 +15,7 @@ import unittest
 from unittest.mock import MagicMock
 
 from lib.context import CratediggerContext
+from lib.cycle_counters import CycleCounters
 from lib.cycle_summary import format_cycle_summary
 from tests.fakes import FakeSlskdAPI
 from tests.helpers import make_cycle_collaborators
@@ -30,7 +31,7 @@ class TestContextCounterDefault(unittest.TestCase):
                 pipeline_db_source=MagicMock(),
             ),
         )
-        self.assertEqual(ctx.cycle_searches_watchdog_killed, 0)
+        self.assertEqual(ctx.counters.cycle_searches_watchdog_killed, 0)
 
 
 class TestCycleSummaryWatchdogField(unittest.TestCase):
@@ -39,26 +40,14 @@ class TestCycleSummaryWatchdogField(unittest.TestCase):
     many searches were killed. Replaces the removed
     `cycle_deadline_skipped=` field — old field name MUST NOT appear."""
 
-    def _ctx(self, **fields) -> CratediggerContext:
-        ctx = CratediggerContext(
-            collaborators=make_cycle_collaborators(
-                cfg=MagicMock(),
-                slskd=FakeSlskdAPI(),
-                pipeline_db_source=MagicMock(),
-            ),
-        )
-        for k, v in fields.items():
-            setattr(ctx, k, v)
-        return ctx
-
     def test_zero_emitted(self):
-        line = format_cycle_summary(self._ctx(), elapsed_s=412.3)
+        line = format_cycle_summary(CycleCounters(), elapsed_s=412.3)
         self.assertIn("cycle_searches_watchdog_killed=0", line)
         self.assertNotIn("cycle_deadline_skipped", line)
 
     def test_three_emitted(self):
         line = format_cycle_summary(
-            self._ctx(cycle_searches_watchdog_killed=3), elapsed_s=611.0)
+            CycleCounters(cycle_searches_watchdog_killed=3), elapsed_s=611.0)
         self.assertIn("cycle_searches_watchdog_killed=3", line)
 
 
@@ -98,14 +87,14 @@ class TestLogSearchResultIncrementsCounter(unittest.TestCase):
         ctx = self._ctx()
         cratedigger._log_search_result(
             self._album(), self._result(watchdog_fired=True), ctx)
-        self.assertEqual(ctx.cycle_searches_watchdog_killed, 1)
+        self.assertEqual(ctx.counters.cycle_searches_watchdog_killed, 1)
 
     def test_normal_result_does_not_bump_counter(self):
         import cratedigger
         ctx = self._ctx()
         cratedigger._log_search_result(
             self._album(), self._result(watchdog_fired=False), ctx)
-        self.assertEqual(ctx.cycle_searches_watchdog_killed, 0)
+        self.assertEqual(ctx.counters.cycle_searches_watchdog_killed, 0)
 
     def test_three_watchdog_fires_in_a_cycle(self):
         """Mixed cycle: 5 results, 3 watchdog'd, 2 normal. Counter is 3."""
@@ -117,7 +106,7 @@ class TestLogSearchResultIncrementsCounter(unittest.TestCase):
         for _ in range(2):
             cratedigger._log_search_result(
                 self._album(), self._result(watchdog_fired=False), ctx)
-        self.assertEqual(ctx.cycle_searches_watchdog_killed, 3)
+        self.assertEqual(ctx.counters.cycle_searches_watchdog_killed, 3)
 
     def test_counter_increments_even_without_db_request_id(self):
         """Albums with no db_request_id still bump the counter — the
@@ -128,7 +117,7 @@ class TestLogSearchResultIncrementsCounter(unittest.TestCase):
         cratedigger._log_search_result(
             self._album(with_request_id=False),
             self._result(watchdog_fired=True), ctx)
-        self.assertEqual(ctx.cycle_searches_watchdog_killed, 1)
+        self.assertEqual(ctx.counters.cycle_searches_watchdog_killed, 1)
 
 
 class TestRemovedFieldsAreGone(unittest.TestCase):

@@ -559,8 +559,8 @@ class TestCheckForMatchCandidateAccumulation(unittest.TestCase):
         self.assertEqual(self._candidates(result), [])
         self.assertEqual(self.ctx.broken_user, set())
         self.assertNotIn((self.username, "dirA", 3, "flac"), self.ctx.negative_matches)
-        self.assertEqual(self.ctx.peers_browsed_lazy, 0)
-        self.assertEqual(self.ctx.cache_neg_hits, 1)
+        self.assertEqual(self.ctx.counters.peers_browsed_lazy, 0)
+        self.assertEqual(self.ctx.counters.cache_neg_hits, 1)
 
     def test_recorded_redis_negative_skip_avoids_second_lookup(self) -> None:
         redis = FakeRedis()
@@ -575,8 +575,8 @@ class TestCheckForMatchCandidateAccumulation(unittest.TestCase):
 
         self.assertFalse(self._matched(result))
         self.assertEqual(redis.get_calls, 0)
-        self.assertEqual(self.ctx.cache_neg_hits, 0)
-        self.assertEqual(self.ctx.peers_browsed_lazy, 0)
+        self.assertEqual(self.ctx.counters.cache_neg_hits, 0)
+        self.assertEqual(self.ctx.counters.peers_browsed_lazy, 0)
 
     def test_partial_match_dir_records_partial_score(self) -> None:
         """Dir with full file_count but only 2 of 3 titles matching →

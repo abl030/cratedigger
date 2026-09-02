@@ -30,6 +30,7 @@ import psycopg2.extras
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 — sets TEST_DB_DSN env var
 
+from lib.cycle_counters import COUNTER_NAMES, CycleCounters
 from lib.dispatch import DispatchOutcome
 from lib.import_execution import (
     CancellationToken,
@@ -6502,34 +6503,96 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
     def tearDown(self):
         self.db.close()
 
+    def test_record_cycle_metrics_round_trip_preserves_every_counter(self):
+        """Rule A over the whole counters value, against real PostgreSQL.
+
+        Every counter gets a distinct value, so this fails on a counter
+        dropped from the INSERT and on one landing in a sibling's column.
+        The column list is derived from ``CycleCounters``, which makes a
+        drop impossible by construction but a MISNAMED counter a runtime
+        error here rather than a silent default -- so the SELECT below
+        reads the columns back by name.
+        """
+        written = CycleCounters(**{
+            name: 2 + offset for offset, name in enumerate(COUNTER_NAMES)})
+        cycle_id = self.db.record_cycle_metrics(
+            cycle_total_s=41.5, counters=written, wanted_total=3)
+
+        cur = self.db._execute(
+            "SELECT " + ", ".join(COUNTER_NAMES)
+            + ", cycle_total_s, wanted_total FROM cycle_metrics WHERE id = %s",
+            (cycle_id,))
+        row = cur.fetchone()
+
+        assert row is not None
+        for name in COUNTER_NAMES:
+            with self.subTest(counter=name):
+                self.assertEqual(row[name], getattr(written, name),
+                                 f"counter {name} did not survive the "
+                                 f"PG boundary in its own column")
+        self.assertEqual(row["cycle_total_s"], 41.5)
+        self.assertEqual(row["wanted_total"], 3)
+
+    def test_record_cycle_metrics_preserves_an_empty_wanted_backlog(self):
+        """A drained backlog is 0, not 1: the writer clamps ``wanted_total``
+        at zero to satisfy the migration-016 CHECK, and a clamp that raised
+        the floor would quietly invent a request that does not exist."""
+        cycle_id = self.db.record_cycle_metrics(
+            cycle_total_s=1.0, wanted_total=0)
+
+        cur = self.db._execute(
+            "SELECT wanted_total FROM cycle_metrics WHERE id = %s", (cycle_id,))
+        row = cur.fetchone()
+
+        assert row is not None
+        self.assertEqual(row["wanted_total"], 0)
+
+    def test_record_cycle_metrics_defaults_every_counter_to_zero(self):
+        """Omitting ``counters`` writes zeros, as the old per-counter
+        keyword defaults did -- not NULL, which the NOT NULL columns
+        would reject outright."""
+        cycle_id = self.db.record_cycle_metrics(cycle_total_s=1.0)
+
+        cur = self.db._execute(
+            "SELECT " + ", ".join(COUNTER_NAMES)
+            + " FROM cycle_metrics WHERE id = %s", (cycle_id,))
+        row = cur.fetchone()
+
+        assert row is not None
+        self.assertEqual([row[name] for name in COUNTER_NAMES],
+                         [0] * len(COUNTER_NAMES))
+
     def test_record_cycle_metrics_and_dashboard_summary(self):
         now = datetime.now(UTC)
         self.db.record_cycle_metrics(
             started_at=now - timedelta(hours=1, seconds=100),
             completed_at=now - timedelta(hours=1),
             cycle_total_s=100.0,
-            search_time_s=80.0,
-            cycle_searches_watchdog_killed=0,
-            find_download_queued=5,
-            find_download_completed=5,
+            counters=CycleCounters(
+                search_time_s=80.0,
+                cycle_searches_watchdog_killed=0,
+                find_download_queued=5,
+                find_download_completed=5,
+            ),
             wanted_total=4,
         )
         self.db.record_cycle_metrics(
             started_at=now - timedelta(hours=2, seconds=300),
             completed_at=now - timedelta(hours=2),
             cycle_total_s=300.0,
-            search_time_s=240.0,
-            cycle_searches_watchdog_killed=1,
-            find_download_queued=3,
-            find_download_completed=2,
+            counters=CycleCounters(
+                search_time_s=240.0,
+                cycle_searches_watchdog_killed=1,
+                find_download_queued=3,
+                find_download_completed=2,
+            ),
             wanted_total=5,
         )
         self.db.record_cycle_metrics(
             started_at=now - timedelta(hours=10, seconds=900),
             completed_at=now - timedelta(hours=10),
             cycle_total_s=900.0,
-            search_time_s=700.0,
-            cache_errors=2,
+            counters=CycleCounters(search_time_s=700.0, cache_errors=2),
             wanted_total=6,
         )
 
@@ -16454,9 +16517,12 @@ class TestDashboardFakeParity(unittest.TestCase):
         db.log_search(rid, query="loop", outcome="no_match", elapsed_s=1.0)
         db.log_search(rid, query="old style", outcome="exhausted")
         db.record_cycle_metrics(
-            cycle_total_s=300.0, browse_time_s=20.0, match_time_s=10.0,
-            search_time_s=240.0, peers_browsed=8, fanout_waves=2,
-            find_download_queued=4, find_download_completed=4,
+            cycle_total_s=300.0,
+            counters=CycleCounters(
+                browse_time_s=20.0, match_time_s=10.0, search_time_s=240.0,
+                peers_browsed=8, fanout_waves=2,
+                find_download_queued=4, find_download_completed=4,
+            ),
             wanted_total=10,
         )
         db.record_peer_observations(["peer-a", "peer-b"])

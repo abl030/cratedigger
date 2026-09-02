@@ -3,6 +3,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, TypedDict
 
+from lib.cycle_counters import COUNTER_NAMES, CycleCounters, counter_values
 from lib.pipeline_db._core import _PipelineDBBase
 from lib.pipeline_db._shared import (
     CACHE_ATTRIBUTION_CYCLE_ONLY,
@@ -27,6 +28,21 @@ from lib.pipeline_db._shared import (
 SEARCH_ERROR_OUTCOMES: tuple[SearchLogOutcome, ...] = (
     "timeout", "error", "empty_query",
 )
+
+#: Every ``cycle_metrics`` column one completed cycle writes, in the order
+#: ``record_cycle_metrics`` supplies them. The counter columns come from
+#: ``lib.cycle_counters`` rather than a second hand-kept list, so a new
+#: counter is persisted the moment it is declared. ``id`` is serial and
+#: the remaining column, ``created_at``, takes ``completed_at``.
+_CYCLE_METRIC_COLUMNS: tuple[str, ...] = (
+    "started_at", "created_at", "cycle_total_s", *COUNTER_NAMES,
+    "wanted_total",
+)
+_INSERT_CYCLE_METRICS = f"""
+    INSERT INTO cycle_metrics ({", ".join(_CYCLE_METRIC_COLUMNS)})
+    VALUES ({", ".join(["%s"] * len(_CYCLE_METRIC_COLUMNS))})
+    RETURNING id
+"""
 
 
 class UnfindableRunMetricsRow(TypedDict):
@@ -364,55 +380,29 @@ class _DashboardMixin(_PipelineDBBase):
         self,
         *,
         cycle_total_s: float,
+        counters: CycleCounters | None = None,
         started_at: datetime | None = None,
         completed_at: datetime | None = None,
-        browse_time_s: float = 0.0,
-        match_time_s: float = 0.0,
-        search_time_s: float = 0.0,
-        cache_pos_hits: int = 0,
-        cache_neg_hits: int = 0,
-        cache_misses: int = 0,
-        cache_errors: int = 0,
-        cache_fuse_tripped: int = 0,
-        cache_write_errors: int = 0,
-        peers_browsed: int = 0,
-        peers_browsed_lazy: int = 0,
-        fanout_waves: int = 0,
-        cycle_searches_watchdog_killed: int = 0,
-        find_download_queued: int = 0,
-        find_download_completed: int = 0,
-        find_download_drain_time_s: float = 0.0,
         wanted_total: int | None = None,
     ) -> int:
-        """Persist one completed cratedigger cycle's runtime counters."""
+        """Persist one completed cratedigger cycle's runtime counters.
+
+        ``counters`` defaults to an all-zero value so a caller that only
+        cares about cycle duration says so by omission, exactly as the
+        sixteen zero-defaulted keyword arguments this replaced allowed.
+        ``completed_at`` lands in the ``created_at`` column: the row is
+        written when the cycle ends, and that column has been the cycle's
+        completion stamp since migration 011.
+        """
         completed = completed_at or datetime.now(UTC)
         wanted_snapshot = (
             self._current_wanted_total() if wanted_total is None
             else max(0, int(wanted_total))
         )
-        cur = self._execute("""
-            INSERT INTO cycle_metrics (
-                started_at, created_at, cycle_total_s, browse_time_s,
-                match_time_s, search_time_s, cache_pos_hits, cache_neg_hits,
-                cache_misses, cache_errors, cache_fuse_tripped,
-                cache_write_errors, peers_browsed, peers_browsed_lazy,
-                fanout_waves, cycle_searches_watchdog_killed,
-                find_download_queued, find_download_completed,
-                find_download_drain_time_s, wanted_total
-            )
-            VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s
-            )
-            RETURNING id
-        """, (
-            started_at, completed, cycle_total_s, browse_time_s,
-            match_time_s, search_time_s, cache_pos_hits, cache_neg_hits,
-            cache_misses, cache_errors, cache_fuse_tripped,
-            cache_write_errors, peers_browsed, peers_browsed_lazy,
-            fanout_waves, cycle_searches_watchdog_killed,
-            find_download_queued, find_download_completed,
-            find_download_drain_time_s, wanted_snapshot,
+        cur = self._execute(_INSERT_CYCLE_METRICS, (
+            started_at, completed, cycle_total_s,
+            *counter_values(counters or CycleCounters()),
+            wanted_snapshot,
         ))
         row = cur.fetchone()
         self.conn.commit()

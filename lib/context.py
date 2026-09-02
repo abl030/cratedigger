@@ -12,6 +12,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from lib.cycle_counters import CycleCounters
+
 if TYPE_CHECKING:
     from datetime import datetime
 
@@ -171,19 +173,26 @@ class CratediggerContext:
       every field is required. Read through the pass-through properties
       below, so ``ctx.cfg`` / ``ctx.slskd`` / ``ctx.download_ownership``
       and friends still resolve exactly as they always have.
-    - everything else — per-cycle scratch: caches, counters, timers, and
-      three worker-local slots. These are mutable and default to empty
+    - everything else — per-cycle scratch: caches, timers, the counters,
+      and three worker-local slots. These are mutable and default to empty
       BECAUSE that is correct: a fresh cycle's scratch is empty, and a
       caller that omits one has not forgotten anything.
 
-    The scratch stays inline rather than nested behind a second value: the
-    forwarding it takes part in is deliberately selective and partly BY
-    REFERENCE (``build_phase1_context`` shares ``cooled_down_users`` so a
-    cooldown Phase 1 discovers reaches Phase 2; ``prepare_find_download_context``
-    shares ``folder_cache``, ``browse_coordinator`` and its lock), so a
-    "fresh per thread, never forwarded" scratch value would be wrong, and a
-    nested-but-forwardable one would only rename what those two functions
-    already spell out field by field.
+    The rest of the scratch stays inline rather than nested behind a second
+    value: the forwarding it takes part in is deliberately selective and
+    partly BY REFERENCE (``build_phase1_context`` shares
+    ``cooled_down_users`` so a cooldown Phase 1 discovers reaches Phase 2;
+    ``prepare_find_download_context`` shares ``folder_cache``,
+    ``browse_coordinator`` and its lock), so a "fresh per thread, never
+    forwarded" scratch value would be wrong, and a nested-but-forwardable
+    one would only rename what those two functions already spell out field
+    by field.
+
+    ``counters`` is the one part that DID separate (issue #1348), and that
+    objection is exactly what it escapes: the counters are ints and floats,
+    so they cannot be shared by reference at all. Each worker gets a fresh
+    value and the owner merges the totals back through
+    ``lib.enqueue.FindDownloadMetrics``.
     """
 
     collaborators: Collaborators
@@ -245,27 +254,12 @@ class CratediggerContext:
     # peer_observations roster at end of cycle (#227).
     peer_observations: set[str] = field(default_factory=lambda: set())
 
-    # --- Per-cycle timing accumulators (issue #198 U1 instrumentation).
-    # browse / match are wrapped at the call sites in lib/matching.py;
-    # search is wrapped around _search_and_queue_parallel in cratedigger.py.
-    #
-    # peers_browsed counts actual cold slskd directory submissions from the
-    # primary fan-out path. Redis hits, Redis negative skips, and duplicate
-    # callers that join existing in-flight browses do not increment it.
-    # peers_browsed_lazy tracks residual cold submissions from the fallback
-    # path in lib/matching.py.
-    browse_time_s: float = 0.0
-    match_time_s: float = 0.0
-    search_time_s: float = 0.0
-    cache_pos_hits: int = 0
-    cache_neg_hits: int = 0
-    cache_misses: int = 0
-    cache_errors: int = 0
-    cache_fuse_tripped: int = 0
-    cache_write_errors: int = 0
-    peers_browsed: int = 0
-    peers_browsed_lazy: int = 0
-    fanout_waves: int = 0
+    # --- Per-cycle counters (issue #1348). ---
+    # Every number the cycle accumulates, declared once in
+    # lib/cycle_counters.py. The summary line, the cycle_metrics row and
+    # lib.enqueue.FindDownloadMetrics all read this value; none of them
+    # enumerates the counter names by hand any more.
+    counters: CycleCounters = field(default_factory=CycleCounters)
 
     # --- Cycle wall-clock anchors. ---
     # Set by run_cycle() as the cycle body starts; read by the registered
@@ -275,24 +269,12 @@ class CratediggerContext:
     cycle_started_at: datetime | None = None
     cycle_start: float = 0.0
 
-    # --- Per-cycle search-watchdog firing count (issue #212).
-    # Incremented once per `SearchResult` whose `watchdog_fired=True`.
-    # Replaces the `cycle_deadline_skipped` counter that fed the rolled-back
-    # `cycle_max_runtime_s` cycle-entry gate. Healthy steady-state is 0–1
-    # per cycle; >3 sustained warrants investigation.
-    cycle_searches_watchdog_killed: int = 0
-
     # --- Per-cycle HAVE evidence enrichment budget. ---
     # Download-phase failures opportunistically measure the request's
     # on-disk copy (missing spectral / V0 research); this bounds how many
     # such measurements one cycle may run so failure bursts never balloon
     # the loop. Skip-if-complete costs nothing and is not budgeted.
     evidence_enrichment_budget: int = 2
-
-    # --- Per-cycle find_download pipeline counters (issue #217). ---
-    find_download_queued: int = 0
-    find_download_completed: int = 0
-    find_download_drain_time_s: float = 0.0
 
     # --- Shared browse boundary ---
     # Lazily initialised by lib.browse so tests that directly pass max_workers
