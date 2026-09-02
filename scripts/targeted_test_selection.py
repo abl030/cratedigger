@@ -507,6 +507,23 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_deploy_pin_script",
         "tests.test_deploy_pin_generated",
     ),
+    # The environment the three fake-command fixtures above hand their
+    # subprocesses (issue #1313, 1329-2). This entry and the tests/fakes/
+    # prefix rule are UNIONED, not overridden, so the prefix half already
+    # contributes tests.test_fakes and the derived
+    # tests.test_fakes_subprocess_env and neither is repeated here; what it
+    # cannot reach is the three fixtures whose behaviour this module
+    # decides. DERIVED, not curated: every test module importing any of
+    # daily_flake_update, deploy_cycle, or deploy_pin, which is the union of
+    # those three entries. Maskable — pinned in MASKABLE_ENTRY_PINS.
+    "tests/fakes/subprocess_env.py": (
+        "tests.test_daily_flake_update",
+        "tests.test_daily_beets_tip_update",
+        "tests.test_deploy_cycle_verifier",
+        "tests.test_deploy_cycle_verifier_generated",
+        "tests.test_deploy_pin_script",
+        "tests.test_deploy_pin_generated",
+    ),
     "tests/finite_domain.py": (
         "tests.test_finite_domain",
     ),

@@ -336,7 +336,7 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
         "tests.test_world_model_coordinator",
     ),
     # The tests/fakes/ prefix rule resolves tests.test_fakes, which loads
-    # none of these five fakes (issue #1081 review round 2).
+    # none of the fakes below (issue #1081 review round 2).
     "tests/fakes/beets_contract.py": (
         "tests.test_beets_config_startup",
         "tests.test_beets_config_startup_generated",
@@ -359,6 +359,17 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
         "tests.test_deploy_hold_generated",
     ),
     "tests/fakes/deploy_pin.py": (
+        "tests.test_deploy_pin_script",
+        "tests.test_deploy_pin_generated",
+    ),
+    # Same prefix rule, one layer up: it resolves tests.test_fakes and the
+    # derived tests.test_fakes_subprocess_env, masking the loss of the three
+    # fixtures whose subprocess environment this module decides.
+    "tests/fakes/subprocess_env.py": (
+        "tests.test_daily_flake_update",
+        "tests.test_daily_beets_tip_update",
+        "tests.test_deploy_cycle_verifier",
+        "tests.test_deploy_cycle_verifier_generated",
         "tests.test_deploy_pin_script",
         "tests.test_deploy_pin_generated",
     ),

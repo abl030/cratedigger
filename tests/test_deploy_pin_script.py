@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tests._source_pins import pinned_source
 from tests.fakes.deploy_pin import FakeDeployPinCommands
+from tests.fakes.subprocess_env import BYTECODE_CACHE_OPT_OUT_VARS
 from tests.structural_audits.deploy_pin import find_shell_contract_violations
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -978,13 +981,21 @@ class TestDeployPinFakeShimCaching(unittest.TestCase):
             pycache = fake.fake_bin / "__pycache__"
             self.assertFalse(pycache.exists())
 
-            proc = subprocess.run(
-                [str(fake.fake_bin / "hostname")],
-                env=fake.environment(fake.TARGET_REV),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            # Run with the opt-outs SET: a mutant runner must export
+            # PYTHONDONTWRITEBYTECODE=1, and the fixture's own
+            # environment() is what keeps that from reaching the stub
+            # (issue #1313, 1329-2).
+            with patch.dict(
+                os.environ,
+                {name: "1" for name in BYTECODE_CACHE_OPT_OUT_VARS},
+            ):
+                proc = subprocess.run(
+                    [str(fake.fake_bin / "hostname")],
+                    env=fake.environment(fake.TARGET_REV),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertEqual(proc.stdout.strip(), "proxmox-vm")
 
@@ -992,9 +1003,10 @@ class TestDeployPinFakeShimCaching(unittest.TestCase):
             self.assertEqual(
                 len(cached), 1,
                 "expected the shim's bytecode to be cached in __pycache__ "
-                f"after one call, found {cached} -- check for an ambient "
-                "PYTHONDONTWRITEBYTECODE or PYTHONPYCACHEPREFIX in your "
-                "environment, either of which silently defeats this caching",
+                f"after one call, found {cached} -- the fixture's own "
+                "environment() is what must drop PYTHONDONTWRITEBYTECODE "
+                "and PYTHONPYCACHEPREFIX, both of which silently defeat "
+                "this caching",
             )
 
     def test_stub_fails_loudly_without_the_shared_shim_module(self) -> None:
