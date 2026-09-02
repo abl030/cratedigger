@@ -249,12 +249,12 @@ t.section('renderSearchPlanButton()');
   // Happy path — pipelineId present yields a clickable button wired to
   // window.toggleSearchPlanSummary with stopPropagation.
   const html = renderSearchPlanButton({ pipelineId: 42 });
-  t.ok(html.includes('class="sp-button"'), 'button uses sp-button class');
-  t.ok(html.includes('window.toggleSearchPlanSummary(42'),
+  t.contains(html, 'class="sp-button"', 'button uses sp-button class');
+  t.contains(html, 'window.toggleSearchPlanSummary(42',
     'button onclick wires window.toggleSearchPlanSummary with the id');
-  t.ok(html.includes('event.stopPropagation()'),
+  t.contains(html, 'event.stopPropagation()',
     'button onclick stops parent row propagation');
-  t.ok(html.includes('aria-label='),
+  t.contains(html, 'aria-label=',
     'button carries an aria-label for accessibility');
 }
 
@@ -336,18 +336,18 @@ function makeInspection(overrides = {}) {
   // AE2 — happy path: cursor 2/N, cycle 1, plan status, NO drift.
   const inspection = makeInspection({ next_ordinal: 2, cycle_count: 1 });
   const html = renderSummaryPanel({ inspection, history: { rows: [] } });
-  t.ok(html.includes('cursor'), 'meta surfaces cursor label');
+  t.contains(html, 'cursor', 'meta surfaces cursor label');
   t.ok(/<strong>2\/4<\/strong>/.test(html),
     'cursor renders as 2/4 inside a single <strong>');
   t.ok(/cycle\s*<strong>1<\/strong>/.test(html),
     'cycle count rendered with the slot count');
-  t.ok(html.includes('sp-status'),
+  t.contains(html, 'sp-status',
     'plan status badge is rendered');
-  t.ok(!html.includes('sp-drift'),
+  t.excludes(html, 'sp-drift',
     'no drift indicator when generator_id_mismatch=false');
-  t.ok(html.includes('Test Artist'),
+  t.contains(html, 'Test Artist',
     'header carries the artist name');
-  t.ok(html.includes('Test Album'),
+  t.contains(html, 'Test Album',
     'header carries the album title');
 }
 
@@ -358,11 +358,11 @@ function makeInspection(overrides = {}) {
     plan: { generator_id: '12' },
   });
   const html = renderSummaryPanel({ inspection, history: { rows: [] } });
-  t.ok(html.includes('sp-drift'),
+  t.contains(html, 'sp-drift',
     'drift indicator class present when generator_id_mismatch=true');
-  t.ok(html.includes('plan=12'),
+  t.contains(html, 'plan=12',
     'drift indicator surfaces the request plan generator id');
-  t.ok(html.includes('current=13'),
+  t.contains(html, 'current=13',
     'drift indicator surfaces the running SEARCH_PLAN_GENERATOR_ID');
 }
 
@@ -377,13 +377,15 @@ function makeInspection(overrides = {}) {
     next_before_id: null,
   };
   const html = renderSummaryPanel({ inspection: makeInspection(), history });
-  t.ok(html.includes('q1') && html.includes('q2') && html.includes('q3'),
-    'all three queries appear in the rendered HTML');
-  t.ok(html.includes('no_match') && html.includes('partial') && html.includes('success'),
-    'all three outcomes appear in the rendered HTML');
+  for (const query of ['q1', 'q2', 'q3']) {
+    t.contains(html, query, `query ${query} appears in the rendered HTML`);
+  }
+  for (const outcome of ['no_match', 'partial', 'success']) {
+    t.contains(html, outcome, `outcome ${outcome} appears in the rendered HTML`);
+  }
   // awstDateTime renders as "YYYY-MM-DD HH:MM" (UTC + 8 = AWST). The first
   // row's UTC 01:00 → 09:00 AWST; assert at least one expected stamp.
-  t.ok(html.includes('2026-05-09 09:00'),
+  t.contains(html, '2026-05-09 09:00',
     'first attempt relative-time stamp rendered via awstDateTime');
   // Three attempt rows, three blocks.
   const attemptCount = (html.match(/class="sp-attempt /g) || []).length
@@ -401,8 +403,8 @@ function makeInspection(overrides = {}) {
     next_before_id: null,
   };
   const html = renderSummaryPanel({ inspection: makeInspection(), history });
-  t.ok(html.includes('lone'), 'sole attempt query appears');
-  t.ok(!html.includes('No attempts yet'),
+  t.contains(html, 'lone', 'sole attempt query appears');
+  t.excludes(html, 'No attempts yet',
     'non-empty history does not show empty-state copy');
   // No malformed HTML — the section markup remains balanced.
   const openSection = (html.match(/<div class="sp-summary-section">/g) || []).length;
@@ -425,11 +427,11 @@ function makeInspection(overrides = {}) {
     },
   });
   const html = renderSummaryPanel({ inspection, history: { rows: [] } });
-  t.ok(html.includes('no_runnable_query'),
+  t.contains(html, 'no_runnable_query',
     'failure class surfaced');
-  t.ok(html.includes('metadata incomplete'),
+  t.contains(html, 'metadata incomplete',
     'sanitised error surfaced');
-  t.ok(html.includes('sp-failure'),
+  t.contains(html, 'sp-failure',
     'failure container wraps the messaging');
   t.ok(!/cursor\s*<strong>/.test(html),
     'no cursor metadata when active_plan is null');
@@ -445,9 +447,9 @@ function makeInspection(overrides = {}) {
     next_before_id: null,
   };
   const html = renderSummaryPanel({ inspection: makeInspection(), history });
-  t.ok(!html.includes('<script>alert(1)</script>'),
+  t.excludes(html, '<script>alert(1)</script>',
     'raw <script> substring not present');
-  t.ok(html.includes('&lt;script&gt;'),
+  t.contains(html, '&lt;script&gt;',
     'angle brackets entity-escaped in rendered HTML');
 }
 
@@ -579,61 +581,60 @@ function makeHistoryRows() {
     nextBeforeId: 12300,
   });
   // Plan slot list rendered, with the cursor (next_ordinal=2) highlighted.
-  t.ok(html.includes('sp-slot-list'),
+  t.contains(html, 'sp-slot-list',
     'AE5: slot list rendered');
-  t.ok(html.includes('sp-slot-current'),
+  t.contains(html, 'sp-slot-current',
     'AE5: cursor slot has sp-slot-current marker');
   // Plan-aware history table with telemetry columns visible.
-  t.ok(html.includes('sp-history-table'),
+  t.contains(html, 'sp-history-table',
     'AE5: plan-aware history table present');
-  t.ok(html.includes('Outcome') && html.includes('Strategy')
-    && html.includes('Elapsed') && html.includes('Final state')
-    && html.includes('Cursor') && html.includes('Stale')
-    && html.includes('Consumed') && html.includes('Cycle')
-    && html.includes('Peers') && html.includes('Fanout')
-    && html.includes('Forensics'),
-    'AE5: history columns include outcome/strategy/elapsed/final_state/cursor/stale/consumed/cycle/peers/fanout/forensics');
+  for (const column of [
+    'Outcome', 'Strategy', 'Elapsed', 'Final state', 'Cursor', 'Stale',
+    'Consumed', 'Cycle', 'Peers', 'Fanout', 'Forensics',
+  ]) {
+    t.contains(html, column, `AE5: history table has a ${column} column`);
+  }
   // Specific row data: ordinal 2, strategy track_2, attempt_consumed=yes.
-  t.ok(html.includes('q-current'),
+  t.contains(html, 'q-current',
     'AE5: current attempt query rendered');
-  t.ok(html.includes('q-stale'),
+  t.contains(html, 'q-stale',
     'AE5: stale attempt query rendered');
-  t.ok(html.includes('plan_superseded'),
+  t.contains(html, 'plan_superseded',
     'AE5: stale_reason rendered for the second row');
-  t.ok(html.includes('sp-history-row-stale'),
+  t.contains(html, 'sp-history-row-stale',
     'AE5: stale row carries the .sp-history-row-stale CSS class');
-  t.ok(html.includes('sp-candidate-forensics'),
+  t.contains(html, 'sp-candidate-forensics',
     'AE5: candidate forensics rendered as <details>');
-  t.ok(html.includes('peer-A'),
+  t.contains(html, 'peer-A',
     'AE5: candidate JSONB serialised inside the forensics block');
   // Per-slot stats.
-  t.ok(html.includes('sp-stats-table'),
+  t.contains(html, 'sp-stats-table',
     'AE5: per-slot stats table rendered');
-  t.ok(html.includes('track_0') && html.includes('track_1'),
-    'AE5: per-slot stats include both strategies');
+  t.contains(html, 'track_0', 'AE5: per-slot stats include the track_0 strategy');
+  t.contains(html, 'track_1', 'AE5: per-slot stats include the track_1 strategy');
   // Plan-health block.
-  t.ok(html.includes('sp-health'),
+  t.contains(html, 'sp-health',
     'AE5: plan-health block rendered');
-  t.ok(html.includes('no_runnable_query'),
+  t.contains(html, 'no_runnable_query',
     'AE5: failure class surfaced in plan-health');
-  t.ok(html.includes('metadata incomplete'),
+  t.contains(html, 'metadata incomplete',
     'AE5: failure error_message surfaced');
-  t.ok(html.includes('omitted_candidates'),
+  t.contains(html, 'omitted_candidates',
     'AE5: provenance: omitted_candidates rendered');
-  t.ok(html.includes('deduped_losers'),
+  t.contains(html, 'deduped_losers',
     'AE5: provenance: deduped_losers rendered');
-  t.ok(html.includes('dropped_low_entropy_tokens'),
+  t.contains(html, 'dropped_low_entropy_tokens',
     'AE5: provenance: dropped_low_entropy_tokens rendered');
   // Pre-rollout legacy section, collapsed.
-  t.ok(html.includes('sp-history-legacy-section'),
+  t.contains(html, 'sp-history-legacy-section',
     'AE5: pre-rollout legacy section rendered');
-  t.ok(html.includes('Pre-rollout history'),
+  t.contains(html, 'Pre-rollout history',
     'AE5: pre-rollout summary text present');
-  t.ok(html.includes('<details class="sp-history-legacy">'),
+  t.contains(html, '<details class="sp-history-legacy">',
     'AE5: pre-rollout block is collapsed via <details>');
-  t.ok(html.includes('class="sp-history-row legacy"'),
+  t.contains(html, 'class="sp-history-row legacy"',
     'AE5: legacy rows tagged distinctly');
-  t.ok(html.includes('old_q'),
+  t.contains(html, 'old_q',
     'AE5: legacy row content rendered inside the collapsed block');
 }
 
@@ -645,9 +646,9 @@ function makeHistoryRows() {
     history: makeHistoryRows(),
     nextBeforeId: null,
   });
-  t.ok(html.includes('cycle-level'),
+  t.contains(html, 'cycle-level',
     'AE6: cache attribution label literally reads "cycle-level"');
-  t.ok(html.includes('Cache attribution'),
+  t.contains(html, 'Cache attribution',
     'AE6: cache attribution label introduces the level');
 }
 
@@ -673,13 +674,13 @@ function makeHistoryRows() {
   t.ok(/<tr class="sp-history-row[ "]/.test(html),
     'AE7: plan-aware rows use .sp-history-row without .legacy');
   // Legacy rows live in .sp-history-legacy-section as .sp-history-row.legacy.
-  t.ok(html.includes('class="sp-history-row legacy"'),
+  t.contains(html, 'class="sp-history-row legacy"',
     'AE7: legacy rows distinguished via .legacy CSS suffix');
-  t.ok(html.includes('sp-history-legacy-section'),
+  t.contains(html, 'sp-history-legacy-section',
     'AE7: legacy rows live in their own section');
   // The two rendered queries must both appear, in the expected sections.
-  t.ok(html.includes('q-current') && html.includes('legacy-q1'),
-    'AE7: both plan-aware and legacy queries rendered');
+  t.contains(html, 'q-current', 'AE7: the plan-aware query is rendered');
+  t.contains(html, 'legacy-q1', 'AE7: the legacy query is rendered');
 }
 
 {
@@ -695,7 +696,7 @@ function makeHistoryRows() {
     history: makeHistoryRows(),
     nextBeforeId: null,
   });
-  t.ok(html.includes('window.searchPlanRefreshDetail'),
+  t.contains(html, 'window.searchPlanRefreshDetail',
     'AE10: Refresh button wires to window.searchPlanRefreshDetail');
   t.ok(/>\s*Refresh\s*</.test(html),
     'AE10: Refresh button label rendered');
@@ -708,9 +709,9 @@ function makeHistoryRows() {
     history: makeHistoryRows(),
     nextBeforeId: 12300,
   });
-  t.ok(html.includes('sp-load-older-button'),
+  t.contains(html, 'sp-load-older-button',
     'pagination: Load older button rendered when nextBeforeId is non-null');
-  t.ok(html.includes('window.searchPlanLoadOlder(2566, 12300)'),
+  t.contains(html, 'window.searchPlanLoadOlder(2566, 12300)',
     'pagination: button onclick wires the cursor seed');
 }
 
@@ -721,7 +722,7 @@ function makeHistoryRows() {
     history: makeHistoryRows(),
     nextBeforeId: null,
   });
-  t.ok(!html.includes('sp-load-older-button'),
+  t.excludes(html, 'sp-load-older-button',
     'pagination: no Load older button when nextBeforeId is null');
 }
 
@@ -740,9 +741,9 @@ function makeHistoryRows() {
     history: [],
     nextBeforeId: null,
   });
-  t.ok(html.includes('No plan-aware attempts yet'),
+  t.contains(html, 'No plan-aware attempts yet',
     'edge: empty plan-aware history shows an empty-state message');
-  t.ok(html.includes('legacy-only'),
+  t.contains(html, 'legacy-only',
     'edge: legacy section still renders the legacy row');
 }
 
@@ -756,9 +757,9 @@ function makeHistoryRows() {
     history: [],
     nextBeforeId: null,
   });
-  t.ok(html.includes('No plan-aware attempts yet'),
+  t.contains(html, 'No plan-aware attempts yet',
     'both-empty: plan-aware empty-state shown');
-  t.ok(html.includes('No legacy attempts'),
+  t.contains(html, 'No legacy attempts',
     'both-empty: legacy empty-state shown');
 }
 
@@ -1008,12 +1009,12 @@ t.section('renderAdvanceForm()');
     requestId: 42,
   });
   // Strategy select with leading "no choice" option + 5 unique strategies.
-  t.ok(html.includes('<select'),
+  t.contains(html, '<select',
     'renderAdvanceForm: emits a <select>');
-  t.ok(html.includes('— (use ordinal)'),
+  t.contains(html, '— (use ordinal)',
     'renderAdvanceForm: leading "— (use ordinal)" option present');
   for (let i = 0; i < 5; i++) {
-    t.ok(html.includes(`>track_${i}</option>`),
+    t.contains(html, `>track_${i}</option>`,
       `renderAdvanceForm: strategy option for track_${i}`);
   }
   // Strategy options are de-duped (5 unique strategies, not 10).
@@ -1023,7 +1024,7 @@ t.section('renderAdvanceForm()');
   // Ordinal input bounded to items.length - 1.
   t.ok(/<input[^>]*type="number"[^>]*min="0"/.test(html),
     'renderAdvanceForm: ordinal input is type="number" min="0"');
-  t.ok(html.includes('max="9"'),
+  t.contains(html, 'max="9"',
     'renderAdvanceForm: ordinal max=N-1 (items.length - 1)');
   // Confirm + Cancel buttons.
   t.ok(/>Confirm</.test(html),
@@ -1031,17 +1032,17 @@ t.section('renderAdvanceForm()');
   t.ok(/>Cancel</.test(html),
     'renderAdvanceForm: Cancel button present');
   // Confirm wires to the submit handler with the request id.
-  t.ok(html.includes('window.searchPlanSubmitAdvance(42'),
+  t.contains(html, 'window.searchPlanSubmitAdvance(42',
     'renderAdvanceForm: Confirm button wires window.searchPlanSubmitAdvance');
   // Cancel wires to cancel handler.
-  t.ok(html.includes('window.searchPlanCancelAdvance(42'),
+  t.contains(html, 'window.searchPlanCancelAdvance(42',
     'renderAdvanceForm: Cancel button wires window.searchPlanCancelAdvance');
   // form id captured for the submit handler to read inputs back.
-  t.ok(html.includes('class="sp-advance-form"'),
+  t.contains(html, 'class="sp-advance-form"',
     'renderAdvanceForm: form has the sp-advance-form class');
-  t.ok(html.includes('data-field="strategy"'),
+  t.contains(html, 'data-field="strategy"',
     'renderAdvanceForm: strategy input data-field marker');
-  t.ok(html.includes('data-field="ordinal"'),
+  t.contains(html, 'data-field="ordinal"',
     'renderAdvanceForm: ordinal input data-field marker');
 }
 
@@ -1055,9 +1056,9 @@ t.section('REGENERATE_CONFIRM_MESSAGE');
 
 {
   const lower = REGENERATE_CONFIRM_MESSAGE.toLowerCase();
-  t.ok(lower.includes('cursor'),
+  t.contains(lower, 'cursor',
     'AE8: regenerate confirm message includes "cursor"');
-  t.ok(lower.includes('cycle'),
+  t.contains(lower, 'cycle',
     'AE8: regenerate confirm message includes "cycle"');
   t.ok(REGENERATE_CONFIRM_MESSAGE.length > 10,
     'AE8: regenerate confirm message is non-trivially long');
@@ -1616,7 +1617,7 @@ async function withRaceFixture(impl) {
       'F2 close: open call dispatched the initial fetch pair');
     // Capture the loading-state HTML that was set synchronously.
     const beforeResolve = createdPanel.innerHTML;
-    t.ok(beforeResolve.includes('Loading'),
+    t.contains(beforeResolve, 'Loading',
       'F2 close: panel shows loading text while fetch is in-flight');
     // Simulate the panel being detached (operator clicked Close /
     // navigated away). getElementById will now return null for this id.
@@ -1772,13 +1773,13 @@ t.section('F14: misc test gaps');
     latest_failed_deterministic: null,
   });
   const html = renderSummaryPanel({ inspection, history: { rows: [] } });
-  t.ok(html.includes('No active plan'),
+  t.contains(html, 'No active plan',
     'F14.1: no-plan + no-failure surfaces the "No active plan" debug line');
-  t.ok(html.includes('has_active_plan='),
+  t.contains(html, 'has_active_plan=',
     'F14.1: debug line surfaces has_active_plan=');
-  t.ok(html.includes('has_deterministic_failure='),
+  t.contains(html, 'has_deterministic_failure=',
     'F14.1: debug line surfaces has_deterministic_failure=');
-  t.ok(html.includes('has_retryable_failure='),
+  t.contains(html, 'has_retryable_failure=',
     'F14.1: debug line surfaces has_retryable_failure=');
 }
 

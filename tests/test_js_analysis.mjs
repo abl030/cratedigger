@@ -12,7 +12,7 @@ import {
   renderRecordingsBlock,
 } from '../web/js/analysis.js';
 
-import { stubGlobals, suite } from './js_harness.mjs';
+import { element, stubGlobals, suite } from './js_harness.mjs';
 
 const t = suite(import.meta.url);
 
@@ -107,45 +107,27 @@ t.section('renderRecordingsBlock() — markers stay with titles');
 
 t.section('disambRemove() — processing conflict locks and refreshes only the acted-on row');
 {
-  const attributes = new Map([['data-pipeline-request-id', '903']]);
   const inserted = [];
-  const btn = {
-    dataset: {},
-    disabled: false,
+  const btn = element({
     textContent: 'Remove request',
-    style: {},
     isConnected: true,
-    setAttribute(name, value) { attributes.set(name, value); },
-    removeAttribute(name) { attributes.delete(name); },
-    getAttribute(name) { return attributes.get(name) || null; },
-    focus() {},
-    insertAdjacentElement(_position, element) {
-      element.isConnected = true;
-      inserted.push(element);
+    insertAdjacentElement(_position, child) {
+      child.isConnected = true;
+      inserted.push(child);
     },
-  };
-  const live = { textContent: '', setAttribute() {} };
+  });
+  btn.setAttribute('data-pipeline-request-id', '903');
+  const live = element();
   const calls = [];
   const globals = stubGlobals({
     confirm: () => true,
     document: {
       activeElement: btn,
-      body: { appendChild() {} },
-      createElement() {
-        return {
-          children: [],
-          className: '',
-          id: '',
-          textContent: '',
-          isConnected: false,
-          setAttribute() {},
-          appendChild(child) { this.children.push(child); },
-          remove() { this.isConnected = false; },
-        };
-      },
+      body: element({ isConnected: true }),
+      createElement() { return element(); },
       getElementById(id) {
         if (id === 'processing-lock-live-region') return live;
-        return inserted.find(element => element.id === id && element.isConnected) || null;
+        return inserted.find(node => node.id === id && node.isConnected) || null;
       },
       querySelectorAll() { return [btn]; },
     },
@@ -193,7 +175,7 @@ t.section('disambRemove() — processing conflict locks and refreshes only the a
   await disambRemove(903, btn);
   t.equal(calls.join(','), '/api/pipeline/delete,/api/pipeline/903',
     'typed conflict refetches only the affected request');
-  t.equal(attributes.get('aria-disabled'), 'true', 'remove control becomes aria-disabled');
+  t.equal(btn.getAttribute('aria-disabled'), 'true', 'remove control becomes aria-disabled');
   t.equal(btn.textContent, 'importing', 'authoritative owner status replaces stale action');
   t.equal(live.textContent.includes('job #70'), true, 'owner change is announced');
   globals.restore();

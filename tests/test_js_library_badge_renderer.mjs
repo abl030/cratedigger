@@ -24,13 +24,13 @@ t.section('renderLibraryBadgeCorpusRow() uses the production Library badge path'
   t.ok(rendered.id === 17, 'synthetic corpus identity is retained');
   t.ok(Object.keys(rendered.fields).join(',') === 'row_html',
     'the differential watches the complete production row HTML');
-  t.ok(rendered.fields.row_html.includes('>captured<'),
+  t.contains(rendered.fields.row_html, '>captured<',
     'captured history renders through production');
-  t.ok(rendered.fields.row_html.includes('>missing<'),
+  t.contains(rendered.fields.row_html, '>missing<',
     'captured current absence renders through production');
-  t.ok(rendered.fields.row_html.includes('>verified<'),
+  t.contains(rendered.fields.row_html, '>verified<',
     'carried proof renders through production');
-  t.ok(rendered.fields.row_html.includes('>wanted<'),
+  t.contains(rendered.fields.row_html, '>wanted<',
     'current acquisition lifecycle renders through production');
   t.ok(JSON.stringify(row) === before, 'rendering does not mutate the corpus row');
 }
