@@ -519,12 +519,19 @@ MASKABLE_RULE_PINS: dict[str, dict[str, tuple[str, ...]]] = {
             "tests.test_read_projection_audit",
         ),
     },
-    # Silent only for the five fakes that also carry a hand-authored entry;
-    # every other fake fails closed on the tests/ row. The derived
-    # tests.test_fakes_<stem> channel is not silently losable here — a fake
-    # with a cluster sibling has no entry, so it raises instead.
+    # Silent only for the fakes that also carry a hand-authored entry; every
+    # other fake fails closed on the tests/ row. Both channels are losable
+    # here, and it took an unrelated PR to show it: this entry once said the
+    # derived tests.test_fakes_<stem> channel could not be, on the reasoning
+    # that a fake with a cluster sibling has no entry. #1313 batch C then
+    # landed subprocess_env.py with BOTH, and this contract went red on the
+    # merge — which is the whole point of measuring instead of reasoning.
     "prefix:tests/fakes/": {
         "tests/fakes/beets_contract.py": ("tests.test_fakes",),
+        "tests/fakes/subprocess_env.py": (
+            "tests.test_fakes",
+            "tests.test_fakes_subprocess_env",
+        ),
     },
     # The residual that opened this contract: five parsers fail closed
     # without their row and pyright_checks.py resolves the colliding
