@@ -549,11 +549,26 @@ export function element(initial = {}) {
   // exists to replace, which is a fake diverging from the real edge
   // (`.claude/rules/test-fidelity.md` Rule B in spirit).
   const attributes = new Map();
+  const classes = new Set();
   return {
     id: '',
     textContent: '',
     innerHTML: '',
     className: '',
+    // A real `classList`, not three no-op methods: `toggleExpand` decides
+    // whether to collapse or load by reading `contains('open')` back, so a
+    // stub that only accepts writes silently makes every panel open twice
+    // and never close. Four suites hand-rolled this shape.
+    classList: {
+      contains(name) { return classes.has(name); },
+      add(name) { classes.add(name); },
+      remove(name) { classes.delete(name); },
+      toggle(name) {
+        if (classes.has(name)) classes.delete(name);
+        else classes.add(name);
+        return classes.has(name);
+      },
+    },
     disabled: false,
     style: {},
     dataset: {},

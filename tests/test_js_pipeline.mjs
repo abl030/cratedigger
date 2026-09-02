@@ -12,10 +12,12 @@ import {
   renderPipelineStatusButtons,
   renderRequestEvidenceSections,
   syncRetagDivergenceAlbum,
+  toggleDetail,
 } from '../web/js/pipeline.js';
 import { state } from '../web/js/state.js';
+import { jsArg } from '../web/js/util.js';
 
-import { stubGlobals, suite } from './js_harness.mjs';
+import { domStub, element, stubGlobals, suite } from './js_harness.mjs';
 
 const t = suite(import.meta.url);
 
@@ -773,6 +775,157 @@ t.section('syncRetagDivergenceAlbum() network-error path re-arms the button with
   t.equal(dom.preNote.textContent, 'Tag-sync request failed',
     'the note falls back to a generic message');
   t.equal(dom.toast.className, 'toast error', 'a network failure toast is an error');
+}
+
+// ---------------------------------------------------------------------------
+// The composed entry (issue #1346).
+//
+// Every render assertion above calls a row renderer directly, and that is
+// the right level for the HTML each one produces. What no direct call can
+// reach is the composition: `toggleDetail` is what production runs, and it
+// decides the order of eight fragments, which payload field feeds each of
+// them, and what it derives before handing anything over. Swap
+// `data.current_library` for `data.request` in that function and every
+// assertion above still passes.
+//
+// So the entry gets its own section rather than replacing the leaf calls,
+// on the model of `renderPipelineDashboard`'s composer test (PR #1296).
+// The leaf calls stay because a needle asserted against the whole panel
+// could match a different fragment; each sentinel below is unique to the
+// field it proves.
+// ---------------------------------------------------------------------------
+
+/** A `/api/pipeline/<id>` envelope carrying one sentinel per composed row. */
+function detailEnvelope(requestOverrides = {}) {
+  return {
+    request: {
+      id: 4242,
+      artist_name: 'ARTISTSENTINEL',
+      album_title: 'ALBUMSENTINEL',
+      status: 'wanted',
+      mb_release_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      mb_release_group_id: 'rgsentinel-0000-0000-0000-000000000000',
+      verified_lossless: true,
+      processing_owner: null,
+      ...requestOverrides,
+    },
+    current_library: {
+      state: 'unique',
+      path: '/library/LIBRARYPATHSENTINEL',
+      album_id: 909,
+    },
+    beets_tracks: [{ bitrate: 900000, format: 'FLAC', title: 'a track' }],
+    tracks: [{ title: 'expected one' }, { title: 'expected two' }],
+    // `created_at` is not decoration: `renderDownloadHistoryItem` formats it
+    // and throws "Invalid time value" without one, which `toggleExpand`
+    // turns into the error placeholder. A history row the server can
+    // actually emit always carries it.
+    history: [
+      { outcome: 'rejected', soulseek_username: 'peer-a', created_at: '2026-04-25T23:25:00+00:00' },
+      { outcome: 'rejected', soulseek_username: 'peer-b', created_at: '2026-04-24T23:25:00+00:00' },
+    ],
+    last_search: { variant: 'FORENSICVARIANTSENTINEL', outcome: 'no_match' },
+  };
+}
+
+/**
+ * Open the detail panel the way production does, and hand back its HTML.
+ *
+ * `toggleExpand` swallows a loader throw into "Failed to load details", so
+ * every caller checks for that string: without it a fixture wrong enough to
+ * crash the composer would render an error placeholder and pass anything
+ * asserted with `excludes`.
+ */
+async function openDetailPanel(envelope) {
+  const panel = element();
+  stubGlobals({
+    document: domStub({ 4242: panel }),
+    fetch: async () => ({ ok: true, status: 200, json: async () => envelope }),
+  });
+  await toggleDetail(4242);
+  return panel.innerHTML;
+}
+
+t.section('toggleDetail() composes the panel in order, each row from its own payload field');
+{
+  const html = await openDetailPanel(detailEnvelope());
+  t.excludes(html, 'Failed to load details', 'the composer ran to completion');
+
+  // Ordered needles, one per composed fragment, in composition order.
+  const rows = [
+    ['aaaaaaaa', 'the external link row renders request.mb_release_id'],
+    ['LIBRARYPATHSENTINEL', 'the library row renders current_library'],
+    ['verified lossless', 'the quality row reads request.verified_lossless'],
+    ['Download History (2)', 'the evidence sections render history'],
+    ['In Library (1 tracks)', 'the evidence sections render beets_tracks'],
+    ['FORENSICVARIANTSENTINEL', 'the forensic block renders last_search'],
+    ["window.updateStatus(4242, 'wanted')", 'the status buttons render request.status'],
+    ['window.banSource(4242,', 'the bad-rip button renders below the status buttons'],
+    ['window.openReplacePicker({sourceRequestId: 4242', 'the Replace button renders last'],
+  ];
+  let previous = -1;
+  let ordered = true;
+  for (const [needle, message] of rows) {
+    const at = html.indexOf(needle);
+    t.ok(at !== -1, message);
+    if (at <= previous) ordered = false;
+    previous = at;
+  }
+  t.ok(ordered, 'the nine fragments appear in the composed order');
+
+  // The two values `toggleDetail` derives rather than forwards. Both
+  // needles go through `jsArg`, the same encoder the button uses, so the
+  // assertion cannot drift from the escaping production applies.
+  t.contains(html, `sourceLabel: ${jsArg('ARTISTSENTINEL — ALBUMSENTINEL')}`,
+    'the Replace label is built from the request artist and album');
+  t.contains(html, `releaseGroupId: ${jsArg('rgsentinel-0000-0000-0000-000000000000')}`,
+    'the Replace button carries request.mb_release_group_id');
+}
+
+t.section('toggleDetail() withholds Replace on a frozen audit row');
+{
+  // A replaced row is terminal audit state; re-replacing it is out of scope
+  // (R30). The gate lives in the composer, so nothing but the composer can
+  // prove it — and the bad-rip button next to it must still render, or the
+  // assertion would pass on a panel that simply failed to build.
+  const html = await openDetailPanel(detailEnvelope({ status: 'replaced' }));
+  t.excludes(html, 'Failed to load details', 'the composer ran to completion');
+  t.contains(html, 'window.banSource(4242,',
+    'the bad-rip button still renders on a replaced row');
+  t.excludes(html, 'window.openReplacePicker',
+    'a replaced row offers no Replace button');
+}
+
+t.section('toggleDetail() surfaces a failed request as an error panel');
+{
+  const panel = element();
+  stubGlobals({
+    document: domStub({ 4242: panel }),
+    fetch: async () => ({ ok: false, status: 503, json: async () => ({}) }),
+  });
+  await toggleDetail(4242);
+  t.contains(panel.innerHTML, 'Failed to load details',
+    'a non-OK response renders the error placeholder');
+  t.equal(panel.classList.contains('open'), true,
+    'the panel stays open so the operator sees the failure');
+}
+
+t.section('toggleDetail() on an open panel collapses it without refetching');
+{
+  const panel = element();
+  let fetches = 0;
+  stubGlobals({
+    document: domStub({ 4242: panel }),
+    fetch: async () => {
+      fetches += 1;
+      return { ok: true, status: 200, json: async () => detailEnvelope() };
+    },
+  });
+  await toggleDetail(4242);
+  t.equal(fetches, 1, 'opening the panel fetches the request detail');
+  await toggleDetail(4242);
+  t.equal(fetches, 1, 'closing it again does not refetch');
+  t.equal(panel.classList.contains('open'), false, 'the panel is collapsed');
 }
 
 t.done();
