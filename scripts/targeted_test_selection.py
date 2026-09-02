@@ -270,6 +270,14 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_spectral_attempt_audit_generated",
         "tests.test_terminal_outcome_callers",
     ),
+    "lib/dispatch/quality_gate.py": (
+        # The basename probe resolves tests.test_quality_gate, masking the
+        # loss of the two integration modules that exercise this seam through
+        # dispatch composition and end-to-end import slices (#1321).
+        "tests.test_quality_gate",
+        "tests.test_import_dispatch",
+        "tests.test_integration_slices",
+    ),
     "lib/startup_reconciliation.py": (
         # Was an admitted zero-neighbour gap (issue #1199, measured
         # 2026-08-19): there is no tests.test_startup_reconciliation, so
@@ -1422,11 +1430,6 @@ LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
     "lib/dispatch/post_import.py": (
         "measured 2026-08-19: zero neighbours -- basename-derived "
         "tests.test_post_import does not exist and no EXACT_PATH_"
-        "NEIGHBOURS/prefix rule covers it (issue #1199)"
-    ),
-    "lib/dispatch/quality_gate.py": (
-        "measured 2026-08-19: zero neighbours -- basename-derived "
-        "tests.test_quality_gate does not exist and no EXACT_PATH_"
         "NEIGHBOURS/prefix rule covers it (issue #1199)"
     ),
 

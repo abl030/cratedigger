@@ -135,13 +135,21 @@ class _FakeSyncBeets:
         self.unreadable: set[str] = set()
         self.resolutions: dict[str, CurrentBeetsResolution] = {}
         self.close_calls = 0
-        #: "" | "read" | "resolve" — which read raises, and how many
-        #: times it fired. ``failure`` defaults to a real Beets
-        #: availability error; pass an unrelated exception to check that
-        #: the mediator does NOT launder it into ``beets_unavailable``.
+        #: "" | "read" | "resolve" — which read raises. ``failure``
+        #: defaults to a real Beets availability error; pass an unrelated
+        #: exception to check that the mediator does NOT launder it into
+        #: ``beets_unavailable``.
         self.fail_authority_on = fail_authority_on
         self.failure = failure
-        self.authority_raises = 0
+        #: One entry per firing, naming the read it fired at. A caller
+        #: that only counts cannot tell an identity read from a release
+        #: resolution, and the two carry different production
+        #: consequences (#1313 residual 1332-5).
+        self.authority_raise_sites: list[str] = []
+
+    @property
+    def authority_raises(self) -> int:
+        return len(self.authority_raise_sites)
 
     def seed_album(
         self,
@@ -165,7 +173,7 @@ class _FakeSyncBeets:
 
     def _maybe_fail(self, site: str) -> None:
         if self.fail_authority_on == site:
-            self.authority_raises += 1
+            self.authority_raise_sites.append(site)
             raise self.failure or real_beets_authority_failure()
 
     def get_album_mb_identity(
