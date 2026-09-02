@@ -684,16 +684,21 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.web.test_server_threading",
         "tests.web.test_server_endpoints",
     ),
-    # The eight entries below were found by issue #1355 item 8's population
-    # of WEB_MODULES_WITHOUT_SELECTION_COVERAGE: each resolved zero
-    # neighbours (neither tests.test_web_<stem> nor tests.web.test_<stem>
-    # exists), but each has real coverage under a name the basename probe
-    # cannot derive. Every neighbour below was verified by READING the
-    # referencing test's own import statement, never by grepping the
-    # filename — web/overlay.py's stem collides with the unrelated
-    # tests/test_overlay.py (which imports web.routes._overlay, not
-    # web.overlay), so a bare tests.test_<stem> probe is NOT trustworthy
-    # here and this file deliberately widens no derived template to add it.
+    # The nine entries below (including web/index_document.py, appended
+    # after library_artist_service.py) were found by issue #1355 item 8's
+    # population of WEB_MODULES_WITHOUT_SELECTION_COVERAGE: each resolved
+    # zero neighbours (neither tests.test_web_<stem> nor
+    # tests.web.test_<stem> exists), but each has real coverage under a
+    # name the basename probe cannot derive. Every neighbour below was
+    # verified by READING the referencing test's own import statement,
+    # never by grepping the filename — web/overlay.py's stem collides with
+    # the unrelated tests/test_overlay.py (which imports
+    # web.routes._overlay, not web.overlay), so a bare tests.test_<stem>
+    # probe is NOT trustworthy here and this file deliberately widens no
+    # derived template to add it. (A pre-review draft of this same series
+    # DID grep instead of reading for web/index_document.py, scoped to
+    # tests/*.py only — missing tests/web/*.py entirely — and wrongly
+    # admitted it as a registry gap; see that entry's own comment.)
     "web/classify.py": (
         # Verified: tests/test_classify_producer_audit.py imports
         # web.classify directly (Rule C's own producer audit for this
@@ -718,10 +723,22 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_web_recents_generated",
     ),
     "web/api_bases.py": (
-        # Verified: tests/test_pipeline_cli.py::
-        # test_non_quarantine_main_still_configures_mirror_api_bases calls
-        # web.mb through configure_api_bases_from_runtime_config, this
-        # module's one production entry point.
+        # Verified by reading each import. tests/test_mb_artist_pagination_
+        # generated.py imports PUBLIC_MB_WS2_BASE directly and asserts
+        # against it. tests/test_web_dev_server_generated.py imports the
+        # whole module, reads PUBLIC_MB_ORIGIN, and mutates
+        # web.api_bases.PUBLIC_MB_WS2_BASE as a seam — its deterministic
+        # sibling tests/test_web_dev_server.py is named alongside it.
+        # tests/test_pipeline_cli.py::
+        # test_non_quarantine_main_still_configures_mirror_api_bases is the
+        # only one that reaches configure_api_bases_from_runtime_config
+        # itself, the module's one process-startup wiring function (see its
+        # own module docstring) — not a claim that it is the only name any
+        # test imports from this module, which the first two entries below
+        # disprove.
+        "tests.test_mb_artist_pagination_generated",
+        "tests.test_web_dev_server_generated",
+        "tests.test_web_dev_server",
         "tests.test_pipeline_cli",
     ),
     "web/library_album_row.py": (
@@ -738,6 +755,16 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         # Verified: tests/test_library_artist_service.py's import block
         # reads ``from web.library_artist_service import``.
         "tests.test_library_artist_service",
+    ),
+    # web/index_document.py was WRONGLY admitted as a registry gap in an
+    # earlier draft of this same change — a grep scoped to tests/*.py
+    # (non-recursive) missed tests/web/*.py entirely (issue #1355 item 8
+    # review, reader finding 1). tests/web/test_server_endpoints.py imports
+    # render_index_document directly in two tests: a Hypothesis property
+    # asserting the footer-selection logic tracks only explicit insecure
+    # mode, and a pin on its RuntimeError for a duplicate footer marker.
+    "web/index_document.py": (
+        "tests.web.test_server_endpoints",
     ),
     # cratedigger.py is a single top-level file (``len(path.parts) == 1``),
     # so ``_direct_test_candidates`` looks for ``tests.test_cratedigger`` —
@@ -1700,12 +1727,14 @@ HARNESS_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {}
 #: tests.test_web_<stem> / tests.web.test_<stem>), so it genuinely misses
 #: real files. Measured 2026-09-02: 41 tracked web/*.py files exist; 22 are
 #: under web/routes/, covered unconditionally by prefix:web/routes/. Of the
-#: remaining 19, 10 resolved zero neighbours. Eight had real coverage under
+#: remaining 19, 10 resolved zero neighbours. Nine had real coverage under
 #: a name the basename probe cannot derive and got an EXACT_PATH_NEIGHBOURS
 #: entry instead (classify.py, mb.py, artist_search.py, download_history_view.py,
 #: api_bases.py, library_album_row.py, library_album_detail_service.py,
-#: library_artist_service.py — see those entries below for the verified
-#: real consumer of each). These two are genuine gaps.
+#: library_artist_service.py, index_document.py — see those entries below
+#: for the verified real consumer of each; index_document.py's own entry
+#: was added after review found the first draft had wrongly admitted it as
+#: a gap on a grep that missed tests/web/*.py). This one is the genuine gap.
 #:
 #: `.js` files under web/js/ are deliberately NOT policed by this row (see
 #: the ROOT_COVERAGE_RULES comment on the web row): targeted selection only
@@ -1719,16 +1748,6 @@ WEB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
         "measured 2026-09-02: zero neighbours -- the file is empty (0 "
         "bytes), so there is no logic to regress and no test module was "
         "ever written for it"
-    ),
-    "web/index_document.py": (
-        "measured 2026-09-02: zero neighbours -- neither "
-        "tests.test_web_index_document nor tests.web.test_index_document "
-        "exists. render_index_document's footer-selection logic is called "
-        "only from web/server.py (via a cached wrapper), and nothing under "
-        "tests/ imports web.index_document directly; "
-        "tests/beets_config_startup_support.py's "
-        "_rendered_index_document reference is to the SERVER's cache "
-        "wrapper, not this module's own function"
     ),
 }
 
@@ -2775,6 +2794,14 @@ def _root_coverage_lines(
             "root and suffix, so resolving zero neighbours here is silent"
         )
     for rule in covering:
+        # Every current row's root strings are distinct and a `top_level`
+        # row can never also match a rooted path (issue #1355 item 8
+        # review), so `covering` holds at most one rule for every one of
+        # the 1,647 tracked files, measured directly — not an invariant
+        # anything here enforces. A future row that overlaps another
+        # (e.g. a second `web` row policing a different suffix) would make
+        # this `continue` start mattering; it would still be correct, since
+        # each matching rule's own message belongs on its own line.
         rationale = rule.registry.get(relative_path)
         if rationale is None:
             lines.append(

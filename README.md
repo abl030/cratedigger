@@ -212,11 +212,16 @@ coverage filed under a nested path, e.g. `lib/dispatch/core.py`) fails closed
 too unless admitted in `LIB_MODULES_WITHOUT_SELECTION_COVERAGE`. A changed
 `scripts/**/*.py` or `scripts/**/*.sh` file — the shell wrappers included —
 is policed the same way through `SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE`.
-One row per root lives in `ROOT_COVERAGE_RULES`;
-`tests/test_selection_coverage_audit.py` keeps those two registries exact in
-both directions and checks every registry's entries for a rationale and a
-path that still exists. The `tests/` registry's own exactness lives in
-`tests/test_targeted_test_selection.py` and
+`migrations/**/*.sql`, `nix/**/*.nix` and `*.json`, `web/**/*.py`,
+`harness/**/*.py` and `*.sh`, and a top-level `*.py` file are policed the
+same way too, each with its own admitted-gap registry (`web/js/*.js` is
+the one deliberate exception — the JavaScript phase always runs in full
+regardless of Python selection, so this mechanism does not police it).
+One row per root lives in `ROOT_COVERAGE_RULES`, eight rows in total;
+`tests/test_selection_coverage_audit.py` keeps every non-early-returning
+registry exact in both directions and checks every registry's entries for
+a rationale and a path that still exists. The `tests/` registry's own
+exactness lives in `tests/test_targeted_test_selection.py` and
 `tests/test_negative_coverage_audit.py` instead.
 
 To see why a path selects what it selects, ask it:

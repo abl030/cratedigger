@@ -1165,6 +1165,20 @@ class TestRootCoverageRegistriesAreExact(unittest.TestCase):
                         files,
                         f"expected {rule.root}/**/*{suffix} files to exist",
                     )
+                    if rule.top_level:
+                        # Pins the walk itself, not just what it resolves:
+                        # a `rglob("*")` regression here would still find
+                        # every OTHER root's files resolving something
+                        # (they are all separately policed), so nothing
+                        # would raise and the loop below would stay quiet
+                        # (issue #1355 item 8 review, mutant runner finding
+                        # F1 — measured survivor, not a hypothetical one).
+                        self.assertTrue(
+                            all(len(p.relative_to(REPO_ROOT).parts) == 1
+                                for p in files),
+                            "top-level walk returned a nested path — "
+                            "this branch must use iterdir(), never rglob()",
+                        )
                 for path in files:
                     relative = path.relative_to(REPO_ROOT).as_posix()
                     with self.subTest(path=relative):
@@ -1368,9 +1382,12 @@ class TestMaskableRulePins(unittest.TestCase):
     Contract C answers this for `EXACT_PATH_NEIGHBOURS`; a `SELECTION_RULES`
     row had no equivalent (issue #1331 residual 1), so deleting one was
     silent for exactly the files whose basename collides with an existing
-    test module — and completely silent for a row over a root no
-    `ROOT_COVERAGE_RULES` row polices, which is `migrations/`, `nix/`,
-    `web/`, `harness/` and the top level.
+    test module — and, before issue #1355 item 8 gave every root a
+    `ROOT_COVERAGE_RULES` row, completely silent for a row over
+    `migrations/`, `nix/`, `web/`, `harness/`, or the top level too. Item 8
+    closed most of that: only `prefix:nix/` and `prefix:harness/` still
+    silently lose SOME of their matched files today (their own comments in
+    `MASKABLE_RULE_PINS` below say exactly which, and why).
     """
 
     def test_pin_keys_are_exactly_the_measured_maskable_rule_set(self) -> None:
