@@ -7,10 +7,12 @@
 import {
   analysisChipHtml,
   applyAnalysisChips,
+  applyAnalysisToExpansion,
   computeRecordingDots,
   disambRemove,
   renderRecordingsBlock,
 } from '../web/js/analysis.js';
+import { state } from '../web/js/state.js';
 
 import { element, stubGlobals, suite } from './js_harness.mjs';
 
@@ -111,10 +113,7 @@ t.section('disambRemove() — processing conflict locks and refreshes only the a
   const btn = element({
     textContent: 'Remove request',
     isConnected: true,
-    insertAdjacentElement(_position, child) {
-      child.isConnected = true;
-      inserted.push(child);
-    },
+    inserted,
   });
   btn.setAttribute('data-pipeline-request-id', '903');
   const live = element();
@@ -179,6 +178,157 @@ t.section('disambRemove() — processing conflict locks and refreshes only the a
   t.equal(btn.textContent, 'importing', 'authoritative owner status replaces stale action');
   t.equal(live.textContent.includes('job #70'), true, 'owner change is announced');
   globals.restore();
+}
+
+// ---------------------------------------------------------------------------
+// The composed entry (issue #1346).
+//
+// `applyAnalysisToExpansion` is what `discography.js` calls. It reads the
+// release group out of `state.disambData`, then walks the pressings by
+// INDEX: pressing i gets colour i and the exclusive count at
+// `pressingExclusiveCounts[i]`. Nothing in the leaf tests above touches
+// that alignment — `computeRecordingDots` returns the counts as an array
+// and `renderRecordingsBlock` renders its own dots — so swapping the two
+// index reads apart is invisible until an operator sees an orange dot
+// labelled with the blue pressing's count.
+// ---------------------------------------------------------------------------
+
+/** A release-title node recording what the entry writes into it. */
+function titleNode() {
+  return element({
+    before: '',
+    after: '',
+    insertAdjacentHTML(position, html) {
+      if (position === 'afterbegin') this.before += html;
+      else this.after += html;
+    },
+  });
+}
+
+/**
+ * The expansion element `discography.js` hands the entry: it resolves a
+ * release row by `data-release-id`, and each row resolves its own title.
+ */
+function expansionFor(titles, { alreadyApplied = false } = {}) {
+  const appended = [];
+  return {
+    appended,
+    el: element({
+      querySelector(selector) {
+        if (selector === '.disamb-recordings') {
+          return alreadyApplied ? { marker: 'block already present' } : null;
+        }
+        // Match the whole selector production spells, not just the id
+        // inside it: an earlier version keyed on `data-release-id="…"`
+        // alone, so changing `.release[` to anything else in production
+        // still resolved the row (PR #1352 reader, F12).
+        const match = /^\.release\[data-release-id="([^"]+)"\]$/.exec(selector);
+        if (!match) return null;
+        const title = titles[match[1]];
+        if (!title) return null;
+        return {
+          // Likewise: the row must be asked for `.release-title`, not for
+          // whatever selector happens to arrive.
+          querySelector(inner) {
+            return inner === '.release-title' ? title : null;
+          },
+        };
+      },
+      insertAdjacentHTML(_position, html) { appended.push(html); },
+    }),
+  };
+}
+
+t.section('applyAnalysisToExpansion() pairs each pressing colour with its own exclusive count');
+{
+  // Two pressings, deliberately lopsided: P0 owns two exclusive recordings
+  // and P1 owns one, so a swapped index shows "1 exclusive" in blue.
+  const rg = {
+    release_group_id: 'rg-analysis',
+    pressings: [
+      { release_id: 'rel-0', recording_ids: ['r1', 'r2', 'shared'] },
+      { release_id: 'rel-1', recording_ids: ['r3', 'shared'] },
+    ],
+    tracks: [
+      { recording_id: 'r1', title: 'Only P0 one' },
+      { recording_id: 'r2', title: 'Only P0 two' },
+      { recording_id: 'r3', title: 'Only P1' },
+      { recording_id: 'shared', title: 'On both' },
+    ],
+  };
+  const titles = { 'rel-0': titleNode(), 'rel-1': titleNode() };
+  const expansion = expansionFor(titles);
+  const globals = stubGlobals({ document: { querySelector: () => null } });
+  state.disambData = { release_groups: [rg] };
+
+  applyAnalysisToExpansion(expansion.el, 'rg-analysis');
+
+  // The counts come from the production helper, not from arithmetic done
+  // here, so the pin cannot drift from what the entry actually reads.
+  const { pressingExclusiveCounts } = computeRecordingDots(rg);
+  t.deepEqual(pressingExclusiveCounts, [2, 1],
+    'the fixture gives the two pressings different exclusive counts');
+
+  t.contains(titles['rel-0'].before, '#6af',
+    'the first pressing takes the first colour');
+  t.contains(titles['rel-1'].before, '#fa6',
+    'the second pressing takes the second colour');
+  t.contains(titles['rel-0'].after, '2 exclusive',
+    'the first pressing is labelled with its OWN exclusive count');
+  t.contains(titles['rel-1'].after, '1 exclusive',
+    'the second pressing is labelled with its own count');
+  t.contains(titles['rel-0'].after, '#6af',
+    'the exclusive label is coloured to match its pressing dot');
+  t.equal(expansion.appended.length, 1, 'the recordings block is appended once');
+  t.contains(expansion.appended[0], 'disamb-recordings',
+    'the appended block carries the marker class the re-entry guard reads');
+
+  globals.restore();
+  state.disambData = null;
+}
+
+t.section('applyAnalysisToExpansion() withholds a zero exclusive count and re-entry');
+{
+  // Both pressings carry the same single recording, so neither owns
+  // anything exclusively and the `exCount > 0` gate must suppress both
+  // labels — while the colour dots still render.
+  const rg = {
+    release_group_id: 'rg-shared',
+    pressings: [
+      { release_id: 'rel-0', recording_ids: ['shared'] },
+      { release_id: 'rel-1', recording_ids: ['shared'] },
+    ],
+    tracks: [{ recording_id: 'shared', title: 'On both' }],
+  };
+  const titles = { 'rel-0': titleNode(), 'rel-1': titleNode() };
+  const expansion = expansionFor(titles);
+  const globals = stubGlobals({ document: { querySelector: () => null } });
+  state.disambData = { release_groups: [rg] };
+
+  applyAnalysisToExpansion(expansion.el, 'rg-shared');
+  t.contains(titles['rel-0'].before, '●', 'a pressing with no exclusives still gets its dot');
+  t.excludes(titles['rel-0'].after, 'exclusive', 'zero exclusives renders no label');
+  t.excludes(titles['rel-1'].after, 'exclusive', 'and neither does the other pressing');
+
+  // Re-entry: an expansion already carrying the block is left alone, which
+  // is what stops a second dot arriving on every re-render. The fixture is
+  // otherwise complete — same titles, same rows — so removing the guard
+  // makes these two assertions fail by name rather than crashing on a
+  // half-built stub.
+  const reTitles = { 'rel-0': titleNode(), 'rel-1': titleNode() };
+  const reEntered = expansionFor(reTitles, { alreadyApplied: true });
+  applyAnalysisToExpansion(reEntered.el, 'rg-shared');
+  t.equal(reTitles['rel-0'].before, '',
+    'a second pass writes no second dot into the release title');
+  t.equal(reEntered.appended.length, 0,
+    'a second pass appends no second recordings block');
+
+  // An unknown release group is a no-op, not a crash.
+  applyAnalysisToExpansion(expansion.el, 'rg-does-not-exist');
+  t.equal(expansion.appended.length, 1, 'an unknown release group appends nothing');
+
+  globals.restore();
+  state.disambData = null;
 }
 
 t.done();

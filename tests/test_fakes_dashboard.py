@@ -8,6 +8,7 @@ from datetime import UTC, date, datetime, timedelta
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+from lib.cycle_counters import CycleCounters
 from tests.dispatch_helpers import handoff_automation_owner
 from tests.fakes import (
     FakePipelineDB,
@@ -27,8 +28,11 @@ class TestFakeDashboardMirror(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1, status="wanted"))
         db.record_cycle_metrics(
-            cycle_total_s=300.0, search_time_s=240.0, peers_browsed=8,
-            find_download_queued=4, find_download_completed=4,
+            cycle_total_s=300.0,
+            counters=CycleCounters(
+                search_time_s=240.0, peers_browsed=8,
+                find_download_queued=4, find_download_completed=4,
+            ),
             wanted_total=10,
         )
         db.log_search(

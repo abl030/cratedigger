@@ -337,10 +337,8 @@ function makeInspection(overrides = {}) {
   const inspection = makeInspection({ next_ordinal: 2, cycle_count: 1 });
   const html = renderSummaryPanel({ inspection, history: { rows: [] } });
   t.contains(html, 'cursor', 'meta surfaces cursor label');
-  t.ok(/<strong>2\/4<\/strong>/.test(html),
-    'cursor renders as 2/4 inside a single <strong>');
-  t.ok(/cycle\s*<strong>1<\/strong>/.test(html),
-    'cycle count rendered with the slot count');
+  t.match(html, /<strong>2\/4<\/strong>/, 'cursor renders as 2/4 inside a single <strong>');
+  t.match(html, /cycle\s*<strong>1<\/strong>/, 'cycle count rendered with the slot count');
   t.contains(html, 'sp-status',
     'plan status badge is rendered');
   t.excludes(html, 'sp-drift',
@@ -433,8 +431,7 @@ function makeInspection(overrides = {}) {
     'sanitised error surfaced');
   t.contains(html, 'sp-failure',
     'failure container wraps the messaging');
-  t.ok(!/cursor\s*<strong>/.test(html),
-    'no cursor metadata when active_plan is null');
+  t.notMatch(html, /cursor\s*<strong>/, 'no cursor metadata when active_plan is null');
 }
 
 {
@@ -671,8 +668,7 @@ function makeHistoryRows() {
     nextBeforeId: null,
   });
   // Plan-aware rows live inside .sp-history-table without .legacy.
-  t.ok(/<tr class="sp-history-row[ "]/.test(html),
-    'AE7: plan-aware rows use .sp-history-row without .legacy');
+  t.match(html, /<tr class="sp-history-row[ "]/, 'AE7: plan-aware rows use .sp-history-row without .legacy');
   // Legacy rows live in .sp-history-legacy-section as .sp-history-row.legacy.
   t.contains(html, 'class="sp-history-row legacy"',
     'AE7: legacy rows distinguished via .legacy CSS suffix');
@@ -698,8 +694,7 @@ function makeHistoryRows() {
   });
   t.contains(html, 'window.searchPlanRefreshDetail',
     'AE10: Refresh button wires to window.searchPlanRefreshDetail');
-  t.ok(/>\s*Refresh\s*</.test(html),
-    'AE10: Refresh button label rendered');
+  t.match(html, />\s*Refresh\s*</, 'AE10: Refresh button label rendered');
 }
 
 {
@@ -1022,15 +1017,13 @@ t.section('renderAdvanceForm()');
   t.equal(optionMatches.length, 6,
     'renderAdvanceForm: 6 options total (5 unique strategies + leading "—")');
   // Ordinal input bounded to items.length - 1.
-  t.ok(/<input[^>]*type="number"[^>]*min="0"/.test(html),
+  t.match(html, /<input[^>]*type="number"[^>]*min="0"/,
     'renderAdvanceForm: ordinal input is type="number" min="0"');
   t.contains(html, 'max="9"',
     'renderAdvanceForm: ordinal max=N-1 (items.length - 1)');
   // Confirm + Cancel buttons.
-  t.ok(/>Confirm</.test(html),
-    'renderAdvanceForm: Confirm button present');
-  t.ok(/>Cancel</.test(html),
-    'renderAdvanceForm: Cancel button present');
+  t.match(html, />Confirm</, 'renderAdvanceForm: Confirm button present');
+  t.match(html, />Cancel</, 'renderAdvanceForm: Cancel button present');
   // Confirm wires to the submit handler with the request id.
   t.contains(html, 'window.searchPlanSubmitAdvance(42',
     'renderAdvanceForm: Confirm button wires window.searchPlanSubmitAdvance');

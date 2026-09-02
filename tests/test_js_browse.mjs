@@ -20,7 +20,7 @@ import {
 } from '../web/js/browse.js';
 import { state } from '../web/js/state.js';
 
-import { suite } from './js_harness.mjs';
+import { stubGlobals, suite } from './js_harness.mjs';
 
 const t = suite(import.meta.url);
 
@@ -41,11 +41,11 @@ const elements = {
   'source-hint': { innerHTML: '' },
 };
 
-globalThis.document = {
+stubGlobals({ document: {
   getElementById(id) {
     return elements[id] || null;
   },
-};
+} });
 
 function response(status, data) {
   return {
@@ -63,7 +63,7 @@ resetWorld();
 {
   const oldArtist = deferred();
   const oldLibrary = deferred();
-  globalThis.fetch = url => {
+  stubGlobals({ fetch: url => {
     if (url.includes('/api/artist/compare?')) {
       return Promise.resolve(response(200, {
         both: [], mb_unpaired: [{ id: 'stale-payload', title: 'Stale', source: 'mb', identity_kind: 'work', provenance: [] }],
@@ -72,7 +72,7 @@ resetWorld();
     }
     if (url.includes('/api/library/artist')) return oldLibrary.promise;
     return oldArtist.promise;
-  };
+  } });
   const old = loadArtistPage('closed-old', 'Closed Old');
   await new Promise(resolve => setImmediate(resolve));
   closeBrowseArtist();
@@ -81,10 +81,10 @@ resetWorld();
   await old;
   t.equal(state.browseCache['closed-old'], undefined, 'close drops early stale compare handoff');
 
-  globalThis.fetch = async url => {
+  stubGlobals({ fetch: async url => {
     if (url.includes('/api/artist/compare?') || url.includes('/disambiguate')) return response(503, {});
     return response(200, url.includes('/api/library/artist') ? { albums: [] } : { release_groups: [] });
-  };
+  } });
   await loadArtistPage('fresh-after-close', 'Fresh');
   t.equal(state.browseCache['fresh-after-close'].compare, null,
     'the next artist caches a null compare rather than the dropped payload');
@@ -102,7 +102,7 @@ resetWorld();
   const oldArtist = deferred();
   const oldLibrary = deferred();
   state.browseArtist = { id: 'switch-old', name: 'No Match Artist' };
-  globalThis.fetch = url => {
+  stubGlobals({ fetch: url => {
     if (url.includes('/api/artist/compare?')) {
       return Promise.resolve(response(200, {
         both: [], mb_unpaired: [{ id: 'switch-stale', title: 'Stale', source: 'mb', identity_kind: 'work', provenance: [] }],
@@ -112,7 +112,7 @@ resetWorld();
     if (url.includes('/api/discogs/search?')) return Promise.resolve(response(200, { artists: [] }));
     if (url.includes('/api/library/artist')) return oldLibrary.promise;
     return oldArtist.promise;
-  };
+  } });
   const old = loadArtistPage('switch-old', 'No Match Artist');
   await new Promise(resolve => setImmediate(resolve));
   await setBrowseSource('discogs');
@@ -135,11 +135,11 @@ t.section('a late compare cannot revive a failed useful load');
 resetWorld();
 {
   const compare = deferred();
-  globalThis.fetch = url => {
+  stubGlobals({ fetch: url => {
     if (url.includes('/api/artist/compare?')) return compare.promise;
     if (url.includes('/api/library/artist')) return Promise.resolve(response(200, { albums: [] }));
     return Promise.resolve(response(503, {}));
-  };
+  } });
   await loadArtistPage('failure-before-compare', 'Failure Before Compare');
   t.match(artistBody.innerHTML, />Retry</,
     'the failed useful pair renders Retry before the compare lands');
@@ -157,13 +157,13 @@ t.section('useful failure clears a compare that won the race');
 resetWorld();
 {
   const artist = deferred();
-  globalThis.fetch = url => {
+  stubGlobals({ fetch: url => {
     if (url.includes('/api/artist/compare?')) {
       return Promise.resolve(response(200, { both: [], mb_unpaired: [], discogs_unpaired: [], discogs_ungrouped_releases: [] }));
     }
     if (url.includes('/api/library/artist')) return Promise.resolve(response(200, { albums: [] }));
     return artist.promise;
-  };
+  } });
   const load = loadArtistPage('compare-before-failure', 'Compare Before Failure');
   await new Promise(resolve => setImmediate(resolve));
   t.equal(pendingEarlyCompareHandoffsForTest(), 1, 'compare handoff exists before useful failure');
@@ -377,13 +377,13 @@ resetWorld();
 {
   const aid = 'mb-503-pin';
   const rawSecret = 'SSL UNEXPECTED_EOF private upstream detail';
-  globalThis.fetch = async (url) => url.includes('/api/library/artist')
+  stubGlobals({ fetch: async (url) => url.includes('/api/library/artist')
     ? response(200, { albums: [] })
     : response(503, {
       error: 'MusicBrainz fallback unavailable, retry',
       retryable: true,
       raw: rawSecret,
-    });
+    }) });
   await loadArtistPage(aid, 'Transport Failure');
   t.deepEqual(safeRetryFailureViolations(aid, rawSecret), [],
     'a MusicBrainz 503 artist response leaves a safe Retry state');
@@ -395,9 +395,9 @@ resetWorld();
 {
   const aid = 'library-500-pin';
   const rawSecret = 'raw downstream database exception';
-  globalThis.fetch = async (url) => url.includes('/api/library/artist')
+  stubGlobals({ fetch: async (url) => url.includes('/api/library/artist')
     ? response(500, { error: rawSecret })
-    : response(200, { release_groups: [] });
+    : response(200, { release_groups: [] }) });
   await loadArtistPage(aid, 'Library Failure');
   t.deepEqual(safeRetryFailureViolations(aid, rawSecret), [],
     'a library 500 response leaves a safe Retry state');
@@ -409,7 +409,7 @@ resetWorld();
 {
   const aid = 'network-pin';
   const rawSecret = 'socket exploded at 10.0.0.9';
-  globalThis.fetch = async () => { throw new Error(rawSecret); };
+  stubGlobals({ fetch: async () => { throw new Error(rawSecret); } });
   await loadArtistPage(aid, 'Network Failure');
   t.deepEqual(safeRetryFailureViolations(aid, rawSecret), [],
     'a rejected fetch promise leaves a safe Retry state');
@@ -423,10 +423,10 @@ resetWorld();
   let fetchCount = 0;
   state.browseArtist = { id: aid, name: 'Retry Artist' };
   state.browseCache[aid] = { stale: true };
-  globalThis.fetch = async () => {
+  stubGlobals({ fetch: async () => {
     fetchCount++;
     throw new Error('still unavailable');
-  };
+  } });
   reloadBrowseArtist();
   await new Promise(resolve => setImmediate(resolve));
   t.equal(state.browseCache[aid], undefined, 'Retry deletes the stale artist cache entry');
@@ -442,12 +442,12 @@ for (const status of [400, 401, 403, 404, 408, 409, 418, 429, 500, 502, 503, 504
     resetWorld();
     const aid = `generated-${failedPart}-${status}`;
     const rawSecret = `raw-${failedPart}-secret-${status}`;
-    globalThis.fetch = async (url) => {
+    stubGlobals({ fetch: async (url) => {
       const isLibrary = url.includes('/api/library/artist');
       const shouldFail = failedPart === 'library' ? isLibrary : !isLibrary;
       if (shouldFail) return response(status, { error: rawSecret, retryable: status === 503 });
       return response(200, isLibrary ? { albums: [] } : { release_groups: [] });
-    };
+    } });
     await loadArtistPage(aid, `Generated ${status}`);
     t.deepEqual(safeRetryFailureViolations(aid, rawSecret), [],
       `a failing ${failedPart} half at ${status} leaves a safe Retry state`);
@@ -460,11 +460,11 @@ t.section('stale-token pin');
 resetWorld();
 {
   const pending = [];
-  globalThis.fetch = () => new Promise(resolve => pending.push(resolve));
+  stubGlobals({ fetch: () => new Promise(resolve => pending.push(resolve)) });
   const oldLoad = loadArtistPage('old-artist', 'Old Artist');
   t.equal(pending.length, 3, 'old load starts compare beside both fast requests');
 
-  globalThis.fetch = async () => { throw new Error('new active failure'); };
+  stubGlobals({ fetch: async () => { throw new Error('new active failure'); } });
   await loadArtistPage('new-artist', 'New Artist');
   const activeHtml = artistBody.innerHTML;
 
@@ -486,7 +486,7 @@ resetWorld();
   const aid = 'early-compare';
   const artist = deferred();
   const library = deferred();
-  globalThis.fetch = (url) => {
+  stubGlobals({ fetch: (url) => {
     if (url.includes('/api/artist/compare?')) {
       return Promise.resolve(response(200, {
         both: [], mb_unpaired: [{
@@ -498,7 +498,7 @@ resetWorld();
     if (url.includes('/api/library/artist')) return library.promise;
     if (url.includes('/disambiguate')) return Promise.resolve(response(503, {}));
     return artist.promise;
-  };
+  } });
   const load = loadArtistPage(aid, 'Early Compare');
   await new Promise(resolve => setImmediate(resolve));
   t.equal(state.browseCache[aid], undefined, 'early compare cannot create partial cache');
@@ -523,7 +523,7 @@ resetWorld();
   const requests = [];
   state.browseSource = 'mb';
   state.browseArtist = { id: 'old-mb-id', name: 'Race Artist' };
-  globalThis.fetch = (url) => {
+  stubGlobals({ fetch: (url) => {
     requests.push(url);
     if (url.includes('/api/artist/old-mb-id?')) return oldArtist.promise;
     if (url.includes('mbid=old-mb-id')) return oldLibrary.promise;
@@ -535,7 +535,7 @@ resetWorld();
       return Promise.resolve(response(200, { albums: [] }));
     }
     throw new Error(`unexpected race request: ${url}`);
-  };
+  } });
 
   const oldLoad = loadArtistPage('old-mb-id', 'Race Artist');
   const sourceSwitch = setBrowseSource('discogs');
@@ -565,22 +565,22 @@ resetWorld();
     /unpaired|ungrouped/i,
     'source hint does not expose comparison topology',
   );
-  t.ok(requests.some(url => url.includes('/api/discogs/artist/new-discogs-id?')),
+  t.anyContains(requests, '/api/discogs/artist/new-discogs-id?',
     'the switch loads the new Discogs artist endpoint');
   t.match(artistBody.innerHTML, />Retry</, 'current-source failure owns Retry');
 
   requests.length = 0;
-  globalThis.fetch = async (url) => {
+  stubGlobals({ fetch: async (url) => {
     requests.push(url);
     throw new Error('retry remains unavailable');
-  };
+  } });
   reloadBrowseArtist();
   await new Promise(resolve => setImmediate(resolve));
-  t.ok(requests.some(url => url.includes('/api/discogs/artist/new-discogs-id?')),
+  t.anyContains(requests, '/api/discogs/artist/new-discogs-id?',
     'Retry re-fetches the Discogs artist endpoint');
   t.ok(requests.some(url => url === '/api/library/artist?name=Race%20Artist'),
     'Retry re-fetches the library half by artist name');
-  t.notOk(requests.some(url => url.includes('old-mb-id')),
+  t.noneContains(requests, 'old-mb-id',
     'Retry never re-fetches the superseded MB id');
 }
 
@@ -597,7 +597,7 @@ for (const [oldSource, newSource] of [['mb', 'discogs'], ['discogs', 'mb']]) {
       let callIndex = 0;
       state.browseSource = oldSource;
       state.browseArtist = { id: `old-${oldSource}`, name: 'Generated Race' };
-      globalThis.fetch = (url) => {
+      stubGlobals({ fetch: (url) => {
         if (url.includes('/api/artist/compare?')) {
           return Promise.resolve(response(503, { error: 'decoration unavailable' }));
         }
@@ -606,7 +606,7 @@ for (const [oldSource, newSource] of [['mb', 'discogs'], ['discogs', 'mb']]) {
         if (call === 1) return oldFastB.promise;
         if (call === 2) return sourceLookup.promise;
         throw new Error(`unexpected generated race fetch ${call}`);
-      };
+      } });
 
       const oldLoad = loadArtistPage(`old-${oldSource}`, 'Generated Race');
       const sourceSwitch = setBrowseSource(newSource);
@@ -639,7 +639,7 @@ resetWorld();
   const requests = [];
   state.browseSource = 'mb';
   state.browseArtist = { id: 'starting-mb-id', name: 'Toggle Artist' };
-  globalThis.fetch = (url) => {
+  stubGlobals({ fetch: (url) => {
     requests.push(url);
     if (url.includes('/api/discogs/search?')) return discogsLookup.promise;
     if (url.includes('/api/search?')) return mbLookup.promise;
@@ -656,7 +656,7 @@ resetWorld();
       return Promise.resolve(response(503, { error: 'stale lookup drove a load' }));
     }
     throw new Error(`unexpected double-toggle request: ${url}`);
-  };
+  } });
 
   const olderToggle = setBrowseSource('discogs');
   const newestToggle = setBrowseSource('mb');
@@ -669,7 +669,7 @@ resetWorld();
   t.equal(state.browseSource, 'mb', 'the newest toggle owns the active source');
   t.deepEqual(state.browseArtist, { id: 'newest-mb-id', name: 'Toggle Artist' },
     'the newest toggle owns the active artist');
-  t.ok(requests.some(url => url.includes('/api/artist/newest-mb-id?')),
+  t.anyContains(requests, '/api/artist/newest-mb-id?',
     'the newest toggle loads its own MB artist endpoint');
   t.notMatch(newestHtml, />Retry</, 'the newest toggle renders a successful page');
 
@@ -684,7 +684,7 @@ resetWorld();
     { id: 'newest-mb-id', name: 'Toggle Artist' },
     'older lookup must not overwrite the newest source artist',
   );
-  t.notOk(requests.some(url => url.includes('stale-discogs-id')),
+  t.noneContains(requests, 'stale-discogs-id',
     'the older lookup never drives a load of its own match');
   t.equal(artistBody.innerHTML, newestHtml, 'older lookup must not repaint the newest page');
 }
@@ -702,7 +702,7 @@ for (const newestSource of ['mb', 'discogs']) {
   const requests = [];
   state.browseSource = newestSource;
   state.browseArtist = { id: `starting-${newestSource}-id`, name: 'Generated Toggle' };
-  globalThis.fetch = (url) => {
+  stubGlobals({ fetch: (url) => {
     requests.push(url);
     if (url.includes('/api/discogs/search?')) return lookups.discogs.promise;
     if (url.includes('/api/search?')) return lookups.mb.promise;
@@ -716,7 +716,7 @@ for (const newestSource of ['mb', 'discogs']) {
       return Promise.resolve(response(503, { error: 'stale source load' }));
     }
     throw new Error(`unexpected generated double-toggle request: ${url}`);
-  };
+  } });
 
   const olderToggle = setBrowseSource(olderSource);
   const newestToggle = setBrowseSource(newestSource);
@@ -741,9 +741,9 @@ for (const newestSource of ['mb', 'discogs']) {
   const expectedEndpoint = newestSource === 'discogs'
     ? `/api/discogs/artist/${newestId}?`
     : `/api/artist/${newestId}?`;
-  t.ok(requests.some(url => url.includes(expectedEndpoint)),
+  t.anyContains(requests, expectedEndpoint,
     `${newestSource} loaded its own endpoint family`);
-  t.notOk(requests.some(url => url.includes(staleId)),
+  t.noneContains(requests, staleId,
     `${newestSource} never loaded the older lookup's match`);
   t.equal(artistBody.innerHTML, newestHtml,
     `${newestSource} page content survives the older lookup`);
@@ -757,12 +757,12 @@ t.section('search row onclick wiring');
 resetWorld();
 {
   state.browseSearchType = 'artist';
-  globalThis.fetch = async url => {
+  stubGlobals({ fetch: async url => {
     t.contains(url, '/api/search?q=', 'artist search hits the MB search endpoint');
     return response(200, {
       artists: [{ id: 'a1', name: 'ArtName', disambiguation: '' }],
     });
-  };
+  } });
   await searchArtists('artname');
   t.match(elements.results.innerHTML,
     /onclick="window\.openBrowseArtist\(&quot;a1&quot;, &quot;ArtName&quot;\)"/,
@@ -772,7 +772,7 @@ resetWorld();
 resetWorld();
 {
   state.browseSearchType = 'release';
-  globalThis.fetch = async () => response(200, {
+  stubGlobals({ fetch: async () => response(200, {
     release_groups: [{
       id: 'rg1',
       artist_id: 'a2',
@@ -780,7 +780,7 @@ resetWorld();
       title: 'RelTitle',
       primary_type: 'Album',
     }],
-  });
+  }) });
   await searchArtists('reltitle');
   t.match(elements.results.innerHTML,
     /onclick="window\.openBrowseArtist\(&quot;a2&quot;, &quot;RelArtist&quot;\)"/,
@@ -792,7 +792,7 @@ resetWorld();
 {
   state.browseSearchType = 'release';
   state.browseSource = 'discogs';
-  globalThis.fetch = async () => response(200, {
+  stubGlobals({ fetch: async () => response(200, {
     release_groups: [{
       id: 'm1',
       discogs_release_id: 'dr9',
@@ -801,7 +801,7 @@ resetWorld();
       title: 'Masterless',
       is_master: false,
     }],
-  });
+  }) });
   await searchArtists('masterless');
   t.match(elements.results.innerHTML,
     /onclick="window\.loadReleaseGroup\(&quot;dr9&quot;, this, \{source:'discogs',identityKind:'release',masterless:true\}\)"/,
@@ -815,14 +815,14 @@ resetWorld();
   // The VA disjunct of the same ternary: a Various Artists release group
   // must route to loadReleaseGroup too, never to a dead-end artist page.
   state.browseSearchType = 'release';
-  globalThis.fetch = async () => response(200, {
+  stubGlobals({ fetch: async () => response(200, {
     release_groups: [{
       id: 'rgva',
       artist_id: '89ad4ac3-39f7-470e-963a-56509c546377',
       artist_name: 'Various Artists',
       title: 'VA Comp',
     }],
-  });
+  }) });
   await searchArtists('va comp');
   t.match(elements.results.innerHTML,
     /onclick="window\.loadReleaseGroup\(&quot;rgva&quot;, this, \{source:'mb',identityKind:'work'\}\)"/,

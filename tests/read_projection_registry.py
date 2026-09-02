@@ -53,6 +53,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from lib.cycle_counters import CycleCounters
 from lib.pipeline_db import (
     CleanupJournalIntent,
     ConsumedAttemptInput,
@@ -1326,18 +1327,20 @@ def _seed_value_get_pipeline_dashboard_metrics(
         result_count=2, elapsed_s=5.0, peers_browsed=6, fanout_waves=1)
     _stamp_latest_search_log(db, created_at=now - timedelta(hours=9))
     db.record_cycle_metrics(
-        cycle_total_s=300.0, browse_time_s=20.0, match_time_s=10.0,
-        search_time_s=240.0, peers_browsed=8, fanout_waves=2,
-        find_download_queued=4, find_download_completed=3,
-        cycle_searches_watchdog_killed=1, wanted_total=10)
+        cycle_total_s=300.0, wanted_total=10,
+        counters=CycleCounters(
+            browse_time_s=20.0, match_time_s=10.0, search_time_s=240.0,
+            peers_browsed=8, fanout_waves=2, find_download_queued=4,
+            find_download_completed=3, cycle_searches_watchdog_killed=1))
     # Outside 24h, so the outlier panel and both cycle windows must drop
     # it despite its far larger cycle_total_s.
     db.record_cycle_metrics(
         completed_at=now - timedelta(hours=26),
-        cycle_total_s=900.0, browse_time_s=60.0, match_time_s=30.0,
-        search_time_s=780.0, peers_browsed=17, fanout_waves=5,
-        find_download_queued=9, find_download_completed=8,
-        cycle_searches_watchdog_killed=2, wanted_total=12)
+        cycle_total_s=900.0, wanted_total=12,
+        counters=CycleCounters(
+            browse_time_s=60.0, match_time_s=30.0, search_time_s=780.0,
+            peers_browsed=17, fanout_waves=5, find_download_queued=9,
+            find_download_completed=8, cycle_searches_watchdog_killed=2))
     db.record_peer_observations(["dash-peer-a", "dash-peer-b"])
     # The partition/probe CHECKs on unfindable_run_metrics (migration 077)
     # are real: categorised + no_change must equal candidates_processed,

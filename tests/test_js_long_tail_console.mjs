@@ -35,7 +35,6 @@ import {
   longTailSetImported,
   longTailSetIntent,
   renderSpectralFragment,
-  renderYoutubeBody,
 } from '../web/js/long_tail_console.js';
 import { loadLongTail, renderLongTailRow } from '../web/js/long_tail.js';
 import { renderPipeline, setPipelineView } from '../web/js/pipeline.js';
@@ -576,10 +575,7 @@ for (const scenario of [
   const control = element({
     textContent: scenario.name,
     isConnected: true,
-    insertAdjacentElement(_position, child) {
-      child.isConnected = true;
-      inserted.push(child);
-    },
+    inserted,
   });
   control.setAttribute('data-pipeline-request-id', String(scenario.requestId));
   const live = element();

@@ -69,6 +69,9 @@ const REPO_ROOT = path.resolve(
 const writeOut = process.stdout.write.bind(process.stdout);
 const writeErr = process.stderr.write.bind(process.stderr);
 
+/** Has `suite()` already run in this process? See its guard for why. */
+let suiteBuilt = false;
+
 /**
  * Every character that would split one marker into two on the reading
  * side.
@@ -205,6 +208,23 @@ function nonStringHaystack(method, haystack) {
   return `t.${method} needs a string haystack, got ${kind}: ${show(haystack)}`;
 }
 
+/**
+ * Refuse a non-array haystack for `anyContains`/`noneContains`.
+ *
+ * The mirror of `nonStringHaystack`, and it exists for the same reason:
+ * `'/api/x'.some` is not a function, so a caller who passed one string
+ * instead of the recorded list would get a TypeError that kills the whole
+ * suite rather than a named failing assertion.
+ */
+function nonArrayHaystack(method, haystacks) {
+  if (Array.isArray(haystacks)) return '';
+  // `typeof null` is `'object'`, which reads as a plausible haystack; name
+  // it. Entry types are deliberately unchecked — both methods `String()`
+  // each entry — so the message says "list", not "array of strings".
+  const kind = haystacks === null ? 'null' : typeof haystacks;
+  return `t.${method} needs a list to search, got ${kind}: ${show(haystacks)}`;
+}
+
 function errorMismatchDetail(thrown, expected) {
   const got = thrown && thrown.constructor && thrown.constructor.name;
   return expected instanceof RegExp
@@ -219,6 +239,21 @@ function errorMismatchDetail(thrown, expected) {
  * @returns {any} the checker; call `done()` exactly once, last.
  */
 export function suite(moduleUrl) {
+  // One suite per process is an assumption the stub registries below rest
+  // on: they are module state, so a second suite's `done()` would release
+  // the first's module-scope stubs and inherit its section flag. Nothing
+  // enforced it (PR #1352 reader, F13), and the audit only checks that a
+  // file CALLS `suite(...)`, never that it calls it once. This is the
+  // enforcement — cheap, and it cannot bite the harness's own fixtures,
+  // which run in child processes.
+  if (suiteBuilt) {
+    throw new Error(
+      'js_harness: suite() called twice in one process. Each suite owns the '
+      + 'global-stub registries, so a second one silently releases the '
+      + "first's stubs. Run the second suite as a child process.",
+    );
+  }
+  suiteBuilt = true;
   const file = path.relative(REPO_ROOT, fileURLToPath(moduleUrl));
   let passed = 0;
   let failed = 0;
@@ -261,8 +296,15 @@ export function suite(moduleUrl) {
   }
 
   const checker = {
-    /** Label the assertions that follow; also printed as a header. */
+    /**
+     * Label the assertions that follow; also printed as a header.
+     *
+     * Also the boundary that hands back every global stubbed since the
+     * previous one — see `stubGlobals`.
+     */
     section(label) {
+      releaseSectionStubs();
+      sectionsHaveStarted = true;
       section = String(label);
       writeOut(`${section}\n`);
       return checker;
@@ -316,6 +358,51 @@ export function suite(moduleUrl) {
         !haystack.includes(needle),
         message,
         `${show(needle)} unexpectedly present in ${show(haystack)}`,
+      );
+    },
+    /**
+     * Substring containment across a LIST of strings: did any of them
+     * contain `needle`?
+     *
+     * The motivating haystack is a recorded call log — the fetch URLs a
+     * test collected while driving production. `t.ok(urls.some(u =>
+     * u.includes(x)), …)` answers the same question and then throws the
+     * evidence away: the failure reads "expected truthy, got false" and
+     * never says which URLs WERE requested, which is the only thing you
+     * want at that moment.
+     *
+     * Distinct from `contains`, which takes one string, and from
+     * `array.includes(value)`, which is exact membership and stays a plain
+     * `t.ok` — see `nonStringHaystack` for why that split exists.
+     */
+    anyContains(haystacks, needle, message) {
+      const refusal = nonArrayHaystack('anyContains', haystacks);
+      if (refusal) return record(false, message, refusal);
+      return record(
+        haystacks.some(item => String(item).includes(needle)),
+        message,
+        `no entry contains ${show(needle)}; got ${show(haystacks)}`,
+      );
+    },
+    /**
+     * The negation of `anyContains`, naming the entry that matched.
+     *
+     * `findIndex`, not `find`: the element itself cannot carry the verdict,
+     * because `undefined` means both "nothing matched" and "the thing that
+     * matched is `undefined`". A recorded list holding one — a stub that
+     * pushes `url` where production passed nothing — made this method and
+     * `anyContains` BOTH pass on the same world, which is a false pass, the
+     * worse direction, and the same shape `nonStringHaystack` above exists
+     * to stop (PR #1353 reader, F1).
+     */
+    noneContains(haystacks, needle, message) {
+      const refusal = nonArrayHaystack('noneContains', haystacks);
+      if (refusal) return record(false, message, refusal);
+      const at = haystacks.findIndex(item => String(item).includes(needle));
+      return record(
+        at === -1,
+        message,
+        `${show(needle)} unexpectedly present at [${at}]: ${show(haystacks[at])}`,
       );
     },
     match(value, pattern, message) {
@@ -404,6 +491,8 @@ export function suite(moduleUrl) {
      */
     done() {
       finished = true;
+      releaseSectionStubs();
+      releaseModuleStubs();
       writeOut(`\n${passed} passed, ${failed} failed\n`);
       writeOut(`${DONE_MARKER}\t${file}\t${passed}\t${failed}\n`);
       if (failed > 0) process.exitCode = 1;
@@ -425,12 +514,75 @@ export function suite(moduleUrl) {
 }
 
 /**
- * Install global stubs and hand back a restorer.
+ * Stubs installed since the last `section()`, newest last.
+ *
+ * One suite runs per process — `scripts/run_js_checks.sh` invokes `node`
+ * once per file, and the harness's own fixtures spawn children rather than
+ * building a second suite in-process — so one registry per module load is
+ * one registry per suite.
+ */
+const sectionStubs = [];
+
+/** Stubs installed before the first `section()`: the file's baseline world. */
+const moduleStubs = [];
+
+let sectionsHaveStarted = false;
+
+function releaseStubs(handles) {
+  // Detach the whole list first, then unwind newest-first. Detaching is
+  // what makes each `restore()` below a plain restore: it finds itself
+  // already gone from the registry and does not try to unwind its own
+  // nested handles, which this loop is already doing in order.
+  const pending = handles.splice(0);
+  for (let i = pending.length - 1; i >= 0; i -= 1) pending[i].restore();
+}
+
+function releaseSectionStubs() {
+  releaseStubs(sectionStubs);
+}
+
+function releaseModuleStubs() {
+  releaseStubs(moduleStubs);
+}
+
+/**
+ * Install global stubs for the rest of this section.
  *
  * Replaces the hand-written dance this repository had at hundreds of
  * sites — save `globalThis.document`, assign a stub, remember to put the
  * old value back — which was also silently unbalanced in places, leaking
  * one test's DOM into the next.
+ *
+ * **The harness owns the restore, and the section is the scope.** Every
+ * stub installed after a `section()` is handed back at the next
+ * `section()`, and the last section's at `done()`. Stubs installed BEFORE
+ * the first `section()` are the file's baseline world — the `document` a
+ * module needs at evaluation time, say — and live until `done()`.
+ *
+ * The returned `restore()` is still there for a block that wants its world
+ * back earlier. It hands back everything stubbed after it as well, because
+ * those were stubbed inside its world: without that, restoring an outer
+ * handle leaves an inner one holding a saved value that is now stale, and
+ * the boundary faithfully re-installs it, so a mock comes back from the
+ * dead after the block explicitly disposed of it. Calling `restore()` twice
+ * is a no-op.
+ *
+ * Section scope is the point rather than a convenience. 104 sites across
+ * six suites assigned `globalThis.fetch` bare and restored nothing, so a
+ * section that installed no `fetch` of its own silently answered from the
+ * previous section's mock (issue #1346). Making the boundary the harness's
+ * job means a block cannot inherit by forgetting: it either installs its
+ * own or reads whatever was there before the file started.
+ *
+ * That second case is not automatically loud, and the first draft of this
+ * comment claimed it was. For `fetch` specifically, node defines a real
+ * one, so a fire-and-forget chain that outlives its section calls it —
+ * and while every URL in these suites is a relative path, so it throws
+ * `Failed to parse URL` before any socket opens, production's own `catch`
+ * then swallows the throw. Measured across all 24 suites: three such calls
+ * on `main`, three after this change. A section that renders is a section
+ * that fetches, so it owes a stub of its own rather than a boundary to
+ * catch it (PR #1352 reader, F2).
  *
  * A key absent from `globalThis` before the call is DELETED on restore,
  * not set to `undefined`, so `typeof globalThis.x === 'undefined'` and
@@ -447,8 +599,20 @@ export function stubGlobals(values) {
       : { present: false, value: undefined });
     globalThis[key] = values[key];
   }
-  return {
+  const owner = sectionsHaveStarted ? sectionStubs : moduleStubs;
+  const handle = {
     restore() {
+      // Anything stubbed AFTER this handle was stubbed inside its world, so
+      // hand those back first. Without this, restoring an outer handle
+      // leaves an inner one holding a saved value that is now stale, and
+      // the section boundary faithfully re-installs it: the mock comes
+      // back from the dead after the block explicitly disposed of it.
+      // `test_js_release_actions.mjs` has exactly that shape twice.
+      const at = owner.indexOf(handle);
+      if (at !== -1) {
+        const nested = owner.splice(at);
+        for (let i = nested.length - 1; i > 0; i -= 1) nested[i].restore();
+      }
       for (const [key, previous] of saved) {
         if (previous.present) globalThis[key] = previous.value;
         else delete globalThis[key];
@@ -456,6 +620,8 @@ export function stubGlobals(values) {
       saved.clear();
     },
   };
+  owner.push(handle);
+  return handle;
 }
 
 /**
@@ -470,10 +636,13 @@ export function stubGlobals(values) {
  * `fakeElement`, `test_js_util.mjs`'s session-overlay node and
  * `test_js_convergence.mjs`'s button), which is why `isConnected`,
  * `children`, `focused` and the attribute map live here rather than in seven
- * files. It is deliberately not their UNION: `insertAdjacentElement` stays
- * hand-rolled at 12 sites because each closes over that test's own
- * `inserted` array, and `append`, `tag`, `type`, `listeners` and `closest`
- * have one caller each. Seed them through `initial`.
+ * files. `insertAdjacentElement` used to be excluded for closing over each
+ * test's own `inserted` array; seeding that array as `inserted` covers it,
+ * and five sites across five suites now do (issue #1346). The seven that
+ * remain are all in `test_js_release_actions.mjs`, on hand-rolled object
+ * literals and classes rather than on this factory, so adopting them is a
+ * different change. `append`, `tag`, `type`, `listeners` and `closest` still
+ * have one caller each — seed them through `initial`.
  *
  * A fresh node is `isConnected: false`, as in a real DOM: it is connected
  * by `appendChild`, by a caller's `insertAdjacentElement`, or by seeding
@@ -491,7 +660,7 @@ export function element(initial = {}) {
   // exists to replace, which is a fake diverging from the real edge
   // (`.claude/rules/test-fidelity.md` Rule B in spirit).
   const attributes = new Map();
-  return {
+  const node = {
     id: '',
     textContent: '',
     innerHTML: '',
@@ -521,8 +690,59 @@ export function element(initial = {}) {
     hasAttribute(name) { return attributes.has(name); },
     addEventListener() {},
     insertAdjacentHTML() {},
+    // Seed `inserted: <array>` and every child inserted into this element
+    // is recorded there, which is the hand-rolled shape eight sites across
+    // five suites wrote out in full. Position is ignored on purpose: a real
+    // `afterend` insert makes a SIBLING, not a child, so pushing into
+    // `children` would be less faithful than not modelling it at all. What
+    // a real insertion does observably to the child, and what production
+    // reads back, is `isConnected`.
+    insertAdjacentElement(_position, child) {
+      child.isConnected = true;
+      if (this.inserted !== undefined) {
+        // Fail closed on a wrong seed, the way `nonArrayHaystack` does: an
+        // element seeded `inserted: {}` would otherwise record nothing and
+        // the test would assert an empty list forever (PR #1353 reader, F5).
+        if (!Array.isArray(this.inserted)) {
+          throw new TypeError(
+            `element({inserted}) needs an array, got ${typeof this.inserted}`,
+          );
+        }
+        this.inserted.push(child);
+      }
+      return child;
+    },
     ...initial,
   };
+  if (!Object.prototype.hasOwnProperty.call(initial, 'classList')) {
+    // A real `classList`, not three no-op methods: `toggleExpand` decides
+    // whether to collapse or load by reading `contains('open')` back, so a
+    // stub that only accepts writes makes every panel open twice and never
+    // close. Four suites hand-rolled this shape.
+    //
+    // It reads and writes `className` rather than a private Set, because in
+    // a real DOM they ARE the same data. The first version kept a separate
+    // Set, so an element seeded `element({className: 'lt-item'})` answered
+    // `classList.contains('lt-item')` with FALSE — a fake diverging from
+    // the real edge, which is the shape `.claude/rules/test-fidelity.md`
+    // Rule B exists to stop (PR #1352 reader, F10).
+    const names = () => String(node.className || '').split(/\s+/).filter(Boolean);
+    node.classList = {
+      contains(name) { return names().includes(name); },
+      add(name) {
+        if (!names().includes(name)) node.className = [...names(), name].join(' ');
+      },
+      remove(name) {
+        node.className = names().filter(each => each !== name).join(' ');
+      },
+      toggle(name) {
+        if (names().includes(name)) node.classList.remove(name);
+        else node.classList.add(name);
+        return names().includes(name);
+      },
+    };
+  }
+  return node;
 }
 
 /**

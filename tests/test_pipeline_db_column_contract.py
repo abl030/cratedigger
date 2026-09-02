@@ -35,6 +35,7 @@ import msgspec
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 — sets TEST_DB_DSN env var
 
+from lib.cycle_counters import CycleCounters
 from lib.import_queue import ImportJob
 from lib.pipeline_db import (
     AddRequestInput,
@@ -61,6 +62,10 @@ from lib.pipeline_db._shared import (
     CANDIDATE_EVIDENCE_PREFIX,
     CURRENT_EVIDENCE_PREFIX,
     accusation_evidence_columns,
+)
+from lib.pipeline_db.dashboard import (
+    _CYCLE_METRIC_COLUMNS,
+    _INSERT_CYCLE_METRICS,
 )
 from lib.pipeline_db.download_log import (
     _CANDIDATE_EVIDENCE_COLUMNS,
@@ -146,7 +151,50 @@ CONTRACTS: list[tuple[str, str, set[str]]] = [
     # back NULL.
     ("AacLatticeCapture", "album_quality_evidence",
      {f"aac_lattice_{name}" for name in _struct_columns(AacLatticeCapture)}),
+    # issue #1348: record_cycle_metrics builds its INSERT column list from
+    # these field names, so a counter renamed here without a migration is
+    # a PG error rather than a silent default -- but only on the next
+    # cycle, in production. This says it at test time instead.
+    ("CycleCounters", "cycle_metrics", _dataclass_columns(CycleCounters)),
 ]
+
+
+class TestCycleMetricsInsertStatement(unittest.TestCase):
+    """The one statement ``record_cycle_metrics`` builds, written out.
+
+    Production interpolates the column list from ``CycleCounters`` so a
+    declared counter is persisted without anyone remembering to add it
+    (issue #1348), which is also why the audit in
+    ``tests/test_replaced_write_audit.py`` sees dynamic SQL and demands a
+    reviewed rationale. This is the other half of that review: the exact
+    text those slots produce, so a reader does not have to run the
+    interpolation in their head.
+    """
+
+    EXPECTED = (
+        "INSERT INTO cycle_metrics (started_at, created_at, cycle_total_s, "
+        "browse_time_s, match_time_s, search_time_s, cache_pos_hits, "
+        "cache_neg_hits, cache_misses, cache_errors, cache_fuse_tripped, "
+        "cache_write_errors, peers_browsed, peers_browsed_lazy, fanout_waves, "
+        "cycle_searches_watchdog_killed, find_download_queued, "
+        "find_download_completed, find_download_drain_time_s, wanted_total)"
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+        "%s, %s, %s, %s, %s) RETURNING id"
+    )
+
+    def test_the_rendered_insert_is_exactly_this(self) -> None:
+        self.assertEqual(" ".join(_INSERT_CYCLE_METRICS.split()), self.EXPECTED)
+
+    def test_every_column_has_its_own_placeholder(self) -> None:
+        """One placeholder per column, counted in what production BUILDS.
+
+        Counting ``EXPECTED``'s own placeholders instead would compare two
+        things this test file owns and leave the generated VALUES list a
+        bystander: an extra ``%s`` in production passed that version
+        (review mutant M23).
+        """
+        self.assertEqual(
+            _INSERT_CYCLE_METRICS.count("%s"), len(_CYCLE_METRIC_COLUMNS))
 
 
 class TestWritePayloadColumnContract(unittest.TestCase):

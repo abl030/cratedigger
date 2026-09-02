@@ -1,5 +1,16 @@
 /**
  * Unit tests for web/js/recents.js activity rendering helpers.
+ *
+ * `loadRecents` is the composed entry and this suite drives it, but the
+ * three item renderers keep their direct calls on purpose (issue #1346).
+ * `renderRecentsItems` is imported as `renderRecentsFixture` because
+ * `tests/test_js_payload_contract_audit.py` reads the LITERAL argument at
+ * each of those call sites and checks every key against the server's
+ * payload contract; routing them through `loadRecents` would hand the
+ * audit a `fetch` stub to parse instead of a payload, and it would go
+ * quietly blind. `renderAcquisitionItems` and `renderImportItems` sit
+ * behind mutually exclusive `state.recentsSub` branches, one fetch each.
+ *
  * Run with: node tests/test_js_recents.mjs
  */
 

@@ -838,5 +838,71 @@ class TestFakeEvidenceWritePolicy(unittest.TestCase):
                 self.assertEqual(loaded.source_path, expected)
 
 
+class TestFakeCandidateEvidenceBeetsChildRefusal(unittest.TestCase):
+    """A live Beets child refuses the binding for every job type.
+
+    ``set_import_job_candidate_evidence`` returns ``False`` above its SQL
+    whenever the caller's lease carries a Beets child, and the
+    statement's own non-automation arm never re-checks it. The fake put
+    that clause inside its ``automation_import`` arm, so a force, local or
+    YouTube job bound evidence mid-Beets-mutation. Same defect as the
+    three in ``tests/test_fakes_import_jobs.py``; this is the one that
+    lives in the evidence cluster.
+    """
+
+    def test_a_live_beets_child_refuses_a_non_automation_binding(self) -> None:
+        from lib.import_execution import ExecutionLeaseSnapshot, ProcessIdentity
+        from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
+
+        def lease(beets: bool) -> ExecutionLeaseSnapshot:
+            return ExecutionLeaseSnapshot(
+                host_boot_id="boot-evidence-child",
+                invocation_id="invocation-evidence-child",
+                systemd_unit="cratedigger-import-preview-worker.service",
+                worker=ProcessIdentity(pid=721, start_ticks=7021),
+                beets=(
+                    ProcessIdentity(pid=722, start_ticks=7022)
+                    if beets else None
+                ),
+            )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=4506, mb_release_id="mb-evidence-child", status="wanted",
+        ))
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=4506,
+            payload=force_import_payload(
+                download_log_id=4506, failed_path="/failed/evidence-child",
+            ),
+        )
+        evidence = make_album_quality_evidence(
+            mb_release_id="mb-evidence-child",
+            source_path="/failed/evidence-child",
+        )
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id="mb-evidence-child",
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+
+        self.assertFalse(db.set_import_job_candidate_evidence(
+            job.id, persisted.id, expected_execution_lease=lease(beets=True),
+        ))
+        refused = db.get_import_job(job.id)
+        assert refused is not None
+        self.assertIsNone(refused.candidate_evidence_id)
+
+        # Must still work: no child, and the same call binds.
+        self.assertTrue(db.set_import_job_candidate_evidence(
+            job.id, persisted.id, expected_execution_lease=lease(beets=False),
+        ))
+        bound = db.get_import_job(job.id)
+        assert bound is not None
+        self.assertEqual(bound.candidate_evidence_id, persisted.id)
+
+
 if __name__ == "__main__":
     unittest.main()

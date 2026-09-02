@@ -1,5 +1,18 @@
 /**
  * Unit tests for web/js/util.js — pure utility functions.
+ *
+ * It also holds the HTML tests for fragments belonging to four other
+ * modules, and those call their renderers directly on purpose (issue
+ * #1346). Each of those modules HAS a composed entry, and each entry is
+ * driven where it belongs: `openReplacePicker` in
+ * `tests/test_js_release_actions.mjs`, `renderLabelDetail` in
+ * `tests/test_js_labels.mjs`, `renderConsoleShell` and `renderLongTailBody`
+ * here. What the direct calls cover is the fragment's own HTML, which is
+ * cheaper and sharper read one fragment at a time than as a needle in a
+ * whole modal. The five long-tail-console panel bodies could not be
+ * reached through the shell anyway: it renders `renderPanelLoading`
+ * placeholders and the bodies arrive later from three separate endpoints.
+ *
  * Run with: node tests/test_js_util.mjs
  */
 
@@ -372,7 +385,7 @@ t.contains(hymen, 'Hymen Records', 'renders the label name');
 t.contains(hymen, 'data-label-id="757"', 'tags the link with data-label-id="757"');
 t.contains(hymen, 'window.openLabelDetail', 'wires window.openLabelDetail call');
 t.contains(hymen, 'class="label-link"', 'tags the anchor with the label-link class');
-t.ok(/<a\b/i.test(hymen), 'renders an anchor element');
+t.match(hymen, /<a\b/i, 'renders an anchor element');
 
 // Empty input → empty string.
 t.equal(renderLabelLinks([]), '', 'empty array → empty string');
@@ -382,7 +395,7 @@ t.equal(renderLabelLinks(undefined), '', 'undefined → empty string');
 // MB-style label (no id) → plain text, no anchor.
 const mbOnly = renderLabelLinks([{ name: 'Some MB Label' }]);
 t.equal(mbOnly, 'Some MB Label', 'MB-style (no id) renders plain text');
-t.ok(!/<a\b/i.test(mbOnly), 'MB-style renders no anchor element');
+t.notMatch(mbOnly, /<a\b/i, 'MB-style renders no anchor element');
 
 // id explicitly null → plain text (Phase B placeholder).
 const mbExplicitNull = renderLabelLinks([{ id: null, name: 'MB Label' }]);
@@ -881,17 +894,17 @@ const sample = [
 const pressingsHtml = renderPressingsList(sample, 'aaa');
 t.contains(pressingsHtml, 'data-expand-mbid="aaa"',
   'renderPressingsList wires current pressing as expandable row');
-t.ok(/data-expand-mbid="aaa"[^>]*disabled|disabled[^>]*data-expand-mbid="aaa"/.test(pressingsHtml),
+t.match(pressingsHtml, /data-expand-mbid="aaa"[^>]*disabled|disabled[^>]*data-expand-mbid="aaa"/,
   'renderPressingsList marks current pressing disabled');
 t.contains(pressingsHtml, 'current pressing', 'renderPressingsList labels current pressing');
 t.contains(pressingsHtml, 'data-expand-mbid="bbb"', 'renderPressingsList includes sibling');
-t.ok(!/<button[^>]*data-expand-mbid="bbb"[^>]*disabled/.test(pressingsHtml),
+t.notMatch(pressingsHtml, /<button[^>]*data-expand-mbid="bbb"[^>]*disabled/,
   'renderPressingsList does not disable non-current siblings');
 t.contains(pressingsHtml, 'data-mbid="bbb"',
   'renderPressingsList tags the non-current pressing with its own mbid');
 t.match(pressingsHtml, /replace-picker-confirm[^>]*data-mbid="bbb"/,
   'renderPressingsList renders pick-button for non-current pressing');
-t.ok(!/replace-picker-confirm[^>]*data-mbid="aaa"/.test(pressingsHtml),
+t.notMatch(pressingsHtml, /replace-picker-confirm[^>]*data-mbid="aaa"/,
   'renderPressingsList omits pick-button for current pressing');
 t.excludes(pressingsHtml, 'aaa</small>',
   'renderPressingsList does not expose the current MBID to the operator');
@@ -914,8 +927,7 @@ t.contains(reqHtml, 'data-expand-mbid="old-uuid"',
   'renderRequestsList row expands by MBID');
 t.contains(reqHtml, 'data-tracks-for="old-uuid"',
   'renderRequestsList renders lazy tracklist container per row');
-t.ok(!/<small[^>]*>[^<]*old-uuid/.test(reqHtml),
-  'renderRequestsList hides the MBID from the operator');
+t.notMatch(reqHtml, /<small[^>]*>[^<]*old-uuid/, 'renderRequestsList hides the MBID from the operator');
 
 const dlg = renderConfirmDialog({
   sourceRequestId: 4194,
@@ -957,7 +969,7 @@ const tlHtml = renderTracklist([
 t.contains(tlHtml, 'Aaa', 'renderTracklist includes title');
 t.contains(tlHtml, '4:23', 'renderTracklist formats track length');
 t.contains(tlHtml, '&lt;em&gt;', 'renderTracklist escapes titles');
-t.ok(!/Disc 1/.test(tlHtml), 'renderTracklist hides disc header for single-disc');
+t.notMatch(tlHtml, /Disc 1/, 'renderTracklist hides disc header for single-disc');
 
 const multiDiscHtml = renderTracklist([
   { disc_number: 1, track_number: 1, title: 'A', length_seconds: 60 },
@@ -1731,7 +1743,7 @@ t.section('long_tail_console.js pure helpers (U4 console)');
     target_format: 'lossless', mb_release_group_id: 'rg-11' });
   t.contains(rgShell, 'window.longTailAcceptSibling(11)',
     'renderConsoleShell wires accept-sibling at open when the row carries an rg (#398)');
-  t.ok(/lt-act-accept[^>]*disabled/.test(missingShell),
+  t.match(missingShell, /lt-act-accept[^>]*disabled/,
     'renderConsoleShell disables accept-sibling at open when the row has no rg');
   // #398: a cached resolver result renders the matrix at shell time, so a
   // console restore after a list re-render doesn't reset a resolved
@@ -1996,8 +2008,7 @@ t.section('long_tail_console.js pure helpers (U6 secondary actions)');
     id: 12, source: 'request', mb_release_group_id: 'rg-1', target_format: null });
   t.contains(mbBar, 'window.longTailAcceptSibling(12)',
     'renderActionsBar: MB row wires the accept-sibling handler');
-  t.ok(!/lt-act-accept[^>]*disabled/.test(mbBar),
-    'renderActionsBar: MB row accept-sibling is enabled');
+  t.notMatch(mbBar, /lt-act-accept[^>]*disabled/, 'renderActionsBar: MB row accept-sibling is enabled');
   t.contains(mbBar, 'window.longTailSetIntent(12, this)',
     'renderActionsBar wires the set-intent toggle to its initiating control');
   t.contains(mbBar, 'data-pipeline-request-id="12"',
@@ -2022,8 +2033,7 @@ t.section('long_tail_console.js pure helpers (U6 secondary actions)');
 
   const discogsBar = renderActionsBar({
     id: 13, source: 'discogs', mb_release_group_id: null, target_format: 'lossless' });
-  t.ok(/lt-act-accept[^>]*disabled/.test(discogsBar),
-    'renderActionsBar: Discogs row disables accept-sibling');
+  t.match(discogsBar, /lt-act-accept[^>]*disabled/, 'renderActionsBar: Discogs row disables accept-sibling');
   t.ok(discogsBar.toLowerCase().includes('musicbrainz-only')
     || discogsBar.toLowerCase().includes('discogs'),
     'renderActionsBar: Discogs row shows the one-line disable reason');
@@ -2038,7 +2048,7 @@ t.section('long_tail_console.js pure helpers (U6 secondary actions)');
   // MB row with no release group → accept-sibling disabled.
   const noRgBar = renderActionsBar({
     id: 14, source: 'request', mb_release_group_id: null, target_format: null });
-  t.ok(/lt-act-accept[^>]*disabled/.test(noRgBar),
+  t.match(noRgBar, /lt-act-accept[^>]*disabled/,
     'renderActionsBar: MB row with no release group disables accept-sibling');
 }
 

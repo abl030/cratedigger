@@ -1140,3 +1140,112 @@ def assert_window_bindings(
             + ", ".join(sorted(audit.missing))
         )
     return audit
+
+
+# The globals a JavaScript test suite installs a stub into. ``window`` is
+# deliberately absent: in every suite here ``window`` is itself a stub object
+# the file just installed, so ``window.loadRecents = …`` writes to that stub
+# rather than to anything shared, and reporting it would name three sites
+# that leak nothing.
+_STUBBABLE_GLOBAL_ROOTS = frozenset({"globalThis", "global", "self"})
+
+
+@dataclass(frozen=True)
+class GlobalAssignment:
+    """One ``globalThis.x = …`` statement, located for a failure message."""
+
+    line: int
+    root: str
+    key: str
+
+
+# Every node type whose `left` field is a write target, plus the two binding
+# patterns and the loop header, which name their target differently.
+_ASSIGNMENT_NODES = (
+    "assignment_expression",
+    "augmented_assignment_expression",
+)
+
+
+def _global_target(node: Node, source_bytes: bytes) -> tuple[str, str] | None:
+    """``(root, key)`` when ``node`` writes a property of a global object."""
+    if node.type == "member_expression":
+        key_node = node.child_by_field_name("property")
+        key = (
+            _node_text(key_node, source_bytes)
+            if key_node is not None and key_node.type == "property_identifier"
+            else "[computed]"
+        )
+    elif node.type == "subscript_expression":
+        key = "[computed]"
+    else:
+        return None
+    obj = node.child_by_field_name("object")
+    if obj is None or obj.type != "identifier":
+        return None
+    root = _node_text(obj, source_bytes)
+    if root not in _STUBBABLE_GLOBAL_ROOTS:
+        return None
+    return root, key
+
+
+def bare_global_assignments(
+    source: str, *, origin: str = "<javascript>"
+) -> list[GlobalAssignment]:
+    """Every write whose target is a property of a global object.
+
+    Six shapes, because a write is not only ``x = y``: plain assignment,
+    augmented assignment (``+=``, ``??=``), update expressions (``x++``,
+    ``--x``), destructuring through an object or array pattern, and a
+    ``for (globalThis.k of …)`` loop header. ``globalThis['fetch']`` reports
+    as ``[computed]`` rather than being skipped, so the awkward spelling
+    fails closed instead of becoming the one that slips through. The first
+    version of this covered only the first two, and PR #1352's reader proved
+    the other four walked past it while the prose claimed "every spelling".
+
+    Deliberately bounded, and this is the honest edge: it reads write TARGETS
+    out of the parse tree and nothing else. ``Object.assign(globalThis, …)``,
+    ``Object.defineProperty``, and a global reached through an alias
+    (``const g = globalThis; g.fetch = …``) are all outside it and stay
+    review's job (`.claude/rules/code-quality.md` § "Semantic source scanners
+    are prohibited"). ``delete globalThis.fetch`` is out too: it removes a
+    stub rather than installing one.
+    """
+    source_bytes = source.encode("utf-8")
+    tree = parse_javascript(source, origin=origin)
+    found: list[GlobalAssignment] = []
+    for node in _walk(tree.root_node):
+        targets: list[Node] = []
+        if node.type in _ASSIGNMENT_NODES:
+            left = node.child_by_field_name("left")
+            if left is None:
+                continue
+            if left.type in ("object_pattern", "array_pattern"):
+                targets.extend(_walk(left))
+            else:
+                targets.append(left)
+        elif node.type == "update_expression":
+            argument = node.child_by_field_name("argument")
+            if argument is None:
+                continue
+            targets.append(argument)
+        elif node.type in ("for_in_statement",):
+            # Covers `for…of` too: tree-sitter-javascript gives both the
+            # same node type, distinguished by an `of` keyword child.
+            left = node.child_by_field_name("left")
+            if left is None:
+                continue
+            targets.append(left)
+        else:
+            continue
+        for target in targets:
+            resolved = _global_target(target, source_bytes)
+            if resolved is None:
+                continue
+            root, key = resolved
+            found.append(
+                GlobalAssignment(
+                    line=node.start_point[0] + 1, root=root, key=key
+                )
+            )
+    return found
