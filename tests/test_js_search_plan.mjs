@@ -1017,7 +1017,8 @@ t.section('renderAdvanceForm()');
   t.equal(optionMatches.length, 6,
     'renderAdvanceForm: 6 options total (5 unique strategies + leading "—")');
   // Ordinal input bounded to items.length - 1.
-  t.match(html, /<input[^>]*type="number"[^>]*min="0"/, 'renderAdvanceForm: ordinal input is type="number" min="0"');
+  t.match(html, /<input[^>]*type="number"[^>]*min="0"/,
+    'renderAdvanceForm: ordinal input is type="number" min="0"');
   t.contains(html, 'max="9"',
     'renderAdvanceForm: ordinal max=N-1 (items.length - 1)');
   // Confirm + Cancel buttons.

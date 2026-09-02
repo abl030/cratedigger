@@ -218,8 +218,11 @@ function nonStringHaystack(method, haystack) {
  */
 function nonArrayHaystack(method, haystacks) {
   if (Array.isArray(haystacks)) return '';
-  return `t.${method} needs an array of strings, got `
-    + `${typeof haystacks}: ${show(haystacks)}`;
+  // `typeof null` is `'object'`, which reads as a plausible haystack; name
+  // it. Entry types are deliberately unchecked — both methods `String()`
+  // each entry — so the message says "list", not "array of strings".
+  const kind = haystacks === null ? 'null' : typeof haystacks;
+  return `t.${method} needs a list to search, got ${kind}: ${show(haystacks)}`;
 }
 
 function errorMismatchDetail(thrown, expected) {
@@ -381,15 +384,25 @@ export function suite(moduleUrl) {
         `no entry contains ${show(needle)}; got ${show(haystacks)}`,
       );
     },
-    /** The negation of `anyContains`, naming the entry that matched. */
+    /**
+     * The negation of `anyContains`, naming the entry that matched.
+     *
+     * `findIndex`, not `find`: the element itself cannot carry the verdict,
+     * because `undefined` means both "nothing matched" and "the thing that
+     * matched is `undefined`". A recorded list holding one — a stub that
+     * pushes `url` where production passed nothing — made this method and
+     * `anyContains` BOTH pass on the same world, which is a false pass, the
+     * worse direction, and the same shape `nonStringHaystack` above exists
+     * to stop (PR #1353 reader, F1).
+     */
     noneContains(haystacks, needle, message) {
       const refusal = nonArrayHaystack('noneContains', haystacks);
       if (refusal) return record(false, message, refusal);
-      const hit = haystacks.find(item => String(item).includes(needle));
+      const at = haystacks.findIndex(item => String(item).includes(needle));
       return record(
-        hit === undefined,
+        at === -1,
         message,
-        `${show(needle)} unexpectedly present in ${show(hit)}`,
+        `${show(needle)} unexpectedly present at [${at}]: ${show(haystacks[at])}`,
       );
     },
     match(value, pattern, message) {
@@ -686,7 +699,17 @@ export function element(initial = {}) {
     // reads back, is `isConnected`.
     insertAdjacentElement(_position, child) {
       child.isConnected = true;
-      if (Array.isArray(this.inserted)) this.inserted.push(child);
+      if (this.inserted !== undefined) {
+        // Fail closed on a wrong seed, the way `nonArrayHaystack` does: an
+        // element seeded `inserted: {}` would otherwise record nothing and
+        // the test would assert an empty list forever (PR #1353 reader, F5).
+        if (!Array.isArray(this.inserted)) {
+          throw new TypeError(
+            `element({inserted}) needs an array, got ${typeof this.inserted}`,
+          );
+        }
+        this.inserted.push(child);
+      }
       return child;
     },
     ...initial,

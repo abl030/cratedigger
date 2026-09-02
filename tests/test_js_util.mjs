@@ -894,15 +894,18 @@ const sample = [
 const pressingsHtml = renderPressingsList(sample, 'aaa');
 t.contains(pressingsHtml, 'data-expand-mbid="aaa"',
   'renderPressingsList wires current pressing as expandable row');
-t.match(pressingsHtml, /data-expand-mbid="aaa"[^>]*disabled|disabled[^>]*data-expand-mbid="aaa"/, 'renderPressingsList marks current pressing disabled');
+t.match(pressingsHtml, /data-expand-mbid="aaa"[^>]*disabled|disabled[^>]*data-expand-mbid="aaa"/,
+  'renderPressingsList marks current pressing disabled');
 t.contains(pressingsHtml, 'current pressing', 'renderPressingsList labels current pressing');
 t.contains(pressingsHtml, 'data-expand-mbid="bbb"', 'renderPressingsList includes sibling');
-t.notMatch(pressingsHtml, /<button[^>]*data-expand-mbid="bbb"[^>]*disabled/, 'renderPressingsList does not disable non-current siblings');
+t.notMatch(pressingsHtml, /<button[^>]*data-expand-mbid="bbb"[^>]*disabled/,
+  'renderPressingsList does not disable non-current siblings');
 t.contains(pressingsHtml, 'data-mbid="bbb"',
   'renderPressingsList tags the non-current pressing with its own mbid');
 t.match(pressingsHtml, /replace-picker-confirm[^>]*data-mbid="bbb"/,
   'renderPressingsList renders pick-button for non-current pressing');
-t.notMatch(pressingsHtml, /replace-picker-confirm[^>]*data-mbid="aaa"/, 'renderPressingsList omits pick-button for current pressing');
+t.notMatch(pressingsHtml, /replace-picker-confirm[^>]*data-mbid="aaa"/,
+  'renderPressingsList omits pick-button for current pressing');
 t.excludes(pressingsHtml, 'aaa</small>',
   'renderPressingsList does not expose the current MBID to the operator');
 t.excludes(pressingsHtml, 'bbb</small>',
@@ -1740,7 +1743,8 @@ t.section('long_tail_console.js pure helpers (U4 console)');
     target_format: 'lossless', mb_release_group_id: 'rg-11' });
   t.contains(rgShell, 'window.longTailAcceptSibling(11)',
     'renderConsoleShell wires accept-sibling at open when the row carries an rg (#398)');
-  t.match(missingShell, /lt-act-accept[^>]*disabled/, 'renderConsoleShell disables accept-sibling at open when the row has no rg');
+  t.match(missingShell, /lt-act-accept[^>]*disabled/,
+    'renderConsoleShell disables accept-sibling at open when the row has no rg');
   // #398: a cached resolver result renders the matrix at shell time, so a
   // console restore after a list re-render doesn't reset a resolved
   // YouTube panel back to never_run.
@@ -2044,7 +2048,8 @@ t.section('long_tail_console.js pure helpers (U6 secondary actions)');
   // MB row with no release group → accept-sibling disabled.
   const noRgBar = renderActionsBar({
     id: 14, source: 'request', mb_release_group_id: null, target_format: null });
-  t.match(noRgBar, /lt-act-accept[^>]*disabled/, 'renderActionsBar: MB row with no release group disables accept-sibling');
+  t.match(noRgBar, /lt-act-accept[^>]*disabled/,
+    'renderActionsBar: MB row with no release group disables accept-sibling');
 }
 
 // --- long_tail_console.js #398 / #481 item 1 console-persistence state ---

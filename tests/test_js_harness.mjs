@@ -258,8 +258,8 @@ t.section('checker vocabulary — the failing side of every method');
   // reports "expected truthy, got false" and never says what the list held.
   t.contains(run.stdout, 'no entry contains "z"; got ["ab","cd"]',
     'anyContains names the needle and prints the list it searched');
-  t.contains(run.stdout, '"c" unexpectedly present in "cd"',
-    'noneContains names the entry that matched, not just the needle');
+  t.contains(run.stdout, '"c" unexpectedly present at [1]: "cd"',
+    'noneContains names the entry that matched and where it sat');
 }
 
 t.section('anyContains and noneContains refuse a non-array haystack');
@@ -274,10 +274,62 @@ t.section('anyContains and noneContains refuse a non-array haystack');
   );
   t.equal(run.status, 1, 'a non-array haystack fails rather than throwing');
   t.equal(run.markers.length, 2, 'both refusals report as ordinary failures');
-  t.contains(run.stdout, 't.anyContains needs an array of strings, got string',
+  t.contains(run.stdout, 't.anyContains needs a list to search, got string',
     'the refusal names the method and the type it got');
-  t.contains(run.stdout, 't.noneContains needs an array of strings, got object',
-    'the negated form refuses too');
+  t.contains(run.stdout, 't.noneContains needs a list to search, got null',
+    'the negated form refuses too, and null is named rather than "object"');
+}
+
+t.section('anyContains and noneContains agree on every entry, undefined included');
+{
+  // They must never both pass on one world. `find` could not tell "nothing
+  // matched" from "the match IS undefined", so a recorded list holding one
+  // made both pass — a false pass, which is the worse direction (PR #1353
+  // reader, F1). Entries are coerced rather than skipped, so a recorded
+  // status code searches like its digits.
+  const run = runFixture([
+    "const list = ['/api/ok', undefined, 404];",
+    "t.anyContains(list, 'undefin', 'an undefined entry is searched, not skipped');",
+    "t.anyContains(list, '40', 'a numeric entry is coerced before searching');",
+    "t.noneContains(list, 'nowhere', 'a needle in no entry reports none');",
+    't.done();',
+  ].join('\n'));
+  t.equal(run.markers.length, 0, 'the agreeing cases all pass');
+
+  const disagree = runFixture([
+    "const list = ['/api/ok', undefined, 404];",
+    "t.noneContains(list, 'undefin', 'must FAIL: undefined is an entry that matched');",
+    "t.noneContains(list, '40', 'must FAIL: the coerced number matched');",
+    't.done();',
+  ].join('\n'));
+  t.equal(disagree.markers.length, 2,
+    'noneContains fails on exactly the worlds anyContains passes');
+  t.contains(disagree.stdout, 'unexpectedly present at [1]',
+    'the detail names the position, which an undefined entry cannot carry');
+}
+
+t.section('element() records inserted children only when seeded to');
+{
+  const inserted = [];
+  const parent = element({ inserted });
+  const child = element();
+  const returned = parent.insertAdjacentElement('beforeend', child);
+  t.equal(returned, child, 'the inserted child is handed back, as the DOM does');
+  t.equal(child.isConnected, true, 'insertion connects the child');
+  t.equal(inserted.length, 1, 'the seeded array records exactly the one child');
+  t.equal(inserted[0], child, 'and records the child, not the parent');
+
+  const unseeded = element();
+  const orphan = element();
+  unseeded.insertAdjacentElement('beforeend', orphan);
+  t.equal(orphan.isConnected, true,
+    'an unseeded parent still connects the child rather than throwing');
+
+  t.throws(
+    () => element({ inserted: {} }).insertAdjacentElement('beforeend', element()),
+    'a non-array seed fails closed instead of silently recording nothing',
+    TypeError,
+  );
 }
 
 t.section('contains and excludes refuse a non-string haystack');

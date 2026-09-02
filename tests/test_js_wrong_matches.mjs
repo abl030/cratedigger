@@ -373,7 +373,8 @@ t.section('renderWrongMatches() keeps converge usable with active import jobs');
 
   t.excludes(dom.wrongMatches.innerHTML, 'Import Active', 'does not replace converge with Import Active');
   t.contains(dom.wrongMatches.innerHTML, 'Converge (2)', 'keeps converge label with active jobs');
-  t.notMatch(dom.wrongMatches.innerHTML, /id="wm-converge-btn-42"[^>]*disabled/, 'active jobs do not disable converge');
+  t.notMatch(dom.wrongMatches.innerHTML, /id="wm-converge-btn-42"[^>]*disabled/,
+    'active jobs do not disable converge');
 }
 
 t.section('setWrongMatchConvergeThreshold() updates expanded group in place');
@@ -2064,7 +2065,8 @@ t.section('Delete All reflects actionable candidates, never a dead end (issue #1
   renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
   t.contains(dom.wrongMatches.innerHTML, 'Delete All (3)',
     'a fully available group keeps the plain label');
-  t.notMatch(dom.wrongMatches.innerHTML, /id="wm-delete-group-btn-42"[^>]*disabled/, 'a fully available group stays enabled');
+  t.notMatch(dom.wrongMatches.innerHTML, /id="wm-delete-group-btn-42"[^>]*disabled/,
+    'a fully available group stays enabled');
 
   // A partially unavailable group relabels with the actionable count and
   // stays enabled — a partial group is still the right action to take.
@@ -2073,7 +2075,8 @@ t.section('Delete All reflects actionable candidates, never a dead end (issue #1
   renderWrongMatches(partial, dom.wrongMatches);
   t.contains(dom.wrongMatches.innerHTML, 'Delete All (2 of 3)',
     'a partially unavailable group shows the actionable count');
-  t.notMatch(dom.wrongMatches.innerHTML, /id="wm-delete-group-btn-42"[^>]*disabled/, 'a partially unavailable group stays enabled');
+  t.notMatch(dom.wrongMatches.innerHTML, /id="wm-delete-group-btn-42"[^>]*disabled/,
+    'a partially unavailable group stays enabled');
 
   // A group with ZERO actionable candidates is a dead end today: the
   // server truthfully refuses (503, nothing destroyed) and the operator
@@ -2083,7 +2086,8 @@ t.section('Delete All reflects actionable candidates, never a dead end (issue #1
   renderWrongMatches(dead, dom.wrongMatches);
   t.contains(dom.wrongMatches.innerHTML, 'Delete All (0 of 3)',
     'a fully unavailable group names zero actionable candidates');
-  t.match(dom.wrongMatches.innerHTML, /id="wm-delete-group-btn-42"[^>]*disabled/, 'a fully unavailable group disables Delete All instead of a dead-end 503');
+  t.match(dom.wrongMatches.innerHTML, /id="wm-delete-group-btn-42"[^>]*disabled/,
+    'a fully unavailable group disables Delete All instead of a dead-end 503');
 
   t.equal(deleteAllButtonLabel(3, 3), 'Delete All (3)',
     'a fully actionable group keeps the plain label');
