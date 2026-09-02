@@ -144,6 +144,13 @@ For each surviving mutant, decide with `mutmut show <name>`:
   between already-degenerate entries; the string-literal operators
   inflating ONE unasserted field into ~5 survivor rows (XX-wrapping,
   case-flips, `.get(None)`) — triage those as one question, not five.
+- **A survivor inside a log-only branch** is decided by the house rule in
+  `.claude/rules/code-quality.md` § "Testing — Red/Green TDD": a log line earns
+  a pin iff it is the sole operator-visible evidence of a decision or failure
+  the operator would act on, such as Recents audit evidence or a refusal
+  reason. Progress and trace logging doesn't, so those are dismissals with the
+  rule cited. Operator ruling, issue #1313 residual 1336-3:
+  https://github.com/abl030/cratedigger/issues/1313#issuecomment-5503374358
 
 Report the machine-generated tally (mutants run / killed / survived) and
 the dismissal list with rationales in the PR's Fault injection section.
