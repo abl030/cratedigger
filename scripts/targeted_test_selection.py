@@ -278,6 +278,36 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_import_dispatch",
         "tests.test_integration_slices",
     ),
+    "lib/dispatch/evidence_gate.py": (
+        # The dispatch/ subdirectory defeats basename derivation for the
+        # established integration homes. Keep the grouped contract plus every
+        # deterministic production boundary used by the #1321 catalog.
+        "tests.test_evidence_gate",
+        "tests.test_dispatch_core",
+        "tests.test_dispatch_from_db",
+        "tests.test_import_dispatch",
+        "tests.test_import_queue",
+        "tests.test_integration_slices",
+        "tests.test_sidecar_service",
+        "tests.test_current_evidence_authority_generated",
+    ),
+    "lib/dispatch/outcome_actions.py": (
+        # Grouped writer contracts plus every deterministic caller boundary
+        # used by the #1321 catalog; the generated module patrols the full
+        # dispatch/lifecycle world space outside per-mutant execution.
+        "tests.test_outcome_actions",
+        "tests.test_outcome_actions_generated",
+        "tests.test_do_mark",
+        "tests.test_import_dispatch",
+        "tests.test_integration_slices",
+        "tests.test_terminal_outcome_callers",
+        "tests.test_album_source",
+        "tests.test_importer_job_kinds",
+        "tests.test_import_manifest",
+        "tests.test_dispatch_from_db",
+        "tests.test_dispatch_core",
+        "tests.test_dispatch_outcomes_generated",
+    ),
     "lib/startup_reconciliation.py": (
         # Was an admitted zero-neighbour gap (issue #1199, measured
         # 2026-08-19): there is no tests.test_startup_reconciliation, so
@@ -761,14 +791,15 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     # local-import's caller ever passes a non-None threshold, and only
     # after its own strict-validation guard already passed) — not a
     # substitute for the dynamic-execution coverage above.
-    # lib/dispatch/types.py holds the dispatch interface itself — the
-    # ``DispatchRequest`` description, the ``DispatchDB`` port, and the
-    # ``DispatchCoreFn`` seam (issue #1277). ``_direct_test_candidates``
-    # derives ``tests.test_types`` from the basename, which does not exist;
-    # its own dedicated module is tests.test_dispatch_request, and the two
-    # dispatch behaviour suites are what prove a change to those types did
-    # not move an outcome.
+    # lib/dispatch/types.py holds the dispatch interface itself — constants,
+    # value carriers, ``DispatchRequest``, the ``DispatchDB`` port, and the
+    # two callable seams. ``_direct_test_candidates`` derives
+    # ``tests.test_types`` from the basename, which does not exist. The
+    # dedicated deterministic contract is tests.test_dispatch_types; the
+    # request/core and generated outcome suites remain complementary caller
+    # and world-space coverage, not substitutes for that durable boundary.
     "lib/dispatch/types.py": (
+        "tests.test_dispatch_types",
         "tests.test_dispatch_request",
         "tests.test_dispatch_core",
         "tests.test_dispatch_outcomes_generated",
@@ -1407,11 +1438,6 @@ LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
         "subdirectory), which does not exist; no EXACT_PATH_NEIGHBOURS/"
         "prefix rule covers it either (issue #1199)"
     ),
-    "lib/dispatch/evidence_gate.py": (
-        "measured 2026-08-19: zero neighbours -- basename-derived "
-        "tests.test_evidence_gate does not exist and no EXACT_PATH_"
-        "NEIGHBOURS/prefix rule covers it (issue #1199)"
-    ),
     "lib/dispatch/helpers.py": (
         "measured 2026-08-19: zero neighbours -- basename-derived "
         "tests.test_helpers does not exist and no EXACT_PATH_NEIGHBOURS/"
@@ -1422,11 +1448,7 @@ LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
         "tests.test_manifest_guard does not exist and no EXACT_PATH_"
         "NEIGHBOURS/prefix rule covers it (issue #1199)"
     ),
-    "lib/dispatch/outcome_actions.py": (
-        "measured 2026-08-19: zero neighbours -- basename-derived "
-        "tests.test_outcome_actions does not exist and no EXACT_PATH_"
-        "NEIGHBOURS/prefix rule covers it (issue #1199)"
-    ),
+
     "lib/dispatch/post_import.py": (
         "measured 2026-08-19: zero neighbours -- basename-derived "
         "tests.test_post_import does not exist and no EXACT_PATH_"
