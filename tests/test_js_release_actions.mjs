@@ -424,7 +424,7 @@ t.section('Processing conflict handler — authoritative owner refresh repaints 
     true,
     'visible explanation is repainted from the authoritative owner',
   );
-  globalThis.fetch = async () => ({
+  stubGlobals({ fetch: async () => ({
     ok: true,
     async json() {
       return {
@@ -436,7 +436,7 @@ t.section('Processing conflict handler — authoritative owner refresh repaints 
         },
       };
     },
-  });
+  }) });
   await handleProcessingLockedConflict({
     httpStatus: 409,
     payload: {
@@ -583,10 +583,10 @@ t.section('Processing conflict handler — newest same-request refresh wins');
   const staleFailure = deferred();
   const currentSuccess = deferred();
   fetches = 0;
-  globalThis.fetch = async () => {
+  stubGlobals({ fetch: async () => {
     fetches++;
     return fetches === 1 ? staleFailure.promise : currentSuccess.promise;
-  };
+  } });
   const staleFailureHandling = handleProcessingLockedConflict({
     httpStatus: 409,
     payload: {

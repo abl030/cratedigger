@@ -1,12 +1,12 @@
 /** Frontend convergence prompt/action contract (#978). */
 import { readFileSync } from 'node:fs';
 
-import { element, suite } from './js_harness.mjs';
+import { element, stubGlobals, suite } from './js_harness.mjs';
 
 // Assigned BEFORE the dynamic import below: web/js/convergence.js reads
 // `document` at module-evaluation time, so this ordering is load-bearing.
-globalThis.window = {};
-globalThis.document = { querySelector() { return null; } };
+stubGlobals({ window: {} });
+stubGlobals({ document: { querySelector() { return null; } } });
 
 const {
   convergenceBadge,
@@ -131,10 +131,10 @@ window.toast = (...args) => toasts.push(args);
 t.section('successful stop');
 
 let request;
-globalThis.fetch = async (url, options) => {
+stubGlobals({ fetch: async (url, options) => {
   request = { url, options };
   return response(200, { outcome: 'stopped' });
-};
+} });
 const successFixture = buttonFixture();
 await stopConvergedSearch(signal, successFixture.button, 'recents');
 t.equal(request.url, '/api/triage/41/stop-converged-search',
@@ -151,10 +151,10 @@ t.section('busy state is synchronous and blocks a second activation');
 
 let releaseFetch;
 let fetchCount = 0;
-globalThis.fetch = () => {
+stubGlobals({ fetch: () => {
   fetchCount += 1;
   return new Promise(resolve => { releaseFetch = resolve; });
-};
+} });
 const doubleFixture = buttonFixture();
 const first = stopConvergedSearch(signal, doubleFixture.button, 'recents');
 const second = await stopConvergedSearch(signal, doubleFixture.button, 'recents');
@@ -169,7 +169,7 @@ await first;
 t.section('stale outcomes');
 
 for (const status of [409, 422]) {
-  globalThis.fetch = async () => response(status, { outcome: 'stale' });
+  stubGlobals({ fetch: async () => response(status, { outcome: 'stale' }) });
   const staleFixture = buttonFixture();
   const before = browseRefreshes;
   await stopConvergedSearch(signal, staleFixture.button, 'library-detail');
@@ -179,7 +179,7 @@ for (const status of [409, 422]) {
 
 t.section('network failure restores the control');
 
-globalThis.fetch = async () => { throw new TypeError('network down'); };
+stubGlobals({ fetch: async () => { throw new TypeError('network down'); } });
 const networkFixture = buttonFixture();
 const network = await stopConvergedSearch(signal, networkFixture.button, 'recents');
 t.equal(network.outcome, 'unavailable', 'a transport failure reports unavailable');
@@ -192,7 +192,7 @@ t.equal(networkFixture.button.textContent, 'Stop searching',
 
 t.section('malformed error body');
 
-globalThis.fetch = async () => response(503, {}, { raw: '<html>proxy error</html>' });
+stubGlobals({ fetch: async () => response(503, {}, { raw: '<html>proxy error</html>' }) });
 const malformedFixture = buttonFixture();
 await stopConvergedSearch(signal, malformedFixture.button, 'recents');
 t.equal(malformedFixture.button.disabled, false,

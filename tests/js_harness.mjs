@@ -261,8 +261,15 @@ export function suite(moduleUrl) {
   }
 
   const checker = {
-    /** Label the assertions that follow; also printed as a header. */
+    /**
+     * Label the assertions that follow; also printed as a header.
+     *
+     * Also the boundary that hands back every global stubbed since the
+     * previous one — see `stubGlobals`.
+     */
     section(label) {
+      releaseSectionStubs();
+      sectionsHaveStarted = true;
       section = String(label);
       writeOut(`${section}\n`);
       return checker;
@@ -404,6 +411,8 @@ export function suite(moduleUrl) {
      */
     done() {
       finished = true;
+      releaseSectionStubs();
+      releaseModuleStubs();
       writeOut(`\n${passed} passed, ${failed} failed\n`);
       writeOut(`${DONE_MARKER}\t${file}\t${passed}\t${failed}\n`);
       if (failed > 0) process.exitCode = 1;
@@ -425,12 +434,59 @@ export function suite(moduleUrl) {
 }
 
 /**
- * Install global stubs and hand back a restorer.
+ * Stubs installed since the last `section()`, newest last.
+ *
+ * One suite runs per process — `scripts/run_js_checks.sh` invokes `node`
+ * once per file, and the harness's own fixtures spawn children rather than
+ * building a second suite in-process — so one registry per module load is
+ * one registry per suite.
+ */
+const sectionStubs = [];
+
+/** Stubs installed before the first `section()`: the file's baseline world. */
+const moduleStubs = [];
+
+let sectionsHaveStarted = false;
+
+function releaseStubs(handles) {
+  // Newest first: a key stubbed twice unwinds through its intermediate
+  // value back to the one that was there before the block started.
+  for (let i = handles.length - 1; i >= 0; i -= 1) handles[i].restore();
+  handles.length = 0;
+}
+
+function releaseSectionStubs() {
+  releaseStubs(sectionStubs);
+}
+
+function releaseModuleStubs() {
+  releaseStubs(moduleStubs);
+}
+
+/**
+ * Install global stubs for the rest of this section.
  *
  * Replaces the hand-written dance this repository had at hundreds of
  * sites — save `globalThis.document`, assign a stub, remember to put the
  * old value back — which was also silently unbalanced in places, leaking
  * one test's DOM into the next.
+ *
+ * **The harness owns the restore, and the section is the scope.** Every
+ * stub installed after a `section()` is handed back at the next
+ * `section()`, and the last section's at `done()`. Stubs installed BEFORE
+ * the first `section()` are the file's baseline world — the `document` a
+ * module needs at evaluation time, say — and live until `done()`. The
+ * returned `restore()` is still there for a block that wants its world
+ * back earlier, and calling it twice is a no-op, so an explicit restore
+ * and the automatic one cannot fight.
+ *
+ * Section scope is the point rather than a convenience. 104 sites across
+ * six suites assigned `globalThis.fetch` bare and restored nothing, so a
+ * section that installed no `fetch` of its own silently answered from the
+ * previous section's mock (issue #1346). Making the boundary the harness's
+ * job means a block cannot inherit by forgetting: it either installs its
+ * own or reads whatever was there before the file started, which fails
+ * visibly.
  *
  * A key absent from `globalThis` before the call is DELETED on restore,
  * not set to `undefined`, so `typeof globalThis.x === 'undefined'` and
@@ -447,7 +503,7 @@ export function stubGlobals(values) {
       : { present: false, value: undefined });
     globalThis[key] = values[key];
   }
-  return {
+  const handle = {
     restore() {
       for (const [key, previous] of saved) {
         if (previous.present) globalThis[key] = previous.value;
@@ -456,6 +512,8 @@ export function stubGlobals(values) {
       saved.clear();
     },
   };
+  (sectionsHaveStarted ? sectionStubs : moduleStubs).push(handle);
+  return handle;
 }
 
 /**

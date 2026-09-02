@@ -1140,3 +1140,72 @@ def assert_window_bindings(
             + ", ".join(sorted(audit.missing))
         )
     return audit
+
+
+# The globals a JavaScript test suite installs a stub into. ``window`` is
+# deliberately absent: in every suite here ``window`` is itself a stub object
+# the file just installed, so ``window.loadRecents = …`` writes to that stub
+# rather than to anything shared, and reporting it would name three sites
+# that leak nothing.
+_STUBBABLE_GLOBAL_ROOTS = frozenset({"globalThis", "global", "self"})
+
+
+@dataclass(frozen=True)
+class GlobalAssignment:
+    """One ``globalThis.x = …`` statement, located for a failure message."""
+
+    line: int
+    root: str
+    key: str
+
+
+def bare_global_assignments(
+    source: str, *, origin: str = "<javascript>"
+) -> list[GlobalAssignment]:
+    """Every assignment whose target is a property of a global object.
+
+    Plain and augmented assignment both, and ``globalThis['fetch']`` as well
+    as ``globalThis.fetch`` — a computed key reports as ``[computed]`` rather
+    than being skipped, so the awkward spelling fails closed instead of
+    becoming the one that slips through.
+
+    Deliberately bounded: this reads assignment TARGETS out of the parse tree
+    and nothing else. ``Object.assign(globalThis, …)`` and a global reached
+    through an alias are outside it and stay review's job
+    (`.claude/rules/code-quality.md` § "Semantic source scanners are
+    prohibited").
+    """
+    source_bytes = source.encode("utf-8")
+    tree = parse_javascript(source, origin=origin)
+    found: list[GlobalAssignment] = []
+    for node in _walk(tree.root_node):
+        if node.type not in (
+            "assignment_expression",
+            "augmented_assignment_expression",
+        ):
+            continue
+        left = node.child_by_field_name("left")
+        if left is None:
+            continue
+        if left.type == "member_expression":
+            key_node = left.child_by_field_name("property")
+            key = (
+                _node_text(key_node, source_bytes)
+                if key_node is not None
+                and key_node.type == "property_identifier"
+                else "[computed]"
+            )
+        elif left.type == "subscript_expression":
+            key = "[computed]"
+        else:
+            continue
+        obj = left.child_by_field_name("object")
+        if obj is None or obj.type != "identifier":
+            continue
+        root = _node_text(obj, source_bytes)
+        if root not in _STUBBABLE_GLOBAL_ROOTS:
+            continue
+        found.append(
+            GlobalAssignment(line=node.start_point[0] + 1, root=root, key=key)
+        )
+    return found

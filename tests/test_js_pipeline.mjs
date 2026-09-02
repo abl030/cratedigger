@@ -15,7 +15,7 @@ import {
 } from '../web/js/pipeline.js';
 import { state } from '../web/js/state.js';
 
-import { suite } from './js_harness.mjs';
+import { stubGlobals, suite } from './js_harness.mjs';
 
 const t = suite(import.meta.url);
 
@@ -56,7 +56,7 @@ function installDriftDom(requestId) {
     get innerHTML() { return this._html; },
     set innerHTML(value) { this._html = value; reloaded = true; },
   };
-  globalThis.document = {
+  stubGlobals({ document: {
     getElementById(id) {
       if (id === 'pipeline-content') return pipelineContent;
       if (id === `drift-note-${requestId}`) {
@@ -65,11 +65,11 @@ function installDriftDom(requestId) {
       if (id === 'toast') return toast;
       return null;
     },
-  };
-  globalThis.setTimeout = (fn) => {
+  } });
+  stubGlobals({ setTimeout: (fn) => {
     fn();
     return 0;
-  };
+  } });
   return {
     pipelineContent,
     preNote,
@@ -359,7 +359,7 @@ t.section('mergeRekeyRequest() success path posts, toasts, and reloads the dashb
   const dom = installDriftDom(8792);
   const btn = { disabled: false, textContent: 'Follow MB merge' };
   const calls = [];
-  globalThis.fetch = async (url, options = {}) => {
+  stubGlobals({ fetch: async (url, options = {}) => {
     calls.push({ url: String(url), options });
     if (String(url) === '/api/pipeline/8792/merge-rekey') {
       return {
@@ -374,7 +374,7 @@ t.section('mergeRekeyRequest() success path posts, toasts, and reloads the dashb
       return { ok: true, json: async () => ({ counts: {}, drift_rows: [] }) };
     }
     throw new Error(`unexpected fetch: ${url}`);
-  };
+  } });
 
   await mergeRekeyRequest(8792, btn);
   await flushMicrotasks();
@@ -402,7 +402,7 @@ t.section('mergeRekeyRequest() refusal path re-arms the button and writes the in
   const dom = installDriftDom(8792);
   const btn = { disabled: true, textContent: 'Rekeying...' };
   const calls = [];
-  globalThis.fetch = async (url) => {
+  stubGlobals({ fetch: async (url) => {
     calls.push(String(url));
     if (String(url) === '/api/pipeline/8792/merge-rekey') {
       return {
@@ -416,7 +416,7 @@ t.section('mergeRekeyRequest() refusal path re-arms the button and writes the in
       };
     }
     throw new Error(`unexpected fetch: ${url}`);
-  };
+  } });
 
   await mergeRekeyRequest(8792, btn);
 
@@ -435,9 +435,9 @@ t.section('mergeRekeyRequest() network-error path re-arms the button with a gene
 {
   const dom = installDriftDom(8792);
   const btn = { disabled: true, textContent: 'Rekeying...' };
-  globalThis.fetch = async () => {
+  stubGlobals({ fetch: async () => {
     throw new TypeError('network down');
-  };
+  } });
 
   await mergeRekeyRequest(8792, btn);
 
@@ -453,11 +453,11 @@ t.section('mergeRekeyRequest() refusal note falls back to the raw error field wh
 {
   const dom = installDriftDom(42);
   const btn = { disabled: true, textContent: 'Rekeying...' };
-  globalThis.fetch = async () => ({
+  stubGlobals({ fetch: async () => ({
     ok: false,
     status: 409,
     json: async () => ({ outcome: 'rekey_refused', error: 'route-level error text' }),
-  });
+  }) });
 
   await mergeRekeyRequest(42, btn);
 
@@ -492,7 +492,7 @@ function installReplacingRetagDom(albumId) {
     get innerHTML() { return this._html; },
     set innerHTML(value) { this._html = value; rerendered = true; },
   };
-  globalThis.document = {
+  stubGlobals({ document: {
     getElementById(id) {
       if (id === `retag-album-${albumId}`) return container;
       if (id === `retag-album-note-${albumId}`) {
@@ -501,11 +501,11 @@ function installReplacingRetagDom(albumId) {
       if (id === 'toast') return toast;
       return null;
     },
-  };
-  globalThis.setTimeout = (fn) => {
+  } });
+  stubGlobals({ setTimeout: (fn) => {
     fn();
     return 0;
-  };
+  } });
   return {
     container,
     preNote,
@@ -521,7 +521,7 @@ t.section('recheckRetagDivergenceAlbum() success path GETs, patches the row in p
   const dom = installReplacingRetagDom(6612);
   const btn = { disabled: false, textContent: 'Recheck' };
   const calls = [];
-  globalThis.fetch = async (url, options) => {
+  stubGlobals({ fetch: async (url, options) => {
     calls.push({ url: String(url), options });
     return {
       ok: true,
@@ -530,7 +530,7 @@ t.section('recheckRetagDivergenceAlbum() success path GETs, patches the row in p
         album_class: 'agrees', item_count: 8, items: [],
       }),
     };
-  };
+  } });
 
   await recheckRetagDivergenceAlbum(6612, btn);
 
@@ -552,7 +552,7 @@ t.section('recheckRetagDivergenceAlbum() N2 (fresh review) — the patched row s
 {
   const dom = installReplacingRetagDom(6612);
   const btn = { disabled: false, textContent: 'Recheck' };
-  globalThis.fetch = async () => ({
+  stubGlobals({ fetch: async () => ({
     ok: true,
     json: async () => ({
       album_id: 6612, db_mb_albumid: 'd990b8af-0000-0000-0000-000000000000',
@@ -568,7 +568,7 @@ t.section('recheckRetagDivergenceAlbum() N2 (fresh review) — the patched row s
         },
       ],
     }),
-  });
+  }) });
 
   await recheckRetagDivergenceAlbum(6612, btn);
 
@@ -588,7 +588,7 @@ t.section('recheckRetagDivergenceAlbum() never reloads the whole dashboard on su
   installReplacingRetagDom(6612);
   const btn = { disabled: false, textContent: 'Recheck' };
   const calls = [];
-  globalThis.fetch = async (url) => {
+  stubGlobals({ fetch: async (url) => {
     calls.push(String(url));
     return {
       ok: true,
@@ -597,7 +597,7 @@ t.section('recheckRetagDivergenceAlbum() never reloads the whole dashboard on su
         item_count: 0, items: [],
       }),
     };
-  };
+  } });
 
   await recheckRetagDivergenceAlbum(6612, btn);
 
@@ -609,11 +609,11 @@ t.section('recheckRetagDivergenceAlbum() not-found path re-arms the button and w
 {
   const dom = installReplacingRetagDom(999);
   const btn = { disabled: true, textContent: 'Rechecking...' };
-  globalThis.fetch = async () => ({
+  stubGlobals({ fetch: async () => ({
     ok: false,
     status: 404,
     json: async () => ({ error: 'No Beets album with id 999' }),
-  });
+  }) });
 
   await recheckRetagDivergenceAlbum(999, btn);
 
@@ -630,9 +630,9 @@ t.section('recheckRetagDivergenceAlbum() network-error path re-arms the button w
 {
   const dom = installReplacingRetagDom(6612);
   const btn = { disabled: true, textContent: 'Rechecking...' };
-  globalThis.fetch = async () => {
+  stubGlobals({ fetch: async () => {
     throw new TypeError('network down');
-  };
+  } });
 
   await recheckRetagDivergenceAlbum(6612, btn);
 
@@ -653,7 +653,7 @@ t.section('syncRetagDivergenceAlbum() POSTs the compare-and-set body and patches
     dataset: { expected: SYNC_DB_ID },
   };
   const calls = [];
-  globalThis.fetch = async (url, options) => {
+  stubGlobals({ fetch: async (url, options) => {
     calls.push({ url: String(url), options });
     return {
       ok: true,
@@ -667,7 +667,7 @@ t.section('syncRetagDivergenceAlbum() POSTs the compare-and-set body and patches
         },
       }),
     };
-  };
+  } });
 
   await syncRetagDivergenceAlbum(16948, btn);
 
@@ -692,7 +692,7 @@ t.section('syncRetagDivergenceAlbum() residual refusal re-renders AND writes the
     disabled: false, textContent: 'Write tags',
     dataset: { expected: SYNC_DB_ID },
   };
-  globalThis.fetch = async () => ({
+  stubGlobals({ fetch: async () => ({
     ok: false,
     status: 409,
     json: async () => ({
@@ -709,7 +709,7 @@ t.section('syncRetagDivergenceAlbum() residual refusal re-renders AND writes the
         }],
       },
     }),
-  });
+  }) });
 
   await syncRetagDivergenceAlbum(16948, btn);
 
@@ -732,7 +732,7 @@ t.section('syncRetagDivergenceAlbum() album-less refusal re-arms the still-attac
     disabled: false, textContent: 'Write tags',
     dataset: { expected: SYNC_DB_ID },
   };
-  globalThis.fetch = async () => ({
+  stubGlobals({ fetch: async () => ({
     ok: false,
     status: 409,
     json: async () => ({
@@ -741,7 +741,7 @@ t.section('syncRetagDivergenceAlbum() album-less refusal re-arms the still-attac
       error_message: 'Beets album 42 now names fdc54a6a…; recheck and retry',
       album: null,
     }),
-  });
+  }) });
 
   await syncRetagDivergenceAlbum(42, btn);
 
@@ -762,9 +762,9 @@ t.section('syncRetagDivergenceAlbum() network-error path re-arms the button with
     disabled: true, textContent: 'Writing tags...',
     dataset: { expected: SYNC_DB_ID },
   };
-  globalThis.fetch = async () => {
+  stubGlobals({ fetch: async () => {
     throw new TypeError('network down');
-  };
+  } });
 
   await syncRetagDivergenceAlbum(16948, btn);
 
