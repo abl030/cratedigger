@@ -1385,9 +1385,11 @@ class TestMaskableRulePins(unittest.TestCase):
     test module — and, before issue #1355 item 8 gave every root a
     `ROOT_COVERAGE_RULES` row, completely silent for a row over
     `migrations/`, `nix/`, `web/`, `harness/`, or the top level too. Item 8
-    closed most of that: only `prefix:nix/` and `prefix:harness/` still
-    silently lose SOME of their matched files today (their own comments in
-    `MASKABLE_RULE_PINS` below say exactly which, and why).
+    closed most of that: of those five roots' rows, only `prefix:nix/` and
+    `prefix:harness/` still silently lose SOME of their matched files today
+    (their own comments in `MASKABLE_RULE_PINS` below say exactly which,
+    and why) — the six pinned rows over `lib/`/`scripts/`/`tests/` were
+    never part of this population and are unaffected either way.
     """
 
     def test_pin_keys_are_exactly_the_measured_maskable_rule_set(self) -> None:

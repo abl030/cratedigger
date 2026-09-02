@@ -690,8 +690,11 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     # zero neighbours (neither tests.test_web_<stem> nor
     # tests.web.test_<stem> exists), but each has real coverage under a
     # name the basename probe cannot derive. Every neighbour below was
-    # verified by READING the referencing test's own import statement,
-    # never by grepping the filename — web/overlay.py's stem collides with
+    # verified by READING the referencing test — its own import statement
+    # where one exists, the real call path where it does not (api_bases.py's
+    # tests.test_pipeline_cli entry, and tests.test_web_dev_server, a named
+    # deterministic sibling that imports nothing from the module itself) —
+    # never by grepping the filename. web/overlay.py's stem collides with
     # the unrelated tests/test_overlay.py (which imports
     # web.routes._overlay, not web.overlay), so a bare tests.test_<stem>
     # probe is NOT trustworthy here and this file deliberately widens no
