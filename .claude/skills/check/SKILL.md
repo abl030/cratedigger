@@ -72,6 +72,25 @@ either — only a receipt that is both conclusively finished-or-dead AND older
 than the 7-day retirement floor above is ever removed, and only by a later
 admitted suite run's own reap pass (issue #1208 item 4).
 
+`incomplete` now comes with a stderr line saying which kind it is (issue
+#1313), built from two facts. A gate that handled SIGHUP, SIGINT, or SIGTERM
+sends its suite child one SIGTERM on the way out and records the signal name
+in the receipt's `interrupted` file; without that marker the run either had
+not launched its suite yet, or lost its gate to something no handler
+survives (SIGKILL, or the host). Separately, `status` re-checks whether that
+suite child is *still alive* — it often is right after an interruption,
+since the gate signals and exits while the coordinator drains its phases and
+publishes a summary, holding the admission lock throughout — and says so, so
+a re-run knows whether to expect a wait. Run the gate detached and poll
+`status` rather than under a tool timeout, which is what produces
+interruptions in the first place.
+
+An interrupted run is not tidy, and `incomplete` does not claim it is: the
+suite may still publish a bundle that the departed gate never records in
+`bundle` (so nothing protects it and it ages out), and the dev shell's
+scratch tree can outlive its own EXIT trap. Both are reaped on age by a
+later admitted suite run.
+
 The isolated final-gate worktree must remain exclusively owned for the entire
 gate. The receipt rechecks its HEAD and clean state immediately before terminal
 publication, but it is not a snapshot or protection against a concurrent writer

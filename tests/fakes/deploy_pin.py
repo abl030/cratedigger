@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from tests.fakes.subprocess_env import inherited_environment
 from tests.parent_signal_guard import guard_source_prelude
 
 # _SHIM_MODULE_HEADER/_SHIM_MODULE_BODY are split around the guard prelude
@@ -646,7 +647,7 @@ class FakeDeployPinCommands:
         # parameter for call-site symmetry with the script's own argv.
         del target
         env = {
-            **os.environ,
+            **inherited_environment(),
             "PATH": f"{self.fake_bin}:{os.environ['PATH']}",
             "HOME": str(self.home),
             "TMPDIR": str(self.tmp),
