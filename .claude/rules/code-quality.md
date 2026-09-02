@@ -156,7 +156,17 @@ file is zero escape hatches, not a fresh baseline entry.
 When either typing ratchet trips, do not stop at making it green. For every
 affected file and finding kind, finish with the committed count at least ten
 below the baseline at the start of the change, or at zero if fewer than ten
-remain, then regenerate the baseline. This is deliberately a convergence rule,
+remain, then regenerate the baseline. That obligation is the same on every
+trip, whatever caused it: hatches added, hatches removed, or a laundering swap
+that nets a decrease. An improvement fails the same exact-equality check an
+addition does, so a file improved by one still owes ten below the baseline it
+started at, or zero if fewer than ten remain. There is no added-hatches-only
+reading and no partial credit. The rule converges the count toward zero; it
+does not price the diff.
+Authority: "it's not added, it's just always. we should make the wording
+explicit here. it's a convergence mechanism, stop trying to find a way out!" —
+https://github.com/abl030/cratedigger/issues/1313#issuecomment-5503374358
+The ten-below obligation is deliberately a convergence rule,
 not another checker: do not add stable-site, diff-aware, or history-aware
 machinery to catch delete-and-add laundering (deleting one escape hatch of a
 kind and adding a DIFFERENT one of the same kind elsewhere in the same file).
@@ -378,6 +388,18 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   (`to_json_dict() → {}` is outside the catalog). Full runbook, scoping
   rules, and the real-PG `--max-children 1` requirement:
   `docs/mutation-testing.md`.
+- **A log-only branch earns a pin only when the log IS the evidence.** A log
+  line earns a pin iff it is the sole operator-visible evidence of a decision
+  or failure the operator would act on, such as Recents audit evidence or a
+  refusal reason. Progress and trace logging doesn't. So a survivor that only
+  rewords progress output is a dismissal with that rationale written down, and
+  one that silences the only record of a refusal is a real gap that owes the
+  assertion. The criterion is the same for aimed mutants and catalog
+  survivors, and
+  mutmut produces the catalog ones by the dozen, so cite this rather than
+  re-deciding per survivor (`docs/mutation-testing.md` § "Triage").
+  Authority: "I accept your definitoin" —
+  https://github.com/abl030/cratedigger/issues/1313#issuecomment-5503374358
 
 ### Generated-test performance is a coverage contract
 
