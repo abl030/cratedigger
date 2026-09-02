@@ -1188,7 +1188,11 @@ class TestMaskableRulePins(unittest.TestCase):
         """
         rules = {rule.name: rule for rule in SELECTION_RULES}
         for name, expected in MASKABLE_RULE_PINS.items():
-            rule = rules[name]
+            rule = rules.get(name)
+            if rule is None:
+                # A pin for a row that no longer exists is the sibling test's
+                # message, and a KeyError here would only bury it.
+                continue
             measured = dict(measured_rule_losses(rule, REPO_ROOT))
             losable: set[str] = set()
             unattributed: list[str] = []
