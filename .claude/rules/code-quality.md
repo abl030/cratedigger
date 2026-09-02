@@ -475,11 +475,28 @@ boundary the typing ratchet has.
 
 The basename conventions and the directory prefix rules are themselves one
 table since issue #1313, `SELECTION_RULES` (5 basename rows read by
-`_direct_test_candidates`, 9 directory rows read by the resolver), so the
+`_direct_test_candidates`, 10 directory rows read by the resolver), so the
 modules they name are ordinary data that contract A checks like any
 `EXACT_PATH_NEIGHBOURS` entry — they were inline literals inside two
 if-chains, and a nonexistent one failed only downstream at the first
-selection that hit the rule. Before adding a hand-authored entry, ask what
+selection that hit the rule. Since #1331 residual 1 those rows also carry
+the deletion-visibility contract the entries have: `MASKABLE_RULE_PINS`
+pins every row whose deletion at least one file it matches would not
+report, measured by removing the row through the resolver's own DI seam and
+asking the real fail-closed contract what happens. 12 of the 15 rows are in
+that state. Over an unpoliced root (`migrations/`, `nix/`, `web/`,
+`harness/`, the top level) nothing can raise at all, so the loss is silent
+even when the file drops to zero neighbours. Over a policed root it is
+silent at the files something else still resolves for — a basename probe,
+another prefix rule, or a hand-authored entry — which is how
+`scripts/phase_parsers/pyright_checks.py` would quietly fall back to a
+module written for a different script. A pin names sample paths and what
+each stops selecting, one per contribution channel the row can silently
+lose, and `MASKABLE_RULE_MATCHERS` freezes the same row's path conditions,
+because a narrowed matcher shrinks the population the measurement judges
+the row against rather than showing a loss. A row that matches no real
+file, or contributes to none of the files it matches, is refused outright,
+since either would measure clean while selecting nothing. Before adding a hand-authored entry, ask what
 the path already resolves:
 `nix-shell --run "python3 scripts/targeted_test_selection.py explain <path>"`
 names the mechanism behind every selected module, every module a rule

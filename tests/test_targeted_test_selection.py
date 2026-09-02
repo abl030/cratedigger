@@ -785,6 +785,87 @@ class TestSelectionRuleTable(unittest.TestCase):
             "_assert_selection_rules_well_formed(SELECTION_RULES)", source
         )
 
+    def test_the_rule_tables_are_a_seam_the_resolver_really_reads(self) -> None:
+        """Both table kwargs reach the resolution AND the fail-closed raise.
+
+        `tests/test_selection_coverage_audit.py`'s contract D measures a
+        row's deletion visibility by handing the resolver the table minus
+        that row; a resolver that quietly read the module globals instead
+        would report every row as safe. Three paths, one per stage: a route
+        module has nothing but its prefix rule, `lib/download.py` keeps its
+        hand-authored entry when the basename stage is empty, and a file
+        that resolves through the rules alone fails closed with both tables
+        emptied.
+        """
+        route = "web/routes/pipeline.py"
+        self.assertEqual(
+            resolve_attributed_neighbours(
+                route, PurePosixPath(route), REPO_ROOT, prefix_rules=()
+            ),
+            (),
+        )
+
+        download = "lib/download.py"
+        self.assertEqual(
+            [
+                source.name
+                for source in resolve_attributed_neighbours(
+                    download,
+                    PurePosixPath(download),
+                    REPO_ROOT,
+                    basename_rules=(),
+                )
+            ],
+            [EXACT_TABLE_SOURCE],
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, r"unmapped lib module: lib/quality/verdict_tiers\.py"
+        ):
+            _changed_path_neighbours(
+                "lib/quality/verdict_tiers.py",
+                REPO_ROOT,
+                basename_rules=(),
+                prefix_rules=(),
+            )
+
+        # A SUBSTITUTE row, not an empty table. Removing rows cannot tell
+        # whether the basename stage really reads the passed table: the
+        # rows are disjoint, so a stage that ignored the kwarg would still
+        # match the same row whenever the outer lookup found one at all,
+        # and two survivors said so (the `basename_rules=` forward dropped
+        # at `_direct_test_candidates`' own call to `_basename_rule`, and
+        # at this function's call to `_direct_test_candidates`). Only a
+        # table naming a DIFFERENT row for the same path separates them.
+        substitute = SelectionRule(
+            name="basename:_substitute_probe",
+            description="a substitute basename row, for this pin only",
+            root="lib",
+            suffixes=(".py",),
+            derived=("tests.test_targeted_test_selection",),
+        )
+        substituted = [
+            (source.name, source.modules)
+            for source in resolve_attributed_neighbours(
+                download,
+                PurePosixPath(download),
+                REPO_ROOT,
+                basename_rules=(substitute,),
+            )
+            if source.name == substitute.name
+        ]
+
+        self.assertEqual(
+            substituted,
+            [(substitute.name, ("tests.test_targeted_test_selection",))],
+        )
+        self.assertEqual(
+            _direct_test_candidates(
+                PurePosixPath(download), basename_rules=(substitute,)
+            ),
+            ("tests.test_targeted_test_selection",),
+        )
+
     def test_attribution_names_the_mechanism_behind_every_module(self) -> None:
         """Three mechanisms fire for one path, and each names what it added.
 

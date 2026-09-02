@@ -227,7 +227,7 @@ nix-shell --run "python3 scripts/targeted_test_selection.py explain lib/download
 
 It names the mechanism behind every selected module: the hand-authored
 `EXACT_PATH_NEIGHBOURS` entry, the self-selector, or one of the
-`SELECTION_RULES` rows (five basename conventions, nine directory rules).
+`SELECTION_RULES` rows (five basename conventions, ten directory rules).
 It also reports any module a rule looked for and did not find on disk, and
 whether the fail-closed contract is watching the path at all. The path need
 not exist yet, so a file can be explained before it is written.

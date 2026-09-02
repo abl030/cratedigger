@@ -36,8 +36,8 @@ probe); its own both-directions exactness lives in
 `tests/test_targeted_test_selection.py`'s tree walk plus
 `tests/test_negative_coverage_audit.py`.
 
-Plus three contracts on `EXACT_PATH_NEIGHBOURS` itself, which the twin
-audits could not see at all:
+Plus four contracts on the hand-authored selection data itself, which the
+twin audits could not see at all:
 
 A. every dotted module a mapping names really exists on disk — since issue
    #1313 this also covers every fixed module a `SELECTION_RULES` row names,
@@ -45,7 +45,8 @@ A. every dotted module a mapping names really exists on disk — since issue
    if-chains;
 B. no entry is fully redundant with what the path would resolve WITHOUT it;
 C. every entry whose deletion the fail-closed rules could NOT catch carries
-   an explicit pin here.
+   an explicit pin here;
+D. so does every `SELECTION_RULES` row, measured the same way.
 
 Contract C answers the gap that motivated this module: the twins only ever
 enforced "resolves ≥ 1 neighbour", which `_direct_test_candidates`' basename
@@ -53,6 +54,22 @@ probe satisfies trivially — so deleting a hand-authored entry for any file
 that also has a basename-matched test module was invisible to them
 (measured: deleting `scripts/test_substrate.py`'s entry survived the whole
 scripts audit).
+
+Contract D is C at the other granularity, and it closes issue #1331's first
+residual: a rule row is data exactly as an entry is, and deleting one was
+silent wherever nothing raised in consequence. Over `migrations/`, `nix/`,
+`web/`, `harness/` and the top level nothing CAN raise, because no
+`ROOT_COVERAGE_RULES` row polices those roots — though "nothing raises" is
+not the same as "every matched file goes quiet": `prefix:harness/` also
+matches `lib/beets.py` through its `exact_paths`, and that one does fail
+closed on the lib/ row. Over a policed root the loss is silent at the files
+something else still resolves for, whether that is a basename probe, another
+prefix rule, or a hand-authored entry.
+
+Where C asks "what does this path resolve without its entry", D asks "what
+does this row's every file resolve without the row", through the same kind of
+DI seam and the real fail-closed contract rather than a reimplementation of
+either.
 
 This is deliberately test infrastructure (selection machinery), so — per
 `.claude/rules/code-quality.md` § "Never property-test the test machinery" —
@@ -62,20 +79,25 @@ it is a deterministic audit, no generated property.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
+import functools
 import io
 import re
 import unittest
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
 from scripts import targeted_test_selection
 from scripts.targeted_test_selection import (
     ADMITTED_GAP_MESSAGE,
     ALWAYS_AMBIENT_TESTS,
+    BASENAME_RULES,
     EXACT_PATH_NEIGHBOURS,
+    PREFIX_RULES,
     ROOT_COVERAGE_RULES,
     SELECTION_RULES,
     RootCoverageRule,
+    SelectionRule,
     _assert_registries_disjoint,
     _changed_path_neighbours,
     _direct_test_candidates,
@@ -84,6 +106,10 @@ from scripts.targeted_test_selection import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+#: What `lost_channels` calls a row's fixed `neighbours` tuple. Its derived
+#: templates are their own channels, named by the template itself.
+NEIGHBOURS_CHANNEL = "neighbours"
 
 #: Every row's expected `admitted_selects_nothing`, held OUTSIDE the table
 #: (issue #1278 item 9 review F1). `AUDITED_RULES` below derives its scope
@@ -168,10 +194,11 @@ def shared_neighbour_sets() -> dict[str, tuple[str, ...]]:
 #: alone cannot distinguish the real `path.parts[:1] == (root,)` guard from
 #: a narrower `len(path.parts) == 2` mutant (issue #1199 review F2), so each
 #: probe goes one level deeper. Each directory is chosen to dodge every
-#: `PREFIX_RULES` row (`tests/fakes/`,
+#: `PREFIX_RULES` row under that root (`tests/fakes/`,
 #: `tests/structural_audits/`, `tests/world_model/`, `lib/pipeline_db/`,
-#: `lib/quality/` all resolve neighbours unconditionally and would make the
-#: probe resolve rather than raise). Keyed by root, so a new rule with no
+#: `lib/quality/`, `scripts/phase_parsers/` all resolve neighbours
+#: unconditionally and would make the probe resolve rather than raise).
+#: Keyed by root, so a new rule with no
 #: entry here fails with a KeyError rather than silently skipping.
 NESTED_PROBE_DIRS: dict[str, str] = {
     "tests": "_probe_dir",
@@ -411,6 +438,218 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
 }
 
 
+#: Contract D. Every `SELECTION_RULES` row whose deletion at least one file
+#: would not report — the row-level twin of `MASKABLE_ENTRY_PINS` above —
+#: mapped to sample paths and the exact modules each one stops selecting
+#: without the row. Measured by `silently_lost_selection`, never
+#: hand-curated.
+#:
+#: One path proves the deletion visible; a row is pinned at more than one
+#: only where it needs more than one to cover every channel it can silently
+#: lose (`test_every_pin_covers_every_channel_the_row_can_silently_lose`).
+#: The rows absent from this table are the three where no matched file loses
+#: anything silently: `basename:scripts/*.sh`,
+#: `prefix:tests/structural_audits/` and `prefix:tests/world_model/`. That is
+#: not the same as "every matched file reports the deletion" (review P3):
+#: ten of the sixteen shell wrappers report nothing because they lose
+#: nothing, and `tests/world_model/mirror_harness.py` is a registered gap
+#: that early-returns either way. What the contract needs is the property
+#: stated here, not the stronger one.
+#:
+#: Modules are compared sorted, so a reordered `*_NEIGHBOURS` tuple is not a
+#: pin edit. Changing what one of those tuples CONTAINS is: the pipeline-DB
+#: set is watched by two rows here, `prefix:lib/pipeline_db/` and
+#: `prefix:migrations/`, which is the point — a shared tuple's membership
+#: decides what several roots select.
+MASKABLE_RULE_PINS: dict[str, dict[str, tuple[str, ...]]] = {
+    # Both templates in one path: verdict_tiers.py has a deterministic
+    # module and a generated one, and the lib/quality/ prefix rule keeps
+    # resolving, so nothing raises when this row goes.
+    "basename:lib/*.py": {
+        "lib/quality/verdict_tiers.py": (
+            "tests.test_verdict_tiers",
+            "tests.test_verdict_tiers_generated",
+        ),
+    },
+    # Issue #1331's own case, from the other side. Deleting this row makes
+    # twelve scripts/ files raise and this one quietly stop selecting
+    # tests.test_pyright_checks — a module written for
+    # scripts/run_pyright_checks.py that never loads a phase parser. The
+    # coverage is wrong-subject either way; the pin is that the row's
+    # deletion cannot be silent anywhere.
+    "basename:scripts/*.py": {
+        "scripts/phase_parsers/pyright_checks.py": ("tests.test_pyright_checks",),
+    },
+    # No ROOT_COVERAGE_RULES row polices web/, so every one of this row's
+    # losses is silent. Two paths because the row derives two templates and
+    # no single file loses both.
+    "basename:web/*.py": {
+        "web/cache.py": ("tests.test_web_cache",),
+        "web/request_security.py": ("tests.web.test_request_security",),
+    },
+    # No rule polices a top-level file. album_source.py is the only path
+    # this row resolves anything for — cratedigger.py has a hand-authored
+    # entry instead.
+    "basename:<top-level>.py": {
+        "album_source.py": ("tests.test_album_source",),
+    },
+    # The basename probe keeps resolving a cluster's own tests, so the loss
+    # of the shared boundary contracts is silent. transfer_ledger.py covers
+    # both channels: the five neighbours and the mirrored fake's self-tests.
+    "prefix:lib/pipeline_db/": {
+        "lib/pipeline_db/transfer_ledger.py": (
+            "tests.test_fakes",
+            "tests.test_fakes_transfer_ledger",
+            "tests.test_pipeline_db",
+            "tests.test_pipeline_db_column_contract",
+            "tests.test_pipeline_db_write_audit",
+            "tests.test_read_projection_audit",
+        ),
+    },
+    # No rule polices migrations/, and nothing else resolves a .sql file at
+    # all: without this row every one of the 82 migrations selects nothing
+    # and no audit says so.
+    "prefix:migrations/": {
+        "migrations/001_initial.sql": (
+            "tests.test_fakes",
+            "tests.test_migrator",
+            "tests.test_pipeline_db",
+            "tests.test_pipeline_db_column_contract",
+            "tests.test_pipeline_db_write_audit",
+            "tests.test_read_projection_audit",
+        ),
+    },
+    # Silent only for the fakes that also carry a hand-authored entry; every
+    # other fake fails closed on the tests/ row. Both channels are losable
+    # here, and it took an unrelated PR to show it: this entry once said the
+    # derived tests.test_fakes_<stem> channel could not be, on the reasoning
+    # that a fake with a cluster sibling has no entry. #1313 batch C then
+    # landed subprocess_env.py with BOTH, and this contract went red on the
+    # merge — which is the whole point of measuring instead of reasoning.
+    "prefix:tests/fakes/": {
+        "tests/fakes/beets_contract.py": ("tests.test_fakes",),
+        "tests/fakes/subprocess_env.py": (
+            "tests.test_fakes",
+            "tests.test_fakes_subprocess_env",
+        ),
+    },
+    # The residual that opened this contract: five parsers fail closed
+    # without their row and pyright_checks.py resolves the colliding
+    # basename module instead.
+    "prefix:scripts/phase_parsers/": {
+        "scripts/phase_parsers/pyright_checks.py": (
+            "tests.test_phase_parsers",
+            "tests.test_suite_coordinator",
+        ),
+    },
+    # No rule polices web/, and the web basename row excludes web/routes/,
+    # so deleting this one silently drops every route file to zero.
+    "prefix:web/routes/": {
+        "web/routes/pipeline.py": (
+            "tests.test_js_payload_contract_audit",
+            "tests.test_pydantic_route_audit",
+            "tests.web.test_route_audit",
+            "tests.web.test_routes_pipeline",
+        ),
+    },
+    # No rule polices nix/, .nix or .lock, so this row is the only thing
+    # selecting the module contract for a module or flake change.
+    "prefix:nix/": {
+        "nix/module.nix": ("tests.test_nix_module",),
+    },
+    # No rule polices harness/ and no basename probe reaches it. The row's
+    # own deletion IS reported, but at lib/beets.py — its exact_paths
+    # sibling, which fails closed on the lib/ row — while all six harness
+    # files go quiet.
+    "prefix:harness/": {
+        "harness/import_one.py": ("tests.test_harness_beets2_contract",),
+    },
+    # Silent for four of the fifteen quality modules; the other eleven fail
+    # closed on the lib/ row. Three of the four are masked by their own
+    # basename probe (a `_generated` sibling exists). wire_types.py, the path
+    # pinned here, is masked by its hand-authored EXACT_PATH_NEIGHBOURS entry
+    # instead — its basename probe resolves nothing (review P2).
+    "prefix:lib/quality/": {
+        "lib/quality/wire_types.py": (
+            "tests.test_quality_classification",
+            "tests.test_quality_decisions",
+            "tests.test_quality_generated",
+        ),
+    },
+}
+
+
+#: The `SelectionRule` fields that decide WHICH paths a row matches, derived
+#: from the dataclass rather than hand-listed, so a new matcher field joins
+#: the frozen set the moment it exists. `neighbours` and `derived` are
+#: excluded because they decide what a matched path GETS, which
+#: `MASKABLE_RULE_PINS` already watches.
+MATCHER_FIELDS: tuple[str, ...] = tuple(
+    field.name
+    for field in dataclasses.fields(SelectionRule)
+    if field.name not in {"name", "description", "neighbours", "derived"}
+)
+
+
+def rule_matcher(rule: SelectionRule) -> dict[str, object]:
+    """A row's path conditions, minus every field left at its default.
+
+    Dropping the defaults keeps the frozen copy in `MASKABLE_RULE_MATCHERS`
+    short enough to read, and loses nothing: a field that gains a value, or
+    loses one, changes the dict either way.
+    """
+    defaults = {
+        field.name: field.default for field in dataclasses.fields(SelectionRule)
+    }
+    return {
+        name: getattr(rule, name)
+        for name in MATCHER_FIELDS
+        if getattr(rule, name) != defaults[name]
+    }
+
+
+#: Contract D's second half, and the answer to the review's one high finding.
+#: `MASKABLE_RULE_PINS` proves a row still CONTRIBUTES what it should to the
+#: paths it names. It says nothing about the paths it no longer matches:
+#: adding `excluded_prefixes=("web/routes/library", "web/routes/triage")` to
+#: `prefix:web/routes/` left `web/routes/triage.py` selecting nothing at all,
+#: with all 125 tests green (measured, review runner M30). Over a policed
+#: root the root rule catches that; over `migrations/`, `nix/`, `web/`,
+#: `harness/` and the top level nothing does, and those are exactly the roots
+#: contract D exists for.
+#:
+#: So the matchers of every pinned row are frozen here. The measurement side
+#: cannot catch this on its own — `rule_candidate_paths` derives its walk
+#: FROM the matchers, so a narrowed row shrinks the population it is judged
+#: against rather than showing a loss. An external anchor is the only thing
+#: that can, the same reasoning `EXPECTED_SUFFIXES` records for
+#: `ROOT_COVERAGE_RULES` one table over.
+MASKABLE_RULE_MATCHERS: dict[str, dict[str, object]] = {
+    "basename:lib/*.py": {"root": "lib", "suffixes": (".py",)},
+    "basename:scripts/*.py": {"root": "scripts", "suffixes": (".py",)},
+    "basename:web/*.py": {
+        "root": "web",
+        "suffixes": (".py",),
+        "excluded_prefixes": ("web/routes/",),
+    },
+    "basename:<top-level>.py": {"top_level": True, "suffixes": (".py",)},
+    "prefix:lib/pipeline_db/": {"prefixes": ("lib/pipeline_db/",)},
+    "prefix:migrations/": {"prefixes": ("migrations/",)},
+    "prefix:tests/fakes/": {"prefixes": ("tests/fakes/",)},
+    "prefix:scripts/phase_parsers/": {"prefixes": ("scripts/phase_parsers/",)},
+    "prefix:web/routes/": {"prefixes": ("web/routes/",)},
+    "prefix:nix/": {
+        "prefixes": ("nix/",),
+        "exact_paths": ("flake.nix", "flake.lock"),
+    },
+    "prefix:harness/": {
+        "prefixes": ("harness/",),
+        "exact_paths": ("lib/beets.py",),
+    },
+    "prefix:lib/quality/": {"prefixes": ("lib/quality/",)},
+}
+
+
 def stale_selection_gaps(rule: RootCoverageRule, repo_root: Path) -> list[str]:
     """One message per STALE entry in ``rule``'s registry — a path
     registered as "resolves zero neighbours" that now resolves real ones.
@@ -466,6 +705,220 @@ def maskable_entry_paths(
         if fallback_only_neighbours(relative_path, repo_root) or not policed:
             maskable.add(relative_path)
     return maskable
+
+
+def rule_candidate_paths(
+    rule: SelectionRule, repo_root: Path
+) -> tuple[str, ...]:
+    """Every real file ``rule`` matches, walked from the rule's own matchers.
+
+    Walking what the row itself constrains keeps this cheap and keeps
+    `.claude/worktrees/` stale checkouts structurally unreachable (the
+    #520/#543 shape) — no row names the repository root, and the `top_level`
+    sweep uses `iterdir`, which does not descend.
+
+    A prefix is a STRING prefix, not necessarily a directory: `matches` uses
+    `startswith`, so `web/routes/p` matches real files while naming no
+    directory. Walking `repo_root / prefix` alone therefore found nothing for
+    such a row and reported it clean — a fail-open inside a contract whose
+    whole premise is fail-closed measurement (review P1). The walk starts at
+    the deepest ancestor that IS a directory and lets `matches` filter, and a
+    prefix with no such ancestor below the repository root contributes
+    nothing rather than escalating to a repository-wide walk.
+
+    ``exact_paths`` are taken verbatim, existence unchecked: the resolver
+    never stats its own target (only candidate test modules), so a
+    fabricated path is a legitimate probe — which is what the known-bad
+    self-tests below need.
+
+    A row that matches no real file at all is not this function's problem to
+    report; `TestEveryRuleIsLive` refuses it, so the emptiness cannot pass
+    for "nothing to measure".
+    """
+    walked: list[str] = []
+    for prefix in (*rule.prefixes, *([f"{rule.root}/"] if rule.root else ())):
+        base = repo_root / prefix
+        while not base.is_dir() and base != repo_root:
+            base = base.parent
+        if base == repo_root:
+            continue
+        walked.extend(
+            path.relative_to(repo_root).as_posix()
+            for path in base.rglob("*")
+            if path.is_file() and "__pycache__" not in path.parts
+        )
+    if rule.top_level:
+        walked.extend(path.name for path in repo_root.iterdir() if path.is_file())
+    walked.extend(rule.exact_paths)
+    return tuple(
+        sorted(
+            {
+                relative
+                for relative in walked
+                if rule.matches(relative, PurePosixPath(relative))
+            }
+        )
+    )
+
+
+def selection_or_refusal(
+    relative_path: str,
+    repo_root: Path,
+    *,
+    basename_rules: Sequence[SelectionRule] = BASENAME_RULES,
+    prefix_rules: Sequence[SelectionRule] = PREFIX_RULES,
+    without: SelectionRule | None = None,
+) -> tuple[str, ...] | None:
+    """What selection resolves for ``relative_path``, or None when the
+    fail-closed contract refuses the path instead.
+
+    ``without`` drops one row from both tables through the production DI
+    seam, so this measures the REAL resolver and the REAL raise rather than
+    reimplementing either. With no row named, the two comprehensions are
+    identity and this is an ordinary resolution. The table kwargs default to
+    production's own and are replaced only by the known-bad self-tests,
+    which need a fabricated row to be IN the table before removing it can
+    mean anything.
+
+    The resolver's admitted-gap stderr note is swallowed: this runs over
+    every file a rule matches, and the registered gaps among them would bury
+    the run in notes that say nothing about rules.
+    """
+    buffer = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(buffer):
+            return _changed_path_neighbours(
+                relative_path,
+                repo_root,
+                basename_rules=tuple(
+                    row for row in basename_rules if row is not without
+                ),
+                prefix_rules=tuple(
+                    row for row in prefix_rules if row is not without
+                ),
+            )
+    except ValueError:
+        return None
+
+
+def silently_lost_selection(
+    rule: SelectionRule,
+    repo_root: Path,
+    *,
+    basename_rules: Sequence[SelectionRule] = BASENAME_RULES,
+    prefix_rules: Sequence[SelectionRule] = PREFIX_RULES,
+) -> dict[str, tuple[str, ...]]:
+    """Path → what it stops selecting if ``rule`` is deleted, for every file
+    whose loss no fail-closed rule would report.
+
+    A file is silent when deleting the row makes nothing RAISE while the
+    modules the row contributed are gone. Two ways to reach that, the same
+    disjunction `maskable_entry_paths` states for an entry: something else
+    still resolves for the path, or no `ROOT_COVERAGE_RULES` row polices its
+    root and suffix, in which case resolving nothing at all is silent too.
+    The second is the bulk of it here — 125 of the silent files resolve
+    exactly zero without their row (82 migrations, 22 routes, 13 nix/flake,
+    4 web, 3 harness, and album_source.py) — which the earlier wording
+    ("leaves it resolving something") flatly contradicted (review P4).
+
+    The first shape is what issue #1331 found: five of the six
+    `scripts/phase_parsers/` files fail closed without their row, and
+    `pyright_checks.py` quietly resolves `tests.test_pyright_checks` instead,
+    a module written for `scripts/run_pyright_checks.py` that never loads a
+    parser.
+
+    ``rule`` must be in the tables being measured, BY IDENTITY — the same
+    comparison `selection_or_refusal` removes it with. A row that is not in
+    them contributes to neither side, so every file would come back unchanged
+    and this would report a clean sheet for a row it never measured, the exact
+    vacuous-green shape a self-test is most likely to write by accident. An
+    `in` test would have admitted a probe merely EQUAL to a real row, which
+    removal by identity then would not remove (review P8).
+    """
+    if not any(
+        rule is row for row in (*basename_rules, *prefix_rules)
+    ):
+        raise AssertionError(
+            f"{rule.name} is not in the tables being measured, so removing "
+            "it changes nothing and this measurement means nothing"
+        )
+    losses: dict[str, tuple[str, ...]] = {}
+    for relative in rule_candidate_paths(rule, repo_root):
+        selected = selection_or_refusal(
+            relative,
+            repo_root,
+            basename_rules=basename_rules,
+            prefix_rules=prefix_rules,
+        )
+        if selected is None:
+            continue
+        without = selection_or_refusal(
+            relative,
+            repo_root,
+            basename_rules=basename_rules,
+            prefix_rules=prefix_rules,
+            without=rule,
+        )
+        if without is None:
+            continue
+        lost = tuple(module for module in selected if module not in without)
+        if lost:
+            losses[relative] = lost
+    return losses
+
+
+@functools.cache
+def measured_rule_losses(
+    rule: SelectionRule, repo_root: Path
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """`silently_lost_selection` as a cached, hashable pair sequence.
+
+    Three contracts below ask the same question of the same fifteen rows,
+    and the measurement walks a few hundred files twice per row.
+    `SelectionRule` is a frozen dataclass of tuples, so it hashes.
+    """
+    return tuple(sorted(silently_lost_selection(rule, repo_root).items()))
+
+
+def maskable_rule_names(
+    rules: Sequence[SelectionRule], repo_root: Path
+) -> set[str]:
+    """Names of the rows whose deletion at least one file would not report."""
+    return {
+        rule.name for rule in rules if measured_rule_losses(rule, repo_root)
+    }
+
+
+def lost_channels(
+    rule: SelectionRule, relative_path: str, lost: Sequence[str]
+) -> tuple[set[str], list[str]]:
+    """``(channels, unattributed)`` for one path's lost modules.
+
+    A row contributes through named channels: its fixed `neighbours` tuple,
+    and one channel per `derived` template. Naming them is what makes a pin
+    table's adequacy mechanical instead of a judgement — a row with two
+    templates needs a pinned path per template, or one template's loss stays
+    invisible.
+
+    ``unattributed`` fails the contract closed: a lost module belongs to the
+    deleted row by construction, so one that matches no channel means this
+    attribution no longer understands how the row contributes.
+    """
+    stem = PurePosixPath(relative_path).stem
+    channels: set[str] = set()
+    unattributed: list[str] = []
+    for module in lost:
+        matched = False
+        if module in rule.neighbours:
+            channels.add(NEIGHBOURS_CHANNEL)
+            matched = True
+        for template in rule.derived:
+            if module == template.format(stem=stem):
+                channels.add(template)
+                matched = True
+        if not matched:
+            unattributed.append(module)
+    return channels, unattributed
 
 
 def redundant_entry_violations(
@@ -790,6 +1243,195 @@ class TestMaskableEntryPins(unittest.TestCase):
                 )
 
 
+class TestEveryRuleIsLive(unittest.TestCase):
+    """A row that matches nothing, or gives nothing to anything it matches.
+
+    Contract D measures what a row's files lose without it, so a row with no
+    files measures clean and demands no pin — the fail-open half of review
+    P1. `prefixes` is a string prefix and nothing checks it names anything
+    real, so `lib/pipline_db/` (typo intended) would be inert in production
+    AND clean here. This is also the row-level answer to what contract B
+    gives an entry (review P11): an entry whose modules the fallback already
+    resolves is refused, and so now is a row that contributes to nothing.
+    """
+
+    def test_every_rule_matches_at_least_one_real_file(self) -> None:
+        for rule in SELECTION_RULES:
+            with self.subTest(rule=rule.name):
+                self.assertTrue(
+                    rule_candidate_paths(rule, REPO_ROOT),
+                    f"{rule.name} matches no file in the repository — its "
+                    "prefixes, root or exact paths name nothing that exists, "
+                    "so it selects nothing in production and measures clean "
+                    "in every contract here",
+                )
+
+    def test_every_rule_contributes_to_at_least_one_file_it_matches(
+        self,
+    ) -> None:
+        """Matching is not contributing: a row whose every derived template
+        misses on disk matches files and hands them nothing.
+        """
+        for rule in SELECTION_RULES:
+            paths = rule_candidate_paths(rule, REPO_ROOT)
+            contributing = [
+                path
+                for path in paths
+                if rule.contribute(PurePosixPath(path), REPO_ROOT)[0]
+            ]
+            with self.subTest(rule=rule.name):
+                self.assertTrue(
+                    contributing,
+                    f"{rule.name} matches {len(paths)} files and contributes "
+                    "a module to none of them — it reads as coverage in the "
+                    "table while selecting nothing",
+                )
+
+
+class TestMaskableRulePins(unittest.TestCase):
+    """Contract D: a rule row whose deletion nothing reports carries a pin.
+
+    Contract C answers this for `EXACT_PATH_NEIGHBOURS`; a `SELECTION_RULES`
+    row had no equivalent (issue #1331 residual 1), so deleting one was
+    silent for exactly the files whose basename collides with an existing
+    test module — and completely silent for a row over a root no
+    `ROOT_COVERAGE_RULES` row polices, which is `migrations/`, `nix/`,
+    `web/`, `harness/` and the top level.
+    """
+
+    def test_pin_keys_are_exactly_the_measured_maskable_rule_set(self) -> None:
+        measured = maskable_rule_names(SELECTION_RULES, REPO_ROOT)
+        pinned = set(MASKABLE_RULE_PINS)
+
+        unpinned = sorted(measured - pinned)
+        self.assertEqual(
+            unpinned,
+            [],
+            "SELECTION_RULES rows whose deletion at least one file would not "
+            "report — add a MASKABLE_RULE_PINS pin for each: "
+            + ", ".join(unpinned),
+        )
+        stale = sorted(pinned - measured)
+        self.assertEqual(
+            stale,
+            [],
+            "MASKABLE_RULE_PINS pins a row every matched file now reports "
+            "the deletion of — remove the stale pin: " + ", ".join(stale),
+        )
+
+    def test_every_pinned_path_still_loses_exactly_its_pinned_modules(
+        self,
+    ) -> None:
+        """The assertion ordinary maintenance hits first, and the one that
+        drives the real resolver twice: deleting the row, dropping a module
+        from its `neighbours`, breaking a `derived` template, or narrowing
+        its matchers past the pinned path all change what that path loses.
+        """
+        rules = {rule.name: rule for rule in SELECTION_RULES}
+        for name, expected in MASKABLE_RULE_PINS.items():
+            rule = rules.get(name)
+            with self.subTest(rule=name):
+                self.assertIsNotNone(
+                    rule,
+                    f"{name} is pinned here but no longer exists in "
+                    "SELECTION_RULES. No fail-closed rule protects this row, "
+                    "so the pin is what makes its deletion visible — removing "
+                    "the row is a deliberate two-place edit.",
+                )
+                assert rule is not None
+                measured = {
+                    path: tuple(sorted(lost))
+                    for path, lost in measured_rule_losses(rule, REPO_ROOT)
+                }
+                self.assertEqual(
+                    {path: measured.get(path) for path in expected},
+                    {
+                        path: tuple(sorted(lost))
+                        for path, lost in expected.items()
+                    },
+                    f"{name}'s pinned paths and what they really lose "
+                    "disagree — update the pin in this file to match, or "
+                    "restore what the row contributed.",
+                )
+
+    def test_every_pinned_rows_matchers_are_frozen(self) -> None:
+        """The loss pins watch what a row gives the paths it names; this
+        watches which paths it matches at all.
+
+        Narrowing a row over an unpoliced root deletes real selection with
+        nothing else objecting, and the loss pins cannot see it: their
+        measurement walks the row's OWN matchers, so narrowing shrinks the
+        population rather than showing a loss. Both tables cover the same
+        rows, so a pin added to one and not the other is red here.
+        """
+        self.assertEqual(
+            sorted(MASKABLE_RULE_MATCHERS),
+            sorted(MASKABLE_RULE_PINS),
+            "every maskable row needs both a loss pin and a frozen matcher",
+        )
+
+        rules = {rule.name: rule for rule in SELECTION_RULES}
+        for name, expected in MASKABLE_RULE_MATCHERS.items():
+            rule = rules.get(name)
+            if rule is None:
+                # The sibling test owns the "row is gone" message.
+                continue
+            with self.subTest(rule=name):
+                self.assertEqual(
+                    rule_matcher(rule),
+                    expected,
+                    f"{name}'s path conditions changed. No fail-closed rule "
+                    "watches which files this row matches, so narrowing it "
+                    "silently drops whatever stopped matching — update the "
+                    "frozen matcher here deliberately, or restore the row.",
+                )
+
+    def test_every_pin_covers_every_channel_the_row_can_silently_lose(
+        self,
+    ) -> None:
+        """A row contributes through its fixed `neighbours` and one channel
+        per `derived` template, and a pin only watches the channels its own
+        paths lose. `basename:web/*.py` is why this exists: it derives both
+        `tests.test_web_<stem>` and `tests.web.test_<stem>`, and no single
+        file loses both, so pinning one path leaves the other template's
+        loss invisible.
+        """
+        rules = {rule.name: rule for rule in SELECTION_RULES}
+        for name, expected in MASKABLE_RULE_PINS.items():
+            rule = rules.get(name)
+            if rule is None:
+                # A pin for a row that no longer exists is the sibling test's
+                # message, and a KeyError here would only bury it.
+                continue
+            measured = dict(measured_rule_losses(rule, REPO_ROOT))
+            losable: set[str] = set()
+            unattributed: list[str] = []
+            for path, lost in measured.items():
+                channels, unknown = lost_channels(rule, path, lost)
+                losable |= channels
+                unattributed.extend(f"{path}: {module}" for module in unknown)
+            pinned: set[str] = set()
+            for path, lost in expected.items():
+                channels, _ = lost_channels(rule, path, lost)
+                pinned |= channels
+
+            with self.subTest(rule=name):
+                self.assertEqual(
+                    unattributed,
+                    [],
+                    f"{name} silently loses modules this attribution cannot "
+                    "trace to the row's neighbours or a derived template: "
+                    + ", ".join(unattributed),
+                )
+                self.assertEqual(
+                    pinned,
+                    losable,
+                    f"{name}'s pins watch {sorted(pinned)} but the row can "
+                    f"silently lose {sorted(losable)} — pin a path per "
+                    "unwatched channel",
+                )
+
+
 class TestSelectionCoverageCheckersTripOnViolations(unittest.TestCase):
     """Known-bad self-tests, one per clause.
 
@@ -1065,6 +1707,251 @@ class TestSelectionCoverageCheckersTripOnViolations(unittest.TestCase):
                 "lib/probe.py", ("tests.test_targeted_test_selection",), REPO_ROOT
             ),
             [],
+        )
+
+    def test_silent_loss_checker_reports_a_row_whose_deletion_nothing_catches(
+        self,
+    ) -> None:
+        """Contract D's measurement, driven by a probe row added to the real
+        prefix table. Removing it leaves `web/cache.py` resolving its own
+        basename module, and no rule polices web/ — so the probe's neighbour
+        vanishes with nothing raising, which is the whole shape.
+        """
+        probe = SelectionRule(
+            name="prefix:_silent_probe",
+            description="probe",
+            exact_paths=("web/cache.py",),
+            neighbours=("tests.test_fakes",),
+        )
+
+        losses = silently_lost_selection(
+            probe, REPO_ROOT, prefix_rules=(*PREFIX_RULES, probe)
+        )
+
+        self.assertEqual(losses, {"web/cache.py": ("tests.test_fakes",)})
+
+    def test_silent_loss_checker_is_quiet_when_the_deletion_fails_closed(
+        self,
+    ) -> None:
+        """Must-still-work. The same probe over a `lib/` path resolves
+        nothing without its row, and the lib/ row raises — a deletion
+        nobody could miss, so it is not a silent loss and needs no pin.
+        """
+        probe = SelectionRule(
+            name="prefix:_policed_probe",
+            description="probe",
+            exact_paths=("lib/_deletion_probe.py",),
+            neighbours=("tests.test_fakes",),
+        )
+
+        self.assertEqual(
+            silently_lost_selection(
+                probe, REPO_ROOT, prefix_rules=(*PREFIX_RULES, probe)
+            ),
+            {},
+        )
+
+    def test_silent_loss_checker_is_quiet_when_another_rule_supplies_it(
+        self,
+    ) -> None:
+        """Must-still-work, and the other direction of "quiet": nothing
+        raises here either, but the real lib/pipeline_db/ row supplies the
+        probe's only module, so deleting the probe loses nothing at all.
+        """
+        probe = SelectionRule(
+            name="prefix:_duplicate_probe",
+            description="probe",
+            exact_paths=("lib/pipeline_db/decisions.py",),
+            neighbours=("tests.test_pipeline_db",),
+        )
+
+        self.assertEqual(
+            silently_lost_selection(
+                probe, REPO_ROOT, prefix_rules=(*PREFIX_RULES, probe)
+            ),
+            {},
+        )
+
+    def test_selection_or_refusal_swallows_only_the_fail_closed_refusal(
+        self,
+    ) -> None:
+        """Widening its `except ValueError` to `except Exception` survived
+        every other test (review runner F2), and the helper's whole job is
+        telling a fail-closed refusal apart from a resolution: anything else
+        swallowed would quietly reclassify a broken resolver as "this path
+        refuses" and drop rows out of the maskable set.
+
+        A `derived` template naming a field the formatter has no value for
+        raises `KeyError` inside the real `render_derived`, which is a
+        producible world rather than a patched one.
+        """
+        exploding = SelectionRule(
+            name="prefix:_exploding_probe",
+            description="probe",
+            exact_paths=("lib/_exploding_probe.py",),
+            derived=("tests.test_{no_such_field}",),
+        )
+
+        with self.assertRaises(KeyError):
+            selection_or_refusal(
+                "lib/_exploding_probe.py",
+                REPO_ROOT,
+                prefix_rules=(*PREFIX_RULES, exploding),
+            )
+
+    def test_silent_loss_checker_skips_a_path_already_failing_closed(
+        self,
+    ) -> None:
+        """The fourth clause, `selected is None`: a path the row matches that
+        ALREADY refuses with the row present has no selection to lose, and
+        counting it would invent a loss out of a pre-existing refusal.
+
+        The probe row contributes nothing (its derived template names no
+        module on disk), so `lib/_pre_refused_probe.py` resolves zero WITH the
+        row and the lib/ row raises. Deleting the clause is not merely a wrong
+        answer here, it is a `TypeError` on the `None` — which is what makes
+        this assertion evidence the clause runs at all. No real row reaches
+        this state today (measured: zero such paths across all fifteen), so
+        the clause is fail-closed legislation rather than live coverage.
+        """
+        probe = SelectionRule(
+            name="prefix:_pre_refused_probe",
+            description="probe",
+            exact_paths=("lib/_pre_refused_probe.py",),
+            derived=("tests.test_no_such_module_{stem}",),
+        )
+
+        self.assertEqual(
+            silently_lost_selection(
+                probe, REPO_ROOT, prefix_rules=(*PREFIX_RULES, probe)
+            ),
+            {},
+        )
+
+    def test_silent_loss_checker_refuses_a_row_outside_the_measured_tables(
+        self,
+    ) -> None:
+        """A row the tables do not hold contributes to neither side, so the
+        measurement would report a clean sheet for a row it never measured.
+        Loud instead.
+        """
+        probe = SelectionRule(
+            name="prefix:_absent_probe",
+            description="probe",
+            exact_paths=("web/cache.py",),
+            neighbours=("tests.test_fakes",),
+        )
+
+        with self.assertRaisesRegex(
+            AssertionError, r"prefix:_absent_probe is not in the tables"
+        ):
+            silently_lost_selection(probe, REPO_ROOT)
+
+    def test_candidate_paths_walk_the_row_and_take_exact_paths_verbatim(
+        self,
+    ) -> None:
+        """The walk is derived from the row's own matchers, so a row that
+        constrains nothing real yields nothing to measure. `exact_paths` are
+        the deliberate exception: the resolver never stats its own target,
+        and the probes above depend on a path that does not exist.
+        """
+        parsers = SelectionRule(
+            name="prefix:_walk_probe",
+            description="probe",
+            prefixes=("scripts/phase_parsers/",),
+            neighbours=("tests.test_fakes",),
+        )
+        absent = SelectionRule(
+            name="prefix:_absent_path_probe",
+            description="probe",
+            exact_paths=("lib/_deletion_probe.py",),
+            neighbours=("tests.test_fakes",),
+        )
+
+        self.assertEqual(
+            rule_candidate_paths(parsers, REPO_ROOT),
+            (
+                "scripts/phase_parsers/__init__.py",
+                "scripts/phase_parsers/dead_code.py",
+                "scripts/phase_parsers/js_checks.py",
+                "scripts/phase_parsers/pyright_checks.py",
+                "scripts/phase_parsers/python_tests.py",
+                "scripts/phase_parsers/ruff.py",
+            ),
+        )
+        self.assertEqual(
+            rule_candidate_paths(absent, REPO_ROOT), ("lib/_deletion_probe.py",)
+        )
+
+    def test_an_inert_row_walks_nothing_or_contributes_nothing(self) -> None:
+        """Both clauses `TestEveryRuleIsLive` asserts, shown false.
+
+        A prefix with a typo names no directory and no file, so the walk is
+        empty — the fail-open review P1 found, since an empty walk is also an
+        empty loss map and therefore a clean measurement. And a row CAN match
+        real files while giving them nothing, when its only channel is a
+        derived template that misses on disk.
+        """
+        typo = SelectionRule(
+            name="prefix:_typo_probe",
+            description="probe",
+            prefixes=("lib/pipline_db/",),
+            neighbours=("tests.test_fakes",),
+        )
+        self.assertEqual(rule_candidate_paths(typo, REPO_ROOT), ())
+
+        derived_only = SelectionRule(
+            name="prefix:_derived_miss_probe",
+            description="probe",
+            prefixes=("scripts/phase_parsers/",),
+            derived=("tests.test_no_such_module_{stem}",),
+        )
+        walked = rule_candidate_paths(derived_only, REPO_ROOT)
+
+        self.assertEqual(len(walked), 6)
+        self.assertEqual(
+            [
+                path
+                for path in walked
+                if derived_only.contribute(PurePosixPath(path), REPO_ROOT)[0]
+            ],
+            [],
+        )
+
+    def test_channel_attribution_names_both_channels_and_fails_closed(
+        self,
+    ) -> None:
+        """Every clause of `lost_channels`: a fixed neighbour, a derived
+        template resolved against the path's own stem, and a module from
+        neither, which the contract must refuse rather than ignore.
+        """
+        rule = SelectionRule(
+            name="prefix:_channel_probe",
+            description="probe",
+            prefixes=("lib/pipeline_db/",),
+            neighbours=("tests.test_fakes",),
+            derived=("tests.test_fakes_{stem}",),
+        )
+
+        channels, unattributed = lost_channels(
+            rule,
+            "lib/pipeline_db/transfer_ledger.py",
+            (
+                "tests.test_fakes",
+                "tests.test_fakes_transfer_ledger",
+                "tests.test_pipeline_db",
+            ),
+        )
+
+        self.assertEqual(
+            channels, {NEIGHBOURS_CHANNEL, "tests.test_fakes_{stem}"}
+        )
+        self.assertEqual(unattributed, ["tests.test_pipeline_db"])
+        self.assertEqual(
+            lost_channels(
+                rule, "lib/pipeline_db/evidence.py", ("tests.test_fakes",)
+            ),
+            ({NEIGHBOURS_CHANNEL}, []),
         )
 
     def test_maskability_checker_separates_masked_from_policed_entries(
