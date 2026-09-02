@@ -57,11 +57,15 @@ V   **Verdict from the re-read files.** ``synced`` is claimed only over a
 R   **Release resolution gating.** The release entry's refusal names what
     Beets actually said: an ambiguous resolution refuses ``not_unique``, a
     missing one ``not_found``, and ``not_unique`` is claimed nowhere else.
-A   **Authority failure is typed, never raised.** Whenever the Beets
-    authority actually went away — at the factory, at the identity read,
-    or at the release resolution — the caller is told
-    ``beets_unavailable``. Reached through one mediator, so the two
-    entries cannot drift apart on it.
+A   **Authority failure is typed, never raised, and named.** Whenever the
+    Beets authority actually went away — at the factory, at the identity
+    read, or at the release resolution — the caller is told
+    ``beets_unavailable`` (A1), reached through one mediator so the two
+    entries cannot drift apart on it. The failure fires where the world
+    put it (A2), the result names the album the dead site had actually
+    reached (A3, the one operator-visible difference between a failed
+    identity read and a failed resolution), and no other refusal wears
+    the ``beets_unavailable`` name (A4).
 L   **Handle lifecycle.** The borrowed entry NEVER closes the handle it
     was lent, on any path including every refusal — the request thread
     that lent it keeps using it. The release entry closes every handle it
@@ -178,8 +182,14 @@ class SyncRun:
     final_tags: dict[str, str]
     open_calls: int
     close_calls: int
-    #: How many times the injected authority failure actually fired.
-    authority_raises: int
+    #: One entry per firing of the injected authority failure, naming
+    #: where it fired: "open" for the factory, "read" for the identity
+    #: read, "resolve" for the release resolution.
+    authority_raise_sites: tuple[str, ...]
+
+    @property
+    def authority_raises(self) -> int:
+        return len(self.authority_raise_sites)
 
 
 def _files_strategy() -> st.SearchStrategy[tuple[tuple[str, str, bool], ...]]:
@@ -201,12 +211,19 @@ def _files_strategy() -> st.SearchStrategy[tuple[tuple[str, str, bool], ...]]:
 #: world the uniform version could draw is still drawable — this steers
 #: the budget, it does not filter (#1313). Measured: the uniform strategy
 #: authorized a write 1 time in 400 and never once through the release
-#: entry. With this weighting the derandomized suite tier's 150 examples
-#: reach 8 album writes and 41 authority failures, and still 0 release
-#: writes — that one cell is carried by its ``@example`` pin at the
-#: gating tier and by the draw itself at fuzz depth (17 release writes in
-#: 1,000 examples). Do not read those pins as belt-and-braces; for the
-#: release write the pin IS the belt.
+#: entry.
+#:
+#: Re-measured for #1313 batch E, because adding an ``@example`` reseeds
+#: the whole derandomized sweep — Hypothesis digests the decorated source,
+#: so every count below moves whenever a pin is added or removed, and any
+#: figure here is a snapshot of one tree. Over the 165 examples the gating
+#: tier now runs: 7 album writes, 1 release write, 4 refused release
+#: locks, 12 DB-identity mismatches, 5 absent DB identities, 7 albums with
+#: nothing readable diverging, and all four reachable (entry, authority
+#: site) cells. Every arm a checker clause decides on is non-zero there,
+#: which was not true before those pins: the release write is thin enough
+#: to depend on its own ``@example``, so do not read these pins as
+#: belt-and-braces. Re-run the arm census after touching a pin.
 _MOSTLY_TRUE = st.sampled_from((True, True, True, False))
 
 
@@ -346,7 +363,9 @@ def run_sync_world(world: SyncWorld) -> SyncRun:
         final_tags=dict(beets.file_tags),
         open_calls=opens,
         close_calls=beets.close_calls,
-        authority_raises=open_raises + beets.authority_raises,
+        authority_raise_sites=(
+            ("open",) * open_raises + tuple(beets.authority_raise_sites)
+        ),
     )
 
 
@@ -514,14 +533,63 @@ def release_resolution_violations(run: SyncRun) -> list[str]:
     return violations
 
 
+def _unavailable_album_id(entry: str, site: str) -> int | None:
+    """What a failure at ``site`` leaves the run able to say about the album.
+
+    The borrowed entry is handed an album id by its caller, so it names
+    that album however early the authority dies. The release entry learns
+    its album only from a unique resolution, so a failure at the open or
+    at the resolution itself has no album to report. Every resolution the
+    harness seeds names ``ALBUM_ID``, so that is the one answer past the
+    resolve.
+    """
+    if entry == "borrowed_album" or site == "read":
+        return ALBUM_ID
+    return None
+
+
 def authority_violations(run: SyncRun) -> list[str]:
-    """A — a Beets authority that goes away is typed, never raised."""
+    """A — a Beets authority that goes away is typed, never raised.
+
+    A2 and A3 are what let this checker tell a failed identity read from
+    a failed release resolution (#1313 residual 1332-5). While A1 read a
+    bare counter, swapping the fake's two failure sites left this whole
+    property green while three deterministic pins went red (measured on
+    ``ce493ba8``). A3 is what kills that swap: the fake's label and the
+    album production then reports disagree, and which album an
+    unavailable result names is the one operator-visible difference
+    between the two reads. A2 catches the neighbouring shape, a failure
+    that fires where no world asked for one, which is what inverting the
+    fake's site comparison does.
+    """
     violations: list[str] = []
-    if run.authority_raises and run.result.outcome != RESULT_BEETS_UNAVAILABLE:
+    outcome = run.result.outcome
+    if run.authority_raise_sites and outcome != RESULT_BEETS_UNAVAILABLE:
         violations.append(
             "A1: the Beets authority failed and the caller was told "
-            f"{run.result.outcome!r} instead of beets_unavailable",
+            f"{outcome!r} instead of beets_unavailable",
         )
+    for site in run.authority_raise_sites:
+        if site != run.world.authority_failure:
+            violations.append(
+                f"A2: the authority was set to fail at "
+                f"{run.world.authority_failure!r} and fired at {site!r}",
+            )
+    if outcome == RESULT_BEETS_UNAVAILABLE:
+        for site in run.authority_raise_sites:
+            expected = _unavailable_album_id(run.world.entry, site)
+            if run.result.album_id != expected:
+                violations.append(
+                    f"A3: the authority died at {site!r} on the "
+                    f"{run.world.entry} entry, which should report "
+                    f"album_id={expected!r} and reported "
+                    f"{run.result.album_id!r}",
+                )
+        if not run.authority_raise_sites:
+            violations.append(
+                "A4: beets_unavailable claimed while the authority never "
+                "failed; some other refusal is wearing its name",
+            )
     return violations
 
 
@@ -651,6 +719,38 @@ class TestTagSyncProperties(unittest.TestCase):
         # the guards' source != "musicbrainz" half.
         entry="owned_release", expected="123456",
     ))
+    @example(world=_world(
+        # The DB-identity guard's own world: the album holds one real
+        # MusicBrainz id and the caller authorized a different one, so the
+        # lane must refuse instead of writing a stale identity into files.
+        # Measured before this pin existed (#1313 residual 1332-5): the
+        # derandomized suite tier reached that refusal 0 times in its 162
+        # examples while fuzz depth reached it tens of times per 2,000 —
+        # the 4 suite-tier worlds that could have were all short-circuited
+        # by an earlier authority failure. Without this pin A4 and W1's
+        # identity half are patrolled only at fuzz depth. The release
+        # entry meets the same guard through the same mediator.
+        expected=THIRD_ID,
+    ))
+    @example(world=_world(
+        # A4's other producer: an album whose DB identity is empty. The
+        # refusal is db_identity_absent, and a mutant relabelling it
+        # beets_unavailable passes every W and V clause. Pinned because
+        # this arm is a casualty of the pin above: adding an @example
+        # reseeds the whole derandomized sweep (Hypothesis digests the
+        # decorated source), and the arm went from 1 drawn example to 0
+        # (#1313 batch E, mutant runner S2 and reader F1).
+        db_identity="",
+    ))
+    @example(world=_world(
+        # The refused RELEASE lock, the one refusal V4 polices that the
+        # derandomized tier never drew: 0 examples on `ce493ba8` and 0
+        # with the two pins above, because it needs an otherwise fully
+        # authorized write world AND the lock denied. Pre-existing rather
+        # than a casualty of those pins, and pinned here because the arm
+        # census that found it is this PR's own (#1313 batch E).
+        lock_granted=False,
+    ))
     def test_write_gating_and_verdict(self, world: SyncWorld) -> None:
         run = run_sync_world(world)
         violations = (
@@ -715,7 +815,7 @@ class TestCheckersTripOnViolations(unittest.TestCase):
         final_tags: dict[str, str] | None = None,
         open_calls: int = 1,
         close_calls: int = 0,
-        authority_raises: int = 0,
+        authority_raise_sites: tuple[str, ...] = (),
     ) -> SyncRun:
         return SyncRun(
             world=world if world is not None else _world(),
@@ -733,7 +833,7 @@ class TestCheckersTripOnViolations(unittest.TestCase):
             ),
             open_calls=open_calls,
             close_calls=close_calls,
-            authority_raises=authority_raises,
+            authority_raise_sites=authority_raise_sites,
         )
 
     def test_w1_trips_on_an_unauthorized_write(self) -> None:
@@ -881,7 +981,7 @@ class TestCheckersTripOnViolations(unittest.TestCase):
                             authority_failure=site,
                         ),
                         result=TagSyncResult(outcome=RESULT_BEETS_UNAVAILABLE),
-                        write_calls=(), authority_raises=1,
+                        write_calls=(), authority_raise_sites=(site,),
                         final_tags={"/library/a/01.opus": OLD_TAG},
                     )
                     self.assertEqual(release_resolution_violations(run), [])
@@ -903,11 +1003,122 @@ class TestCheckersTripOnViolations(unittest.TestCase):
         run = self._base_run(
             world=_world(authority_failure="read"),
             result=TagSyncResult(outcome=RESULT_NOT_FOUND),
-            write_calls=(), authority_raises=1,
+            write_calls=(), authority_raise_sites=("read",),
             final_tags={"/library/a/01.opus": OLD_TAG},
         )
         violations = authority_violations(run)
         self.assertTrue(any(v.startswith("A1") for v in violations), violations)
+
+    def test_a2_trips_when_the_failure_fires_somewhere_else(self) -> None:
+        """The world asked for a dead identity read and the release
+        resolution died instead. A1 cannot see it: the outcome is still
+        beets_unavailable. In the running property this is the shape an
+        inverted site comparison in the fake produces; the swapped-sites
+        version is A3's kill."""
+        run = self._base_run(
+            world=_world(entry="owned_release", authority_failure="read"),
+            result=TagSyncResult(outcome=RESULT_BEETS_UNAVAILABLE),
+            write_calls=(), authority_raise_sites=("resolve",),
+            final_tags={"/library/a/01.opus": OLD_TAG},
+            close_calls=1,
+        )
+        # Asserted whole: the message names both sites, so a substring
+        # check on either one is satisfied by a clause that transposed
+        # them (measured by the #1313 batch E mutant runner, MC2).
+        self.assertIn(
+            "A2: the authority was set to fail at 'read' and fired at "
+            "'resolve'",
+            authority_violations(run),
+        )
+
+    def test_a2_stays_quiet_when_the_named_site_is_never_reached(self) -> None:
+        """Q3: the album entry never resolves a release, so a world that
+        asks for a dead resolution produces no failure at all. A2 must
+        read what fired, not what the world asked for.
+
+        Driven through the real service rather than a hand-built run: a
+        constructed empty site tuple only proves an empty loop iterates
+        zero times (#1313 batch E, reader F6).
+        """
+        run = run_sync_world(_world(authority_failure="resolve"))
+        self.assertEqual(run.authority_raise_sites, ())
+        self.assertEqual(authority_violations(run), [])
+
+    def test_a3_trips_when_a_dead_site_names_the_wrong_album(self) -> None:
+        """The release entry has no album until the resolution returns one,
+        so an authority that died at the resolve cannot name one."""
+        run = self._base_run(
+            world=_world(entry="owned_release", authority_failure="resolve"),
+            result=TagSyncResult(
+                outcome=RESULT_BEETS_UNAVAILABLE, album_id=ALBUM_ID,
+            ),
+            write_calls=(), authority_raise_sites=("resolve",),
+            final_tags={"/library/a/01.opus": OLD_TAG},
+            close_calls=1,
+        )
+        violations = authority_violations(run)
+        self.assertTrue(
+            any(v.startswith("A3") for v in violations), violations,
+        )
+        self.assertEqual([v for v in violations if not v.startswith("A3")], [])
+
+    def test_a3_trips_when_the_read_site_reports_no_album(self) -> None:
+        """The read happens inside the album lane on both entries, so it
+        always has an album to name. Without this the ``site == "read"``
+        arm of the mapping has no deterministic pin at all — dropping it
+        was killed only by the property (#1313 batch E, mutant runner
+        MC3)."""
+        run = self._base_run(
+            world=_world(entry="owned_release", authority_failure="read"),
+            result=TagSyncResult(outcome=RESULT_BEETS_UNAVAILABLE),
+            write_calls=(), authority_raise_sites=("read",),
+            final_tags={"/library/a/01.opus": OLD_TAG},
+            close_calls=1,
+        )
+        violations = authority_violations(run)
+        self.assertTrue(
+            any(v.startswith("A3") for v in violations), violations,
+        )
+        self.assertEqual([v for v in violations if not v.startswith("A3")], [])
+
+    def test_a3_stays_quiet_when_the_borrowed_entry_dies_at_the_open(
+        self,
+    ) -> None:
+        """Q3: nothing was read, and the result still names an album —
+        correctly, because the caller supplied it. A clause reading "died
+        early, so it knows nothing" would accuse production here."""
+        run = self._base_run(
+            world=_world(authority_failure="open"),
+            result=TagSyncResult(
+                outcome=RESULT_BEETS_UNAVAILABLE, album_id=ALBUM_ID,
+            ),
+            write_calls=(), authority_raise_sites=("open",),
+            open_calls=0,
+            final_tags={"/library/a/01.opus": OLD_TAG},
+        )
+        self.assertEqual(authority_violations(run), [])
+
+    def test_a4_trips_when_a_refusal_wears_the_unavailable_name(self) -> None:
+        """A refusal relabelled beets_unavailable passes every V clause: no
+        write ran, and the outcome is mapped."""
+        run = self._base_run(
+            world=_world(expected=THIRD_ID),
+            result=TagSyncResult(
+                outcome=RESULT_BEETS_UNAVAILABLE, album_id=ALBUM_ID,
+            ),
+            write_calls=(),
+            final_tags={"/library/a/01.opus": OLD_TAG},
+        )
+        violations = authority_violations(run)
+        self.assertTrue(any(v.startswith("A4") for v in violations), violations)
+        # A4 is the only clause with anything to say about this run, in
+        # its own family and in every other. Asserted rather than traced
+        # (#1313 batch E, reader F7).
+        self.assertEqual([v for v in violations if not v.startswith("A4")], [])
+        self.assertEqual(verdict_violations(run), [])
+        self.assertEqual(write_gating_violations(run), [])
+        self.assertEqual(release_resolution_violations(run), [])
+        self.assertEqual(lifecycle_violations(run), [])
 
     def test_l1_trips_when_the_borrowed_entry_closes_a_lent_handle(
         self,
