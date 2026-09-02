@@ -219,7 +219,9 @@ across client-local memory stores.
 
 `deploy` (full deploy sequence) · `debug-download` (live audit trail) · `check`
 (receipt-backed canonical suite) · `beets-docs` (pinned upstream reference) ·
-`orchestrate-issue` (isolated multi-PR implementation/review/deploy loop)
+`orchestrate-issue` (isolated multi-PR implementation/review/deploy loop) ·
+`meta-orchestrate` (register-scale parallel agent dispatch) · `unslop` (cut AI
+tells from prose)
 
 ### Shared rule loading
 
