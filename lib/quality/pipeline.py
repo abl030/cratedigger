@@ -1355,12 +1355,21 @@ def classify_quality_import_stages(
 def classify_full_pipeline_decision(
     decision: dict[str, object],
 ) -> tuple[str, bool, str | None]:
-    """Classify a full pipeline decision dict for preview/cleanup display."""
+    """Classify a full pipeline decision dict for preview/cleanup display.
 
-    if decision.get("preimport_nested") == "reject_nested":
-        return "confident_reject", True, "nested_layout"
+    Checks ``preimport_audio`` before ``preimport_nested`` — the same
+    precedence ``evidence_decision_name`` uses and
+    ``preimport_corrupt_outranks_nested`` decides for both twins (issue
+    #1355 item 1). Neither twin's dict can carry both keys as reject
+    values any more, so this ordering has no live consequence today, but a
+    third independently-authored order over the same two keys is exactly
+    the shape that bit this decision before.
+    """
+
     if decision.get("preimport_audio") == "reject_corrupt":
         return "confident_reject", True, "audio_corrupt"
+    if decision.get("preimport_nested") == "reject_nested":
+        return "confident_reject", True, "nested_layout"
     # U11: bad-hash and empty-fileset early-exit rejects.
     if decision.get("preimport_bad_hash") == "reject_bad_hash":
         return "confident_reject", True, "bad_audio_hash"

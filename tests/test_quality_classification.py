@@ -4519,6 +4519,28 @@ class TestPreimportFactRejects(unittest.TestCase):
         self.assertIsNone(r["preimport_nested"])
         self.assertEqual(evidence_decision_name(r), "audio_corrupt")
 
+    def test_classify_full_pipeline_decision_agrees_audio_corrupt_wins(self):
+        """Issue #1355 item 1, third site: ``classify_full_pipeline_decision``
+        (preview/cleanup display) must name the same fact
+        ``evidence_decision_name`` (dispatch) does. No real decision dict
+        can carry both ``preimport_audio`` and ``preimport_nested`` as
+        reject values any more, so this drives the classifier's own pure
+        contract directly on a hand-built dict rather than through either
+        twin — a real regression here would only resurface if some future
+        writer ever populates both keys again, which is exactly the
+        landmine this pins against."""
+        from lib.quality import classify_full_pipeline_decision
+
+        both = {
+            "preimport_audio": "reject_corrupt",
+            "preimport_nested": "reject_nested",
+            "imported": False,
+        }
+        verdict, cleanup_eligible, reason = classify_full_pipeline_decision(both)
+        self.assertEqual(verdict, "confident_reject")
+        self.assertTrue(cleanup_eligible)
+        self.assertEqual(reason, "audio_corrupt")
+
     def test_preimport_fact_reject_keeps_searching(self):
         """The mode-blind reducer reports the shared self-healing outcome."""
         from lib.quality import full_pipeline_decision_from_evidence

@@ -7454,21 +7454,27 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     def test_classification_checker_trips_on_a_fact_named_for_dispatch(self):
         """The name clause, which the classification clause short-circuits past.
 
-        Both facts are really present, so ``classify_full_pipeline_decision``
-        answers with the higher-priority ``nested_layout`` while
-        ``evidence_decision_name`` answers ``audio_corrupt`` — the two
-        production functions disagreeing about the same dict.
+        Before issue #1355 item 1, ``classify_full_pipeline_decision`` and
+        ``evidence_decision_name`` independently encoded the audio_corrupt-
+        vs-nested_layout precedence and disagreed on a dict carrying both
+        facts — the same class of bug the issue exists to remove. Both now
+        route through the one shared ``preimport_corrupt_outranks_nested``
+        precedence and neither twin's dict can carry both keys as reject
+        values, so no real dict can trigger this clause any more. Exercise
+        it through the checker's own name_fn injection seam instead, on an
+        ordinary single-fact dict.
         """
-        both = {
+        nested_only = {
             "preimport_nested": "reject_nested",
-            "preimport_audio": "reject_corrupt",
             "imported": False,
         }
         with self.assertRaisesRegex(
                 AssertionError,
                 r"^integrity fact nested_layout named 'audio_corrupt' for "
                 r"dispatch$"):
-            assert_classification_coherent(both, "preimport_nested")
+            assert_classification_coherent(
+                nested_only, "preimport_nested",
+                name_fn=lambda _decision: "audio_corrupt")
 
     def test_classification_checker_trips_on_a_planted_classifier(self):
         """The three clauses keyed on what the classifiers RETURN.
