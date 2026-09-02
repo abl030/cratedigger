@@ -1885,6 +1885,15 @@ BASENAME_RULES: tuple[SelectionRule, ...] = (
 #: difference is currently unobservable and the row order below is not
 #: pinned by anything — what IS pinned is the stage order: table entry, then
 #: self-selector, then basename, then these.
+#:
+#: No row here constrains `root`, `top_level` or `suffixes`, so `matches`
+#: short-circuits before it ever reads the `PurePosixPath` argument for one
+#: of these rows. That is why passing a bogus `path` to a prefix row's
+#: `matches` is an equivalent mutation today (issue #1329 residual 8, and a
+#: mutmut survivor in every breadth pass over this file). It stops being
+#: equivalent the moment a row uses one of those three fields — this note is
+#: the warning that the safety is a property of the data below, not of the
+#: matcher.
 PREFIX_RULES: tuple[SelectionRule, ...] = (
     SelectionRule(
         name="prefix:lib/pipeline_db/",
@@ -2191,8 +2200,12 @@ def _split_existing(
     return tuple(existing), tuple(missing)
 
 
-def _basename_rule(path: PurePosixPath) -> SelectionRule | None:
-    """The one BASENAME_RULES row that matches ``path``, if any.
+def _basename_rule(
+    path: PurePosixPath,
+    *,
+    basename_rules: Sequence[SelectionRule] = BASENAME_RULES,
+) -> SelectionRule | None:
+    """The one matching row of ``basename_rules``, if any.
 
     The rows are mutually exclusive by construction — disjoint roots,
     disjoint suffixes within a root, and a top-level rule no rooted path can
@@ -2200,22 +2213,28 @@ def _basename_rule(path: PurePosixPath) -> SelectionRule | None:
     first-match tie-break. `tests/test_targeted_test_selection.py` pins that
     over every tracked file, because the claim is what lets `explain`
     attribute a basename hit to one named rule.
+
+    ``basename_rules`` is a kwarg-DI seam; see `_resolve_neighbours`.
     """
     relative_path = path.as_posix()
-    for rule in BASENAME_RULES:
+    for rule in basename_rules:
         if rule.matches(relative_path, path):
             return rule
     return None
 
 
-def _direct_test_candidates(path: PurePosixPath) -> tuple[str, ...]:
+def _direct_test_candidates(
+    path: PurePosixPath,
+    *,
+    basename_rules: Sequence[SelectionRule] = BASENAME_RULES,
+) -> tuple[str, ...]:
     """The basename-convention module names for ``path``, existence unchecked.
 
     The caller checks each candidate really exists via `_existing_module`,
     so this claims nothing beyond a naming convention: never evidence that
     the matched module executes or reads the file.
     """
-    rule = _basename_rule(path)
+    rule = _basename_rule(path, basename_rules=basename_rules)
     return () if rule is None else rule.render_derived(path)
 
 
@@ -2225,6 +2244,8 @@ def resolve_attributed_neighbours(
     repo_root: Path,
     *,
     exact_path_neighbours: Mapping[str, tuple[str, ...]] = EXACT_PATH_NEIGHBOURS,
+    basename_rules: Sequence[SelectionRule] = BASENAME_RULES,
+    prefix_rules: Sequence[SelectionRule] = PREFIX_RULES,
 ) -> tuple[NeighbourSource, ...]:
     """Every mechanism's contribution, named, in resolution order.
 
@@ -2235,6 +2256,8 @@ def resolve_attributed_neighbours(
     A source appears for every mechanism that MATCHED, including one that
     contributed nothing because its derived module does not exist: that case
     is the most useful thing `explain` reports.
+
+    The three table kwargs are DI seams; see `_resolve_neighbours`.
     """
     sources: list[NeighbourSource] = []
     entry = exact_path_neighbours.get(relative_path, ())
@@ -2255,7 +2278,7 @@ def resolve_attributed_neighbours(
                 (module,),
             )
         )
-    basename_rule = _basename_rule(path)
+    basename_rule = _basename_rule(path, basename_rules=basename_rules)
     if basename_rule is not None:
         # Deliberately routed through `_direct_test_candidates` rather than
         # `basename_rule.contribute`, which would be one call rather than
@@ -2265,7 +2288,8 @@ def resolve_attributed_neighbours(
         # production candidate source instead of becoming a test-only
         # synonym for the same five rows.
         modules, unresolved = _split_existing(
-            _direct_test_candidates(path), repo_root
+            _direct_test_candidates(path, basename_rules=basename_rules),
+            repo_root,
         )
         sources.append(
             NeighbourSource(
@@ -2275,7 +2299,7 @@ def resolve_attributed_neighbours(
                 unresolved,
             )
         )
-    for rule in PREFIX_RULES:
+    for rule in prefix_rules:
         if not rule.matches(relative_path, path):
             continue
         modules, unresolved = rule.contribute(path, repo_root)
@@ -2291,6 +2315,8 @@ def _resolve_neighbours(
     repo_root: Path,
     *,
     exact_path_neighbours: Mapping[str, tuple[str, ...]] = EXACT_PATH_NEIGHBOURS,
+    basename_rules: Sequence[SelectionRule] = BASENAME_RULES,
+    prefix_rules: Sequence[SelectionRule] = PREFIX_RULES,
 ) -> list[str]:
     """The full EXACT_PATH_NEIGHBOURS + self-selector + direct-candidate +
     prefix-rule resolution, with NO admitted-gap registry's fail-closed check
@@ -2300,12 +2326,17 @@ def _resolve_neighbours(
     directly without tripping the fail-closed raise for every
     still-unregistered zero-neighbour file.
 
-    ``exact_path_neighbours`` is a kwarg-DI seam (issue #1278 item 9): pass
-    an empty mapping to measure what a path resolves WITHOUT its
-    hand-authored entry — the "would deleting this entry be visible?"
-    question tests/test_selection_coverage_audit.py's maskable-entry pins
-    exist to answer. It is a definition-time default, so a replacement must
-    be passed explicitly; patching the module binding does not reach it.
+    Three kwarg-DI seams, one per table, each answering the same question
+    about a different mechanism: what does this path resolve WITHOUT that
+    piece of hand-authored data? ``exact_path_neighbours`` (issue #1278 item
+    9) takes an empty mapping to drop a path's entry;
+    ``basename_rules``/``prefix_rules`` (issue #1313) take the table minus
+    one row to drop a rule. Both questions have the same purpose —
+    tests/test_selection_coverage_audit.py's maskable-entry and
+    maskable-rule pins measure deletion visibility through the real resolver
+    rather than reimplementing it. They are definition-time defaults, so a
+    replacement must be passed explicitly; patching the module binding does
+    not reach them.
     """
     return [
         module
@@ -2314,6 +2345,8 @@ def _resolve_neighbours(
             path,
             repo_root,
             exact_path_neighbours=exact_path_neighbours,
+            basename_rules=basename_rules,
+            prefix_rules=prefix_rules,
         )
         for module in source.modules
     ]
@@ -2322,7 +2355,18 @@ def _resolve_neighbours(
 def _changed_path_neighbours(
     relative_path: str,
     repo_root: Path,
+    *,
+    basename_rules: Sequence[SelectionRule] = BASENAME_RULES,
+    prefix_rules: Sequence[SelectionRule] = PREFIX_RULES,
 ) -> tuple[str, ...]:
+    """One path's selection, with every root rule's fail-closed check applied.
+
+    ``basename_rules``/``prefix_rules`` are the same DI seams
+    `_resolve_neighbours` documents, forwarded so a caller can ask the whole
+    contract — resolution AND the raise — what deleting one rule row would
+    do. `_resolve_neighbours` alone answers only half of that, and the
+    fail-closed half is what decides whether a deletion would be noticed.
+    """
     path = PurePosixPath(relative_path)
     for rule in ROOT_COVERAGE_RULES:
         if rule.admitted_selects_nothing and relative_path in rule.registry:
@@ -2333,7 +2377,13 @@ def _changed_path_neighbours(
             # registered but the tests/world_model/ prefix rule would still
             # have populated WORLD_MODEL_NEIGHBOURS for it).
             return ()
-    neighbours = _resolve_neighbours(relative_path, path, repo_root)
+    neighbours = _resolve_neighbours(
+        relative_path,
+        path,
+        repo_root,
+        basename_rules=basename_rules,
+        prefix_rules=prefix_rules,
+    )
     if not neighbours:
         for rule in ROOT_COVERAGE_RULES:
             # A file this rule polices that resolves zero test neighbours
