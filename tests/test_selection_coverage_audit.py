@@ -342,6 +342,18 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
         "tests.test_import_dispatch",
         "tests.test_integration_slices",
     ),
+    # The dedicated basename candidate would mask deletion of the seven
+    # established dispatch/integration/authority neighbours (#1321).
+    "lib/dispatch/evidence_gate.py": (
+        "tests.test_evidence_gate",
+        "tests.test_dispatch_core",
+        "tests.test_dispatch_from_db",
+        "tests.test_import_dispatch",
+        "tests.test_import_queue",
+        "tests.test_integration_slices",
+        "tests.test_sidecar_service",
+        "tests.test_current_evidence_authority_generated",
+    ),
     # Basename probe resolves tests.test_surface_outcomes.
     "lib/surface_outcomes.py": (
         "tests.test_surface_outcomes",

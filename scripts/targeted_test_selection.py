@@ -278,6 +278,19 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_import_dispatch",
         "tests.test_integration_slices",
     ),
+    "lib/dispatch/evidence_gate.py": (
+        # The dispatch/ subdirectory defeats basename derivation for the
+        # established integration homes. Keep the grouped contract plus every
+        # deterministic production boundary used by the #1321 catalog.
+        "tests.test_evidence_gate",
+        "tests.test_dispatch_core",
+        "tests.test_dispatch_from_db",
+        "tests.test_import_dispatch",
+        "tests.test_import_queue",
+        "tests.test_integration_slices",
+        "tests.test_sidecar_service",
+        "tests.test_current_evidence_authority_generated",
+    ),
     "lib/startup_reconciliation.py": (
         # Was an admitted zero-neighbour gap (issue #1199, measured
         # 2026-08-19): there is no tests.test_startup_reconciliation, so
@@ -1406,11 +1419,6 @@ LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
         "derives tests.test_core from the basename (ignoring the dispatch/ "
         "subdirectory), which does not exist; no EXACT_PATH_NEIGHBOURS/"
         "prefix rule covers it either (issue #1199)"
-    ),
-    "lib/dispatch/evidence_gate.py": (
-        "measured 2026-08-19: zero neighbours -- basename-derived "
-        "tests.test_evidence_gate does not exist and no EXACT_PATH_"
-        "NEIGHBOURS/prefix rule covers it (issue #1199)"
     ),
     "lib/dispatch/helpers.py": (
         "measured 2026-08-19: zero neighbours -- basename-derived "
