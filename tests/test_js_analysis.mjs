@@ -113,10 +113,7 @@ t.section('disambRemove() — processing conflict locks and refreshes only the a
   const btn = element({
     textContent: 'Remove request',
     isConnected: true,
-    insertAdjacentElement(_position, child) {
-      child.isConnected = true;
-      inserted.push(child);
-    },
+    inserted,
   });
   btn.setAttribute('data-pipeline-request-id', '903');
   const live = element();

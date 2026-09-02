@@ -565,7 +565,7 @@ resetWorld();
     /unpaired|ungrouped/i,
     'source hint does not expose comparison topology',
   );
-  t.ok(requests.some(url => url.includes('/api/discogs/artist/new-discogs-id?')),
+  t.anyContains(requests, '/api/discogs/artist/new-discogs-id?',
     'the switch loads the new Discogs artist endpoint');
   t.match(artistBody.innerHTML, />Retry</, 'current-source failure owns Retry');
 
@@ -576,11 +576,11 @@ resetWorld();
   } });
   reloadBrowseArtist();
   await new Promise(resolve => setImmediate(resolve));
-  t.ok(requests.some(url => url.includes('/api/discogs/artist/new-discogs-id?')),
+  t.anyContains(requests, '/api/discogs/artist/new-discogs-id?',
     'Retry re-fetches the Discogs artist endpoint');
   t.ok(requests.some(url => url === '/api/library/artist?name=Race%20Artist'),
     'Retry re-fetches the library half by artist name');
-  t.notOk(requests.some(url => url.includes('old-mb-id')),
+  t.noneContains(requests, 'old-mb-id',
     'Retry never re-fetches the superseded MB id');
 }
 
@@ -669,7 +669,7 @@ resetWorld();
   t.equal(state.browseSource, 'mb', 'the newest toggle owns the active source');
   t.deepEqual(state.browseArtist, { id: 'newest-mb-id', name: 'Toggle Artist' },
     'the newest toggle owns the active artist');
-  t.ok(requests.some(url => url.includes('/api/artist/newest-mb-id?')),
+  t.anyContains(requests, '/api/artist/newest-mb-id?',
     'the newest toggle loads its own MB artist endpoint');
   t.notMatch(newestHtml, />Retry</, 'the newest toggle renders a successful page');
 
@@ -684,7 +684,7 @@ resetWorld();
     { id: 'newest-mb-id', name: 'Toggle Artist' },
     'older lookup must not overwrite the newest source artist',
   );
-  t.notOk(requests.some(url => url.includes('stale-discogs-id')),
+  t.noneContains(requests, 'stale-discogs-id',
     'the older lookup never drives a load of its own match');
   t.equal(artistBody.innerHTML, newestHtml, 'older lookup must not repaint the newest page');
 }
@@ -741,9 +741,9 @@ for (const newestSource of ['mb', 'discogs']) {
   const expectedEndpoint = newestSource === 'discogs'
     ? `/api/discogs/artist/${newestId}?`
     : `/api/artist/${newestId}?`;
-  t.ok(requests.some(url => url.includes(expectedEndpoint)),
+  t.anyContains(requests, expectedEndpoint,
     `${newestSource} loaded its own endpoint family`);
-  t.notOk(requests.some(url => url.includes(staleId)),
+  t.noneContains(requests, staleId,
     `${newestSource} never loaded the older lookup's match`);
   t.equal(artistBody.innerHTML, newestHtml,
     `${newestSource} page content survives the older lookup`);

@@ -244,10 +244,7 @@ t.section('forceImportWrongMatch() maps processing conflict to the shared locked
   const btn = element({
     textContent: 'Force Import',
     isConnected: true,
-    insertAdjacentElement(_position, child) {
-      child.isConnected = true;
-      inserted.push(child);
-    },
+    inserted,
   });
   const live = element();
   const calls = [];
@@ -376,7 +373,8 @@ t.section('renderWrongMatches() keeps converge usable with active import jobs');
 
   t.excludes(dom.wrongMatches.innerHTML, 'Import Active', 'does not replace converge with Import Active');
   t.contains(dom.wrongMatches.innerHTML, 'Converge (2)', 'keeps converge label with active jobs');
-  t.ok(!/id="wm-converge-btn-42"[^>]*disabled/.test(dom.wrongMatches.innerHTML), 'active jobs do not disable converge');
+  t.notMatch(dom.wrongMatches.innerHTML, /id="wm-converge-btn-42"[^>]*disabled/,
+    'active jobs do not disable converge');
 }
 
 t.section('setWrongMatchConvergeThreshold() updates expanded group in place');
@@ -1151,9 +1149,9 @@ t.section('renderEntry() embeds evidence cells without preview hooks');
   t.contains(html, 'Downloaded as', 'rendered HTML surfaces preserved source folders');
   t.contains(html, 'wm-explorer-100', 'rendered HTML includes an explorer mount');
   // R3 / AE2: no preview button or preview action surfaces in this feature.
-  t.ok(!/data-action=["']preview["']/.test(html), 'no data-action=preview attribute');
-  t.ok(!/preview[-_]btn/.test(html), 'no preview button class');
-  t.ok(!/onclick=["'][^"']*preview/i.test(html), 'no onclick handler invoking preview');
+  t.notMatch(html, /data-action=["']preview["']/, 'no data-action=preview attribute');
+  t.notMatch(html, /preview[-_]btn/, 'no preview button class');
+  t.notMatch(html, /onclick=["'][^"']*preview/i, 'no onclick handler invoking preview');
 }
 
 t.section('renderWrongMatches() preserves ordinary candidate metadata presentation');
@@ -2067,7 +2065,7 @@ t.section('Delete All reflects actionable candidates, never a dead end (issue #1
   renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
   t.contains(dom.wrongMatches.innerHTML, 'Delete All (3)',
     'a fully available group keeps the plain label');
-  t.ok(!/id="wm-delete-group-btn-42"[^>]*disabled/.test(dom.wrongMatches.innerHTML),
+  t.notMatch(dom.wrongMatches.innerHTML, /id="wm-delete-group-btn-42"[^>]*disabled/,
     'a fully available group stays enabled');
 
   // A partially unavailable group relabels with the actionable count and
@@ -2077,7 +2075,7 @@ t.section('Delete All reflects actionable candidates, never a dead end (issue #1
   renderWrongMatches(partial, dom.wrongMatches);
   t.contains(dom.wrongMatches.innerHTML, 'Delete All (2 of 3)',
     'a partially unavailable group shows the actionable count');
-  t.ok(!/id="wm-delete-group-btn-42"[^>]*disabled/.test(dom.wrongMatches.innerHTML),
+  t.notMatch(dom.wrongMatches.innerHTML, /id="wm-delete-group-btn-42"[^>]*disabled/,
     'a partially unavailable group stays enabled');
 
   // A group with ZERO actionable candidates is a dead end today: the
@@ -2088,7 +2086,7 @@ t.section('Delete All reflects actionable candidates, never a dead end (issue #1
   renderWrongMatches(dead, dom.wrongMatches);
   t.contains(dom.wrongMatches.innerHTML, 'Delete All (0 of 3)',
     'a fully unavailable group names zero actionable candidates');
-  t.ok(/id="wm-delete-group-btn-42"[^>]*disabled/.test(dom.wrongMatches.innerHTML),
+  t.match(dom.wrongMatches.innerHTML, /id="wm-delete-group-btn-42"[^>]*disabled/,
     'a fully unavailable group disables Delete All instead of a dead-end 503');
 
   t.equal(deleteAllButtonLabel(3, 3), 'Delete All (3)',

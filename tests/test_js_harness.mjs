@@ -219,6 +219,8 @@ t.section('checker vocabulary — the passing side of every method');
     + "t.equal('a', 'a', 'equal'); t.notEqual('a', 'b', 'notEqual');\n"
     + "t.deepEqual({x: [1]}, {x: [1]}, 'deepEqual');\n"
     + "t.contains('abc', 'b', 'contains'); t.excludes('abc', 'z', 'excludes');\n"
+    + "t.anyContains(['ab', 'cd'], 'a', 'anyContains');\n"
+    + "t.noneContains(['ab', 'cd'], 'z', 'noneContains');\n"
     + "t.match('abc', /b/, 'match'); t.notMatch('abc', /z/, 'notMatch');\n"
     + "t.throws(() => { throw new TypeError('x'); }, 'throws', TypeError);\n"
     + "t.pass('pass');\n"
@@ -226,7 +228,7 @@ t.section('checker vocabulary — the passing side of every method');
     + 't.done();',
   );
   t.equal(run.status, 0, 'every passing-side assertion passes');
-  t.contains(run.stdout, '12 passed, 0 failed', 'all twelve counted exactly once');
+  t.contains(run.stdout, '14 passed, 0 failed', 'all fourteen counted exactly once');
 }
 
 t.section('checker vocabulary — the failing side of every method');
@@ -236,6 +238,8 @@ t.section('checker vocabulary — the failing side of every method');
     + "t.equal('a', 'b', 'equal'); t.notEqual('a', 'a', 'notEqual');\n"
     + "t.deepEqual({x: [1]}, {x: [2]}, 'deepEqual');\n"
     + "t.contains('abc', 'z', 'contains'); t.excludes('abc', 'b', 'excludes');\n"
+    + "t.anyContains(['ab', 'cd'], 'z', 'anyContains');\n"
+    + "t.noneContains(['ab', 'cd'], 'c', 'noneContains');\n"
     + "t.match('abc', /z/, 'match'); t.notMatch('abc', /b/, 'notMatch');\n"
     + "t.throws(() => {}, 'throwsNothing');\n"
     + "t.throws(() => { throw new TypeError('x'); }, 'throwsWrongClass', RangeError);\n"
@@ -245,11 +249,87 @@ t.section('checker vocabulary — the failing side of every method');
     + 't.done();',
   );
   t.equal(run.status, 1, 'the failing side exits 1');
-  t.equal(run.markers.length, 14, 'each of the fourteen failing assertions reports once');
-  t.contains(run.stdout, '0 passed, 14 failed', 'none of them was miscounted as a pass');
+  t.equal(run.markers.length, 16, 'each of the sixteen failing assertions reports once');
+  t.contains(run.stdout, '0 passed, 16 failed', 'none of them was miscounted as a pass');
   t.contains(run.stdout, 'expected a throw, none happened', 'throws() explains a missing throw');
   t.contains(run.stdout, 'expected a rejection, none happened', 'rejects() explains a missing rejection');
   t.contains(run.stdout, 'expected RangeError, got TypeError', 'the wrong error class is named');
+  // The detail is the whole reason these two exist: `t.ok(list.some(…))`
+  // reports "expected truthy, got false" and never says what the list held.
+  t.contains(run.stdout, 'no entry contains "z"; got ["ab","cd"]',
+    'anyContains names the needle and prints the list it searched');
+  t.contains(run.stdout, '"c" unexpectedly present at [1]: "cd"',
+    'noneContains names the entry that matched and where it sat');
+}
+
+t.section('anyContains and noneContains refuse a non-array haystack');
+{
+  // The mirror of the string-haystack guard below. One string instead of
+  // the recorded list would throw `haystacks.some is not a function` and
+  // kill the suite; refusing the type fails one named assertion instead.
+  const run = runFixture(
+    "t.anyContains('/api/x', 'x', 'string haystack');\n"
+    + "t.noneContains(null, 'x', 'null haystack');\n"
+    + 't.done();',
+  );
+  t.equal(run.status, 1, 'a non-array haystack fails rather than throwing');
+  t.equal(run.markers.length, 2, 'both refusals report as ordinary failures');
+  t.contains(run.stdout, 't.anyContains needs a list to search, got string',
+    'the refusal names the method and the type it got');
+  t.contains(run.stdout, 't.noneContains needs a list to search, got null',
+    'the negated form refuses too, and null is named rather than "object"');
+}
+
+t.section('anyContains and noneContains agree on every entry, undefined included');
+{
+  // They must never both pass on one world. `find` could not tell "nothing
+  // matched" from "the match IS undefined", so a recorded list holding one
+  // made both pass — a false pass, which is the worse direction (PR #1353
+  // reader, F1). Entries are coerced rather than skipped, so a recorded
+  // status code searches like its digits.
+  const run = runFixture([
+    "const list = ['/api/ok', undefined, 404];",
+    "t.anyContains(list, 'undefin', 'an undefined entry is searched, not skipped');",
+    "t.anyContains(list, '40', 'a numeric entry is coerced before searching');",
+    "t.noneContains(list, 'nowhere', 'a needle in no entry reports none');",
+    't.done();',
+  ].join('\n'));
+  t.equal(run.markers.length, 0, 'the agreeing cases all pass');
+
+  const disagree = runFixture([
+    "const list = ['/api/ok', undefined, 404];",
+    "t.noneContains(list, 'undefin', 'must FAIL: undefined is an entry that matched');",
+    "t.noneContains(list, '40', 'must FAIL: the coerced number matched');",
+    't.done();',
+  ].join('\n'));
+  t.equal(disagree.markers.length, 2,
+    'noneContains fails on exactly the worlds anyContains passes');
+  t.contains(disagree.stdout, 'unexpectedly present at [1]',
+    'the detail names the position, which an undefined entry cannot carry');
+}
+
+t.section('element() records inserted children only when seeded to');
+{
+  const inserted = [];
+  const parent = element({ inserted });
+  const child = element();
+  const returned = parent.insertAdjacentElement('beforeend', child);
+  t.equal(returned, child, 'the inserted child is handed back, as the DOM does');
+  t.equal(child.isConnected, true, 'insertion connects the child');
+  t.equal(inserted.length, 1, 'the seeded array records exactly the one child');
+  t.equal(inserted[0], child, 'and records the child, not the parent');
+
+  const unseeded = element();
+  const orphan = element();
+  unseeded.insertAdjacentElement('beforeend', orphan);
+  t.equal(orphan.isConnected, true,
+    'an unseeded parent still connects the child rather than throwing');
+
+  t.throws(
+    () => element({ inserted: {} }).insertAdjacentElement('beforeend', element()),
+    'a non-array seed fails closed instead of silently recording nothing',
+    TypeError,
+  );
 }
 
 t.section('contains and excludes refuse a non-string haystack');
