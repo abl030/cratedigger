@@ -714,9 +714,10 @@ def cmd_quality(db: _QualityCommandDB, args: argparse.Namespace) -> None:
     ]
     # --- Preimport gate scenarios (issue #91) ---
     # Audio and nested-layout gates short-circuit before any FLAC/MP3 stage
-    # runs. These let operators see the rejection paths that live in
-    # lib.measurement.measure_preimport_state and
-    # lib.dispatch.dispatch_import_from_db.
+    # runs. These let operators see the rejection paths that
+    # lib.measurement.measure_preimport_state measures and
+    # lib.quality.pipeline decides from (issue #1355 item 1: corrupt audio
+    # outranks a nested folder when a candidate carries both facts).
     #
     # `audio_check_mode` is read from the active runtime config and
     # applied to every scenario — on deployments with

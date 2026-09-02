@@ -6,6 +6,8 @@ Pure move: every definition is AST-identical to the original — except
 so it stops claiming production would measure codecs it never measures.
 """
 
+from typing import Literal
+
 from lib.quality.evidence_types import CODEC_FAMILY_MP3, CodecFamily
 
 # ---------------------------------------------------------------------------
@@ -125,18 +127,55 @@ def preimport_audio_gate(audio_check_mode: str, audio_corrupt: bool) -> str:
 def preimport_nested_gate(has_nested_audio: bool) -> str:
     """Decide the outcome of the preimport nested-folder gate.
 
-    Mirrors ``lib.dispatch.dispatch_import_from_db``'s fail-fast
-    rejection of nested imports: the preimport gates recurse,
-    but the downstream ``harness/import_one.py`` still uses ``os.listdir``
-    for bitrate measurement and conversion. A nested import
-    would pass the gates and then produce an empty/misclassified measurement.
+    A nested folder must reject: the downstream ``harness/import_one.py``
+    still uses ``os.listdir`` for bitrate measurement and conversion, so a
+    nested import would pass the gates and then produce an
+    empty/misclassified measurement.
 
     The auto path is already flattened by ``process_completed_album`` before
     dispatch runs. If a nested folder nevertheless reaches this shared
     decision boundary, caller identity does not make it safe.
+
+    This gate no longer runs ahead of the audio-integrity gate in
+    production: dispatch reads persisted ``AlbumQualityEvidence`` and never
+    measures directly (``lib.dispatch.dispatch_import_from_db`` never calls
+    ``measure_preimport_state``), so there is no live pre-check to mirror.
+    ``preimport_corrupt_outranks_nested`` is the one function that decides
+    which of the two facts a decision reports when a candidate carries both
+    (issue #1355 item 1).
 
     Returns one of:
         "reject_nested"  — nested audio files present
         "pass"           — flat layout
     """
     return "reject_nested" if has_nested_audio else "pass"
+
+
+def preimport_corrupt_outranks_nested(
+    *, audio_corrupt: bool, nested_layout: bool,
+) -> Literal["audio_corrupt", "nested_layout"] | None:
+    """The one precedence between corrupt audio and nested folder shape.
+
+    ``full_pipeline_decision`` (the flat-kwargs simulator twin) and
+    ``lib.quality.pipeline.candidate_preimport_reject_fact`` (feeding
+    ``full_pipeline_decision_from_evidence``, production's real decider)
+    used to independently encode this ordering and disagreed on a
+    candidate that is both corrupt and nested: the evidence twin checked
+    corrupt first, the flat twin checked nested first (issue #1355 item 1).
+    The two facts are not mutually exclusive — ``measure_preimport_state``
+    derives folder layout from a single path enumeration before it runs the
+    audio-integrity decode, so either can be true regardless of the other,
+    and both can land on the same persisted evidence row.
+
+    The consequence is policy-visible: ``dispatch_actions.decision_denylists``
+    denylists ``audio_corrupt`` but not ``nested_layout``. Corrupt audio
+    always outranks folder shape here, so a peer whose upload decodes as
+    garbage is denylisted whether or not its folder also happens to be
+    nested. Both callers route through this one function so they cannot
+    drift apart again.
+    """
+    if audio_corrupt:
+        return "audio_corrupt"
+    if nested_layout:
+        return "nested_layout"
+    return None
