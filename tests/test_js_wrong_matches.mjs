@@ -75,11 +75,45 @@ function installStorage() {
 /**
  * Drain pending microtasks. Used after a call that kicks off a
  * fire-and-forget background chain (the render-time triage attach —
- * issue #1106) so a test can let it settle to a terminal state before
- * the next test block reassigns `globalThis.fetch` — an un-drained
- * chain would otherwise keep polling into a LATER test's mock.
+ * issue #1106) so a test can let it settle to a terminal state before the
+ * section ends.
+ *
+ * An un-drained chain used to keep polling into a LATER section's mock.
+ * Since #1346 the harness hands `fetch` back at the section boundary, so it
+ * polls node's real `fetch` instead — which throws `Failed to parse URL` on
+ * these relative paths before any socket opens, and production's own
+ * `catch` swallows it. Louder than answering the next test's mock, but
+ * still silent, so draining is still the answer rather than a formality.
  * @param {number} [times]
  */
+/**
+ * Answer the render-time triage probe, and nothing else.
+ *
+ * `renderWrongMatches` starts a fire-and-forget triage attach (#1106), so a
+ * section that renders is a section that fetches, whether it means to or
+ * not. Sections asserting only rendered HTML used to leave `fetch` alone
+ * and silently inherit the previous section's mock; since #1346 the harness
+ * hands `fetch` back at the boundary, so they reached node's real one
+ * instead. Neither is a stub anyone chose. This is: idle status, and a
+ * throw for any other URL, so a section that starts fetching something
+ * unexpected says so rather than drifting.
+ */
+function stubIdleTriageFetch() {
+  return stubGlobals({ fetch: async (url) => {
+    if (String(url) === '/api/wrong-matches/triage/status') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          state: 'idle', started_at: null, finished_at: null,
+          error: null, summary: null,
+        }),
+      };
+    }
+    throw new Error(`unexpected fetch in a render-only section: ${url}`);
+  } });
+}
+
 async function flushMicrotasks(times = 30) {
   for (let i = 0; i < times; i += 1) {
     await Promise.resolve();
@@ -299,6 +333,7 @@ t.section('converge helpers classify green candidates');
 t.section('renderWrongMatches() shows threshold controls and green state');
 {
   installStorage();
+  stubIdleTriageFetch();
   const dom = installDom();
   renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
   t.contains(dom.wrongMatches.innerHTML, 'Loosen', 'renders threshold input');
@@ -322,11 +357,13 @@ t.section('renderWrongMatches() shows threshold controls and green state');
   setWrongMatchConvergeThreshold(42, 230);
   t.contains(dom.wrongMatches.innerHTML, '3 green', 'threshold edit updates green count');
   t.contains(dom.wrongMatches.innerHTML, 'Converge (3)', 'threshold edit updates converge count');
+  await flushMicrotasks();
 }
 
 t.section('renderWrongMatches() keeps converge usable with active import jobs');
 {
   installStorage();
+  stubIdleTriageFetch();
   const dom = installDom();
   const data = JSON.parse(JSON.stringify(wrongMatchesData()));
   data.groups[0].import_jobs = [{
@@ -345,6 +382,7 @@ t.section('renderWrongMatches() keeps converge usable with active import jobs');
 t.section('setWrongMatchConvergeThreshold() updates expanded group in place');
 {
   installStorage();
+  stubIdleTriageFetch();
   const dom = installDom();
   renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
   const originalHtml = dom.wrongMatches.innerHTML;
@@ -368,11 +406,16 @@ t.section('setWrongMatchConvergeThreshold() updates expanded group in place');
   t.equal(elements.get('wm-green-count-42').textContent, '3 green', 'updates green count badge');
   t.equal(elements.get('wm-converge-btn-42').textContent, 'Converge (3)', 'updates converge button text');
   t.excludes(String(elements.get('wm-entry-green-102').style.cssText || ''), 'display:none', 'newly green entry badge is shown');
+  await flushMicrotasks();
 }
 
 t.section('convergeWrongMatches() posts selected threshold and removes row in place');
 {
   installStorage();
+  // Before the render, not after: the render's own triage attach fetches
+  // immediately, so a stub installed below it arrives too late and the
+  // probe reaches node's real `fetch`.
+  stubIdleTriageFetch();
   const dom = installDom();
   renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
   setWrongMatchConvergeThreshold(42, 180);
@@ -626,12 +669,14 @@ t.section('bulkTriageWrongMatches() posts full-queue confirmation and refreshes'
   // The Stop button is enabled the moment the sweep starts (before the
   // first status poll even fires) and disabled again once it's done.
   let stopBtnEnabledDuringSweep = null;
-  const realFetch = globalThis.fetch;
+  // Not node's real fetch: the mock this section installed a few lines
+  // above, which this second stub wraps to observe the button mid-sweep.
+  const innerFetch = globalThis.fetch;
   stubGlobals({ fetch: async (url, options) => {
     if (stopBtnEnabledDuringSweep === null) {
       stopBtnEnabledDuringSweep = dom.stopBtn.disabled === false;
     }
-    return realFetch(url, options);
+    return innerFetch(url, options);
   } });
   // #1106: both toolbar buttons are looked up by id at mutation time,
   // never held as a captured node — bulkTriageWrongMatches() no longer

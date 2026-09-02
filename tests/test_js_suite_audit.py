@@ -211,8 +211,9 @@ def _raw_source(path: Path) -> str:
 # The one suite allowed to assign a global bare. `tests/test_js_harness.mjs`
 # tests `stubGlobals` itself: proving that an existing global is restored by
 # identity, and that a second restore does not re-apply a stale value, both
-# need a global set OUTSIDE the helper under test. Each of its three sites is
-# paired with its own `delete`.
+# need a global set OUTSIDE the helper under test. Every key it writes is
+# deleted afterwards — three assignments, two `delete`s, because two of the
+# assignments write the same key.
 _BARE_GLOBAL_ASSIGNMENT_ALLOWED = frozenset({"test_js_harness.mjs"})
 
 
@@ -581,6 +582,27 @@ class TestNoSuiteMutatesAGlobalWithoutRestoringIt(unittest.TestCase):
         ("inside a helper function",
          "function install() {\n  globalThis.document = {};\n}\n",
          "assigns globalThis.document directly"),
+        # The four below walked straight past the first version of this
+        # clause while its docstring claimed every spelling was covered.
+        # PR #1352's reader drove the real function over 22 worlds and
+        # found them; `++` is the pointed one, because the commit message
+        # held up `+= 1` as proof the audit was not defeated by the one
+        # spelling that slips through.
+        ("postfix increment", "globalThis.counter++;\n",
+         "assigns globalThis.counter directly"),
+        ("prefix decrement", "--globalThis.counter;\n",
+         "assigns globalThis.counter directly"),
+        ("object destructuring target",
+         "({ fetch: globalThis.fetch } = source);\n",
+         "assigns globalThis.fetch directly"),
+        ("array destructuring target", "[globalThis.fetch] = [stub];\n",
+         "assigns globalThis.fetch directly"),
+        ("a for-of loop header",
+         "for (globalThis.key of ['a']) {\n  noop();\n}\n",
+         "assigns globalThis.key directly"),
+        ("a for-in loop header",
+         "for (globalThis.key in source) {\n  noop();\n}\n",
+         "assigns globalThis.key directly"),
     )
 
     def test_each_spelling_trips_the_clause(self) -> None:
@@ -611,15 +633,35 @@ class TestNoSuiteMutatesAGlobalWithoutRestoringIt(unittest.TestCase):
             "window.toast = () => {};\n"
             "const state = { fetch: null };\n"
             "state.fetch = async () => ({});\n"
-            "const alias = globalThis;\n"
             "let localThis = 0;\n"
             "localThis = 1;\n"
+            "delete globalThis.leftover;\n"
             "// globalThis.fetch = 'a comment is not a write';\n"
             "globals.restore();\n"
             "t.done();\n"
         )
         self.assertEqual(global_assignment_violations("test_js_x.mjs", source), [])
-        self.assertIn("alias", source, "the alias line is present but unreported")
+
+    def test_the_alias_hole_is_real_and_stays_review_s_job(self) -> None:
+        """A write THROUGH an alias is not reported, and the docstring says so.
+
+        The conforming world above used to carry a bare `const alias =
+        globalThis;` and assert the string was present in a string the test
+        itself built, which proved nothing about the audit (PR #1352 reader,
+        F14). The hole is real, so pin it as a hole: a write through the
+        alias is the shape that gets past this grammar, and naming it here
+        is what stops someone reading the clause as airtight.
+        """
+        source = (
+            "const alias = globalThis;\n"
+            "alias.fetch = async () => ({});\n"
+        )
+        self.assertEqual(
+            global_assignment_violations("test_js_x.mjs", source),
+            [],
+            "a write through an alias is outside the declared grammar; if "
+            "this starts failing, the docstring's stated bound is stale",
+        )
 
 
 class TestJsSuiteAudit(unittest.TestCase):

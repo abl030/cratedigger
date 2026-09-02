@@ -531,22 +531,30 @@ t.section('a stub installed before the first section lives until done()');
   // fixture can make, so the fixture checks it from an exit handler. The
   // harness registers its own guard first, at `suite()` time, so this one
   // runs second and sees a finished suite.
+  // The LAST section's stub is released by `done()` too, and that half went
+  // untested until PR #1352's mutant runner removed `releaseSectionStubs()`
+  // from `done()` and watched the suite stay green. Both are checked here.
   const run = runFixture([
     "globalThis.__baseline = 'before';",
+    "globalThis.__lastSection = 'before';",
     "stubGlobals({ __baseline: 'module scope' });",
     "t.section('one');",
     "t.equal(globalThis.__baseline, 'module scope', 'survives a boundary');",
     "t.section('two');",
     "t.equal(globalThis.__baseline, 'module scope', 'and the next one');",
+    "stubGlobals({ __lastSection: 'last section' });",
+    "t.equal(globalThis.__lastSection, 'last section', 'the last section stubs too');",
     'process.on(\'exit\', () => {',
-    "  process.stdout.write(globalThis.__baseline === 'before'",
-    "    ? 'BASELINE_RELEASED\\n' : 'BASELINE_LEAKED\\n');",
+    "  const released = globalThis.__baseline === 'before'",
+    "    && globalThis.__lastSection === 'before';",
+    "  process.stdout.write(released ? 'ALL_RELEASED\\n'",
+    "    : `LEAKED baseline=${globalThis.__baseline} last=${globalThis.__lastSection}\\n`);",
     '});',
     't.done();',
   ].join('\n'));
   t.equal(run.markers.length, 0, 'the fixture reports no failure');
-  t.contains(run.stdout, 'BASELINE_RELEASED',
-    'done() hands back the module-scope stub too');
+  t.contains(run.stdout, 'ALL_RELEASED',
+    'done() hands back the module-scope stub AND the last section\'s');
 }
 
 t.section('an explicit restore is not undone by the section boundary');
@@ -560,6 +568,52 @@ t.section('an explicit restore is not undone by the section boundary');
     "t.section('two');",
     "t.equal(globalThis.__early, 'set after restore',",
     "  'the boundary does not re-apply an already-restored stub');",
+    't.done();',
+  ].join('\n'));
+  t.equal(run.markers.length, 0, 'the fixture reports no failure');
+  t.equal(run.status, 0, 'the fixture exits clean');
+}
+
+t.section('restoring an outer stub hands back the one nested inside it');
+{
+  // The world the section above cannot reach, and the one that was
+  // genuinely broken: a section stubs the same key twice, then restores the
+  // OLDER handle. The younger handle's saved value is now stale, and a
+  // boundary that faithfully re-installed it brought the first mock back
+  // from the dead — after the block had explicitly disposed of it.
+  // `test_js_release_actions.mjs` has this shape twice, and the leak was
+  // found by PR #1352's reader, not by the section above.
+  const run = runFixture([
+    "globalThis.__nested = 'original';",
+    "t.section('one');",
+    "const outer = stubGlobals({ __nested: 'outer' });",
+    "stubGlobals({ __nested: 'inner' });",
+    "t.equal(globalThis.__nested, 'inner', 'the inner stub is installed');",
+    'outer.restore();',
+    "t.equal(globalThis.__nested, 'original',",
+    "  'restoring the outer handle unwinds the inner one too');",
+    "t.section('two');",
+    "t.equal(globalThis.__nested, 'original',",
+    "  'and the boundary does not resurrect either of them');",
+    't.done();',
+  ].join('\n'));
+  t.equal(run.markers.length, 0, 'the fixture reports no failure');
+  t.equal(run.status, 0, 'the fixture exits clean');
+}
+
+t.section('a second suite in one process is refused, not silently allowed');
+{
+  // The registries are module state, so two suites in one process share
+  // them: the second one's `done()` would release the first's module-scope
+  // stubs. The audit checks only that a file CALLS `suite(...)`.
+  const run = runFixture([
+    "import { suite as secondSuite } from " + JSON.stringify(HARNESS) + ";",
+    'let refused = null;',
+    'try {',
+    '  secondSuite(import.meta.url);',
+    '} catch (e) { refused = e.message; }',
+    "t.ok(refused && refused.includes('called twice in one process'),",
+    "  `a second suite() throws: ${refused}`);",
     't.done();',
   ].join('\n'));
   t.equal(run.markers.length, 0, 'the fixture reports no failure');

@@ -8,6 +8,7 @@ import {
   recheckRetagDivergenceAlbum,
   renderCurrentLibraryRow,
   renderCurrentQualityRow,
+  renderPipeline,
   renderPipelineNav,
   renderPipelineStatusButtons,
   renderRequestEvidenceSections,
@@ -783,10 +784,11 @@ t.section('syncRetagDivergenceAlbum() network-error path re-arms the button with
 // Every render assertion above calls a row renderer directly, and that is
 // the right level for the HTML each one produces. What no direct call can
 // reach is the composition: `toggleDetail` is what production runs, and it
-// decides the order of eight fragments, which payload field feeds each of
-// them, and what it derives before handing anything over. Swap
-// `data.current_library` for `data.request` in that function and every
-// assertion above still passes.
+// decides the order of the fragments it concatenates, which payload field
+// feeds each of them, and what it derives before handing anything over.
+// Swap `data.current_library` for `data.request` in that function and every
+// one of those 99 render assertions still passes — necessarily so, since a
+// leaf call passes its own arguments and the composer's cannot reach it.
 //
 // So the entry gets its own section rather than replacing the leaf calls,
 // on the model of `renderPipelineDashboard`'s composer test (PR #1296).
@@ -851,7 +853,10 @@ t.section('toggleDetail() composes the panel in order, each row from its own pay
   const html = await openDetailPanel(detailEnvelope());
   t.excludes(html, 'Failed to load details', 'the composer ran to completion');
 
-  // Ordered needles, one per composed fragment, in composition order.
+  // Ordered needles in composition order. Nine needles over eight
+  // fragments: `renderRequestEvidenceSections` contributes two, its
+  // download-history block and its in-library block, and their relative
+  // order inside that one fragment is worth pinning too.
   const rows = [
     ['aaaaaaaa', 'the external link row renders request.mb_release_id'],
     ['LIBRARYPATHSENTINEL', 'the library row renders current_library'],
@@ -871,7 +876,7 @@ t.section('toggleDetail() composes the panel in order, each row from its own pay
     if (at <= previous) ordered = false;
     previous = at;
   }
-  t.ok(ordered, 'the nine fragments appear in the composed order');
+  t.ok(ordered, 'the nine needles appear in the composed order');
 
   // The two values `toggleDetail` derives rather than forwards. Both
   // needles go through `jsArg`, the same encoder the button uses, so the
@@ -894,6 +899,61 @@ t.section('toggleDetail() withholds Replace on a frozen audit row');
     'the bad-rip button still renders on a replaced row');
   t.excludes(html, 'window.openReplacePicker',
     'a replaced row offers no Replace button');
+}
+
+t.section('renderPipeline() paints the long-tail view as nav then worklist');
+{
+  // The suite's other entry, and the reason `renderPipelineNav` gets direct
+  // calls above: those assert the nav's own HTML, while only this proves
+  // the nav is what `renderPipeline` puts in front of the worklist. The
+  // dashboard arm is deliberately not driven — it goes straight to
+  // `loadPipelineDashboard()` and a fetch, and `test_js_pipeline_dashboard.mjs`
+  // owns the composition behind it.
+  const content = element();
+  stubGlobals({ document: domStub({ 'pipeline-content': content }) });
+  const previousView = state.pipelineView;
+  const previousLongTail = state.longTail;
+  state.pipelineView = 'long-tail';
+  state.longTail = {
+    rows: [{ id: 501, artist_name: 'LONGTAILARTIST', album_title: 'Cohort', band: 'missing' }],
+    band: null,
+    query: '',
+  };
+
+  renderPipeline();
+
+  const navAt = content.innerHTML.indexOf('window.setPipelineView(');
+  const bodyAt = content.innerHTML.indexOf('lt-worklist');
+  t.ok(navAt !== -1, 'the long-tail view renders the pipeline nav');
+  t.ok(bodyAt !== -1, 'the long-tail view renders the worklist body');
+  t.ok(navAt < bodyAt, 'the nav strip is painted before the worklist');
+  t.contains(content.innerHTML, 'LONGTAILARTIST',
+    'the worklist is built from the cached cohort, not refetched');
+
+  state.pipelineView = previousView;
+  state.longTail = previousLongTail;
+}
+
+t.section('toggleDetail() hands the exact processing owner to the status buttons');
+{
+  // Found by PR #1352's mutant runner: forcing the third argument of
+  // `renderPipelineStatusButtons` to a bare `null` survived every
+  // assertion, because no fixture here had a truthy `processing_owner`.
+  // The owner's own status decides the label, so a dropped owner shows
+  // "ownership details are unavailable" where this shows job #71.
+  const html = await openDetailPanel(detailEnvelope({
+    status: 'processing',
+    processing_owner: { job_id: 71, status: 'running', preview_status: 'evidence_ready' },
+  }));
+  t.excludes(html, 'Failed to load details', 'the composer ran to completion');
+  t.contains(html, 'job #71 is importing',
+    'the lock explanation is derived from the owner the request carried');
+  t.contains(html, '/api/import-jobs/71/recovery',
+    'the exact owner job is linked for recovery');
+  t.excludes(html, 'ownership details are unavailable',
+    'the owner reached the status buttons, rather than arriving as null');
+  t.excludes(html, "window.updateStatus(4242, 'wanted')",
+    'a processing row offers no free-form status change');
 }
 
 t.section('toggleDetail() surfaces a failed request as an error panel');
@@ -923,6 +983,12 @@ t.section('toggleDetail() on an open panel collapses it without refetching');
   });
   await toggleDetail(4242);
   t.equal(fetches, 1, 'opening the panel fetches the request detail');
+  // This section does not go through `openDetailPanel`, so it owes the
+  // error-placeholder check itself: without it, a composer that threw on
+  // the first open would satisfy both counters below and the section would
+  // pass while asserting nothing about a rendered panel.
+  t.excludes(panel.innerHTML, 'Failed to load details',
+    'the first open rendered a real panel, not the error placeholder');
   await toggleDetail(4242);
   t.equal(fetches, 1, 'closing it again does not refetch');
   t.equal(panel.classList.contains('open'), false, 'the panel is collapsed');

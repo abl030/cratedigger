@@ -221,10 +221,21 @@ function expansionFor(titles, { alreadyApplied = false } = {}) {
         if (selector === '.disamb-recordings') {
           return alreadyApplied ? { marker: 'block already present' } : null;
         }
-        const match = /data-release-id="([^"]+)"/.exec(selector);
+        // Match the whole selector production spells, not just the id
+        // inside it: an earlier version keyed on `data-release-id="…"`
+        // alone, so changing `.release[` to anything else in production
+        // still resolved the row (PR #1352 reader, F12).
+        const match = /^\.release\[data-release-id="([^"]+)"\]$/.exec(selector);
         if (!match) return null;
         const title = titles[match[1]];
-        return title ? { querySelector: () => title } : null;
+        if (!title) return null;
+        return {
+          // Likewise: the row must be asked for `.release-title`, not for
+          // whatever selector happens to arrive.
+          querySelector(inner) {
+            return inner === '.release-title' ? title : null;
+          },
+        };
       },
       insertAdjacentHTML(_position, html) { appended.push(html); },
     }),
