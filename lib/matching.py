@@ -657,13 +657,13 @@ def check_for_match(
                     ctx.cfg.browse_global_max_workers,
                 )
         finally:
-            ctx.browse_time_s += time.monotonic() - browse_t0
+            ctx.counters.browse_time_s += time.monotonic() - browse_t0
             # Lazy-fallback path: fan-out either swallowed an exception via
             # _browse_one (no entry written, user not in broken_user) or
             # this caller bypassed the wave loop. Either way, count
             # separately from peers_browsed so the cycle summary can
             # distinguish primary fan-out load from residual lazy retries.
-            ctx.peers_browsed_lazy += browse_attempts
+            ctx.counters.peers_browsed_lazy += browse_attempts
         if ctx.peer_cache is None:
             for d, result in browsed.items():
                 cache_browsed_directory(ctx, username, d, result)
@@ -769,4 +769,4 @@ def check_for_match(
 
         return _build_no_match()
     finally:
-        ctx.match_time_s += time.monotonic() - match_t0
+        ctx.counters.match_time_s += time.monotonic() - match_t0

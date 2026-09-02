@@ -252,7 +252,7 @@ class TestSearchResultScalarMerge(unittest.TestCase):
 
         self.assertEqual(ctx.user_upload_speed["user1"], 500)
         self.assertEqual(ctx.search_dir_audio_count["user1"]["dirA"], 12)
-        self.assertEqual(ctx.cache_pos_hits, 2)
+        self.assertEqual(ctx.counters.cache_pos_hits, 2)
 
     def test_merge_search_result_writes_current_scalar_maxima_to_redis(self) -> None:
         import cratedigger

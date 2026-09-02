@@ -129,6 +129,33 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "placeholder discipline, and counter vocabulary"
         ),
     ),
+    ("lib/pipeline_db/dashboard.py", "6a6227ef5b3e4640"): (
+        (
+            "issue #1348: the cycle-metrics INSERT interpolates one "
+            "module-level constant, ``_CYCLE_METRIC_COLUMNS`` -- four literal "
+            "column names plus ``lib.cycle_counters.COUNTER_NAMES``, which is "
+            "``CycleCounters``'s own dataclass field names -- and a ``%s`` "
+            "placeholder list of exactly that length. Both slots are fixed at "
+            "import from Python identifiers; no caller value, request field or "
+            "runtime string can reach the statement text, and every value is "
+            "still a bound parameter. The target is ``cycle_metrics``, a "
+            "telemetry table with no request lifecycle column, so this write "
+            "cannot touch album_requests whatever the column list says. The "
+            "rendered statement is pinned verbatim in "
+            "tests/test_pipeline_db_column_contract.py::"
+            "TestCycleMetricsInsertStatement, and the sixteen COUNTER column "
+            "names are proven to be real ``cycle_metrics`` columns by the "
+            "CycleCounters contract in the same file (the four literal "
+            "columns are covered by the real-PG round trip instead). Note "
+            "what this fingerprint does and "
+            "does not bind (review finding F2): a non-constant SQL argument "
+            "binds DYNAMIC_SCOPE, the enclosing ``record_cycle_metrics`` AST, "
+            "so editing the method re-triggers review -- but the statement "
+            "itself lives in the module-level ``_INSERT_CYCLE_METRICS``, and "
+            "rewriting ITS text leaves this fingerprint unchanged. The "
+            "verbatim pin above is what catches that, not this entry"
+        ),
+    ),
     ("lib/pipeline_db/download_log.py", "95d18a3931276ae1"): (
         (
             "get_log's three outcome variants were three verbatim copies of one "
