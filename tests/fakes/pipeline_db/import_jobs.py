@@ -77,6 +77,15 @@ from tests.fakes._shared import _as_datetime, _utcnow
 from tests.fakes.pipeline_db._base import _FakePipelineDBBase
 from tests.fakes.pipeline_db._shared import _reject_nonstandard_json_constant
 
+#: ``import_jobs.preview_message``'s column DEFAULT, set by
+#: ``migrations/005_import_preview_opt_in_default.sql`` and restated by
+#: ``migrations/018_neutral_import_job_preview_ready.sql``. No Python
+#: production code spells it — the database supplies it to any INSERT whose
+#: column list omits ``preview_message``, which is exactly what
+#: ``handoff_automation_import`` does. ``tests/test_pipeline_db.py`` pins the
+#: real DEFAULT against real PostgreSQL; this is the fake's copy of it.
+PREVIEW_GATE_DISABLED_DEFAULT = "Preview gate disabled"
+
 
 def _noop_owner_checkpoint() -> None:
     """Fake owner proof: the fake has no session, lease, or cancellation.
@@ -186,8 +195,24 @@ class _FakeImportJobsMixin(_FakePipelineDBBase):
         payload,
         message: str | None,
         expected_request_status: str | None = None,
+        leaves_preview_defaults_to_database: bool = False,
     ) -> ImportJob:
-        """Mint one row after the caller has enforced its creation policy."""
+        """Mint one row after the caller has enforced its creation policy.
+
+        ``leaves_preview_defaults_to_database`` mirrors the one place
+        production's INSERTs into ``import_jobs`` disagree.
+        ``enqueue_import_job`` and
+        ``enqueue_youtube_import_and_mark_success`` both name
+        ``preview_message``, ``preview_completed_at`` and
+        ``importable_at`` in their column lists and write each as an
+        explicit ``NULL``. ``handoff_automation_import``'s column list
+        omits all three, so migrations 005/018's ``DEFAULT``s fire and a
+        fresh automation job is born carrying ``'Preview gate disabled'``
+        and two ``NOW()`` stamps. Collapsing that into one always-NULL
+        shape (as this fake did until #1347) erases a real difference:
+        see ``TestFakeAutomationHandoffRowShape`` for the live evidence
+        and for why it decides queue order.
+        """
         self._next_import_job_id += 1
         now = _utcnow()
         row: dict[str, Any] = {
@@ -209,14 +234,21 @@ class _FakeImportJobsMixin(_FakePipelineDBBase):
             "completed_at": None,
             "preview_status": IMPORT_JOB_PREVIEW_WAITING,
             "preview_result": None,
-            "preview_message": None,
+            "preview_message": (
+                PREVIEW_GATE_DISABLED_DEFAULT
+                if leaves_preview_defaults_to_database else None
+            ),
             "preview_error": None,
             "preview_attempts": 0,
             "preview_worker_id": None,
             "preview_started_at": None,
             "preview_heartbeat_at": None,
-            "preview_completed_at": None,
-            "importable_at": None,
+            "preview_completed_at": (
+                now if leaves_preview_defaults_to_database else None
+            ),
+            "importable_at": (
+                now if leaves_preview_defaults_to_database else None
+            ),
             "candidate_evidence_id": None,
             "expected_request_status": (
                 expected_request_status
@@ -361,6 +393,7 @@ class _FakeImportJobsMixin(_FakePipelineDBBase):
                     payload=automation_import_payload(),
                     message=message,
                     expected_request_status="processing",
+                    leaves_preview_defaults_to_database=True,
                 )
                 self._automation_handoff_write_boundary(
                     1,
@@ -667,9 +700,10 @@ class _FakeImportJobsMixin(_FakePipelineDBBase):
         early ``return []`` in each peek rather than inside the fragment. Per
         row here instead of once per scan: same answer, since a true guard
         refuses every row, and it keeps the rule in the one place both lanes
-        already read.
+        already read. The predicate itself is shared with the four other
+        callers that spell the same rule (#1347).
         """
-        if execution_lease is not None and execution_lease.beets is not None:
+        if self._live_beets_child_refuses(execution_lease):
             return False
         job_type = row.get("job_type")
         if job_type == IMPORT_JOB_YOUTUBE:
@@ -984,6 +1018,8 @@ class _FakeImportJobsMixin(_FakePipelineDBBase):
         source_path: str,
         expected_execution_lease: ExecutionLeaseSnapshot | None = None,
     ) -> ImportJob | None:
+        if self._live_beets_child_refuses(expected_execution_lease):
+            return None
         request = self._requests.get(request_id)
         for row in self._import_jobs:
             if (
@@ -1023,7 +1059,6 @@ class _FakeImportJobsMixin(_FakePipelineDBBase):
                         include_child=True,
                     )
                     or expected_execution_lease is None
-                    or expected_execution_lease.beets is not None
                     or not isinstance(state, dict)
                     or state.get("current_path") != source_path
                 ):
@@ -1613,6 +1648,8 @@ class _FakeImportJobsMixin(_FakePipelineDBBase):
         *,
         expected_execution_lease: ExecutionLeaseSnapshot | None = None,
     ) -> bool:
+        if self._live_beets_child_refuses(expected_execution_lease):
+            return False
         for row in self._import_jobs:
             if (
                 row["id"] == job_id
@@ -1627,7 +1664,6 @@ class _FakeImportJobsMixin(_FakePipelineDBBase):
                         include_child=True,
                     )
                     or expected_execution_lease is None
-                    or expected_execution_lease.beets is not None
                 ):
                     return False
                 now = _utcnow()
@@ -1644,6 +1680,8 @@ class _FakeImportJobsMixin(_FakePipelineDBBase):
         message: str | None = None,
         expected_execution_lease: ExecutionLeaseSnapshot | None = None,
     ) -> ImportJob | None:
+        if self._live_beets_child_refuses(expected_execution_lease):
+            return None
         for row in self._import_jobs:
             if (
                 row["id"] == job_id
@@ -1660,7 +1698,6 @@ class _FakeImportJobsMixin(_FakePipelineDBBase):
                             include_child=True,
                         )
                         and expected_execution_lease is not None
-                        and expected_execution_lease.beets is None
                     )
                 )
             ):

@@ -405,6 +405,8 @@ class _FakeEvidenceMixin(_FakePipelineDBBase):
         *,
         expected_execution_lease: ExecutionLeaseSnapshot | None = None,
     ) -> bool:
+        if self._live_beets_child_refuses(expected_execution_lease):
+            return False
         for row in self._import_jobs:
             if row.get("id") == import_job_id:
                 if row.get("job_type") == IMPORT_JOB_AUTOMATION and (
@@ -417,7 +419,6 @@ class _FakeEvidenceMixin(_FakePipelineDBBase):
                         include_child=True,
                     )
                     or expected_execution_lease is None
-                    or expected_execution_lease.beets is not None
                 ):
                     return False
                 row["candidate_evidence_id"] = evidence_id
