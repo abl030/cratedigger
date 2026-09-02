@@ -335,6 +335,13 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
         "tests.test_spectral_attempt_audit_generated",
         "tests.test_terminal_outcome_callers",
     ),
+    # The basename probe resolves tests.test_quality_gate, masking the loss
+    # of the dispatch-composition and end-to-end integration coverage (#1321).
+    "lib/dispatch/quality_gate.py": (
+        "tests.test_quality_gate",
+        "tests.test_import_dispatch",
+        "tests.test_integration_slices",
+    ),
     # Basename probe resolves tests.test_surface_outcomes.
     "lib/surface_outcomes.py": (
         "tests.test_surface_outcomes",
