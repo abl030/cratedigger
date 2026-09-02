@@ -515,21 +515,25 @@ class TestTargetedTestSelection(unittest.TestCase):
     ) -> None:
         """The derived row adds precision; it is not the fail-closed floor.
 
-        tests/fakes/pipeline_db/evidence.py has no tests/test_fakes_evidence.py,
-        so the derived name resolves nothing and the change must still land on
-        tests.test_fakes rather than on a module that does not exist.
+        tests/fakes/pipeline_db/cleanup_journal.py has no
+        tests/test_fakes_cleanup_journal.py, so the derived name resolves
+        nothing and the change must still land on tests.test_fakes rather than
+        on a module that does not exist. Any sibling-less cluster serves; the
+        assertFalse below is what tells whoever gives this one its own module
+        to repoint the example (issue #1313, where giving evidence a sibling
+        did exactly that).
         """
         self.assertFalse(
-            (REPO_ROOT / "tests" / "test_fakes_evidence.py").exists())
+            (REPO_ROOT / "tests" / "test_fakes_cleanup_journal.py").exists())
 
         selected = expand_test_selection(
             (),
-            changed_paths=("tests/fakes/pipeline_db/evidence.py",),
+            changed_paths=("tests/fakes/pipeline_db/cleanup_journal.py",),
             repo_root=REPO_ROOT,
         )
 
         self.assertIn("tests.test_fakes", selected)
-        self.assertNotIn("tests.test_fakes_evidence", selected)
+        self.assertNotIn("tests.test_fakes_cleanup_journal", selected)
 
     def test_the_two_registries_are_disjoint(self) -> None:
         """No path claims both a real mapping and an admitted coverage gap.
@@ -1018,14 +1022,19 @@ class TestSelectionRuleTable(unittest.TestCase):
     def test_explain_reports_a_derived_name_with_no_module_on_disk(self) -> None:
         """The single most common reason a path resolves less than expected,
         and the reason `NeighbourSource` carries `unresolved` at all.
+
+        Any sibling-less cluster serves as the example; the assertFalse tells
+        whoever gives this one a module to repoint it (issue #1313).
         """
-        self.assertFalse((REPO_ROOT / "tests" / "test_fakes_evidence.py").exists())
+        self.assertFalse(
+            (REPO_ROOT / "tests" / "test_fakes_cleanup_journal.py").exists())
 
         report = "\n".join(
-            explain_path("tests/fakes/pipeline_db/evidence.py", REPO_ROOT)
+            explain_path("tests/fakes/pipeline_db/cleanup_journal.py", REPO_ROOT)
         )
 
-        self.assertIn("tests.test_fakes_evidence  (no module file on disk)", report)
+        self.assertIn(
+            "tests.test_fakes_cleanup_journal  (no module file on disk)", report)
         self.assertIn("selects: tests.test_fakes", report)
 
     def test_explain_reports_a_fail_closed_path_instead_of_raising(self) -> None:
