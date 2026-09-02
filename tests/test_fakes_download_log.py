@@ -305,10 +305,6 @@ class TestFakeDownloadLogIdMint(unittest.TestCase):
         self.assertEqual(db.log_download(1, outcome="rejected"), 42)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestFakeDownloadLogWrites(unittest.TestCase):
     """``log_download`` writes: canonical outcomes, source defaults, the
     transfer detail column, and the derived validation projection.
@@ -735,3 +731,7 @@ class TestFakeWrongMatchQueue(unittest.TestCase):
         self.assertEqual(env.wrong_match_triage, audit)
         # Unknown log id returns False.
         self.assertFalse(db.record_wrong_match_triage(99999, audit))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -84,3 +84,7 @@ class TestFakePlexAddedAtPins(unittest.TestCase):
             [row["status"] for row in db.plex_added_at_pins],
             ["skipped", "pending"],
         )
+
+
+if __name__ == "__main__":
+    unittest.main()

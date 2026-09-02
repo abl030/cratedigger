@@ -459,10 +459,6 @@ class TestFakePipelineDBSlskdEventCursor(unittest.TestCase):
         self.assertEqual(second["last_event_id"], "ev-1")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestFakeRequestTracks(unittest.TestCase):
     """The per-request track list and the track-artist aligner."""
 
@@ -577,3 +573,7 @@ class TestFakeDenylistAndCooldowns(unittest.TestCase):
         # Upsert replaced rather than duplicated alice's row.
         self.assertEqual(len(db.user_cooldowns), 2)
         self.assertEqual(db.user_cooldowns["alice"].reason, "y")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -66,7 +66,6 @@ TESTS_TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "tests/test_download_errors_generated.py": {"any": 10},
     "tests/test_enqueue_fanout.py": {"any": 2, "cast": 12},
     "tests/test_evidence_generated.py": {"any": 9, "cast": 3},
-    "tests/test_fakes.py": {"any": 3},
     "tests/test_fakes_download_log.py": {"type_ignore": 2},
     "tests/test_fakes_misc.py": {"type_ignore": 2},
     "tests/test_fakes_youtube.py": {"any": 6, "cast": 2},

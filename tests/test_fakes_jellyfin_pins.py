@@ -92,3 +92,7 @@ class TestFakeJellyfinDateCreatedPins(unittest.TestCase):
             [row["status"] for row in db.jellyfin_date_created_pins],
             ["expired", "pending"],
         )
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -835,10 +835,6 @@ class TestFakePipelineDBSearchPlanContract(unittest.TestCase):
                 )
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestFakeSearchLog(unittest.TestCase):
     """``log_search`` and the search history it accumulates."""
 
@@ -953,3 +949,7 @@ class TestFakeSearchHistoryPage(unittest.TestCase):
         page = db.get_search_history_page(1, limit=10)
         self.assertEqual(len(page.rows), 1)
         self.assertEqual(page.rows[0]["query"], "mine")
+
+
+if __name__ == "__main__":
+    unittest.main()

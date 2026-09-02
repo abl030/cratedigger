@@ -852,10 +852,6 @@ class TestFakeMergeRekeyOperatorClaimFence(unittest.TestCase):
         self.assertEqual(row["mb_release_id"], self.MERGED)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestFakeImportJobStubLifecycle(unittest.TestCase):
     """The import-job queue stubs mirror the real claim/complete lifecycle
     on both the automation and preview lanes.
@@ -1451,3 +1447,7 @@ class TestFakeTerminalForceWrongMatchCleanupJobs(unittest.TestCase):
         self.assertNotIn(historical_completed.id, selected)
         self.assertNotIn(historical_failed.id, selected)
         self.assertNotIn(historical_null_result.id, selected)
+
+
+if __name__ == "__main__":
+    unittest.main()

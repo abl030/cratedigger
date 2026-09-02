@@ -813,10 +813,6 @@ class TestFakeRequestUniqueMbReleaseId(unittest.TestCase):
             db.add_request("A", "B", "request", mb_release_id="mbid-seeded")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestFakeRequestLifecycleWrites(unittest.TestCase):
     """Status transitions and attempt bookkeeping on ``album_requests``."""
 
@@ -1273,8 +1269,9 @@ class TestFakeRequestMetadataGuards(unittest.TestCase):
 class TestFakeRequestMergeRekey(unittest.TestCase):
     """``update_request_release_for_merge`` and ``merge_rekey_collision``.
 
-    The assertions read evidence rows; the verb under test is the
-    requests cluster's, which is what puts these here.
+    Two of the four also assert on evidence rows the rekey carries with it.
+    Both verbs belong to the requests cluster, which is what puts all four
+    here rather than under evidence.
     """
 
     def test_merge_rekey_moves_only_an_owned_processing_row(self):
@@ -1559,24 +1556,43 @@ class TestFakeRequestRows(unittest.TestCase):
 
     def test_delete_request_cascades_to_child_tables(self):
         """Real SQL has ``ON DELETE CASCADE`` from album_requests to
-        download_log, search_log, and source_denylist. The fake must
-        prune those too so tests cannot observe an impossible state
-        where orphaned child rows survive their parent (codex R2)."""
+        download_log, search_log, source_denylist, and the search plans with
+        their items. The fake must prune those too so tests cannot observe an
+        impossible state where orphaned child rows survive their parent
+        (codex R2).
+
+        The plan arm is asserted here as well as from the plan side in
+        ``tests/test_fakes_search_plan.py``. The cascade code lives in the
+        requests cluster, so without this a mutant there survives everything
+        selection pulls for a change to that file (#1313 review runner, R3).
+        """
+        from lib.pipeline_db import SearchPlanItemInput
+
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=1))
-        db.seed_request(make_request_row(id=2))
+        db.seed_request(make_request_row(id=2, mb_release_id="mb-survivor"))
         db.log_download(1, outcome="success")
         db.log_download(2, outcome="success")
         db.log_search(1, outcome="found")
         db.log_search(2, outcome="no_match")
         db.add_denylist(1, "badguy")
         db.add_denylist(2, "other")
+        doomed_plan = db.create_successful_search_plan(
+            request_id=1, generator_id="g1",
+            items=[SearchPlanItemInput(ordinal=0, strategy="default", query="Q0")])
+        kept_plan = db.create_successful_search_plan(
+            request_id=2, generator_id="g1",
+            items=[SearchPlanItemInput(ordinal=0, strategy="default", query="Q1")])
 
         db.delete_request(1)
 
         self.assertEqual([e.request_id for e in db.download_logs], [2])
         self.assertEqual([e.request_id for e in db.search_logs], [2])
         self.assertEqual([e.request_id for e in db.denylist], [2])
+        self.assertEqual(list(db.search_plans), [kept_plan])
+        self.assertEqual(
+            {it.plan_id for it in db.search_plan_items.values()}, {kept_plan})
+        self.assertNotEqual(doomed_plan, kept_plan)
 
     def test_delete_request_does_not_cascade_evidence_post_021(self):
         """Migration 021: evidence is content-addressed. Deleting a request
@@ -1604,7 +1620,8 @@ class TestFakeRequestRows(unittest.TestCase):
 
 class TestFakeRequestReads(unittest.TestCase):
     """The request read models: get_wanted, status filters and counts,
-    artist lookup, search, and the long-tail cohort.
+    artist lookup, the long-tail cohort, and the #426 recency window and
+    search mirrors.
     """
 
     def test_get_downloading(self):
@@ -1802,3 +1819,7 @@ class TestFakeRequestReads(unittest.TestCase):
         # Non-wanted and missing ids return None.
         self.assertIsNone(db.get_long_tail_request(6))
         self.assertIsNone(db.get_long_tail_request(999))
+
+
+if __name__ == "__main__":
+    unittest.main()

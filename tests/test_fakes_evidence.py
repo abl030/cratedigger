@@ -145,8 +145,9 @@ class TestFakeEvidenceRoundTrip(unittest.TestCase):
 
 
 class TestFakeEvidenceAddressing(unittest.TestCase):
-    """The four addressing modes: download_log, import_job, request-current,
-    and the latest-candidate lookup that reads them back.
+    """The three addressing modes — download_log, import_job,
+    request-current — the freeze on a replaced row, and the latest-candidate
+    lookup that reads addressed rows back.
     """
 
     def test_album_quality_evidence_supports_download_log_addressing(self):
@@ -210,6 +211,31 @@ class TestFakeEvidenceAddressing(unittest.TestCase):
 
         self.assertEqual(db.get_request_current_evidence_id(42), persisted.id)
 
+    def test_request_current_evidence_refuses_a_replaced_row(self):
+        """A ``replaced`` row is terminal audit and its current-evidence
+        pointer is frozen (critical invariant 6). The fake's refusal had no
+        test anywhere: deleting the status check left the whole suite green
+        (#1313 review runner, E8).
+        """
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="replaced"))
+        db.seed_request(make_request_row(
+            id=43, mb_release_id="mb-successor", status="wanted"))
+        evidence = make_album_quality_evidence(mb_release_id="mb-replaced-freeze")
+        db.upsert_album_quality_evidence(evidence)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+
+        self.assertFalse(db.set_request_current_evidence(42, persisted.id))
+        self.assertIsNone(db.get_request_current_evidence_id(42))
+        # The successor is writable, so the refusal is the status and not a
+        # blanket failure of the writer.
+        self.assertTrue(db.set_request_current_evidence(43, persisted.id))
+        self.assertEqual(db.get_request_current_evidence_id(43), persisted.id)
+
     def test_get_latest_download_log_candidate_evidence_id(self):
         """Issue #813 tooling tier: replaying the request's real last
         candidate needs the newest download_log candidate_evidence_id."""
@@ -269,8 +295,9 @@ class TestFakeEvidenceAddressing(unittest.TestCase):
 
 
 class TestFakeEvidenceValidation(unittest.TestCase):
-    """What the fake refuses: malformed content keys, invalid snapshots,
-    and an inconsistent AAC lattice.
+    """Where the fake validates its input: it refuses malformed content keys,
+    invalid snapshots and an inconsistent AAC lattice, and it accepts a
+    zero-count empty fileset.
     """
 
     def test_album_quality_evidence_rejects_malformed_content_key(self):
@@ -708,3 +735,108 @@ class TestFakeEvidenceWritePolicy(unittest.TestCase):
         assert replaced is not None
         self.assertEqual(replaced.v0_metric, replacement)
         self.assertTrue(replaced.on_disk_v0_research_attempted)
+
+    def _stale_spectral_write(self, lineage_version: int) -> str | None:
+        """Store graded evidence at one lineage, overwrite it with a writer
+        carrying no grade, and report what the stored grade became."""
+        db = FakePipelineDB()
+        evidence = make_album_quality_evidence(
+            mb_release_id=f"mb-lineage-{lineage_version}",
+            lineage_version=lineage_version,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=192,
+                format="MP3",
+                spectral_grade="genuine",
+                spectral_subject="source",
+                spectral_provenance="measured",
+                cliff_hz=16500,
+                codec_family="mp3",
+                ultrasonic_deficit_db=44.0,
+                spectral_measurement_version=2,
+            ),
+        )
+        db.upsert_album_quality_evidence(evidence)
+        db.upsert_album_quality_evidence(msgspec.structs.replace(
+            evidence,
+            measurement=msgspec.structs.replace(
+                evidence.measurement,
+                spectral_grade=None,
+                spectral_bitrate_kbps=None,
+                spectral_subject=None,
+                spectral_provenance=None,
+                cliff_hz=None,
+                codec_family=None,
+                ultrasonic_deficit_db=None,
+                spectral_measurement_version=None,
+            ),
+        ))
+        loaded = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert loaded is not None
+        return loaded.measurement.spectral_grade
+
+    def _stale_v0_write(self, lineage_version: int) -> object | None:
+        """As above for the V0 tuple, which reads the same lineage guard."""
+        from lib.quality import AlbumQualityV0Metric
+
+        db = FakePipelineDB()
+        evidence = make_album_quality_evidence(
+            mb_release_id=f"mb-v0-lineage-{lineage_version}",
+            lineage_version=lineage_version,
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=201,
+                avg_bitrate_kbps=259,
+                median_bitrate_kbps=255,
+                subject="installed",
+                provenance="measured",
+            ),
+        )
+        db.upsert_album_quality_evidence(evidence)
+        db.upsert_album_quality_evidence(
+            msgspec.structs.replace(evidence, v0_metric=None))
+        loaded = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert loaded is not None
+        return loaded.v0_metric
+
+    def test_both_preserve_guards_start_at_lineage_four(self):
+        """Two guards read ``lineage_version >= 4`` — the spectral CASE and
+        the V0 tuple — and every other test here takes the builder's default
+        of 5, which passes ``> 4`` just as happily. Lineage 4 is the only
+        value that tells the two comparisons apart (#1313 review runner, E2).
+        """
+        self.assertIsNone(self._stale_spectral_write(3))
+        self.assertEqual(self._stale_spectral_write(4), "genuine")
+        self.assertEqual(self._stale_spectral_write(5), "genuine")
+        self.assertIsNone(self._stale_v0_write(3))
+        self.assertIsNotNone(self._stale_v0_write(4))
+        self.assertIsNotNone(self._stale_v0_write(5))
+
+    def test_stored_source_path_wins_unless_it_is_blank(self):
+        """A later writer cannot move the recorded source path, but a stored
+        blank does not freeze the row — the guard is
+        ``existing.source_path.strip()``, and only the blank case separates it
+        from its negation (#1313 review runner, E5).
+        """
+        for stored, expected in (("/old/path", "/old/path"), ("   ", "/new/path")):
+            with self.subTest(stored=stored):
+                db = FakePipelineDB()
+                evidence = make_album_quality_evidence(
+                    mb_release_id="mb-source-path", source_path=stored)
+                db.upsert_album_quality_evidence(evidence)
+                db.upsert_album_quality_evidence(msgspec.structs.replace(
+                    evidence, source_path="/new/path"))
+                loaded = db.find_album_quality_evidence(
+                    mb_release_id=evidence.mb_release_id,
+                    snapshot_fingerprint=evidence.snapshot_fingerprint,
+                )
+                assert loaded is not None
+                self.assertEqual(loaded.source_path, expected)
+
+
+if __name__ == "__main__":
+    unittest.main()

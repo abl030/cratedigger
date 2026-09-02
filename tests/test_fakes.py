@@ -7,8 +7,11 @@ builders, and the ``FakePipelineDBSource`` gating tests.
 A cluster's own self-tests live beside it in ``tests/test_fakes_<cluster>.py``,
 which is also what ``scripts/targeted_test_selection.py`` derives from a
 changed ``tests/fakes/pipeline_db/<cluster>.py`` or
-``lib/pipeline_db/<cluster>.py``. The underscore-prefixed modules have no
-such sibling and fall back here, which is why their tests stay.
+``lib/pipeline_db/<cluster>.py``. A cluster with no such module falls back
+here, which is where the ``_base`` and ``_core`` tests below stay by design
+and where ``source``'s gating tests already were. ``cleanup_journal``,
+``convergence`` and ``terminal_outcomes`` also have no sibling yet and would
+land here too.
 
 A new ``PipelineDB`` method owes an equivalent stub on ``FakePipelineDB``
 plus a self-test — in the cluster's own module when it has one, here when
@@ -18,7 +21,6 @@ it does not. That is the New Work Checklist row in
 
 import inspect
 import unittest
-from typing import Any
 from unittest.mock import MagicMock
 
 from lib.grab_list import DownloadFile, GrabListEntry
@@ -223,12 +225,24 @@ class TestFakeAssertLog(unittest.TestCase):
         db.assert_log(self, 0, outcome="success", request_id=42)
 
     def test_assert_log_checks_extra_fields(self):
+        """A field that is not a DownloadLogRow attribute lands in ``.extra``,
+        and assert_log must read it back from there.
+
+        The name promised this and the body used to read ``.extra`` directly,
+        so the getattr default in assert_log was unconstrained: the #1313
+        review runner dropped the fallback to a bare ``None`` and the whole
+        suite stayed green. Every one of the 33 assert_log call sites in the
+        tree passes a real column, so nothing else reaches this branch.
+        """
         db = FakePipelineDB()
         db.log_download(42, outcome="success", spectral_grade="genuine")
 
-        db.assert_log(self, 0, outcome="success")
-        # Extra field goes into .extra dict
-        self.assertEqual(db.download_logs[0].extra["spectral_grade"], "genuine")
+        self.assertFalse(
+            hasattr(db.download_logs[0], "spectral_grade"),
+            "pick a field the row does not declare, or this pins nothing")
+        db.assert_log(self, 0, outcome="success", spectral_grade="genuine")
+        with self.assertRaisesRegex(AssertionError, r"spectral_grade"):
+            db.assert_log(self, 0, spectral_grade="lossy_upscale")
 
     def test_assert_log_failure_message_names_the_real_field(self):
         """Issue #1211 review F4 regression pin: assert_log's f-string used
@@ -242,21 +256,6 @@ class TestFakeAssertLog(unittest.TestCase):
 
         with self.assertRaisesRegex(AssertionError, r"beets_distance"):
             db.assert_log(self, 0, beets_distance=0.01)
-
-
-# ---------------------------------------------------------------------------
-# Field resolutions (migration 030) — fake parity
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Triage cohort fakes (U15)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Persisted search plans (U1) — fake parity
-# ---------------------------------------------------------------------------
 
 
 class TestBuilders(unittest.TestCase):
@@ -649,12 +648,26 @@ class TestPipelineDBFakeContractInternals(unittest.TestCase):
             def m(self, request_id: int, flag: bool = False) -> None:
                 ...
         class Fake:
-            def m(self, request_id: int, **kwargs: Any) -> None:
+            def m(self, request_id: int, **kwargs: object) -> None:
                 ...
         diff = _diff_signatures(Real, Fake)
         self.assertTrue(
             any("'flag'" in m for m in diff),
             f"Expected drift for named param 'flag', got: {diff}")
+
+    def test_annotations_are_not_compared(self):
+        """The contract's docstring says a fake may annotate as loosely as it
+        likes. That was only ever illustrated by the fixtures' own spelling,
+        which asserted nothing; assert it instead, so the fixtures above are
+        free to use whatever annotation reads best.
+        """
+        class Real:
+            def m(self, request_id: int, **extra: int) -> None:
+                ...
+        class Fake:
+            def m(self, request_id: str, **extra: str) -> None:
+                ...
+        self.assertEqual(_diff_signatures(Real, Fake), [])
 
     def test_renamed_param_is_caught(self):
         class Real:
@@ -691,7 +704,7 @@ class TestPipelineDBFakeContractInternals(unittest.TestCase):
 
     def test_star_kwargs_on_real_still_requires_fake_kwargs(self):
         class Real:
-            def m(self, **extra: Any) -> None:
+            def m(self, **extra: object) -> None:
                 ...
         class Fake:
             def m(self) -> None:  # no **kwargs

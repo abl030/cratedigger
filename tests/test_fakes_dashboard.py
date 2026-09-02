@@ -153,10 +153,6 @@ class TestFakeDashboardMirror(unittest.TestCase):
         self.assertEqual(heavy[0]["result_count"], 0)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestFakeDashboardMetricStubs(unittest.TestCase):
     """The dashboard metric stubs and the unfindable-run metrics row that
     feeds them.
@@ -337,3 +333,7 @@ class TestFakePeerMetrics(unittest.TestCase):
         self.assertEqual(by_date["2026-05-07"]["new_peers"], 0)
         self.assertEqual(by_date["2026-05-07"]["total_peers"], 0)
         self.assertEqual(by_date["2026-05-08"]["total_peers"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
