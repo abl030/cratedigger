@@ -40,9 +40,11 @@ from lib.import_execution import (
 from lib.import_queue import (
     IMPORT_JOB_FORCE,
     IMPORT_JOB_TYPES,
+    IMPORT_PREVIEW_REQUEUE_MAX_EXPONENT,
     AutomationHandoffResult,
     ImportJob,
     force_import_payload,
+    import_preview_requeue_delay,
 )
 from lib.mb_canonical import CanonicalReleaseRedirected
 from lib.merge_rekey_service import RESULT_REKEYED, MergeRekeyService
@@ -3972,6 +3974,102 @@ class TestRequeueImportJobForPreview(unittest.TestCase):
         assert other_row is not None
         self.assertEqual(other_row["status"], "queued")
         self.assertEqual(other_row["preview_status"], "waiting")
+
+
+@requires_postgres
+class TestImportPreviewScanBackoffParity(unittest.TestCase):
+    """The preview scan's SQL backoff IS ``import_preview_requeue_delay``.
+
+    One policy, three implementations: the SQL window inside
+    ``peek_import_preview_job_candidates``, the Python function the
+    dispatch requeue message and the exhaustion check read, and
+    ``FakePipelineDB``'s scan, which calls that same Python function. The
+    fake is therefore faithful to production only as far as the SQL and
+    the Python agree, and nothing compared them — the two hand-written
+    pins next door fix attempts at 1 and at 2454, which is the first
+    doubling and the cap, leaving every doubling between them free. Base
+    2 could become base 3 in the SQL and 213 tests stayed green (#1313
+    residual 1314-3).
+    """
+
+    def setUp(self):
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="preview-backoff-parity-mbid",
+            artist_name="Backoff",
+            album_title="Parity",
+            source="request",
+        )
+        self.job = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=self.req_id,
+            dedupe_key="manual:preview-backoff-parity",
+            payload={"download_log_id": 1, "failed_path": "/tmp/parity"},
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    #: Seconds either side of the due moment. A round trip through the
+    #: scan takes milliseconds, but ``NOW()`` advances between the UPDATE
+    #: that ages the row and the SELECT that reads it, so the "not due
+    #: yet" side needs more slack than doc1's worst scheduling hiccup.
+    MARGIN_SECONDS = 5
+
+    def _age_row(self, *, attempts: int, seconds_ago: float) -> None:
+        self.db._execute("""
+            UPDATE import_jobs
+            SET attempts = %s, updated_at = NOW() - make_interval(secs => %s)
+            WHERE id = %s
+        """, (attempts, seconds_ago, self.job.id))
+
+    def _on_offer(self) -> bool:
+        return any(
+            candidate.id == self.job.id
+            for candidate in self.db.peek_import_preview_job_candidates(limit=10)
+        )
+
+    def test_scan_admits_a_requeued_row_exactly_when_the_policy_says_it_is_due(
+        self,
+    ) -> None:
+        # Derived from the policy, not hand-listed: one attempt count per
+        # doubling plus two past the cap, so raising the exponent grows
+        # this table rather than leaving its new steps unpatrolled.
+        attempt_counts = [*range(1, IMPORT_PREVIEW_REQUEUE_MAX_EXPONENT + 3), 2454]
+        distinct_delays = {
+            import_preview_requeue_delay(attempts) for attempts in attempt_counts
+        }
+        self.assertEqual(
+            len(distinct_delays), IMPORT_PREVIEW_REQUEUE_MAX_EXPONENT + 1,
+            "the table must reach every delay the policy can return",
+        )
+
+        for attempts in attempt_counts:
+            due_after = import_preview_requeue_delay(attempts).total_seconds()
+            with self.subTest(attempts=attempts, due_after=due_after):
+                self._age_row(
+                    attempts=attempts,
+                    seconds_ago=due_after - self.MARGIN_SECONDS,
+                )
+                self.assertFalse(
+                    self._on_offer(),
+                    f"scan offered a row {self.MARGIN_SECONDS}s before its "
+                    f"{due_after}s backoff elapsed",
+                )
+                self._age_row(
+                    attempts=attempts,
+                    seconds_ago=due_after + self.MARGIN_SECONDS,
+                )
+                self.assertTrue(
+                    self._on_offer(),
+                    f"scan withheld a row {self.MARGIN_SECONDS}s after its "
+                    f"{due_after}s backoff elapsed",
+                )
+
+    def test_a_never_attempted_row_skips_the_backoff_window_entirely(self) -> None:
+        """``attempts = 0`` short-circuits: a fresh row is due immediately."""
+        self._age_row(attempts=0, seconds_ago=0)
+        self.assertTrue(self._on_offer())
 
 
 @requires_postgres
