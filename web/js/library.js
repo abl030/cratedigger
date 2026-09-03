@@ -34,12 +34,12 @@ function refreshAfterBeetsDeletion(albumId) {
     return;
   }
 
-  const activeTab = document.querySelector('.tab.active')?.textContent?.trim();
-  if (activeTab === 'Recents') {
+  const activeTab = document.querySelector('.tab.active')?.getAttribute('data-tab-name');
+  if (activeTab === 'recents') {
     window.loadRecents?.();
     return;
   }
-  if (activeTab === 'Pipeline') {
+  if (activeTab === 'pipeline') {
     window.loadPipeline?.();
     return;
   }
@@ -458,9 +458,8 @@ export async function setLibQuality(mbid, status, minBitrate, detailId) {
       toast(`Set ${parts.join(', ')}`);
       // Refresh the whole recents/library view to update badges
       const activeTab = document.querySelector('.tab.active');
-      if (activeTab) {
-        const tabText = activeTab.textContent.trim();
-        if (tabText === 'Recents') window.loadRecents();
+      if (activeTab && activeTab.getAttribute('data-tab-name') === 'recents') {
+        window.loadRecents();
       }
     } else {
       toast(data.error || 'Failed', true);

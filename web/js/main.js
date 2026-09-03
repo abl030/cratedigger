@@ -18,6 +18,7 @@ import { disambRemove } from './analysis.js';
 import { loadWrongMatches, toggleWrongMatchGroup, toggleWrongMatchEntry, reloadWrongMatchExplorer, maybeLoadWrongMatchExplorer, refreshWrongMatches, forceImportWrongMatch, deleteWrongMatch, deleteWrongMatchGroup, bulkTriageWrongMatches, stopWrongMatchTriage, convergeWrongMatches, setWrongMatchConvergeThreshold, toggleWrongMatchesReplacedFilter } from './wrong-matches.js';
 import { openLabelDetail, openLabelDetailFromList, closeLabelDetail, onLabelFilterChange, onLabelYearFilterInput, toggleLabelIncludeSublabels, goToLabelPage } from './labels.js';
 import { toggleSearchPlanSummary, openSearchPlanDetail, closeSearchPlanDetail, searchPlanRegenerate, searchPlanAdvance, searchPlanLoadOlder, searchPlanRefreshDetail, searchPlanSubmitAdvance, searchPlanCancelAdvance } from './search_plan.js';
+import { dispatchTabShown } from './tabs.js';
 import { openReplacePicker } from './replace_picker.js';
 import { invalidateActiveRgs } from './active_rgs.js';
 import { toggleSection } from './render_primitives.js';
@@ -86,7 +87,8 @@ async function openReplacePickerAndHandle(options) {
 }
 
 // --- Tab management ---
-const tabOrder = ['browse', 'recents', 'pipeline', 'manual'];
+// Internal name, visible label, and follow-up-render ownership all live in
+// `tabs.js` (issue #1355 WE4) — `showTab` below only selects and dispatches.
 
 /**
  * Internal flag used by `openSearchPlanDetail`-style flows to suppress
@@ -97,8 +99,13 @@ const tabOrder = ['browse', 'recents', 'pipeline', 'manual'];
  */
 let suppressDetailReset = false;
 
-/** @param {string} name */
-function showTab(name) {
+/**
+ * Switch to tab `name`: activate its `.tab`/`.section` elements and run
+ * its follow-up render, if it has one (`tabs.js::dispatchTabShown`).
+ *
+ * @param {string} name
+ */
+export function showTab(name) {
   // F12: Tab-switch reset for the search-plan detail subview. When the
   // operator is on the detail page and clicks a tab — including
   // re-clicking the Pipeline tab — clear the detail context so the
@@ -112,13 +119,11 @@ function showTab(name) {
   }
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
-  const tabEl = document.querySelector(`.tab:nth-child(${tabOrder.indexOf(name) + 1})`);
+  const tabEl = document.querySelector(`.tab[data-tab-name="${name}"]`);
   if (tabEl) tabEl.classList.add('active');
   const secEl = document.getElementById(name + '-section');
   if (secEl) secEl.classList.add('active');
-  if (name === 'pipeline') loadPipeline();
-  if (name === 'recents') loadRecents();
-  if (name === 'manual') loadWrongMatches();
+  dispatchTabShown(name);
 }
 
 /**

@@ -20,6 +20,7 @@
 
 import { state, toast } from './state.js';
 import { esc, awstDateTime } from './util.js';
+import { isTabName, tabHasAsyncRender } from './tabs.js';
 
 /**
  * Default number of `search_log` rows fetched per history page.
@@ -573,7 +574,7 @@ export async function toggleSearchPlanSummary(requestId, rowEl) {
 
 /**
  * @typedef {Object} ActiveTabSnapshot
- * @property {string} tab          One of `'browse'`, `'pipeline'`, `'recents'`, `'decisions'`, `'manual'`.
+ * @property {string} tab          A `tabs.js` internal tab name (`'browse'`, `'recents'`, `'pipeline'`, or `'manual'`).
  * @property {string|null} subView Sub-view within the active tab when meaningful.
  * @property {number} scrollY      `window.scrollY` at the snapshot moment.
  */
@@ -585,27 +586,21 @@ export async function toggleSearchPlanSummary(requestId, rowEl) {
  * mutate them. The caller stamps this onto `state.searchPlanDetailContext`
  * via {@link captureOriginContext} before navigating to the detail page.
  *
- * Tab name mapping mirrors `web/js/main.js` `tabOrder`. We map the
- * visible tab labels to internal names so the back button can route via
- * `showTab(name)` directly.
+ * The active tab's `data-tab-name` attribute IS the internal name
+ * (`tabs.js` is the one owner of that mapping — see its module doc), so
+ * there is no label to reverse-map here; an unknown or missing attribute
+ * falls back to `'pipeline'`, same as before this attribute existed.
  *
  * @returns {ActiveTabSnapshot}
  */
 export function snapshotActiveTab() {
-  const labelToName = {
-    browse: 'browse',
-    recents: 'recents',
-    pipeline: 'pipeline',
-    decisions: 'decisions',
-    'wrong matches': 'manual',
-  };
   /** @type {string} */
   let tab = 'pipeline';
   if (typeof document !== 'undefined' && document.querySelector) {
     const activeEl = document.querySelector('.tab.active');
-    const label = (activeEl && activeEl.textContent ? activeEl.textContent.trim().toLowerCase() : '');
-    if (label && Object.prototype.hasOwnProperty.call(labelToName, label)) {
-      tab = labelToName[/** @type {keyof typeof labelToName} */ (label)];
+    const name = (activeEl && activeEl.getAttribute) ? activeEl.getAttribute('data-tab-name') : null;
+    if (name && isTabName(name)) {
+      tab = name;
     }
   }
   /** @type {string|null} */
@@ -793,7 +788,7 @@ export function closeSearchPlanDetail() {
     // apply it immediately in that case.
     stashScrollRestore(scrollY);
     const destinationConsumesRestore = typeof showTab === 'function'
-      && (tab === 'pipeline' || tab === 'recents' || tab === 'manual');
+      && tabHasAsyncRender(tab);
     if (typeof showTab === 'function') {
       showTab(tab);
     }
