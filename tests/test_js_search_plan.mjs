@@ -25,6 +25,7 @@ import {
   renderDetailPage,
   renderSearchPlanDetail,
   closeSearchPlanDetail,
+  consumePendingScrollRestore,
   searchPlanRefreshDetail,
   parseAdvanceTarget,
   renderAdvanceForm,
@@ -439,6 +440,34 @@ function makeInspection(overrides = {}) {
 }
 
 {
+  // WE-3 folded fix: a failure_class with a null error_message is a real
+  // producible row, not a hypothetical one. lib/pipeline_db/search_plan.py's
+  // create_failed_search_plan requires failure_class but defaults
+  // error_message=None (the migrations/014_persisted_search_plans.sql
+  // error_message column is nullable TEXT with no NOT NULL constraint), so
+  // a plan can legitimately persist with a failure class and no message.
+  // Every OTHER fixture in this file sets both fields together, which lets
+  // an `if (failureClass || failureError)` -> `&&` mutant at
+  // web/js/search_plan.js survive silently; this fixture is built the way
+  // the real writer's own defaults would produce one, and closes that gap.
+  const inspection = makeInspection({
+    active_plan: null,
+    currentness: {
+      is_wanted: true, has_active_plan: false, generator_id_mismatch: false,
+      has_deterministic_failure: true, has_retryable_failure: false,
+    },
+    latest_failed_deterministic: {
+      failure_class: 'no_runnable_query', error_message: null,
+    },
+  });
+  const html = renderSummaryPanel({ inspection, history: { rows: [] } });
+  t.contains(html, 'no_runnable_query',
+    'failure class surfaced even when error_message is null (producer default)');
+  t.excludes(html, 'No active plan',
+    'a real failure_class never falls through to the no-failure-recorded debug line');
+}
+
+{
   // Escape interpolation — hostile attempt query must be HTML-escaped.
   const history = {
     rows: [
@@ -774,10 +803,21 @@ function makeHistoryRows() {
 t.section('closeSearchPlanDetail() / openSearchPlanDetail()');
 
 /**
- * Tiny shim — capture window-side effects without a real DOM.
+ * Tiny shim -- capture window-side effects without a real DOM.
+ *
+ * `impl` may be async: `closeSearchPlanDetail` no longer restores
+ * scroll on a fixed frame count for a pipeline/recents/manual origin --
+ * it stashes and leaves consumption to the destination's own render
+ * (`loadPipeline`/`loadRecents`/`loadWrongMatches`, composed pins in
+ * their own test files). A caller here that wants to prove "not called
+ * before completion, called exactly once after" drives real microtask
+ * ticks and the real exported `consumePendingScrollRestore` standing in
+ * for that destination render finishing.
+ *
+ * @param {(win: any, calls: {showTab: string[], scrollTo: number[]}) => void | Promise<void>} impl
  */
-function withFakeWindow(impl) {
-  const calls = { showTab: [], scrollTo: [], rafCount: 0, scheduledScrolls: [] };
+async function withFakeWindow(impl) {
+  const calls = { showTab: /** @type {string[]} */ ([]), scrollTo: /** @type {number[]} */ ([]) };
   const prevState = state.searchPlanDetailContext;
   const prevPipelineView = state.pipelineView;
   /** @type {any} */
@@ -785,13 +825,6 @@ function withFakeWindow(impl) {
     scrollY: 0,
     /** @param {number} _x @param {number} y */
     scrollTo(_x, y) { calls.scrollTo.push(y); },
-    /** @param {() => void} fn */
-    requestAnimationFrame(fn) {
-      calls.rafCount += 1;
-      // Run the callback inline — the test then inspects calls.scrollTo.
-      fn();
-      return calls.rafCount;
-    },
     /** @param {string} name */
     showTab(name) { calls.showTab.push(name); },
   };
@@ -804,8 +837,14 @@ function withFakeWindow(impl) {
     }),
   });
   try {
-    impl(fakeWindow, calls);
+    await impl(fakeWindow, calls);
   } finally {
+    // Drain any stash a block forgot to consume, so a leftover pending
+    // restore can never leak into the next block's assertions -- this
+    // runs against the REAL fakeWindow still installed, so a drain here
+    // still records into THIS block's own `calls.scrollTo`, not a
+    // future block's.
+    consumePendingScrollRestore();
     state.searchPlanDetailContext = prevState;
     state.pipelineView = prevPipelineView;
     globals.restore();
@@ -813,9 +852,11 @@ function withFakeWindow(impl) {
 }
 
 {
-  // AE3: originTab='browse', originScrollY=420 → showTab('browse'),
-  // scrollTo scheduled to 420.
-  withFakeWindow((win, calls) => {
+  // AE3: originTab='browse', originScrollY=420. Browse has no
+  // follow-up render on a tab switch (its DOM is untouched), so
+  // closeSearchPlanDetail restores scroll itself, immediately -- no
+  // destination to defer to.
+  await withFakeWindow((win, calls) => {
     state.searchPlanDetailContext = {
       requestId: 2566,
       originTab: 'browse',
@@ -826,15 +867,24 @@ function withFakeWindow(impl) {
     t.ok(calls.showTab.length === 1 && calls.showTab[0] === 'browse',
       'AE3: showTab("browse") called once');
     t.ok(calls.scrollTo.length === 1 && calls.scrollTo[0] === 420,
-      'AE3: window.scrollTo(0, 420) scheduled via requestAnimationFrame');
+      'AE3: window.scrollTo(0, 420) restored immediately -- browse has no destination render to wait for');
     t.ok(state.searchPlanDetailContext === null,
       'AE3: stash cleared after close');
   });
 }
 
 {
-  // Origin tab is pipeline+long-tail: pipelineView restored to long-tail.
-  withFakeWindow((win, calls) => {
+  // Origin tab is pipeline+long-tail: pipelineView restored to
+  // long-tail, and -- unlike browse -- closeSearchPlanDetail must NOT
+  // apply the restore itself. loadPipeline() is the real destination
+  // render and owns consuming it (composed pin in
+  // tests/test_js_pipeline.mjs, which drives a genuinely deferred
+  // fetch). This test proves the search_plan.js half of that contract
+  // directly: the stash survives real microtask ticks untouched, firing
+  // the consume function -- standing in for the destination's render
+  // finishing -- restores exactly once with the exact position, and a
+  // second consume call is a no-op.
+  await withFakeWindow(async (win, calls) => {
     state.searchPlanDetailContext = {
       requestId: 100,
       originTab: 'pipeline',
@@ -847,14 +897,26 @@ function withFakeWindow(impl) {
       'pipeline-origin: pipelineView restored to long-tail');
     t.ok(calls.showTab.length === 1 && calls.showTab[0] === 'pipeline',
       'pipeline-origin: showTab("pipeline") called');
-    t.ok(calls.scrollTo.length === 1 && calls.scrollTo[0] === 64,
-      'pipeline-origin: scrollTo scheduled to origin scrollY');
+    t.equal(calls.scrollTo.length, 0,
+      'pipeline-origin: scrollTo not called immediately -- the destination owns consuming the stash');
+    await Promise.resolve();
+    await Promise.resolve();
+    t.equal(calls.scrollTo.length, 0,
+      'pipeline-origin: scrollTo still not called after real microtask ticks -- no timer or frame heuristic remains');
+    consumePendingScrollRestore();
+    t.equal(calls.scrollTo.length, 1,
+      'pipeline-origin: scrollTo called exactly once once the destination render completes');
+    t.equal(calls.scrollTo[0], 64,
+      'pipeline-origin: restores the exact origin scroll position');
+    consumePendingScrollRestore();
+    t.equal(calls.scrollTo.length, 1,
+      'pipeline-origin: a second consume call is a no-op -- exactly once, not at-least-once');
   });
 }
 
 {
   // Origin tab is pipeline+dashboard: pipelineView restored to dashboard.
-  withFakeWindow((win, calls) => {
+  await withFakeWindow((win, calls) => {
     state.searchPlanDetailContext = {
       requestId: 100,
       originTab: 'pipeline',
@@ -869,8 +931,10 @@ function withFakeWindow(impl) {
 }
 
 {
-  // Origin tab is recents+acquisition: restore recentsSub.
-  withFakeWindow((win, calls) => {
+  // Origin tab is recents+acquisition: restore recentsSub. Recents also
+  // defers the restore to its own destination render (composed pin in
+  // tests/test_js_recents.mjs).
+  await withFakeWindow((win, calls) => {
     state.searchPlanDetailContext = {
       requestId: 99,
       originTab: 'recents',
@@ -883,12 +947,17 @@ function withFakeWindow(impl) {
       'recents-origin: recentsSub restored to acquisition');
     t.ok(calls.showTab[0] === 'recents',
       'recents-origin: showTab("recents") called');
+    t.equal(calls.scrollTo.length, 0,
+      'recents-origin: scrollTo not called immediately -- the destination owns consuming the stash');
+    consumePendingScrollRestore();
+    t.ok(calls.scrollTo.length === 1 && calls.scrollTo[0] === 100,
+      'recents-origin: scrollTo fires with the origin scroll position once consumed');
   });
 }
 
 {
   // PR5 renamed the importer subview to Imports; Back must restore it.
-  withFakeWindow((win, calls) => {
+  await withFakeWindow((win, calls) => {
     state.searchPlanDetailContext = {
       requestId: 101,
       originTab: 'recents',
@@ -905,8 +974,10 @@ function withFakeWindow(impl) {
 }
 
 {
-  // No origin context: fallback to pipeline/dashboard, no throw.
-  withFakeWindow((win, calls) => {
+  // No origin context: fallback to pipeline/dashboard, no throw. There
+  // is no stashed scroll position in this path (no ctx means no
+  // scrollY to restore), so no consume is expected either.
+  await withFakeWindow((win, calls) => {
     state.searchPlanDetailContext = null;
     state.pipelineView = 'search-plan-detail';
     let threw = false;
@@ -920,6 +991,36 @@ function withFakeWindow(impl) {
       'no-origin: fallback to pipelineView=dashboard');
     t.ok(calls.showTab.length === 1 && calls.showTab[0] === 'pipeline',
       'no-origin: fallback shows the pipeline tab');
+    t.equal(calls.scrollTo.length, 0,
+      'no-origin: no scroll position was ever stashed, so nothing restores');
+  });
+}
+
+{
+  // Mutant-runner finding: the stash must happen BEFORE showTab is
+  // called, not merely "eventually" -- a destination whose loader
+  // consumes synchronously (rather than after an await, as every real
+  // loader here does today) would see nothing pending yet if the
+  // ordering ever inverted. Simulate exactly that: a showTab stub that
+  // consumes the instant it is invoked, standing in for a fully
+  // synchronous destination render. If stashScrollRestore ever moved to
+  // run after showTab(tab), this synchronous consumer would find
+  // nothing pending and scrollTo would never fire.
+  await withFakeWindow((win, calls) => {
+    win.showTab = (name) => {
+      calls.showTab.push(name);
+      consumePendingScrollRestore();
+    };
+    state.searchPlanDetailContext = {
+      requestId: 555,
+      originTab: 'pipeline',
+      originScrollY: 999,
+      originSubView: 'dashboard',
+    };
+    state.pipelineView = 'search-plan-detail';
+    closeSearchPlanDetail();
+    t.ok(calls.scrollTo.length === 1 && calls.scrollTo[0] === 999,
+      'the stash is already set by the time showTab runs, so a synchronous destination consumer restores immediately');
   });
 }
 

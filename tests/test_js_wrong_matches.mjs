@@ -39,6 +39,8 @@ import {
   toggleWrongMatchEntry,
   triageButtonPresentation,
 } from '../web/js/wrong-matches.js';
+import { closeSearchPlanDetail } from '../web/js/search_plan.js';
+import { state } from '../web/js/state.js';
 import { esc } from '../web/js/util.js';
 
 import { domStub, element, stubGlobals, suite } from './js_harness.mjs';
@@ -2651,6 +2653,103 @@ t.section('retryTriageStatusOnce() is single-flight — a second concurrent call
 
   t.equal(statusCalls, 1,
     'only ONE retry actually performs its status fetch -- the concurrent second call is a no-op');
+  globals.restore();
+}
+
+// --- WE-3: loadWrongMatches() is the scroll-restore completion boundary
+//
+// Mirrors the pipeline.js/recents.js pins: search_plan.js's
+// closeSearchPlanDetail stashes the origin scroll position for a
+// manual-tab origin and leaves it un-consumed; loadWrongMatches() is
+// the real destination and consumes it only once its own fetch-driven
+// render is done -- including when that render is the `_loaded` cache
+// short-circuit, which still counts as "this tab's render is done".
+
+t.section('loadWrongMatches() consumes a pending scroll restore only after its own render completes');
+{
+  invalidateWrongMatches();
+  const content = element();
+  const scrollCalls = [];
+  // Captured at the exact moment scrollTo fires -- proves the restore
+  // lands after the FINAL DOM write, not merely after the fetch settles
+  // (a mutant that moved the consume call to just before `renderWrongMatches`
+  // finished would still pass a fetch-timing-only assertion).
+  const htmlAtScrollTime = [];
+  let resolveFetch;
+  const fetchGate = new Promise((resolve) => { resolveFetch = resolve; });
+  const globals = stubGlobals({
+    // No `wm-bulk-triage-btn` / `wm-bulk-triage-stop-btn` in this stub,
+    // so `_deriveTriageButtonState` short-circuits with no fetch of its
+    // own -- the ONLY fetch this render makes is the queue fetch below.
+    document: domStub({ 'wrong-matches-content': content }),
+    window: /** @type {any} */ ({
+      scrollTo(_x, y) { scrollCalls.push(y); htmlAtScrollTime.push(content.innerHTML); },
+      showTab() {},
+    }),
+    localStorage: { getItem() { return null; } },
+    fetch: async (url) => {
+      if (url !== '/api/wrong-matches') throw new Error(`unexpected fetch: ${url}`);
+      await fetchGate;
+      return { ok: true, status: 200, json: async () => ({ groups: [] }) };
+    },
+  });
+  state.searchPlanDetailContext = {
+    requestId: 7, originTab: 'manual', originScrollY: 512, originSubView: null,
+  };
+  closeSearchPlanDetail();
+  t.equal(scrollCalls.length, 0,
+    'closeSearchPlanDetail does not restore scroll itself for a manual-tab origin');
+
+  const rendered = loadWrongMatches();
+  await Promise.resolve();
+  await Promise.resolve();
+  t.equal(scrollCalls.length, 0,
+    'scrollTo is not called while the wrong-matches queue fetch is still pending');
+
+  resolveFetch();
+  await rendered;
+  t.equal(scrollCalls.length, 1,
+    'scrollTo is called exactly once after loadWrongMatches finishes rendering');
+  t.equal(scrollCalls[0], 512, 'restores the exact stashed scroll position');
+  t.excludes(htmlAtScrollTime[0], 'Loading wrong matches',
+    'scrollTo never fires while the loading placeholder is still showing');
+  t.equal(htmlAtScrollTime[0], content.innerHTML,
+    'the wrong-matches DOM was already in its final rendered state at the moment scrollTo fired');
+  globals.restore();
+}
+
+t.section('loadWrongMatches() consumes a pending scroll restore even on the cached _loaded short-circuit');
+{
+  // Prime the module-scoped `_loaded` cache with a real fetch first.
+  const primeContent = element();
+  const primeGlobals = stubGlobals({
+    document: domStub({ 'wrong-matches-content': primeContent }),
+    window: /** @type {any} */ ({ scrollTo() {}, showTab() {} }),
+    localStorage: { getItem() { return null; } },
+    fetch: async () => ({ ok: true, status: 200, json: async () => ({ groups: [] }) }),
+  });
+  await loadWrongMatches();
+  primeGlobals.restore();
+
+  // Now a second call short-circuits on `_loaded` -- no fetch at all --
+  // and must still consume the stash.
+  const scrollCalls = [];
+  const globals = stubGlobals({
+    document: domStub({ 'wrong-matches-content': primeContent }),
+    window: /** @type {any} */ ({
+      scrollTo(_x, y) { scrollCalls.push(y); },
+      showTab() {},
+    }),
+    fetch: async (url) => { throw new Error(`unexpected fetch on cached load: ${url}`); },
+  });
+  state.searchPlanDetailContext = {
+    requestId: 8, originTab: 'manual', originScrollY: 88, originSubView: null,
+  };
+  closeSearchPlanDetail();
+  await loadWrongMatches();
+  t.equal(scrollCalls.length, 1,
+    'the cached _loaded short-circuit still consumes the pending restore');
+  t.equal(scrollCalls[0], 88, 'restores the exact stashed scroll position on the cached path');
   globals.restore();
 }
 

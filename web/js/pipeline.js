@@ -15,7 +15,7 @@ import {
   handleProcessingLockedConflict,
   processingOwnerPresentation,
 } from './release_action_state.js';
-import { renderSearchPlanDetail } from './search_plan.js';
+import { consumePendingScrollRestore, renderSearchPlanDetail } from './search_plan.js';
 import { loadLongTail, renderLongTailBody } from './long_tail.js';
 import { restoreLongTailConsoles } from './long_tail_console.js';
 import {
@@ -71,25 +71,34 @@ export function renderRequestEvidenceSections(history, beetsTracks, expectedTrac
  * @returns {Promise<void>}
  */
 export async function loadPipeline() {
-  if (state.pipelineView === 'long-tail') {
-    // U3: the long-tail worklist owns its own fetch lifecycle. It paints
-    // a loading affordance, fetches the banded cohort, then routes back
-    // through renderPipeline (which re-emits the Pipeline nav).
-    await loadLongTail();
-    return;
-  }
-  if (state.pipelineView === 'search-plan-detail') {
-    // U4: detail subview owns its own render lifecycle; openSearchPlanDetail
-    // already kicked off the fetch when the subview was entered. Don't
-    // clobber it with a dashboard paint.
-    const ctx = state.searchPlanDetailContext;
-    if (ctx && ctx.requestId) {
-      await renderSearchPlanDetail(ctx.requestId);
+  // The `finally` guarantees exactly one consume per call regardless of
+  // which branch below runs or returns early — the search-plan back
+  // button's completion boundary (search_plan.js::closeSearchPlanDetail)
+  // relies on this being the true end of the Pipeline tab's render, not
+  // a fixed delay after it starts.
+  try {
+    if (state.pipelineView === 'long-tail') {
+      // U3: the long-tail worklist owns its own fetch lifecycle. It paints
+      // a loading affordance, fetches the banded cohort, then routes back
+      // through renderPipeline (which re-emits the Pipeline nav).
+      await loadLongTail();
+      return;
     }
-    return;
+    if (state.pipelineView === 'search-plan-detail') {
+      // U4: detail subview owns its own render lifecycle; openSearchPlanDetail
+      // already kicked off the fetch when the subview was entered. Don't
+      // clobber it with a dashboard paint.
+      const ctx = state.searchPlanDetailContext;
+      if (ctx && ctx.requestId) {
+        await renderSearchPlanDetail(ctx.requestId);
+      }
+      return;
+    }
+    state.pipelineView = 'dashboard';
+    await loadPipelineDashboard();
+  } finally {
+    consumePendingScrollRestore();
   }
-  state.pipelineView = 'dashboard';
-  await loadPipelineDashboard();
 }
 
 /**

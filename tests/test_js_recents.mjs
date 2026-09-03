@@ -26,6 +26,7 @@ import {
   renderRecentsSubnav,
   triageLabelText,
 } from '../web/js/recents.js';
+import { closeSearchPlanDetail } from '../web/js/search_plan.js';
 import { state } from '../web/js/state.js';
 import { esc } from '../web/js/util.js';
 import { validDualProviderProof } from './fixtures/cd_rip_proof.mjs';
@@ -774,6 +775,105 @@ t.section('Acquisition row wires window.toggleDetail with (acquisition-<id>, id)
     'YouTube acquisition row keys the detail on the yt log id but navigates by request id');
   t.contains(yt, 'id="acquisition-youtube-301"',
     'YouTube detail placeholder id matches the toggle target');
+}
+
+// --- WE-3: loadRecents() is the scroll-restore completion boundary ---
+//
+// Mirrors the pipeline.js pin: search_plan.js::closeSearchPlanDetail
+// stashes the origin scroll position for a recents-tab origin and
+// leaves it un-consumed; loadRecents() is the real destination and
+// consumes it only once its own fetch-driven render is done.
+
+t.section('loadRecents() consumes a pending scroll restore only after its own render completes');
+{
+  const content = { innerHTML: '' };
+  const scrollCalls = [];
+  // Captured at the exact moment scrollTo fires -- proves the restore
+  // lands after the FINAL DOM write, not merely after the fetch settles
+  // (a mutant that moved the consume call to just before the last
+  // `el.innerHTML =` would still pass a fetch-timing-only assertion).
+  const htmlAtScrollTime = [];
+  let resolveFetch;
+  const fetchGate = new Promise((resolve) => { resolveFetch = resolve; });
+  const globals = stubGlobals({
+    document: domStub({ 'recents-content': content }),
+    window: /** @type {any} */ ({
+      scrollTo(_x, y) { scrollCalls.push(y); htmlAtScrollTime.push(content.innerHTML); },
+      showTab() {},
+    }),
+    fetch: async () => {
+      await fetchGate;
+      return { ok: true, status: 200, async json() { return { log: [] }; } };
+    },
+  });
+  state.recentsFilter = 'imported'; // avoid the 'all' fallback fetch branch
+  state.searchPlanDetailContext = {
+    requestId: 99, originTab: 'recents', originScrollY: 321, originSubView: 'history',
+  };
+  state.recentsSub = 'acquisition';
+  closeSearchPlanDetail();
+  t.equal(state.recentsSub, 'history', 'origin subView restored to history before loadRecents runs');
+  t.equal(scrollCalls.length, 0,
+    'closeSearchPlanDetail does not restore scroll itself for a recents origin');
+
+  const rendered = loadRecents();
+  await Promise.resolve();
+  await Promise.resolve();
+  t.equal(scrollCalls.length, 0,
+    'scrollTo is not called while the recents log fetch is still pending');
+
+  resolveFetch();
+  await rendered;
+  t.equal(scrollCalls.length, 1,
+    'scrollTo is called exactly once after loadRecents finishes rendering');
+  t.equal(scrollCalls[0], 321, 'restores the exact stashed scroll position');
+  t.excludes(htmlAtScrollTime[0], 'Loading...',
+    'scrollTo never fires while the loading placeholder is still showing');
+  t.equal(htmlAtScrollTime[0], content.innerHTML,
+    'the recents DOM was already in its final rendered state at the moment scrollTo fired');
+  globals.restore();
+}
+
+t.section('loadRecents() consumes a pending scroll restore on its imports/acquisition early-return branches too');
+// Reader re-read finding: the first version of this test only drove the
+// `imports` subview -- `acquisition` shares the exact same early-return
+// shape (closeSearchPlanDetail can restore `recentsSub='acquisition'`
+// too, see the recents/acquisition origin block in
+// tests/test_js_search_plan.mjs) and was still unpinned, so the
+// symmetric mutant on that branch would have survived. Drive both.
+for (const subView of ['imports', 'acquisition']) {
+  // Mutant-runner finding (WE-3 review): the `finally` wraps the whole
+  // function, but the log-fetch pin above only proves that ONE branch
+  // converges on it -- hoisting either early-return branch out of the
+  // `try` left every existing test in this suite green.
+  // closeSearchPlanDetail restores `recentsSub` to exactly this origin
+  // subView, which is the real trigger for this branch, so drive it
+  // that way rather than setting recentsSub by hand.
+  const content = { innerHTML: '' };
+  const scrollCalls = [];
+  const globals = stubGlobals({
+    document: domStub({ 'recents-content': content }),
+    window: /** @type {any} */ ({
+      scrollTo(_x, y) { scrollCalls.push(y); },
+      showTab() {},
+    }),
+    fetch: async () => (subView === 'imports'
+      ? { ok: true, status: 200, async json() { return { jobs: [], counts: {} }; } }
+      : { ok: true, status: 200, async json() { return { acquisition: [], youtube_ingest: [] }; } }),
+  });
+  state.searchPlanDetailContext = {
+    requestId: 101, originTab: 'recents', originScrollY: 8765, originSubView: subView,
+  };
+  state.recentsSub = 'history';
+  closeSearchPlanDetail();
+  t.equal(state.recentsSub, subView,
+    `origin subView restored to ${subView} before loadRecents runs`);
+  await loadRecents();
+  t.equal(scrollCalls.length, 1,
+    `the ${subView} early-return branch also consumes the pending restore`);
+  t.equal(scrollCalls[0], 8765,
+    `restores the exact stashed scroll position on the ${subView} branch`);
+  globals.restore();
 }
 
 t.done();

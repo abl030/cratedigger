@@ -4,6 +4,7 @@
  */
 
 import {
+  loadPipeline,
   mergeRekeyRequest,
   recheckRetagDivergenceAlbum,
   renderCurrentLibraryRow,
@@ -15,6 +16,7 @@ import {
   syncRetagDivergenceAlbum,
   toggleDetail,
 } from '../web/js/pipeline.js';
+import { closeSearchPlanDetail } from '../web/js/search_plan.js';
 import { state } from '../web/js/state.js';
 import { jsArg } from '../web/js/util.js';
 
@@ -992,6 +994,99 @@ t.section('toggleDetail() on an open panel collapses it without refetching');
   await toggleDetail(4242);
   t.equal(fetches, 1, 'closing it again does not refetch');
   t.equal(panel.classList.contains('open'), false, 'the panel is collapsed');
+}
+
+// --- WE-3: loadPipeline() is the scroll-restore completion boundary --
+//
+// search_plan.js::closeSearchPlanDetail stashes the origin scroll
+// position and, for a pipeline-tab origin, deliberately does not
+// consume it itself — loadPipeline() is the real destination render and
+// owns consuming it exactly once its own DOM update is done. This
+// drives BOTH real functions across the module boundary:
+// closeSearchPlanDetail establishes the stash the way the back button
+// really does, and loadPipeline's own fetch is deferred so the test can
+// prove ordering, not just eventual truth.
+
+t.section('loadPipeline() consumes a pending scroll restore only after its own render completes');
+{
+  const content = element();
+  const scrollCalls = [];
+  // Captured at the exact moment scrollTo fires -- proves the restore
+  // lands after the FINAL DOM write, not merely after the fetch settles
+  // (a mutant that moved the consume call to just before the last
+  // `el.innerHTML =` would still pass a fetch-timing-only assertion).
+  const htmlAtScrollTime = [];
+  let resolveFetch;
+  const fetchGate = new Promise((resolve) => { resolveFetch = resolve; });
+  stubGlobals({
+    document: domStub({ 'pipeline-content': content }),
+    window: /** @type {any} */ ({
+      scrollTo(_x, y) { scrollCalls.push(y); htmlAtScrollTime.push(content.innerHTML); },
+      showTab() {},
+    }),
+    fetch: async () => {
+      await fetchGate;
+      return { ok: true, status: 200, async json() { return { counts: {}, drift_rows: [] }; } };
+    },
+  });
+  state.searchPlanDetailContext = {
+    requestId: 42, originTab: 'pipeline', originScrollY: 777, originSubView: 'dashboard',
+  };
+  state.pipelineView = 'search-plan-detail';
+  closeSearchPlanDetail();
+  t.equal(scrollCalls.length, 0,
+    'closeSearchPlanDetail does not restore scroll itself for a pipeline origin');
+
+  const rendered = loadPipeline();
+  await Promise.resolve();
+  await Promise.resolve();
+  t.equal(scrollCalls.length, 0,
+    'scrollTo is not called while the dashboard fetch is still pending');
+
+  resolveFetch();
+  await rendered;
+  t.equal(scrollCalls.length, 1,
+    'scrollTo is called exactly once after loadPipeline finishes rendering');
+  t.equal(scrollCalls[0], 777, 'restores the exact stashed scroll position');
+  t.excludes(htmlAtScrollTime[0], 'Loading...',
+    'scrollTo never fires while the loading placeholder is still showing');
+  t.equal(htmlAtScrollTime[0], content.innerHTML,
+    'the dashboard DOM was already in its final rendered state at the moment scrollTo fired');
+}
+
+t.section('loadPipeline() consumes a pending scroll restore on its long-tail early-return branch too');
+{
+  // Mutant-runner finding (WE-3 review): the `finally` wraps the whole
+  // function, but the dashboard-branch pin above only proves that ONE
+  // branch converges on it -- hoisting just the long-tail early-return
+  // branch out of the `try` left every existing test in this suite
+  // green. closeSearchPlanDetail restores `pipelineView='long-tail'`
+  // for exactly this origin subView, which is the real trigger for this
+  // branch (see U3 in loadPipeline's own body), so drive it that way
+  // rather than setting pipelineView by hand.
+  const content = element();
+  const scrollCalls = [];
+  const globals = stubGlobals({
+    document: domStub({ 'pipeline-content': content }),
+    window: /** @type {any} */ ({
+      scrollTo(_x, y) { scrollCalls.push(y); },
+      showTab() {},
+    }),
+    fetch: async () => ({ ok: true, status: 200, async json() { return { results: [] }; } }),
+  });
+  state.searchPlanDetailContext = {
+    requestId: 43, originTab: 'pipeline', originScrollY: 4321, originSubView: 'long-tail',
+  };
+  state.pipelineView = 'search-plan-detail';
+  closeSearchPlanDetail();
+  t.equal(state.pipelineView, 'long-tail',
+    'origin subView restored to long-tail before loadPipeline runs');
+  await loadPipeline();
+  t.equal(scrollCalls.length, 1,
+    'the long-tail early-return branch also consumes the pending restore');
+  t.equal(scrollCalls[0], 4321,
+    'restores the exact stashed scroll position on the long-tail branch');
+  globals.restore();
 }
 
 t.done();
