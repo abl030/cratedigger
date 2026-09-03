@@ -622,6 +622,12 @@ function makeHistoryRows() {
     'AE5: failure class surfaced in plan-health');
   t.contains(html, 'metadata incomplete',
     'AE5: failure error_message surfaced');
+  // created_at on the fixture's flat plan dict must reach the rendered
+  // failure timestamp via awstDateTime (UTC 2026-05-08T00:00:00Z + 8h).
+  t.contains(html, 'sp-health-failure-when',
+    'AE5: failure timestamp block rendered');
+  t.contains(html, '2026-05-08 08:00',
+    'AE5: failure created_at rendered via awstDateTime');
   t.contains(html, 'omitted_candidates',
     'AE5: provenance: omitted_candidates rendered');
   t.contains(html, 'deduped_losers',
