@@ -6,11 +6,9 @@ Both are enriched with library/pipeline status via check_beets_library() and che
 """
 from __future__ import annotations
 
-import concurrent.futures
 import copy
 import urllib.error
 import uuid
-from collections.abc import Callable
 from typing import NotRequired, TypedDict, TypeGuard
 
 import msgspec
@@ -39,6 +37,7 @@ from web.library_album_row import AmbiguousLibraryRequestAttachmentError
 from web.library_artist_service import list_library_artist_rows
 from web.mb import VA_ARTIST_MBID as _MB_VA_ARTIST_MBID
 from web.overlay import compute_library_rank
+from web.parallel_fanout import parallel_results
 from web.routes._overlay import overlay_release_rows_in_place
 from web.routes._registry import (
     RouteHandler,
@@ -47,31 +46,6 @@ from web.routes._registry import (
     route,
 )
 from web.runtime import runtime
-
-
-def _parallel_results[Key, Result](
-    jobs: dict[Key, Callable[[], Result]], *, max_workers: int,
-) -> dict[Key, Result]:
-    """Fan out independent route sources without delaying an upstream error."""
-    if not jobs:
-        return {}
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
-    futures = {key: executor.submit(job) for key, job in jobs.items()}
-    try:
-        done, _pending = concurrent.futures.wait(
-            futures.values(), return_when=concurrent.futures.FIRST_EXCEPTION,
-        )
-        for future in done:
-            future.result()
-        results = {key: future.result() for key, future in futures.items()}
-    except BaseException:
-        for future in futures.values():
-            future.cancel()
-        executor.shutdown(wait=False, cancel_futures=True)
-        raise
-    else:
-        executor.shutdown(wait=True)
-        return results
 
 
 def get_search(h: RouteHandler, params: dict[str, list[str]]) -> None:
@@ -726,7 +700,7 @@ def _build_compare_skeleton(
     # The source catalogues have no dependency on each other.  Starting them
     # together removes a cold compare waterfall while each adapter retains its
     # own mirror-specific fan-out limits and cache/singleflight semantics.
-    sources = _parallel_results({
+    sources = parallel_results({
         **({"mb": lambda: mb_api.get_artist_release_groups(mbid)} if mbid else {}),
         **({"discogs": lambda: discogs_api.get_artist_releases(int(discogs_id))}
            if discogs_id else {}),

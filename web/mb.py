@@ -12,7 +12,6 @@ leaked stale badges when the pipeline updated Postgres outside the
 web UI's POST invalidation paths. See issue #101.
 """
 
-import concurrent.futures
 import json
 import threading
 import time
@@ -36,6 +35,7 @@ from lib.json_narrow import is_object_list, is_str_object_dict
 from web import cache as _cache
 from web.api_bases import PUBLIC_MB_ORIGIN, PUBLIC_MB_WS2_BASE
 from web.artist_search import merge_exact_artist_identities
+from web.parallel_fanout import parallel_results
 
 # Default: public MusicBrainz (functional but rate-limited ~1 req/s).
 # Production points this at the local mirror via the module's
@@ -155,33 +155,6 @@ def _get(url: str) -> Any:
             return request_once()
 
 
-def _parallel_results[Key, Result](
-    jobs: dict[Key, Callable[[], Result]], *, max_workers: int,
-) -> dict[Key, Result]:
-    """Return concurrent results, surfacing one failure without sibling wait."""
-    if not jobs:
-        return {}
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
-    futures = {key: executor.submit(job) for key, job in jobs.items()}
-    try:
-        done, _pending = concurrent.futures.wait(
-            futures.values(), return_when=concurrent.futures.FIRST_EXCEPTION,
-        )
-        # A completed exception wins immediately; do not call the context
-        # manager's waiting shutdown path while another mirror request hangs.
-        for future in done:
-            future.result()
-        results = {key: future.result() for key, future in futures.items()}
-    except BaseException:
-        for future in futures.values():
-            future.cancel()
-        executor.shutdown(wait=False, cancel_futures=True)
-        raise
-    else:
-        executor.shutdown(wait=True)
-        return results
-
-
 def _fetch_browse_pages[MBPage, MBItem](
     fetch_page: Callable[[int, int], MBPage],
     page_total: Callable[[MBPage], int],
@@ -225,7 +198,7 @@ def _fetch_browse_pages[MBPage, MBItem](
         start: (lambda start=start: fill_segment(start, first if start == 0 else None))
         for start in starts
     }
-    segments = _parallel_results(jobs, max_workers=_MB_MIRROR_CONCURRENCY)
+    segments = parallel_results(jobs, max_workers=_MB_MIRROR_CONCURRENCY)
     pages = [page for start in starts for page in segments[start]]
     ids = [item_id(item) for page in pages for item in page_items(page)]
     if len(ids) != total or any(not identity for identity in ids) or len(ids) != len(set(ids)):
@@ -798,7 +771,7 @@ def get_artist_release_groups(artist_mbid: str) -> list[ArtistCatalogueRow]:
         # The three families are independent.  Each helper's remaining pages
         # fan out after its own first page, and _get keeps their combined load
         # within one mirror-wide budget.
-        families = _parallel_results({
+        families = parallel_results({
             "release_groups": lambda: _fetch_browse_pages(
                 fetch_release_groups,
                 lambda page: page.release_group_count,
@@ -818,7 +791,7 @@ def get_artist_release_groups(artist_mbid: str) -> list[ArtistCatalogueRow]:
                 lambda item: item.id,
             ),
         }, max_workers=3)
-        # _parallel_results' return type is homogeneous per its shared
+        # parallel_results' return type is homogeneous per its shared
         # ``Result`` TypeVar, so a dict fanning out THREE genuinely
         # different per-key result types cannot statically discriminate
         # `families["release_groups"]` from `families["direct_releases"]`
@@ -1236,7 +1209,7 @@ def get_artist_releases_with_recordings(
             return segment
 
         starts = range(0, len(canonical_ids), 100)
-        segments = _parallel_results(
+        segments = parallel_results(
             {start: (lambda start=start: fetch_segment(start)) for start in starts},
             max_workers=_MB_MIRROR_CONCURRENCY,
         )
@@ -1265,7 +1238,7 @@ def get_artist_releases_with_recordings(
                 )
                 return msgspec.convert(raw, type=_MBReleaseFullStruct)
 
-            repairs = _parallel_results(
+            repairs = parallel_results(
                 {release_id: (lambda release_id=release_id: fetch_missing(release_id))
                  for release_id in missing_ids},
                 max_workers=_MB_MIRROR_CONCURRENCY,

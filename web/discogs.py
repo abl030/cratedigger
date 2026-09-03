@@ -12,7 +12,6 @@ so that per-user pipeline / library overlay state is never baked
 into Redis (issue #101).
 """
 
-import concurrent.futures
 import hashlib
 import json
 import re
@@ -33,6 +32,7 @@ from lib.discogs_positions import (
 from lib.json_narrow import is_str_object_dict, json_list
 from web import cache as _cache
 from web.artist_search import ArtistHit, merge_exact_artist_identities
+from web.parallel_fanout import parallel_results
 
 # Mirror-REQUIRED (tier-2 plan U6, R13): these endpoints (/api/search,
 # /api/masters/<id>, ...) and the msgspec response Structs are the Rust
@@ -86,29 +86,6 @@ def _mirror_semaphore(url: str) -> threading.BoundedSemaphore:
             _discogs_mirror_semaphores[origin] = semaphore
         return semaphore
 
-
-def _parallel_results[Key, Result](
-    jobs: dict[Key, Callable[[], Result]], *, max_workers: int,
-) -> dict[Key, Result]:
-    if not jobs:
-        return {}
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
-    futures = {key: executor.submit(job) for key, job in jobs.items()}
-    try:
-        done, _pending = concurrent.futures.wait(
-            futures.values(), return_when=concurrent.futures.FIRST_EXCEPTION,
-        )
-        for future in done:
-            future.result()
-        results = {key: future.result() for key, future in futures.items()}
-    except BaseException:
-        for future in futures.values():
-            future.cancel()
-        executor.shutdown(wait=False, cancel_futures=True)
-        raise
-    else:
-        executor.shutdown(wait=True)
-        return results
 
 # Canonical Various Artists artist_id sentinel. The Discogs CC0 dump uses
 # 194 as the foreign key in `release_artist` for VA-credited releases, but
@@ -506,7 +483,7 @@ def get_artist_releases(artist_id: int) -> list[ArtistCatalogueRow]:
 
         # These endpoints are independent bulk documents.  Keep the fan-out
         # deliberately tiny: one request for masters and one for appearances.
-        sources = _parallel_results({
+        sources = parallel_results({
             "masters": lambda: _get(
                 f"{api_base}/api/artists/{artist_id}/masters/all",
             ),
