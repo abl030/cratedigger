@@ -40,8 +40,7 @@ from lib.grab_list import DownloadFile, GrabListEntry
 from lib.import_execution import (
     CancellationToken,
     ExecutionCancelled,
-    ExecutionLeaseSnapshot,
-    OwnerSessionIdentity,
+    ExecutionOwnerProof,
 )
 from lib.import_queue import (
     AutomationHandoffResult,
@@ -642,8 +641,7 @@ def _run_completed_processing(
     import_job_id: int,
     process_album_fn: ProcessAlbumFn | None = None,
     cancellation_token: CancellationToken | None = None,
-    execution_lease: ExecutionLeaseSnapshot | None = None,
-    owner_session_identity: OwnerSessionIdentity | None = None,
+    owner_proof: ExecutionOwnerProof | None = None,
 ) -> CompletionResult:
     """Run exact-owner processing for a completed album.
 
@@ -674,8 +672,7 @@ def _run_completed_processing(
             ctx,
             import_job_id=import_job_id,
             cancellation_token=cancellation_token,
-            execution_lease=execution_lease,
-            owner_session_identity=owner_session_identity,
+            owner_proof=owner_proof,
         )
     except ExecutionCancelled:
         raise

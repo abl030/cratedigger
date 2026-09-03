@@ -33,6 +33,7 @@ from lib.download_ownership import DownloadOwnershipWriter
 from lib.import_execution import (
     CancellationToken,
     ExecutionLeaseSnapshot,
+    ExecutionOwnerProof,
     OwnerSessionIdentity,
     ProcessIdentity,
 )
@@ -3117,6 +3118,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             from lib.staged_album import StagedAlbum
 
             validate_calls: list[int] = []
+            observed_owner_proofs: list[ExecutionOwnerProof | None] = []
 
             def _stub_validate(
                 album_data: GrabListEntry,
@@ -3126,9 +3128,8 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 import_job_id: int,
                 handle_valid_fn: HandleValidFn | None = None,
                 dispatch_fn: DispatchCoreFn | None = None,
-                execution_lease: ExecutionLeaseSnapshot | None = None,
                 cancellation_token: CancellationToken | None = None,
-                owner_session_identity: OwnerSessionIdentity | None = None,
+                owner_proof: ExecutionOwnerProof | None = None,
             ) -> DispatchOutcome | None:
                 del (
                     album_data,
@@ -3136,22 +3137,34 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                     ctx,
                     handle_valid_fn,
                     dispatch_fn,
-                    execution_lease,
                     cancellation_token,
-                    owner_session_identity,
                 )
                 validate_calls.append(import_job_id)
+                observed_owner_proofs.append(owner_proof)
                 return stub_outcome
 
             validate_recorder: ValidateFn = _stub_validate
+            owner_proof = ExecutionOwnerProof(
+                execution_lease=ExecutionLeaseSnapshot(
+                    host_boot_id="boot-a",
+                    invocation_id="invocation-a",
+                    systemd_unit="cratedigger-importer.service",
+                    worker=ProcessIdentity(pid=101, start_ticks=1001),
+                ),
+                owner_session_identity=OwnerSessionIdentity(
+                    connection_object_id=1, backend_pid=2,
+                ),
+            )
 
             result = process_completed_album(
                 album, ctx, import_job_id=1, validate_fn=validate_recorder,
+                owner_proof=owner_proof,
             )
 
             assert isinstance(result, CompletionDispatched)
             self.assertIs(result.outcome, stub_outcome)
             self.assertEqual(validate_calls, [1])
+            self.assertEqual(observed_owner_proofs, [owner_proof])
 
     @patch("lib.beets.beets_validate")
     def test_beets_rejection_summary_is_returned_to_queue_owner(

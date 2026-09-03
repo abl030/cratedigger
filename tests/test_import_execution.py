@@ -1,5 +1,6 @@
 """Execution-lease, fail-stop session, and process-group primitives."""
 
+import dataclasses
 import os
 import pathlib
 import signal
@@ -25,6 +26,7 @@ from lib.import_execution import (
     ExecutionCancelled,
     ExecutionLeaseSnapshot,
     ExecutionLivenessEvidence,
+    ExecutionOwnerProof,
     InvocationObservation,
     InvocationState,
     MonitoredProcessGroup,
@@ -198,6 +200,73 @@ class TestExecutionLeaseCapture(unittest.TestCase):
                 systemd_unit=" ",
                 invocation_id="invocation-a",
             )
+
+
+class TestExecutionOwnerProof(unittest.TestCase):
+    """The #898 owner pair, bundled for the completed-download lifecycle."""
+
+    def test_holds_both_fields_and_compares_by_value(self) -> None:
+        identity = OwnerSessionIdentity(connection_object_id=1, backend_pid=2)
+        proof = ExecutionOwnerProof(
+            execution_lease=_lease(),
+            owner_session_identity=identity,
+        )
+
+        self.assertEqual(proof.execution_lease, _lease())
+        self.assertIs(proof.owner_session_identity, identity)
+        self.assertEqual(
+            proof,
+            ExecutionOwnerProof(
+                execution_lease=_lease(),
+                owner_session_identity=identity,
+            ),
+        )
+        self.assertNotEqual(
+            proof,
+            ExecutionOwnerProof(
+                execution_lease=_lease(child=False),
+                owner_session_identity=identity,
+            ),
+        )
+
+    def test_both_fields_are_required_with_no_default(self) -> None:
+        """The whole point of this type: neither field is optional on its
+        own, so a caller cannot construct a bundle naming an execution
+        lease without also naming the session it expects to hold
+        ``IMPORT``, or vice versa (review finding, WE8 mutant runner: this
+        co-nullity claim had no direct test). Checked by introspection,
+        not by a deliberately-wrong constructor call, so the pin does not
+        need a Pyright escape hatch to assert the call would fail."""
+        field_names = {
+            field.name: field for field in dataclasses.fields(ExecutionOwnerProof)
+        }
+        self.assertEqual(
+            set(field_names), {"execution_lease", "owner_session_identity"},
+        )
+        for name, field in field_names.items():
+            self.assertIs(
+                field.default, dataclasses.MISSING,
+                f"{name} must have no default — both fields are required",
+            )
+            self.assertIs(
+                field.default_factory, dataclasses.MISSING,
+                f"{name} must have no default_factory — both fields are required",
+            )
+
+    def test_frozen_rejects_field_reassignment(self) -> None:
+        proof = ExecutionOwnerProof(
+            execution_lease=_lease(),
+            owner_session_identity=OwnerSessionIdentity(
+                connection_object_id=1, backend_pid=2,
+            ),
+        )
+
+        # setattr, not direct assignment: pyright statically rejects direct
+        # assignment to a frozen dataclass field, which would need a
+        # typing-ratchet-tracked ignore here; setattr exercises the same
+        # runtime __setattr__ override without one.
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            setattr(proof, "execution_lease", _lease(child=False))  # noqa: B010
 
 
 class TestExecutionLivenessDecision(unittest.TestCase):

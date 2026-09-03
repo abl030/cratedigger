@@ -20,11 +20,7 @@ from lib.download_rejection import _handle_rejected_result
 from lib import download_validation
 from lib.dispatch import DispatchCoreFn, DispatchOutcome
 from lib.grab_list import GrabListEntry
-from lib.import_execution import (
-    CancellationToken,
-    ExecutionLeaseSnapshot,
-    OwnerSessionIdentity,
-)
+from lib.import_execution import CancellationToken, ExecutionOwnerProof
 from lib.media_readiness import MediaReadinessError, normalize_media_metadata
 from lib.processing_paths import canonical_folder_for_row, processing_albums_dir
 from lib.quality import ValidationResult
@@ -85,8 +81,7 @@ class ProcessAlbumFn(Protocol):
         materialize_before_file_copy: Callable[[], None] | None = None,
         materialize_fn: Callable[..., download_materialization.MaterializeResult] | None = None,
         cancellation_token: CancellationToken | None = None,
-        execution_lease: ExecutionLeaseSnapshot | None = None,
-        owner_session_identity: OwnerSessionIdentity | None = None,
+        owner_proof: ExecutionOwnerProof | None = None,
     ) -> CompletionResult: ...
 
 
@@ -101,8 +96,7 @@ def process_completed_album(
     materialize_before_file_copy: Callable[[], None] | None = None,
     materialize_fn: Callable[..., download_materialization.MaterializeResult] | None = None,
     cancellation_token: CancellationToken | None = None,
-    execution_lease: ExecutionLeaseSnapshot | None = None,
-    owner_session_identity: OwnerSessionIdentity | None = None,
+    owner_proof: ExecutionOwnerProof | None = None,
 ) -> CompletionResult:
     """Materialize, validate, and dispatch one fully downloaded album."""
     staged_album = StagedAlbum.from_entry(
@@ -170,29 +164,16 @@ def process_completed_album(
             if validate_fn is not None
             else download_validation._process_beets_validation
         )
-        if cancellation_token is None:
-            outcome = resolved_validate(
-                album_data,
-                staged_album,
-                ctx,
-                import_job_id=import_job_id,
-                handle_valid_fn=handle_valid_fn,
-                dispatch_fn=dispatch_fn,
-                execution_lease=execution_lease,
-                owner_session_identity=owner_session_identity,
-            )
-        else:
-            outcome = resolved_validate(
-                album_data,
-                staged_album,
-                ctx,
-                import_job_id=import_job_id,
-                handle_valid_fn=handle_valid_fn,
-                dispatch_fn=dispatch_fn,
-                cancellation_token=cancellation_token,
-                execution_lease=execution_lease,
-                owner_session_identity=owner_session_identity,
-            )
+        outcome = resolved_validate(
+            album_data,
+            staged_album,
+            ctx,
+            import_job_id=import_job_id,
+            handle_valid_fn=handle_valid_fn,
+            dispatch_fn=dispatch_fn,
+            cancellation_token=cancellation_token,
+            owner_proof=owner_proof,
+        )
         if outcome is not None:
             if outcome.deferred:
                 return CompletionDeferred(detail=outcome.message)

@@ -51,6 +51,7 @@ from lib.import_execution import (
     CancellationToken,
     ExecutionCancelled,
     ExecutionLeaseSnapshot,
+    ExecutionOwnerProof,
     OwnerSessionIdentity,
     ProcessIdentity,
 )
@@ -508,8 +509,10 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
                     ctx,
                     import_job_id=claimed.id,
                     cancellation_token=token,
-                    execution_lease=execution_lease,
-                    owner_session_identity=owner_session_identity,
+                    owner_proof=ExecutionOwnerProof(
+                        execution_lease=execution_lease,
+                        owner_session_identity=owner_session_identity,
+                    ),
                 )
 
         assert result is not None
@@ -518,6 +521,13 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
         self.assertEqual(
             handle_valid.call_args.kwargs["import_job_id"],
             claimed.id,
+        )
+        self.assertEqual(
+            handle_valid.call_args.kwargs["owner_proof"],
+            ExecutionOwnerProof(
+                execution_lease=execution_lease,
+                owner_session_identity=owner_session_identity,
+            ),
         )
 
     def test_action_time_candidate_drift_requeues_before_import(self):
@@ -591,8 +601,7 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
                 quality_gate_fn: QualityGateFn | None = None,
                 dispatch_fn: DispatchCoreFn | None = None,
                 cancellation_token: CancellationToken | None = None,
-                execution_lease: ExecutionLeaseSnapshot | None = None,
-                owner_session_identity: OwnerSessionIdentity | None = None,
+                owner_proof: ExecutionOwnerProof | None = None,
             ) -> DispatchOutcome | None:
                 del (
                     album_data,
@@ -603,8 +612,7 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
                     quality_gate_fn,
                     dispatch_fn,
                     cancellation_token,
-                    execution_lease,
-                    owner_session_identity,
+                    owner_proof,
                 )
                 handle_valid_calls.append(import_job_id)
                 return None
@@ -628,6 +636,111 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertIn("Candidate quality evidence unavailable", result.message)
         self.assertEqual(handle_valid_calls, [])
+
+    def test_candidate_drift_requeue_carries_the_exact_owner_proof(self):
+        """Sibling to the ``_handle_valid_result`` release-lock-contention
+        gap (review finding, WE8): ``_process_beets_validation``'s own
+        stale-candidate requeue unpacks ``owner_proof.execution_lease``
+        through the identical ``if owner_proof is not None else None``
+        shape, and the drift test above never passes one, so the
+        expression evaluated to ``None`` on every existing run. With no
+        proof the real running job's requeue UPDATE matches zero rows and
+        the job stays untouched; with the job's actual matching lease the
+        requeue really flips ``status``/``preview_status``.
+        """
+        from lib.download_validation import _process_beets_validation
+        from lib.quality import ValidationResult
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, mb_release_id="mbid-123"))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            track = os.path.join(tmpdir, "01 - Track.mp3")
+            with open(track, "wb") as handle:
+                handle.write(b"audio")
+            job = handoff_automation_owner(
+                db, 42, canonical_path=tmpdir,
+            )
+            preview_lease = _preview_execution_lease("drift-proof-preview")
+            assert claim_next_import_preview_job(
+                db, worker_id="preview", execution_lease=preview_lease,
+            ) is not None
+            _seed_candidate_for_import_job(
+                db, job.id,
+                mb_release_id="mbid-123",
+                files=snapshot_audio_files(tmpdir),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=245,
+                    avg_bitrate_kbps=256,
+                    median_bitrate_kbps=252,
+                    format="MP3",
+                    spectral_grade="genuine",
+                ),
+                codec="mp3",
+                container="mp3",
+                storage_format="MP3",
+                expected_execution_lease=preview_lease,
+            )
+            assert db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"ready": True},
+                expected_execution_lease=preview_lease,
+            ) is not None
+            importer_lease = _importer_execution_lease("drift-proof-importer")
+            claimed = claim_next_import_job(
+                db, worker_id="importer", execution_lease=importer_lease,
+            )
+            assert claimed is not None and claimed.id == job.id
+            with open(track, "ab") as handle:
+                handle.write(b" changed")
+            cfg = CratediggerConfig(
+                beets_harness_path="/nix/store/fake/harness/run_beets_harness.sh",
+                beets_distance_threshold=0.15,
+                beets_staging_dir=os.path.join(tmpdir, "staging"),
+                slskd_download_dir=tmpdir,
+                pipeline_db_enabled=True,
+            )
+            ctx = make_ctx_with_fake_db(db, cfg=cfg)
+            album_data = make_grab_list_entry(
+                album_id=42,
+                artist="Artist",
+                title="Album",
+                mb_release_id="mbid-123",
+                db_source="request",
+                db_request_id=42,
+            )
+            staged_album = StagedAlbum(current_path=tmpdir, request_id=42)
+
+            with patch("lib.beets.beets_validate", return_value=ValidationResult(
+                valid=True, distance=0.05, scenario="strong_match",
+            )):
+                without_proof = _process_beets_validation(
+                    album_data, staged_album, ctx, import_job_id=claimed.id,
+                )
+                unchanged = db.get_import_job(claimed.id)
+                assert unchanged is not None
+                self.assertEqual(unchanged.status, "running")
+
+                identity = OwnerSessionIdentity(
+                    connection_object_id=1, backend_pid=2,
+                )
+                with_proof = _process_beets_validation(
+                    album_data, staged_album, ctx, import_job_id=claimed.id,
+                    owner_proof=ExecutionOwnerProof(
+                        execution_lease=importer_lease,
+                        owner_session_identity=identity,
+                    ),
+                )
+
+        assert without_proof is not None
+        self.assertFalse(without_proof.success)
+        assert with_proof is not None
+        self.assertFalse(with_proof.success)
+        self.assertIn("requeued for preview", with_proof.message)
+        requeued_job = db.get_import_job(claimed.id)
+        assert requeued_job is not None
+        self.assertEqual(requeued_job.status, "queued")
+        self.assertEqual(requeued_job.preview_status, "waiting")
 
 
 class TestPreviewCompletionEvidenceOwnership(unittest.TestCase):
@@ -4351,14 +4464,10 @@ class TestAutomationImporterOwnership(unittest.TestCase):
             observed_authority["cancellation_token"],
             token,
         )
-        self.assertEqual(
-            observed_authority["execution_lease"],
-            lease,
-        )
-        self.assertEqual(
-            observed_authority["owner_session_identity"],
-            identity,
-        )
+        owner_proof = observed_authority["owner_proof"]
+        assert isinstance(owner_proof, ExecutionOwnerProof)
+        self.assertEqual(owner_proof.execution_lease, lease)
+        self.assertEqual(owner_proof.owner_session_identity, identity)
 
     def test_validation_forwards_token_to_dispatch_without_drop(self) -> None:
         from lib.download_validation import _handle_valid_result
@@ -4437,8 +4546,10 @@ class TestAutomationImporterOwnership(unittest.TestCase):
                     import_job_id=claimed.id,
                     dispatch_fn=dispatch,
                     cancellation_token=token,
-                    execution_lease=lease,
-                    owner_session_identity=identity,
+                    owner_proof=ExecutionOwnerProof(
+                        execution_lease=lease,
+                        owner_session_identity=identity,
+                    ),
                 )
 
         assert outcome is not None
@@ -4449,6 +4560,96 @@ class TestAutomationImporterOwnership(unittest.TestCase):
         dispatch_request = dispatch.call_args.args[0]
         self.assertEqual(dispatch_request.execution_lease, lease)
         self.assertEqual(dispatch_request.owner_session_identity, identity)
+
+    def test_release_lock_contention_requeues_only_with_an_owner_proof(
+        self,
+    ) -> None:
+        """Mutation-testing gap closed (WE8): the co-nullity check on the
+        contended-release-lock branch had no test at all before this PR's
+        bundling, catalog-caught with ``if owner_proof is not None:``
+        flipped to ``is None``. With a proof, the real running job must
+        actually requeue to preview (real DB row transition, no mock of
+        our own ``_requeue_import_job_to_preview``); without one, the
+        caller gets the generic deferred outcome and the job stays
+        untouched.
+        """
+        from lib.dispatch import DISPATCH_CODE_REQUEUED_FOR_PREVIEW
+        from lib.download_validation import _handle_valid_result
+
+        with tempfile.TemporaryDirectory() as root:
+            source = os.path.join(root, "processing-album")
+            os.mkdir(source)
+            with open(os.path.join(source, "01.flac"), "wb") as handle:
+                handle.write(b"audio")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42,
+                mb_release_id="mbid-123",
+                active_download_state={
+                    "filetype": "flac",
+                    "enqueued_at": "2026-07-29T00:00:00+00:00",
+                    "current_path": source,
+                    "files": [],
+                },
+            ))
+            job = handoff_automation_owner(
+                db, 42,
+                state=db.request(42)["active_download_state"],
+                canonical_path=source,
+            )
+            preview_lease = _preview_execution_lease("release-contention-preview")
+            assert claim_next_import_preview_job(
+                db, worker_id="preview", execution_lease=preview_lease,
+            ) is not None
+            assert db.mark_import_job_preview_importable(
+                job.id,
+                preview_result={"ready": True},
+                expected_execution_lease=preview_lease,
+            ) is not None
+            lease = _importer_execution_lease("release-contention-importer")
+            claimed = claim_next_import_job(
+                db, worker_id="importer", execution_lease=lease,
+            )
+            assert claimed is not None
+            db.set_advisory_lock_result(False)
+            ctx = make_ctx_with_fake_db(db, cfg=CratediggerConfig())
+            album = make_grab_list_entry(
+                album_id=42,
+                artist="Artist",
+                title="Album",
+                mb_release_id="mbid-123",
+                db_source="request",
+                db_request_id=42,
+            )
+            staged = StagedAlbum(current_path=source, request_id=42)
+            bv_result = ValidationResult(
+                valid=True, distance=0.01, scenario="strong_match",
+            )
+
+            without_proof = _handle_valid_result(
+                album, bv_result, staged, ctx, import_job_id=claimed.id,
+            )
+            unchanged = db.get_import_job(claimed.id)
+            assert unchanged is not None
+            self.assertEqual(unchanged.status, "running")
+
+            identity = OwnerSessionIdentity(connection_object_id=1, backend_pid=2)
+            with_proof = _handle_valid_result(
+                album, bv_result, staged, ctx, import_job_id=claimed.id,
+                owner_proof=ExecutionOwnerProof(
+                    execution_lease=lease,
+                    owner_session_identity=identity,
+                ),
+            )
+
+        assert without_proof is not None
+        self.assertTrue(without_proof.deferred)
+        assert with_proof is not None
+        self.assertEqual(with_proof.code, DISPATCH_CODE_REQUEUED_FOR_PREVIEW)
+        requeued_job = db.get_import_job(claimed.id)
+        assert requeued_job is not None
+        self.assertEqual(requeued_job.status, "queued")
+        self.assertEqual(requeued_job.preview_status, "waiting")
 
 
 class TestImportPreviewWorker(unittest.TestCase):

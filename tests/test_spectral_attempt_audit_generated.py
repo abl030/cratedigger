@@ -2173,6 +2173,7 @@ class TestIronAndWineOuterEvidenceSlice(unittest.TestCase):
         from lib.import_execution import (
             CancellationToken,
             ExecutionLeaseSnapshot,
+            ExecutionOwnerProof,
             OwnerSessionIdentity,
             ProcessIdentity,
         )
@@ -2520,8 +2521,7 @@ class TestIronAndWineOuterEvidenceSlice(unittest.TestCase):
                 *,
                 import_job_id: int,
                 cancellation_token: CancellationToken,
-                execution_lease: ExecutionLeaseSnapshot,
-                owner_session_identity: OwnerSessionIdentity,
+                owner_proof: ExecutionOwnerProof,
                 **_kwargs: object,
             ) -> CompletionDispatched:
                 return CompletionDispatched(dispatch_import_core(
@@ -2534,8 +2534,8 @@ class TestIronAndWineOuterEvidenceSlice(unittest.TestCase):
                         dl_info=DownloadInfo(username='rexasaurus', filetype='flac'),
                         distance=0.05,
                         candidate_import_job_id=import_job_id,
-                        execution_lease=execution_lease,
-                        owner_session_identity=owner_session_identity,
+                        execution_lease=owner_proof.execution_lease,
+                        owner_session_identity=owner_proof.owner_session_identity,
                     ),
                     db,
                     cfg=cfg,
