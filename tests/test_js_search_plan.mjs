@@ -16,6 +16,7 @@ import {
   buildHistoryUrl,
   captureOriginContext,
   restoreOriginContext,
+  snapshotActiveTab,
   invalidateSearchPlanCache,
   getCacheEntry,
   setCacheEntry,
@@ -36,8 +37,11 @@ import {
   REGENERATE_CONFIRM_MESSAGE,
 } from '../web/js/search_plan.js';
 import { state } from '../web/js/state.js';
+import { tabHasAsyncRender } from '../web/js/tabs.js';
 
-import { stubGlobals, suite } from './js_harness.mjs';
+import {
+  stubGlobals, suite, element, domStub,
+} from './js_harness.mjs';
 
 const t = suite(import.meta.url);
 
@@ -800,6 +804,49 @@ function makeHistoryRows() {
 }
 
 // --- closeSearchPlanDetail back-button restore -----------------------
+t.section('snapshotActiveTab()');
+
+{
+  // The active tab's data-tab-name attribute IS the internal name --
+  // tabs.js is the one owner of that mapping, so there is no label to
+  // reverse-map here (issue #1355 WE4 removed the old labelToName table).
+  for (const name of ['browse', 'recents', 'pipeline', 'manual']) {
+    const active = element({ className: 'tab active' });
+    active.setAttribute('data-tab-name', name);
+    const globals = stubGlobals({
+      document: domStub({}, { querySelector: () => active }),
+    });
+    try {
+      const snap = snapshotActiveTab();
+      t.equal(snap.tab, name, `snapshotActiveTab() reads '${name}' straight off data-tab-name, no label mapping`);
+    } finally {
+      globals.restore();
+    }
+  }
+}
+
+{
+  // Unknown/missing data-tab-name falls back to 'pipeline', same as the
+  // pre-tabs.js code's default when no label matched.
+  const noAttr = element({ className: 'tab active' });
+  const bogus = element({ className: 'tab active' });
+  bogus.setAttribute('data-tab-name', 'decisions'); // dead labelToName entry -- never a real tab
+  const cases = [
+    ['no active tab in the DOM at all', domStub({}, { querySelector: () => null })],
+    ['active tab carries no data-tab-name', domStub({}, { querySelector: () => noAttr })],
+    ["active tab's data-tab-name is not a real tab ('decisions')", domStub({}, { querySelector: () => bogus })],
+  ];
+  for (const [label, doc] of cases) {
+    const globals = stubGlobals({ document: doc });
+    try {
+      const snap = snapshotActiveTab();
+      t.equal(snap.tab, 'pipeline', `snapshotActiveTab() falls back to 'pipeline' when ${label}`);
+    } finally {
+      globals.restore();
+    }
+  }
+}
+
 t.section('closeSearchPlanDetail() / openSearchPlanDetail()');
 
 /**
@@ -971,6 +1018,51 @@ async function withFakeWindow(impl) {
     t.ok(calls.showTab[0] === 'recents',
       'imports-origin: showTab("recents") called');
   });
+}
+
+{
+  // Origin tab is manual (Wrong Matches) — the third hardcoded name in
+  // the pre-tabs.js `tab === 'pipeline' || tab === 'recents' || tab ===
+  // 'manual'` condition (issue #1355 WE3 residual). No case here drove
+  // this tab before `tabHasAsyncRender('manual')` replaced that literal
+  // condition; without this test a mutant deleting 'manual' from
+  // `tabs.js`'s registry would survive every existing assertion.
+  await withFakeWindow((win, calls) => {
+    state.searchPlanDetailContext = {
+      requestId: 202,
+      originTab: 'manual',
+      originScrollY: 250,
+      originSubView: null,
+    };
+    closeSearchPlanDetail();
+    t.ok(calls.showTab.length === 1 && calls.showTab[0] === 'manual',
+      'manual-origin: showTab("manual") called');
+    t.equal(calls.scrollTo.length, 0,
+      'manual-origin: scrollTo not called immediately — loadWrongMatches owns consuming the stash');
+    consumePendingScrollRestore();
+    t.ok(calls.scrollTo.length === 1 && calls.scrollTo[0] === 250,
+      'manual-origin: scrollTo fires with the origin scroll position once consumed');
+  });
+}
+
+{
+  // Composed parity check: closeSearchPlanDetail's "does the destination
+  // consume the restore itself" decision must equal tabs.js's own
+  // `tabHasAsyncRender` for every real tab name, not a hand-copied
+  // expectation that could silently re-drift from the registry
+  // (issue #1355 WE4 — this is the exact fact the WE3 residual named).
+  for (const tab of ['browse', 'recents', 'pipeline', 'manual']) {
+    // eslint-disable-next-line no-await-in-loop
+    await withFakeWindow((win, calls) => {
+      state.searchPlanDetailContext = {
+        requestId: 303, originTab: tab, originScrollY: 77, originSubView: null,
+      };
+      closeSearchPlanDetail();
+      const scrollFiredImmediately = calls.scrollTo.length === 1;
+      t.notEqual(scrollFiredImmediately, tabHasAsyncRender(tab),
+        `closeSearchPlanDetail('${tab}') fires scrollTo immediately iff tabHasAsyncRender('${tab}') is false (got ${tabHasAsyncRender(tab)})`);
+    });
+  }
 }
 
 {

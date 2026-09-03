@@ -8,14 +8,18 @@ import {
   buildDeleteConfirmHtml,
   describeBanSourceSuccess,
   describeBeetsDeletion,
+  executeBeetsDeletion,
   libraryAlbumBadgeItem,
   renderLibraryAlbumRow,
   renderLibraryDetailBody,
+  setLibQuality,
 } from '../web/js/library.js';
 import { esc } from '../web/js/util.js';
-import { pipelineStore, updatePipelineStatus } from '../web/js/state.js';
+import { pipelineStore, state, updatePipelineStatus } from '../web/js/state.js';
 
-import { suite } from './js_harness.mjs';
+import {
+  suite, stubGlobals, element, domStub,
+} from './js_harness.mjs';
 
 const t = suite(import.meta.url);
 
@@ -530,6 +534,142 @@ t.section('renderLibraryAlbumRow() wires in-library rows through window.toggleLi
     'in-library row onclick keys on the beets album id');
   t.contains(html, 'id="lib-99"',
     'detail placeholder id matches the toggle target');
+}
+
+t.section('executeBeetsDeletion() refreshes by the active tab\'s data-tab-name, not its visible label');
+
+/**
+ * @param {any|null} activeTab
+ */
+function docWithActiveTab(activeTab) {
+  return domStub({}, {
+    querySelector(sel) {
+      if (sel === '.tab.active') return activeTab;
+      if (sel === '.confirm-overlay') return null;
+      return null;
+    },
+  });
+}
+
+{
+  // Recents is the active tab (by data-tab-name, not by rendered label
+  // text — issue #1355 WE4 removed the '.tab.active'.textContent.trim()
+  // === 'Recents' comparison).
+  const active = element({ className: 'tab active' });
+  active.setAttribute('data-tab-name', 'recents');
+  let recentsCalls = 0;
+  let pipelineCalls = 0;
+  const globals = stubGlobals({
+    document: docWithActiveTab(active),
+    fetch: () => Promise.resolve({
+      status: 200,
+      json: async () => ({
+        status: 'ok', artist: 'A', album: 'B', deleted_files: 1, deleted_artifacts: 0,
+      }),
+    }),
+    window: { loadRecents: () => { recentsCalls += 1; }, loadPipeline: () => { pipelineCalls += 1; } },
+  });
+  try {
+    await executeBeetsDeletion(1, element());
+    t.equal(recentsCalls, 1, "executeBeetsDeletion refreshes via window.loadRecents when the active tab's data-tab-name is 'recents'");
+    t.equal(pipelineCalls, 0, 'and does not also call window.loadPipeline');
+  } finally {
+    globals.restore();
+  }
+}
+
+{
+  // Pipeline is the active tab.
+  const active = element({ className: 'tab active' });
+  active.setAttribute('data-tab-name', 'pipeline');
+  let recentsCalls = 0;
+  let pipelineCalls = 0;
+  const globals = stubGlobals({
+    document: docWithActiveTab(active),
+    fetch: () => Promise.resolve({
+      status: 200,
+      json: async () => ({
+        status: 'ok', artist: 'A', album: 'B', deleted_files: 1, deleted_artifacts: 0,
+      }),
+    }),
+    window: { loadRecents: () => { recentsCalls += 1; }, loadPipeline: () => { pipelineCalls += 1; } },
+  });
+  try {
+    await executeBeetsDeletion(1, element());
+    t.equal(pipelineCalls, 1, "executeBeetsDeletion refreshes via window.loadPipeline when the active tab's data-tab-name is 'pipeline'");
+    t.equal(recentsCalls, 0, 'and does not also call window.loadRecents');
+  } finally {
+    globals.restore();
+  }
+}
+
+{
+  // Wrong Matches ('manual') is active: neither the Recents nor the
+  // Pipeline refresh fires -- refreshAfterBeetsDeletion only special-cases
+  // those two, same as before this item's attribute-based rewrite.
+  const active = element({ className: 'tab active' });
+  active.setAttribute('data-tab-name', 'manual');
+  let recentsCalls = 0;
+  let pipelineCalls = 0;
+  const globals = stubGlobals({
+    document: docWithActiveTab(active),
+    fetch: () => Promise.resolve({
+      status: 200,
+      json: async () => ({
+        status: 'ok', artist: 'A', album: 'B', deleted_files: 1, deleted_artifacts: 0,
+      }),
+    }),
+    window: { loadRecents: () => { recentsCalls += 1; }, loadPipeline: () => { pipelineCalls += 1; } },
+  });
+  try {
+    await executeBeetsDeletion(1, element());
+    t.equal(recentsCalls, 0, "executeBeetsDeletion does not call window.loadRecents when the active tab is 'manual'");
+    t.equal(pipelineCalls, 0, 'nor window.loadPipeline');
+  } finally {
+    globals.restore();
+  }
+}
+
+t.section('setLibQuality() refreshes Recents by data-tab-name, not visible label text');
+
+{
+  const active = element({ className: 'tab active' });
+  active.setAttribute('data-tab-name', 'recents');
+  let recentsCalls = 0;
+  const globals = stubGlobals({
+    document: docWithActiveTab(active),
+    fetch: () => Promise.resolve({ status: 200, json: async () => ({ status: 'ok' }) }),
+    window: { loadRecents: () => { recentsCalls += 1; } },
+  });
+  const prevBrowseArtist = state.browseArtist;
+  try {
+    state.browseArtist = null;
+    await setLibQuality('release-id', 'wanted', null);
+    t.equal(recentsCalls, 1, "setLibQuality refreshes via window.loadRecents when the active tab's data-tab-name is 'recents'");
+  } finally {
+    state.browseArtist = prevBrowseArtist;
+    globals.restore();
+  }
+}
+
+{
+  const active = element({ className: 'tab active' });
+  active.setAttribute('data-tab-name', 'pipeline');
+  let recentsCalls = 0;
+  const globals = stubGlobals({
+    document: docWithActiveTab(active),
+    fetch: () => Promise.resolve({ status: 200, json: async () => ({ status: 'ok' }) }),
+    window: { loadRecents: () => { recentsCalls += 1; } },
+  });
+  const prevBrowseArtist = state.browseArtist;
+  try {
+    state.browseArtist = null;
+    await setLibQuality('release-id', 'wanted', null);
+    t.equal(recentsCalls, 0, "setLibQuality does not call window.loadRecents when the active tab is 'pipeline'");
+  } finally {
+    state.browseArtist = prevBrowseArtist;
+    globals.restore();
+  }
 }
 
 t.done();
