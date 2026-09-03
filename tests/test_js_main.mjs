@@ -196,4 +196,69 @@ t.section("showTab() dispatches each tab's own follow-up render — the same fac
   }
 }
 
+t.section("closeSearchPlanDetail()'s deferred restore is genuinely consumed by the real showTab dispatch it names");
+
+{
+  // tabHasAsyncRender(name) answers "does this tab have an onShow" -- a
+  // PROXY for what closeSearchPlanDetail actually needs, "will the
+  // destination's own render consume the stashed restore". The two
+  // coincide today because every real onShow (loadRecents/loadPipeline/
+  // loadWrongMatches) ends in `finally { consumePendingScrollRestore(); }`,
+  // but nothing pins that composition directly -- reviewer finding on
+  // this diff. This drives the REAL chain end to end through the REAL
+  // showTab (not search_plan.js's own tests' fake `window.showTab`):
+  // closeSearchPlanDetail stashes, dispatches to the real loader, and
+  // only that loader's own completion calls the real exported
+  // consumePendingScrollRestore -- observed via a real window.scrollTo
+  // recorder, not an intermediate boolean.
+  const { closeSearchPlanDetail } = await import('../web/js/search_plan.js');
+  const asyncCases = [
+    ['recents', CONTENT_IDS.recents],
+    ['pipeline', CONTENT_IDS.pipeline],
+    ['manual', CONTENT_IDS.manual],
+  ];
+  for (const [tabName, contentId] of asyncCases) {
+    const app = buildAppDocument();
+    /** @type {number[]} */
+    const scrollCalls = [];
+    const restore = stubGlobals({
+      document: app.document,
+      // search_plan.js reads window.showTab at call time -- this section's
+      // window is a fresh stub (stubGlobals fully replaces the global, it
+      // does not merge), so the real showTab captured above must be
+      // re-attached explicitly, same as web/index.html's own onclick
+      // wiring depends on main.js's Object.assign(window, {showTab, ...}).
+      window: { setTimeout: () => 0, showTab, scrollTo: (_x, y) => { scrollCalls.push(y); } },
+      fetch: () => Promise.reject(new Error('test: no network')),
+      localStorage: { getItem: () => null },
+    }).restore;
+    const prevPipelineView = state.pipelineView;
+    const prevRecentsSub = state.recentsSub;
+    const prevDetailContext = state.searchPlanDetailContext;
+    try {
+      state.pipelineView = 'dashboard';
+      state.recentsSub = 'history';
+      state.searchPlanDetailContext = {
+        requestId: 909, originTab: tabName, originScrollY: 4242, originSubView: null,
+      };
+      closeSearchPlanDetail();
+      t.equal(scrollCalls.length, 0,
+        `closeSearchPlanDetail('${tabName}') does not scroll immediately -- the real ${tabName} loader owns consuming the stash`);
+      // Drain enough microtask ticks for the real loader's own fetch
+      // (deliberately rejecting) to settle and its finally block to run.
+      for (let tick = 0; tick < 6; tick += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        await Promise.resolve();
+      }
+      t.deepEqual(scrollCalls, [4242],
+        `after showTab('${tabName}')'s real loader (#${contentId}) finishes, the real consumePendingScrollRestore fires window.scrollTo(0, 4242) exactly once`);
+    } finally {
+      state.pipelineView = prevPipelineView;
+      state.recentsSub = prevRecentsSub;
+      state.searchPlanDetailContext = prevDetailContext;
+      restore();
+    }
+  }
+}
+
 t.done();

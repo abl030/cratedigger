@@ -1,4 +1,5 @@
 // @ts-check
+import { readFileSync } from 'node:fs';
 import { suite } from './js_harness.mjs';
 import { tabDefs, isTabName, tabLabel, tabHasAsyncRender, dispatchTabShown } from '../web/js/tabs.js';
 
@@ -17,6 +18,33 @@ t.section('tabDefs() — the one owner of name/label/order');
     defs.map((d) => d.label),
     ['Browse', 'Recents', 'Pipeline', 'Wrong Matches'],
     'visible labels match the text web/index.html renders for each tab',
+  );
+}
+
+t.section("web/index.html's tab bar matches tabDefs() exactly");
+
+{
+  // tabs.js's own module doc claims this test is what keeps the markup
+  // and the registry in lockstep -- so it has to actually parse the
+  // markup, not compare tabDefs() against a second hand-typed literal
+  // (that would just be two guesses agreeing with each other, the exact
+  // shape .claude/rules/test-fidelity.md Rule C forbids). Renaming a
+  // label or reordering the tab bar in web/index.html without touching
+  // tabDefs() must fail here.
+  const indexHtml = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
+  const tabDivRe = /<div class="tab( active)?" data-tab-name="([a-z]+)" onclick="showTab\('\2'\)">([^<]+)<\/div>/g;
+  /** @type {Array<[string, string]>} */
+  const rendered = [];
+  let match = tabDivRe.exec(indexHtml);
+  while (match) {
+    rendered.push([match[2], match[3]]);
+    match = tabDivRe.exec(indexHtml);
+  }
+  t.ok(rendered.length > 0, 'the tab-bar regex actually matched something in web/index.html (a rewritten markup shape must update this parser, not silently match zero)');
+  t.deepEqual(
+    rendered,
+    tabDefs().map((d) => [d.name, d.label]),
+    "web/index.html's rendered [data-tab-name, label] pairs, in DOM order, equal tabDefs()'s [name, label] pairs, in registry order",
   );
 }
 
@@ -62,29 +90,48 @@ t.section('tabHasAsyncRender() — the single fact showTab\'s dispatch and close
   }
 }
 
-t.section('dispatchTabShown() — no-op for a tab with no follow-up render, and for an unknown name');
+t.section("dispatchTabShown() calls exactly the named tab's own onShow, never another tab's");
 
 {
-  // browse's onShow is null; the real recents/pipeline/manual loaders touch
-  // `document`/`fetch` and are exercised through the composed `showTab`
-  // entry in tests/test_js_main.mjs instead, which is the real caller.
-  let threw = false;
-  try {
-    dispatchTabShown('browse');
-  } catch (err) {
-    threw = true;
+  // A `try { dispatchTabShown(x) } catch { threw = true }` shape looks like
+  // it proves "does nothing", but every real onShow is an async loader --
+  // a wrongly-dispatched call rejects a promise rather than throwing
+  // synchronously, so that shape passes even when the WRONG loader ran
+  // (mutant-runner finding on this exact file: a `dispatchTabShown` that
+  // ignored `name` and always ran TAB_DEFS[1]'s loader still reported
+  // "0 failed" here). `tabDefs()` returns the live TAB_DEFS array, not a
+  // defensive copy, so this test substitutes each entry's `onShow` with a
+  // recorder and asserts real invocation counts instead of "didn't throw".
+  // Per-name real-loader dispatch (the actual production loaders, through
+  // a DOM stub) is exercised by tests/test_js_main.mjs.
+  const defs = tabDefs();
+  const originalOnShow = defs.map((d) => d.onShow);
+  /** @type {Record<string, number>} */
+  const calls = {};
+  for (const def of defs) {
+    if (def.onShow !== null) {
+      def.onShow = () => { calls[def.name] = (calls[def.name] || 0) + 1; };
+    }
   }
-  t.ok(!threw, "dispatchTabShown('browse') does not throw (browse has no follow-up render)");
-}
-
-{
-  let threw = false;
   try {
+    for (const target of defs) {
+      for (const def of defs) calls[def.name] = 0;
+      dispatchTabShown(target.name);
+      for (const def of defs) {
+        const expected = (def.name === target.name && def.onShow !== null) ? 1 : 0;
+        const label = def.name === target.name
+          ? 'calls its own recorder exactly once'
+          : `does not call the '${def.name}' recorder`;
+        t.equal(calls[def.name], expected, `dispatchTabShown('${target.name}') ${label}`);
+      }
+    }
+    for (const def of defs) calls[def.name] = 0;
     dispatchTabShown('not-a-real-tab');
-  } catch (err) {
-    threw = true;
+    t.deepEqual(Object.values(calls), defs.map(() => 0),
+      'dispatchTabShown of an unknown name calls no recorder at all');
+  } finally {
+    defs.forEach((d, i) => { d.onShow = originalOnShow[i]; });
   }
-  t.ok(!threw, 'dispatchTabShown of an unknown name is a silent no-op');
 }
 
 t.done();
