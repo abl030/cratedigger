@@ -14,6 +14,7 @@ import uuid
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
+import msgspec
 from hypothesis import given
 from hypothesis import strategies as st
 
@@ -23,8 +24,11 @@ from web.mb import (
     _quote_mb_identifier,
     get_artist_name,
     get_artist_release_groups,
+    get_artist_releases_with_recordings,
     get_release,
     get_release_group,
+    get_release_group_releases,
+    get_release_group_year,
     search_artists,
     search_release_groups,
 )
@@ -433,6 +437,94 @@ class TestArtistReleaseGroupsWithAppearances(unittest.TestCase):
         self.assertEqual(rows[0].type, "")
         self.assertEqual(rows[0].primary_types, [])
         self.assertEqual(rows[0].first_release_date, "")
+
+
+class TestWireBoundaryValidation(unittest.TestCase):
+    """Issue #1355 item 5 — every general-purpose MB endpoint now decodes
+    through a strict ``msgspec.Struct``. One RED test per newly-decoded
+    endpoint family: feed a real field the wrong wire type and assert
+    ``msgspec.ValidationError`` fires at the boundary rather than a
+    ``.get()`` silently tolerating it."""
+
+    def test_search_release_groups_rejects_non_int_score(self) -> None:
+        bad = {
+            "releases": [{
+                "id": "rel-bad-score",
+                "title": "Bad Score",
+                "date": "2024",
+                "score": "not-an-int",
+                "release-group": {"id": "rg-bad-score"},
+            }],
+        }
+        with _mock_urlopen(bad), self.assertRaises(msgspec.ValidationError):
+            search_release_groups("bad score query")
+
+    def test_search_artists_rejects_non_list_artists(self) -> None:
+        bad = {"artists": "not-a-list"}
+        with _mock_urlopen(bad), self.assertRaises(msgspec.ValidationError):
+            search_artists("bad artists query")
+
+    def test_get_artist_release_groups_rejects_non_int_count(self) -> None:
+        bad_rg_browse = {"release-group-count": "not-an-int", "release-groups": []}
+        with _mock_urlopen_by_fragment({
+            "/release-group?artist=": bad_rg_browse,
+            "/release?artist=": {"release-count": 0, "releases": []},
+            "/release?track_artist=": {"release-count": 0, "releases": []},
+        }), self.assertRaises(msgspec.ValidationError):
+            get_artist_release_groups("artist-bad-rg-count")
+
+    def test_get_release_group_rejects_non_str_id(self) -> None:
+        bad = {"id": 12345, "title": "Bad Id"}
+        with _mock_urlopen(bad), self.assertRaises(msgspec.ValidationError):
+            get_release_group("rg-bad-id")
+
+    def test_get_release_group_year_rejects_non_str_date(self) -> None:
+        bad = {"id": "rg-bad-date", "first-release-date": 2024}
+        with _mock_urlopen(bad), self.assertRaises(msgspec.ValidationError):
+            get_release_group_year("rg-bad-date")
+
+    def test_get_release_group_releases_rejects_non_int_track_count(self) -> None:
+        meta = {"id": "rg-bad-tc", "title": "T", "primary-type": "Album"}
+        bad_releases = {
+            "release-count": 1,
+            "releases": [{
+                "id": "rel-1", "title": "T", "date": "2024",
+                "country": "XW", "status": "Official",
+                "media": [{"format": "CD", "track-count": "twelve"}],
+            }],
+        }
+        with _mock_urlopen_by_fragment({
+            "/release-group/rg-bad-tc?fmt=json": meta,
+            "/release?release-group=": bad_releases,
+        }), self.assertRaises(msgspec.ValidationError):
+            get_release_group_releases("rg-bad-tc")
+
+    def test_get_release_rejects_non_str_title(self) -> None:
+        bad = {"id": "rel-bad-title", "title": 12345, "date": "2024"}
+        with _mock_urlopen(bad), self.assertRaises(msgspec.ValidationError):
+            get_release("rel-bad-title", fresh=True)
+
+    def test_get_artist_name_rejects_non_str_name(self) -> None:
+        bad = {"id": "artist-bad-name", "name": 12345}
+        with _mock_urlopen(bad), self.assertRaises(msgspec.ValidationError):
+            get_artist_name("artist-bad-name")
+
+    def test_get_artist_releases_with_recordings_rejects_non_str_release_id(
+        self,
+    ) -> None:
+        canonical = {
+            "release-count": 1,
+            "releases": [{"id": "rel-1"}],
+        }
+        bad_detail = {
+            "release-count": 1,
+            "releases": [{"id": 999}],
+        }
+        with _mock_urlopen_by_fragment({
+            "/release?artist=artist-bad-recordings&fmt=json": canonical,
+            "/release?artist=artist-bad-recordings&inc=recordings": bad_detail,
+        }), self.assertRaises(msgspec.ValidationError):
+            get_artist_releases_with_recordings("artist-bad-recordings")
 
 
 if __name__ == "__main__":

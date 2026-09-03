@@ -36,17 +36,19 @@ def _release(
     """Build a fake MB release dict matching the shape from the API.
 
     Matches ``web.mb._MBReleaseFullJSON`` exactly (the type
-    ``lib.artist_releases`` now declares its input as) — ``number`` is
-    ``int`` and ``recording`` carries no ``title`` because neither is
-    read by ``analyse_artist_releases``/``filter_non_live`` (only
-    ``recording.id`` and the track's own ``title`` are), and
-    ``media[].track-count`` isn't a real field on this endpoint's medium
-    shape (that's a different, summary-only MB endpoint).
+    ``lib.artist_releases`` now declares its input as) — ``number`` is a
+    **string** at the wire (MB's printed label, e.g. ``"A1"`` for vinyl;
+    issue #1355 item 5 corrected the type this fixture used to claim) and
+    ``recording`` carries no ``title`` because neither is read by
+    ``analyse_artist_releases``/``filter_non_live`` (only ``recording.id``
+    and the track's own ``title`` are), and ``media[].track-count`` isn't
+    a real field on this endpoint's medium shape (that's a different,
+    summary-only MB endpoint).
     """
     track_dicts: list[_MBTrackFullJSON] = [
         {
             "position": i + 1,
-            "number": i + 1,
+            "number": str(i + 1),
             "title": t["title"],
             "length": t.get("length") or 0,
             "recording": {"id": t["rec_id"]},

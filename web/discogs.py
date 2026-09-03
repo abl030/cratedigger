@@ -22,7 +22,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal
 
 import msgspec
 
@@ -30,6 +30,7 @@ from lib.artist_catalogue import ArtistCatalogueRow
 from lib.discogs_positions import (
     normalize_release_tracks as _normalize_release_tracks,
 )
+from lib.json_narrow import is_str_object_dict, json_list
 from web import cache as _cache
 from web.artist_search import ArtistHit, merge_exact_artist_identities
 
@@ -129,13 +130,13 @@ from lib.va_identity import (
 def _get(url: str, *, timeout: int = DEFAULT_HTTP_TIMEOUT_SECONDS) -> Any:
     """Fetch and JSON-decode one Discogs mirror URL.
 
-    Returns ``Any`` — the raw external-JSON boundary; callers immediately
-    assign the result to a locally-scoped ``_Discogs*JSON`` TypedDict-
-    annotated variable (untyped/unvalidated at runtime — same
-    ``.get(..., default)`` tolerance as before) so downstream field access
-    is precisely typed without this function validating the response shape.
-    The label endpoints below decode through ``msgspec.convert`` instead
-    (strict wire-boundary Structs), since they need real validation.
+    Returns ``Any`` — this is the raw external-JSON boundary. Every
+    general-purpose endpoint below immediately decodes the result via
+    ``msgspec.convert(raw, type=...)`` into one of the strict wire
+    Structs declared in this module (issue #1355 item 5); ``get_release_
+    raw`` is the one deliberate exception (see its docstring) that keeps
+    the untouched ``dict[str, object]`` for a consumer reading fields
+    wider than any narrow Struct here declares.
     """
     req = urllib.request.Request(url)
     req.add_header("User-Agent", USER_AGENT)
@@ -187,43 +188,43 @@ def _parse_year(date_str: str) -> int | None:
         return None
 
 
-class _DiscogsArtistRefJSON(TypedDict, total=False):
-    """Slice of a Discogs ``artists[]`` credit entry (search hit, release,
-    or master-release row)."""
-    id: int
-    name: str
+class _DiscogsArtistRef(msgspec.Struct):
+    """Strict slice of a Discogs ``artists[]`` credit entry (search hit,
+    release, or master-release row)."""
+    id: int = 0
+    name: str = ""
 
 
-def _primary_artist_name(artists: list[_DiscogsArtistRefJSON]) -> str:
+def _primary_artist_name(artists: list[_DiscogsArtistRef]) -> str:
     """Extract the display artist name from a Discogs artists array."""
     if not artists:
         return "Unknown"
-    return artists[0].get("name", "Unknown")
+    return artists[0].name or "Unknown"
 
 
-def _primary_artist_id(artists: list[_DiscogsArtistRefJSON]) -> int | None:
+def _primary_artist_id(artists: list[_DiscogsArtistRef]) -> int | None:
     """Extract the primary artist ID from a Discogs artists array."""
     if not artists:
         return None
-    return artists[0].get("id")
+    return artists[0].id or None
 
 
-class _DiscogsSearchHitJSON(TypedDict, total=False):
-    """Slice of one ``/api/search`` result hit."""
-    id: int
-    master_id: int
-    title: str
-    master_title: str
-    primary_type: str
-    released: str
-    master_first_released: str
-    artists: list[_DiscogsArtistRefJSON]
-    score: float
+class _DiscogsSearchHit(msgspec.Struct):
+    """Strict slice of one ``/api/search`` result hit."""
+    id: int = 0
+    master_id: int | None = None
+    title: str = ""
+    master_title: str | None = None
+    primary_type: str = ""
+    released: str = ""
+    master_first_released: str | None = None
+    artists: list[_DiscogsArtistRef] = msgspec.field(default_factory=list[_DiscogsArtistRef])
+    score: float = 0.0
 
 
-class _DiscogsSearchResponseJSON(TypedDict, total=False):
-    """Slice of the ``/api/search`` response."""
-    results: list[_DiscogsSearchHitJSON]
+class _DiscogsSearchResponse(msgspec.Struct):
+    """Strict slice of the ``/api/search`` response."""
+    results: list[_DiscogsSearchHit] = msgspec.field(default_factory=list[_DiscogsSearchHit])
 
 
 def search_releases(query: str) -> list[dict[str, object]]:
@@ -254,28 +255,31 @@ def search_releases(query: str) -> list[dict[str, object]]:
         url = f"{api_base}/api/search?title={q}&per_page=25"
         if va_pin:
             url += f"&artist_id={VA_ARTIST_ID}"
-        data: _DiscogsSearchResponseJSON = _get(url)
+        raw = _get(url)
+        data = msgspec.convert(raw, type=_DiscogsSearchResponse)
         seen_master: set[int] = set()
         results: list[dict[str, object]] = []
-        for r in data.get("results", []):
-            master_id = r.get("master_id")
-            release_id = r.get("id", 0)
-            artists = r.get("artists", [])
+        for r in data.results:
+            master_id = r.master_id
+            release_id = r.id
+            artists = r.artists
             if master_id and master_id in seen_master:
                 continue
             if master_id:
                 seen_master.add(master_id)
-            title = r.get("master_title") or r.get("title", "") if master_id else r.get("title", "")
-            first_released = r.get("master_first_released") or r.get("released", "") if master_id else r.get("released", "")
+            title = (r.master_title or r.title) if master_id else r.title
+            first_released = (
+                (r.master_first_released or r.released) if master_id else r.released
+            )
             results.append({
                 "id": str(master_id) if master_id else str(release_id),
                 "title": title,
-                "primary_type": r.get("primary_type", ""),
+                "primary_type": r.primary_type,
                 "first_release_date": first_released,
                 "artist_id": str(_primary_artist_id(artists) or ""),
                 "artist_name": _primary_artist_name(artists),
                 "artist_disambiguation": "",
-                "score": int(r.get("score", 0) * 100),
+                "score": int(r.score * 100),
                 "is_master": bool(master_id),
                 "discogs_release_id": str(release_id),
             })
@@ -290,21 +294,21 @@ def search_releases(query: str) -> list[dict[str, object]]:
     return _cache.memoize_meta(cache_key, _fetch)
 
 
-class _DiscogsArtistSearchHitJSON(TypedDict, total=False):
-    """Slice of one ``/api/artists?name=`` result hit."""
-    id: int
-    name: str
-    score: float
+class _DiscogsArtistSearchHit(msgspec.Struct):
+    """Strict slice of one ``/api/artists?name=`` result hit."""
+    id: int = 0
+    name: str = ""
+    score: float = 0.0
 
 
-class _DiscogsArtistSearchResponseJSON(TypedDict, total=False):
-    """Slice of the ``/api/artists?name=`` response."""
-    results: list[_DiscogsArtistSearchHitJSON]
+class _DiscogsArtistSearchResponse(msgspec.Struct):
+    """Strict slice of the ``/api/artists?name=`` response."""
+    results: list[_DiscogsArtistSearchHit] = msgspec.field(default_factory=list[_DiscogsArtistSearchHit])
 
 
-class _DiscogsArtistDetailJSON(TypedDict, total=False):
-    """Slice of the ``/api/artists/{id}`` response."""
-    aliases: list[_DiscogsArtistRefJSON]
+class _DiscogsArtistDetail(msgspec.Struct):
+    """Strict slice of the ``/api/artists/{id}`` response."""
+    aliases: list[_DiscogsArtistRef] = msgspec.field(default_factory=list[_DiscogsArtistRef])
 
 
 def search_artists(query: str) -> list[ArtistHit]:
@@ -317,16 +321,16 @@ def search_artists(query: str) -> list[ArtistHit]:
 
     def _fetch() -> list[ArtistHit]:
         q = urllib.parse.quote(query)
-        data: _DiscogsArtistSearchResponseJSON = _get(
-            f"{api_base}/api/artists?name={q}&per_page=20")
+        raw = _get(f"{api_base}/api/artists?name={q}&per_page=20")
+        data = msgspec.convert(raw, type=_DiscogsArtistSearchResponse)
         results: list[ArtistHit] = [
             {
-                "id": str(r.get("id", 0)),
-                "name": r.get("name", ""),
+                "id": str(r.id),
+                "name": r.name,
                 "disambiguation": "",
-                "score": int(r.get("score", 0) * 100),
+                "score": int(r.score * 100),
             }
-            for r in data.get("results", [])
+            for r in data.results
         ]
         exact = next((
             row for row in results
@@ -335,18 +339,18 @@ def search_artists(query: str) -> list[ArtistHit]:
         if exact is None:
             return results
         try:
-            detail: _DiscogsArtistDetailJSON = _get(
-                f"{api_base}/api/artists/{exact['id']}")
+            raw_detail = _get(f"{api_base}/api/artists/{exact['id']}")
+            detail = msgspec.convert(raw_detail, type=_DiscogsArtistDetail)
         except (urllib.error.HTTPError, urllib.error.URLError):
             return results
         related: list[ArtistHit] = [
             {
-                "id": str(alias.get("id", 0)),
-                "name": alias.get("name", ""),
+                "id": str(alias.id),
+                "name": alias.name,
                 "disambiguation": "",
                 "score": max(0, exact["score"] - 1),
             }
-            for alias in detail.get("aliases", [])
+            for alias in detail.aliases
         ]
         return merge_exact_artist_identities(
             results, exact_id=exact["id"], related=related,
@@ -547,60 +551,61 @@ def get_artist_releases(artist_id: int) -> list[ArtistCatalogueRow]:
     return msgspec.convert(cached, type=list[ArtistCatalogueRow])
 
 
-class _DiscogsFormatJSON(TypedDict, total=False):
-    """Slice of one Discogs release/master ``formats[]`` entry."""
-    name: str
+class _DiscogsFormat(msgspec.Struct):
+    """Strict slice of one Discogs release/master ``formats[]`` entry."""
+    name: str = ""
     # Mirror serde emits ``null`` for an absent Option<Vec<String>>, so the
     # value is genuinely nullable at the wire — the reader guards for it.
-    descriptions: str | list[str] | None
+    descriptions: str | list[str] | None = None
 
 
-class _DiscogsMasterReleaseEntryJSON(TypedDict, total=False):
-    """Slice of one ``/api/masters/{id}`` ``releases[]`` entry."""
-    id: int
-    title: str
-    released: str
-    country: str
-    track_count: int
-    formats: list[_DiscogsFormatJSON]
-    labels: list[dict[str, object]]
+class _DiscogsMasterReleaseEntry(msgspec.Struct):
+    """Strict slice of one ``/api/masters/{id}`` ``releases[]`` entry."""
+    id: int = 0
+    title: str = ""
+    released: str = ""
+    country: str = ""
+    track_count: int = 0
+    formats: list[_DiscogsFormat] = msgspec.field(default_factory=list[_DiscogsFormat])
+    labels: list[dict[str, object]] = msgspec.field(default_factory=list[dict[str, object]])
 
 
-class _DiscogsMasterDetailJSON(TypedDict, total=False):
-    """Slice of the ``/api/masters/{id}`` response."""
-    title: str
-    primary_type: str
-    first_release_date: str
-    artist_credit: str
-    primary_artist_id: int
-    releases: list[_DiscogsMasterReleaseEntryJSON]
+class _DiscogsMasterDetail(msgspec.Struct):
+    """Strict slice of the ``/api/masters/{id}`` response."""
+    title: str = ""
+    primary_type: str = ""
+    first_release_date: str = ""
+    artist_credit: str = ""
+    primary_artist_id: int | None = None
+    releases: list[_DiscogsMasterReleaseEntry] = msgspec.field(default_factory=list[_DiscogsMasterReleaseEntry])
 
 
-class _DiscogsTrackJSON(TypedDict, total=False):
-    """Slice of one Discogs release ``tracks[]`` entry."""
-    position: str
-    title: str
-    duration: str
+class _DiscogsReleaseDetail(msgspec.Struct):
+    """Strict slice of the ``/api/releases/{id}`` response this module
+    validates directly.
+
+    ``tracks`` deliberately stays OUTSIDE this Struct: ``get_release``
+    reads it straight off the raw dict via ``_normalize_release_tracks``
+    (``lib/discogs_positions.py``), which must distinguish an ABSENT
+    ``position``/``duration`` key from an explicit empty string —
+    a decoded Struct field always carries its declared default when the
+    key is absent, so it cannot preserve that distinction the same way.
+    """
+    id: int = 0
+    title: str = ""
+    artists: list[_DiscogsArtistRef] = msgspec.field(default_factory=list[_DiscogsArtistRef])
+    released: str = ""
+    master_id: int | None = None
+    country: str = ""
+    formats: list[_DiscogsFormat] = msgspec.field(default_factory=list[_DiscogsFormat])
+    labels: list[dict[str, object]] = msgspec.field(default_factory=list[dict[str, object]])
 
 
-class _DiscogsReleaseDetailJSON(TypedDict, total=False):
-    """Slice of the ``/api/releases/{id}`` response."""
-    id: int
-    title: str
-    artists: list[_DiscogsArtistRefJSON]
-    tracks: list[_DiscogsTrackJSON]
-    released: str
-    master_id: int
-    country: str
-    formats: list[_DiscogsFormatJSON]
-    labels: list[dict[str, object]]
-
-
-def _status_from_formats(formats: list[_DiscogsFormatJSON]) -> str:
+def _status_from_formats(formats: list[_DiscogsFormat]) -> str:
     """Project Discogs format descriptions into truthful display status."""
     qualifiers: set[str] = set()
     for format_ in formats:
-        descriptions = format_.get("descriptions", "")
+        descriptions = format_.descriptions
         if isinstance(descriptions, str):
             qualifiers.update(
                 value.strip() for value in descriptions.split(",") if value.strip()
@@ -627,35 +632,36 @@ def get_master_releases(master_id: int) -> dict[str, object]:
     api_base = require_mirror_configured()
 
     def _fetch() -> dict[str, object]:
-        data: _DiscogsMasterDetailJSON = _get(f"{api_base}/api/masters/{master_id}")
+        raw = _get(f"{api_base}/api/masters/{master_id}")
+        data = msgspec.convert(raw, type=_DiscogsMasterDetail)
         releases: list[dict[str, object]] = []
-        for r in data.get("releases", []):
-            formats = r.get("formats", [])
-            format_names = [f.get("name", "?") for f in formats]
+        for r in data.releases:
+            formats = r.formats
+            format_names = [f.name or "?" for f in formats]
             releases.append({
-                "id": str(r.get("id", 0)),
-                "title": r.get("title", data.get("title", "")),
-                "date": r.get("released", ""),
-                "country": r.get("country", ""),
+                "id": str(r.id),
+                "title": r.title or data.title,
+                "date": r.released,
+                "country": r.country,
                 "status": _status_from_formats(formats),
-                "track_count": r.get("track_count", 0),
+                "track_count": r.track_count,
                 "format": ", ".join(format_names) if format_names else "?",
                 "media_count": len(formats),
-                "labels": r.get("labels", []),
+                "labels": r.labels,
             })
         return {
-            "title": data.get("title", ""),
-            "type": data.get("primary_type", ""),
-            "first_release_date": data.get("first_release_date", ""),
-            "artist_credit": data.get("artist_credit", ""),
-            "primary_artist_id": str(data.get("primary_artist_id") or ""),
+            "title": data.title,
+            "type": data.primary_type,
+            "first_release_date": data.first_release_date,
+            "artist_credit": data.artist_credit,
+            "primary_artist_id": str(data.primary_artist_id or ""),
             "releases": releases,
         }
 
     return _cache.memoize_meta(f"discogs:master:v2:{master_id}", _fetch)
 
 
-def _request_release_raw(release_id: int) -> _DiscogsReleaseDetailJSON:
+def _request_release_raw(release_id: int) -> dict[str, object]:
     """Fetch one literal mirror release payload."""
     api_base = require_mirror_configured()
     return _get(f"{api_base}/api/releases/{release_id}")
@@ -663,10 +669,10 @@ def _request_release_raw(release_id: int) -> _DiscogsReleaseDetailJSON:
 
 def _fetch_release_raw(
     release_id: int, *, fresh: bool = False,
-) -> _DiscogsReleaseDetailJSON:
+) -> dict[str, object]:
     """Raw cache path for source-audit consumers."""
 
-    def _fetch() -> _DiscogsReleaseDetailJSON:
+    def _fetch() -> dict[str, object]:
         return _request_release_raw(release_id)
 
     return _cache.memoize_meta(
@@ -675,7 +681,17 @@ def _fetch_release_raw(
 
 
 def get_release_raw(release_id: int, *, fresh: bool = False) -> dict[str, object]:
-    """Raw Discogs release JSON, preserving literal track positions."""
+    """Raw Discogs release JSON, preserving literal track positions.
+
+    Deliberately never decoded into any of this module's strict Structs:
+    ``lib.library_completeness``'s cross-engine census reads ``sub_tracks``
+    and literal ``position``/``duration`` strings straight off this dict
+    (``lib/discogs_positions.py``'s absent-vs-empty distinction, same
+    rationale as ``_DiscogsReleaseDetail``'s own docstring), fields wider
+    than any narrow slice this module could safely declare without
+    becoming a moving target every time that consumer needs one more
+    field. Mirrors ``web.mb.get_release_raw``'s identical carve-out.
+    """
     # Configuration admission precedes the cache lookup: a warm entry must
     # never turn an unavailable mirror into a silently usable source.
     require_mirror_configured()
@@ -695,28 +711,33 @@ def get_release(release_id: int, *, fresh: bool = False) -> dict[str, object]:
     require_mirror_configured()
 
     def _fetch() -> dict[str, object]:
-        data = _request_release_raw(release_id)
-        artists = data.get("artists", [])
-        artist_name = _primary_artist_name(artists)
-        artist_id = _primary_artist_id(artists)
+        raw = _request_release_raw(release_id)
+        data = msgspec.convert(raw, type=_DiscogsReleaseDetail)
+        artist_name = _primary_artist_name(data.artists)
+        artist_id = _primary_artist_id(data.artists)
 
-        tracks = _normalize_release_tracks(data.get("tracks", []))
+        # tracks read the RAW dict directly — see _DiscogsReleaseDetail's
+        # docstring for why this field stays outside the strict Struct.
+        tracks = _normalize_release_tracks([
+            entry for entry in json_list(raw.get("tracks"))
+            if is_str_object_dict(entry)
+        ])
 
-        year = _parse_year(data.get("released", ""))
+        year = _parse_year(data.released)
 
         return {
-            "id": str(data.get("id", 0)),
-            "title": data.get("title", ""),
+            "id": str(data.id),
+            "title": data.title,
             "artist_name": artist_name,
             "artist_id": str(artist_id) if artist_id else None,
-            "release_group_id": str(data.get("master_id", "")) if data.get("master_id") else None,
-            "date": data.get("released", ""),
+            "release_group_id": str(data.master_id) if data.master_id else None,
+            "date": data.released,
             "year": year,
-            "country": data.get("country", ""),
-            "status": _status_from_formats(data.get("formats", [])),
+            "country": data.country,
+            "status": _status_from_formats(data.formats),
             "tracks": tracks,
-            "labels": data.get("labels", []),
-            "formats": data.get("formats", []),
+            "labels": data.labels,
+            "formats": [msgspec.to_builtins(f) for f in data.formats],
         }
 
     return _cache.memoize_meta(
@@ -728,8 +749,9 @@ def get_artist_name(artist_id: int) -> str:
     api_base = require_mirror_configured()
 
     def _fetch() -> str:
-        data: _DiscogsArtistRefJSON = _get(f"{api_base}/api/artists/{artist_id}")
-        return data.get("name", "")
+        raw = _get(f"{api_base}/api/artists/{artist_id}")
+        data = msgspec.convert(raw, type=_DiscogsArtistRef)
+        return data.name
 
     return _cache.memoize_meta(f"discogs:artist:{artist_id}:name", _fetch)
 

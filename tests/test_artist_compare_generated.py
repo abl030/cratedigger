@@ -21,7 +21,7 @@ from web.discogs import (
     _DiscogsArtistMasterEntry,
     _DiscogsArtistMastersResponse,
 )
-from web.mb import _normalize_artist_release_group
+from web.mb import _MBReleaseGroupRef, _normalize_artist_release_group
 from web.routes.browse import _apply_rg_pipeline_overlay, _PipelineHit
 
 StructuralType = Literal["Album", "EP", "Single"]
@@ -523,14 +523,17 @@ class TestArtistCompareGenerated(unittest.TestCase):
         date: str | None,
         secondary_types: list[str] | None,
     ) -> None:
-        row = _normalize_artist_release_group({
-            "id": "rg-nullable",
-            "title": title,
-            "primary-type": primary_type,
-            "secondary-types": secondary_types,
-            "first-release-date": date,
-            "artist-credit": [],
-        }, is_appearance=False)
+        row = _normalize_artist_release_group(
+            _MBReleaseGroupRef(
+                id="rg-nullable",
+                title=title,
+                primary_type=primary_type,
+                secondary_types=secondary_types,
+                first_release_date=date,
+                artist_credit=[],
+            ),
+            is_appearance=False,
+        )
 
         assert_mb_normalized_row(
             row,

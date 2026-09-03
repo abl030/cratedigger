@@ -20,7 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from typing import Any, TypedDict
+from typing import Any, Protocol, TypedDict
 
 import msgspec
 
@@ -125,12 +125,12 @@ def _quote_mb_identifier(identifier: str) -> str:
 def _get(url: str) -> Any:
     """Fetch and JSON-decode one MB API URL.
 
-    Returns ``Any`` — this is the raw external-JSON boundary; callers
-    immediately assign the result to a locally-scoped ``_MB*JSON``
-    TypedDict-annotated variable (untyped/unvalidated at runtime, same
-    ``.get(..., default)`` tolerance as before) so every downstream field
-    access is precisely typed without this module ever validating the
-    external response's shape.
+    Returns ``Any`` — this is the raw external-JSON boundary. Callers that
+    need real validation immediately decode the result via
+    ``msgspec.convert(raw, type=...)`` into one of the strict wire Structs
+    below; ``get_release_raw`` is the one deliberate exception (see its
+    docstring) that keeps the untouched ``dict[str, object]`` for consumers
+    reading fields wider than any narrow Struct this module declares.
     """
     def request_once() -> object:
         # Pace each HTTP attempt, including the retry. A retry is still a
@@ -234,22 +234,240 @@ def _fetch_browse_pages[MBPage, MBItem](
     return pages
 
 
+# ── Wire-boundary Structs (msgspec) ──────────────────────────────────────
+#
+# Strict decode of every general-purpose MB endpoint this module calls
+# (issue #1355 item 5). ``rename="kebab"`` maps a snake_case Python field
+# to MB's kebab-case JSON key (``artist_credit`` -> ``artist-credit``,
+# ``first_release_date`` -> ``first-release-date``, ...) without a
+# per-field ``msgspec.field(name=...)``. Every field carries a default
+# (mirroring the previous TypedDicts' ``total=False``) so an ``inc=``
+# clause that omits a field, or an endpoint returning a bare ``{}`` (as
+# the URL-quoting seam tests do), still decodes; a field MB can send as
+# JSON ``null`` (proven against live mirror samples and the existing
+# ``test_null_primary_type_normalizes_to_empty_structural_evidence`` /
+# ``test_unknown_or_null_release_status_does_not_become_unofficial``
+# fixtures) is typed ``X | None`` rather than given a non-None default,
+# so an explicit null is never confused with a genuinely-absent key.
+#
+# ``get_release_raw`` deliberately stays OUTSIDE this boundary: it hands
+# real callers (``lib/field_resolver_service.py``'s label-info and
+# per-track ``artist-credit``/``joinphrase`` reads, ``lib/
+# library_completeness.py``'s ``recording.video`` and ``pregap`` reads,
+# ``web/routes/pipeline_mutations.py``'s VA Rule 2 nested
+# ``release-group`` primary-type read) fields wider than any narrow slice
+# this module declares — narrowing that contract to a Struct would
+# silently drop fields those callers need. See its own docstring.
+
+
+class _MBArtistRef(msgspec.Struct, rename="kebab"):
+    """Strict slice of an MB nested ``artist`` object."""
+    id: str = ""
+    name: str = ""
+    disambiguation: str = ""
+
+
+_EMPTY_MB_ARTIST_REF = _MBArtistRef()
+"""Reusable empty fallback for "no artist credited"."""
+
+
+class _MBArtistCreditName(msgspec.Struct, rename="kebab"):
+    """One MB ``artist-credit`` array entry."""
+    name: str = ""
+    artist: _MBArtistRef = msgspec.field(default_factory=_MBArtistRef)
+
+
+class _MBReleaseGroupRef(msgspec.Struct, rename="kebab"):
+    """Slice of a MusicBrainz ``release-group`` object — nested inside a
+    release (``release-group`` in a release lookup) or fetched directly (a
+    ``/release-group?artist=`` browse hit, or the top-level shape of
+    ``/release-group/<mbid>?inc=artist-credits``). Different endpoints
+    populate different subsets of these fields."""
+    id: str = ""
+    title: str | None = None
+    primary_type: str | None = None
+    secondary_types: list[str] | None = None
+    first_release_date: str | None = None
+    artist_credit: list[_MBArtistCreditName] = msgspec.field(default_factory=list[_MBArtistCreditName])
+
+
+class _MBReleaseSearchHit(msgspec.Struct, rename="kebab"):
+    """Slice of one ``/release?query=`` search-result hit."""
+    id: str = ""
+    title: str = ""
+    date: str = ""
+    score: int = 0
+    release_group: _MBReleaseGroupRef = msgspec.field(default_factory=_MBReleaseGroupRef)
+    artist_credit: list[_MBArtistCreditName] = msgspec.field(default_factory=list[_MBArtistCreditName])
+
+
+class _MBReleaseSearchResponse(msgspec.Struct, rename="kebab"):
+    """Slice of the ``/release?query=`` search response."""
+    releases: list[_MBReleaseSearchHit] = msgspec.field(default_factory=list[_MBReleaseSearchHit])
+
+
+class _MBArtistSearchHit(msgspec.Struct, rename="kebab"):
+    """Slice of one ``/artist?query=`` search-result hit."""
+    id: str = ""
+    name: str = ""
+    disambiguation: str = ""
+    score: int = 0
+
+
+class _MBArtistSearchResponse(msgspec.Struct, rename="kebab"):
+    """Slice of the ``/artist?query=`` search response."""
+    artists: list[_MBArtistSearchHit] = msgspec.field(default_factory=list[_MBArtistSearchHit])
+
+
+class _MBArtistRelation(msgspec.Struct, rename="kebab"):
+    """Slice of one entry in an ``/artist/<mbid>?inc=artist-rels`` response."""
+    type: str = ""
+    direction: str = ""
+    artist: _MBArtistRef | None = None
+
+
+class _MBArtistDetail(msgspec.Struct, rename="kebab"):
+    """Slice of the ``/artist/<mbid>?inc=artist-rels`` response."""
+    relations: list[_MBArtistRelation] = msgspec.field(default_factory=list[_MBArtistRelation])
+
+
+class _MBReleaseGroupBrowseResponse(msgspec.Struct, rename="kebab"):
+    """Slice of the ``/release-group?artist=`` browse response."""
+    release_groups: list[_MBReleaseGroupRef] = msgspec.field(default_factory=list[_MBReleaseGroupRef])
+    release_group_count: int = 0
+
+
+class _MBReleaseBrowseHit(msgspec.Struct, rename="kebab"):
+    """Slice of one ``/release?artist=`` / ``/release?track_artist=`` hit."""
+    id: str = ""
+    release_group: _MBReleaseGroupRef | None = None
+    status: str | None = None
+
+
+class _MBReleaseBrowseResponse(msgspec.Struct, rename="kebab"):
+    """Slice of the ``/release?artist=`` / ``/release?track_artist=`` /
+    plain ``/release?artist=`` (no ``inc=``) browse response — the last of
+    these hits may carry only ``id`` per release."""
+    releases: list[_MBReleaseBrowseHit] = msgspec.field(default_factory=list[_MBReleaseBrowseHit])
+    release_count: int = 0
+
+
+class _MBMediaSummary(msgspec.Struct, rename="kebab"):
+    """Slice of one ``media`` entry in a release-group's release summary."""
+    format: str | None = None
+    track_count: int = 0
+
+
+class _MBReleaseGroupReleaseSummary(msgspec.Struct, rename="kebab"):
+    """Slice of one release summary inside ``/release?release-group=``.
+
+    ``country``/``status`` are typed nullable (proven against live mirror
+    samples: both arrive as JSON ``null`` on real releases) — the
+    TypedDict this Struct replaces declared them plain ``str``, so a
+    null value used to pass ``None`` straight into the frontend-facing
+    dict silently via ``.get("status", "")`` (a present key with a null
+    value returns the null, not the fallback)."""
+    id: str = ""
+    title: str = ""
+    date: str = ""
+    country: str | None = None
+    status: str | None = None
+    media: list[_MBMediaSummary] = msgspec.field(default_factory=list[_MBMediaSummary])
+
+
+class _MBReleaseGroupReleasesResponse(msgspec.Struct, rename="kebab"):
+    """Slice of the ``/release?release-group=`` browse response."""
+    releases: list[_MBReleaseGroupReleaseSummary] = msgspec.field(default_factory=list[_MBReleaseGroupReleaseSummary])
+    release_count: int = 0
+
+
+class _MBRecordingRef(msgspec.Struct, rename="kebab"):
+    """Slice of a MusicBrainz ``recording`` object this module reads."""
+    id: str = ""
+    length: int | None = None
+
+
+class _MBTrackFull(msgspec.Struct, rename="kebab"):
+    """Slice of a full-release-lookup ``track`` object.
+
+    ``number`` is MB's free-form printed label (``"1"``, ``"A1"``, ``"B2"``
+    for vinyl) — a **string** at the wire, confirmed against live mirror
+    samples. The historical TypedDict this Struct replaces declared it
+    ``int``, an unvalidated annotation nothing ever checked; that was
+    exactly the kind of drift the wire-boundary rule exists to catch."""
+    position: int | None = None
+    number: str | None = None
+    title: str = ""
+    length: int | None = None
+    recording: _MBRecordingRef | None = None
+
+
+class _MBPregap(msgspec.Struct, rename="kebab"):
+    """Slice of a full-release-lookup medium's ``pregap`` object."""
+    title: str = ""
+    length: int | None = None
+    recording: _MBRecordingRef | None = None
+
+
+class _MBFullMedium(msgspec.Struct, rename="kebab"):
+    """Slice of a full-release-lookup ``medium`` object."""
+    position: int = 1
+    format: str | None = None
+    pregap: _MBPregap | None = None
+    tracks: list[_MBTrackFull] = msgspec.field(default_factory=list[_MBTrackFull])
+
+
+class _MBReleaseFullStruct(msgspec.Struct, rename="kebab"):
+    """Strict decode counterpart of ``_MBReleaseFullJSON`` below — the
+    slice of the ``/release/<mbid>?inc=recordings+artist-credits+media+
+    release-groups+labels`` response this module reads for its own
+    internal use (``_strip_release`` / ``get_artist_releases_with_
+    recordings``). Kept as a separate name from ``_MBReleaseFullJSON``
+    because that TypedDict remains the public return-type shape
+    ``get_artist_releases_with_recordings`` hands to
+    ``lib.artist_releases`` (a plain dict, produced here via
+    ``msgspec.to_builtins`` after this Struct validates it) — see that
+    function's docstring."""
+    id: str = ""
+    title: str = ""
+    date: str = ""
+    country: str = ""
+    status: str = ""
+    artist_credit: list[_MBArtistCreditName] = msgspec.field(default_factory=list[_MBArtistCreditName])
+    release_group: _MBReleaseGroupRef | None = None
+    media: list[_MBFullMedium] = msgspec.field(default_factory=list[_MBFullMedium])
+
+
+class _MBArtistReleasesWithRecordingsResponse(msgspec.Struct, rename="kebab"):
+    """Slice of the ``/release?artist=...&inc=recordings+media+release-groups``
+    response — full per-release shape (unlike ``_MBReleaseBrowseResponse``,
+    whose hits carry only ``id``/``release-group``/``status``)."""
+    releases: list[_MBReleaseFullStruct] = msgspec.field(default_factory=list[_MBReleaseFullStruct])
+    release_count: int = 0
+
+
+# ── TypedDict shapes still used as plain-dict type hints ────────────────
+#
+# ``get_release_raw`` returns the untouched wide dict (see its docstring);
+# ``get_artist_releases_with_recordings`` returns a plain dict per release
+# (via ``msgspec.to_builtins`` on the validated ``_MBReleaseFullStruct``
+# above) so ``lib.artist_releases`` — deliberately decoupled from any
+# ``web.mb`` runtime import — keeps consuming ``.get(...)``-style dicts
+# exactly as before.
+
+
 class _MBArtistRefJSON(TypedDict, total=False):
-    """MB nested ``artist`` object inside an artist-credit entry or relation."""
+    """Plain-dict shape of an MB nested ``artist`` object — the
+    ``_MBArtistRef`` Struct above validates the wire; this TypedDict
+    types the dict ``msgspec.to_builtins`` hands back out to
+    ``lib.artist_releases`` (see ``_MBReleaseFullJSON`` below)."""
     id: str
     name: str
     disambiguation: str
 
 
-_EMPTY_MB_ARTIST_REF: _MBArtistRefJSON = {}
-"""Typed empty fallback for "no artist credited" — a reusable NAMED
-constant rather than an inline ``{}`` literal so ``.get(key, default)`` /
-ternary-fallback call sites resolve the exact-TypedDict ``get()`` overload
-instead of unifying with a fresh ``dict[Unknown, Unknown]`` literal."""
-
-
 class _MBArtistCreditNameJSON(TypedDict, total=False):
-    """One MB ``artist-credit`` array entry."""
+    """Plain-dict shape of one MB ``artist-credit`` array entry."""
     name: str
     artist: _MBArtistRefJSON
 
@@ -262,126 +480,27 @@ _MBReleaseGroupRefJSON = TypedDict("_MBReleaseGroupRefJSON", {
     "first-release-date": str | None,
     "artist-credit": list[_MBArtistCreditNameJSON],
 }, total=False)
-"""Slice of a MusicBrainz ``release-group`` object — nested inside a release
-(``release-group`` in a release lookup) or fetched directly (a
-``/release-group?artist=`` browse hit, or the top-level shape of
-``/release-group/<mbid>?inc=artist-credits``). Different endpoints
-populate different subsets of these fields; ``total=False`` covers that."""
+"""Plain-dict shape of a MusicBrainz ``release-group`` object nested
+inside ``_MBReleaseFullJSON``."""
 
 
-_MBReleaseSearchHitJSON = TypedDict("_MBReleaseSearchHitJSON", {
+_MBRecordingRefJSON = TypedDict("_MBRecordingRefJSON", {
     "id": str,
-    "title": str,
-    "date": str,
-    "score": int,
-    "release-group": _MBReleaseGroupRefJSON,
-    "artist-credit": list[_MBArtistCreditNameJSON],
+    "length": int,
 }, total=False)
-"""Slice of one ``/release?query=`` search-result hit."""
-
-
-class _MBReleaseSearchResponseJSON(TypedDict, total=False):
-    """Slice of the ``/release?query=`` search response."""
-    releases: list[_MBReleaseSearchHitJSON]
-
-
-class _MBArtistSearchHitJSON(TypedDict, total=False):
-    """Slice of one ``/artist?query=`` search-result hit."""
-    id: str
-    name: str
-    disambiguation: str
-    score: int
-
-
-class _MBArtistSearchResponseJSON(TypedDict, total=False):
-    """Slice of the ``/artist?query=`` search response."""
-    artists: list[_MBArtistSearchHitJSON]
-
-
-_MBArtistRelationJSON = TypedDict("_MBArtistRelationJSON", {
-    "type": str,
-    "direction": str,
-    "artist": _MBArtistRefJSON,
-}, total=False)
-"""Slice of one entry in an ``/artist/<mbid>?inc=artist-rels`` response."""
-
-
-class _MBArtistDetailJSON(TypedDict, total=False):
-    """Slice of the ``/artist/<mbid>?inc=artist-rels`` response."""
-    relations: list[_MBArtistRelationJSON]
-
-
-_MBReleaseGroupBrowseResponseJSON = TypedDict(
-    "_MBReleaseGroupBrowseResponseJSON", {
-        "release-groups": list[_MBReleaseGroupRefJSON],
-        "release-group-count": int,
-    }, total=False)
-"""Slice of the ``/release-group?artist=`` browse response."""
-
-
-_MBReleaseBrowseHitJSON = TypedDict("_MBReleaseBrowseHitJSON", {
-    "id": str,
-    "release-group": _MBReleaseGroupRefJSON,
-    "status": str,
-}, total=False)
-"""Slice of one ``/release?artist=`` / ``/release?track_artist=`` hit."""
-
-
-_MBReleaseBrowseResponseJSON = TypedDict("_MBReleaseBrowseResponseJSON", {
-    "releases": list[_MBReleaseBrowseHitJSON],
-    "release-count": int,
-}, total=False)
-"""Slice of the ``/release?artist=`` / ``/release?track_artist=`` browse
-response."""
-
-
-_MBMediaSummaryJSON = TypedDict("_MBMediaSummaryJSON", {
-    "format": str,
-    "track-count": int,
-}, total=False)
-"""Slice of one ``media`` entry in a release-group's release summary."""
-
-
-_MBReleaseGroupReleaseSummaryJSON = TypedDict(
-    "_MBReleaseGroupReleaseSummaryJSON", {
-        "id": str,
-        "title": str,
-        "date": str,
-        "country": str,
-        "status": str,
-        "media": list[_MBMediaSummaryJSON],
-    }, total=False)
-"""Slice of one release summary inside ``/release?release-group=``."""
-
-
-_MBReleaseGroupReleasesResponseJSON = TypedDict(
-    "_MBReleaseGroupReleasesResponseJSON", {
-        "releases": list[_MBReleaseGroupReleaseSummaryJSON],
-        "release-count": int,
-    }, total=False)
-"""Slice of the ``/release?release-group=`` browse response."""
-
-
-class _MBRecordingRefJSON(TypedDict, total=False):
-    """Slice of a MusicBrainz ``recording`` object this module reads.
-
-    ``id`` isn't read by anything in this module today but is declared here
-    (issue #784) so ``lib.artist_releases`` — which needs the recording id
-    for cross-release-group coverage analysis — can reuse this exact shape
-    via a ``TYPE_CHECKING`` import instead of maintaining a parallel type.
-    """
-    id: str
-    length: int
+"""Plain-dict shape of a MusicBrainz ``recording`` object."""
 
 
 _MBTrackFullJSON = TypedDict("_MBTrackFullJSON", {
     "position": int,
-    "number": int,
+    "number": str,
     "title": str,
     "length": int,
     "recording": _MBRecordingRefJSON,
 }, total=False)
-"""Slice of a full-release-lookup ``track`` object."""
+"""Plain-dict shape of a full-release-lookup ``track`` object. ``number``
+is a string at the wire (MB's printed label, e.g. ``"A1"`` for vinyl) —
+see ``_MBTrackFull``'s docstring above for the drift this replaced."""
 
 
 _MBPregapJSON = TypedDict("_MBPregapJSON", {
@@ -389,7 +508,7 @@ _MBPregapJSON = TypedDict("_MBPregapJSON", {
     "length": int,
     "recording": _MBRecordingRefJSON,
 }, total=False)
-"""Slice of a full-release-lookup medium's ``pregap`` object."""
+"""Plain-dict shape of a full-release-lookup medium's ``pregap`` object."""
 
 
 _MBFullMediumJSON = TypedDict("_MBFullMediumJSON", {
@@ -398,10 +517,7 @@ _MBFullMediumJSON = TypedDict("_MBFullMediumJSON", {
     "pregap": _MBPregapJSON,
     "tracks": list[_MBTrackFullJSON],
 }, total=False)
-"""Slice of a full-release-lookup ``medium`` object. ``format`` isn't read
-by anything in this module today but is declared here (issue #784) so
-``lib.artist_releases`` can reuse this exact shape — see
-``_MBRecordingRefJSON``'s docstring."""
+"""Plain-dict shape of a full-release-lookup ``medium`` object."""
 
 
 _MBReleaseFullJSON = TypedDict("_MBReleaseFullJSON", {
@@ -414,23 +530,13 @@ _MBReleaseFullJSON = TypedDict("_MBReleaseFullJSON", {
     "release-group": _MBReleaseGroupRefJSON,
     "media": list[_MBFullMediumJSON],
 }, total=False)
-"""Slice of the ``/release/<mbid>?inc=recordings+artist-credits+media+
-release-groups+labels`` response this module reads. Untyped beyond this
-slice (structural-only, no runtime validation) — mirrors the pre-existing
-``.get(..., default)`` tolerance for an external API response, not a
-wire-boundary Struct. Consumers needing wider fields (label-info,
-per-track artist-credit) read the ``dict[str, object]`` returned by
-``get_release_raw`` directly instead of this internal slice."""
-
-
-_MBArtistReleasesWithRecordingsResponseJSON = TypedDict(
-    "_MBArtistReleasesWithRecordingsResponseJSON", {
-        "releases": list[_MBReleaseFullJSON],
-        "release-count": int,
-    }, total=False)
-"""Slice of the ``/release?artist=...&inc=recordings+media+release-groups``
-response — full per-release shape (unlike ``_MBReleaseBrowseResponseJSON``,
-whose hits carry only ``id``/``release-group``/``status``)."""
+"""Plain-dict shape returned by ``get_artist_releases_with_recordings`` —
+each entry is validated on ingest via ``_MBReleaseFullStruct`` and handed
+out as a dict via ``msgspec.to_builtins``. ``lib.artist_releases`` imports
+this under ``TYPE_CHECKING`` for its own type hints (zero runtime coupling
+to this module) and needs this exact nested-TypedDict shape, not a
+flattened ``dict[str, object]``, to keep its own chained ``.get()`` reads
+strict-pyright-clean."""
 
 
 def search_release_groups(query: str) -> list[dict[str, object]]:
@@ -451,43 +557,50 @@ def search_release_groups(query: str) -> list[dict[str, object]]:
 
     def _fetch() -> list[dict[str, object]]:
         q = urllib.parse.quote(query, safe="")
-        data: _MBReleaseSearchResponseJSON = _get(
-            f"{MB_API_BASE}/release?query={q}&fmt=json&limit=25")
+        raw = _get(f"{MB_API_BASE}/release?query={q}&fmt=json&limit=25")
+        data = msgspec.convert(raw, type=_MBReleaseSearchResponse)
         seen_rg: set[str] = set()
         results: list[dict[str, object]] = []
-        for r in data.get("releases", []):
-            rg = r.get("release-group", {})
-            rg_id = rg.get("id", "")
+        for r in data.releases:
+            rg = r.release_group
+            rg_id = rg.id
             if not rg_id or rg_id in seen_rg:
                 continue
             seen_rg.add(rg_id)
-            artist_credit = r.get("artist-credit", [{}])
-            artist = (
-                artist_credit[0].get("artist", _EMPTY_MB_ARTIST_REF)
-                if artist_credit else _EMPTY_MB_ARTIST_REF
-            )
+            artist_credit = r.artist_credit
+            artist = artist_credit[0].artist if artist_credit else _EMPTY_MB_ARTIST_REF
             results.append({
                 "id": rg_id,
-                "title": rg.get("title", r.get("title", "")),
-                "primary_type": rg.get("primary-type", ""),
-                "first_release_date": rg.get("first-release-date", r.get("date", "")),
-                "artist_id": artist.get("id", ""),
-                "artist_name": artist.get("name", ""),
-                "artist_disambiguation": artist.get("disambiguation", ""),
-                "score": r.get("score", 0),
+                "title": rg.title or r.title or "",
+                "primary_type": rg.primary_type or "",
+                "first_release_date": rg.first_release_date or r.date or "",
+                "artist_id": artist.id,
+                "artist_name": artist.name,
+                "artist_disambiguation": artist.disambiguation,
+                "score": r.score,
             })
         return results
 
     return _cache.memoize_meta(f"mb:search:release_groups:{query}", _fetch)
 
 
+class _MBArtistIdentity(Protocol):
+    """Structural shape shared by ``_MBArtistRef`` and ``_MBArtistSearchHit``
+    — both carry ``id``/``name``/``disambiguation``, the fields
+    ``_artist_search_hit`` projects, without both types needing a common
+    base class."""
+    id: str
+    name: str
+    disambiguation: str
+
+
 def _artist_search_hit(
-    artist: _MBArtistRefJSON, *, score: int,
+    artist: _MBArtistIdentity, *, score: int,
 ) -> dict[str, object]:
     return {
-        "id": artist.get("id", ""),
-        "name": artist.get("name", ""),
-        "disambiguation": artist.get("disambiguation", ""),
+        "id": artist.id,
+        "name": artist.name,
+        "disambiguation": artist.disambiguation,
         "score": score,
     }
 
@@ -496,35 +609,38 @@ def _related_artist_identity_hits(
     artist_id: str, *, score: int,
 ) -> list[dict[str, object]]:
     """Resolve canonical MusicBrainz ``is person`` identity siblings."""
-    detail: _MBArtistDetailJSON = _get(
+    raw = _get(
         f"{MB_API_BASE}/artist/{_quote_mb_identifier(artist_id)}?inc=artist-rels&fmt=json"
     )
-    relations = detail.get("relations", [])
-    identity_artists: list[_MBArtistRefJSON] = []
+    detail = msgspec.convert(raw, type=_MBArtistDetail)
+    relations = detail.relations
+    identity_artists: list[_MBArtistRef] = []
 
     # A persona such as Four Tet points backward to the underlying person.
     person = next((
-        rel.get("artist")
+        rel.artist
         for rel in relations
-        if rel.get("type") == "is person"
-        and rel.get("direction") == "backward"
-        and rel.get("artist")
+        if rel.type == "is person"
+        and rel.direction == "backward"
+        and rel.artist is not None
+        and rel.artist.id
     ), None)
-    if person:
+    if person is not None:
         identity_artists.append(person)
-        detail = _get(
-            f"{MB_API_BASE}/artist/{_quote_mb_identifier(person.get('id', ''))}?inc=artist-rels&fmt=json"
+        raw = _get(
+            f"{MB_API_BASE}/artist/{_quote_mb_identifier(person.id)}?inc=artist-rels&fmt=json"
         )
-        relations = detail.get("relations", [])
+        detail = msgspec.convert(raw, type=_MBArtistDetail)
+        relations = detail.relations
 
     # The person entity points forward to each separately catalogued persona.
     identity_artists.extend(
-        forward_artist
+        rel.artist
         for rel in relations
-        if rel.get("type") == "is person"
-        and rel.get("direction") == "forward"
-        for forward_artist in [rel.get("artist")]
-        if forward_artist
+        if rel.type == "is person"
+        and rel.direction == "forward"
+        and rel.artist is not None
+        and rel.artist.id
     )
     return [
         _artist_search_hit(artist, score=score)
@@ -536,11 +652,11 @@ def search_artists(query: str) -> list[dict[str, object]]:
     """Search for artists by name. Returns list of {id, name, disambiguation, score}."""
     def _fetch() -> list[dict[str, object]]:
         q = urllib.parse.quote(query, safe="")
-        data: _MBArtistSearchResponseJSON = _get(
-            f"{MB_API_BASE}/artist?query={q}&fmt=json&limit=20")
+        raw = _get(f"{MB_API_BASE}/artist?query={q}&fmt=json&limit=20")
+        data = msgspec.convert(raw, type=_MBArtistSearchResponse)
         results = [
-            _artist_search_hit(a, score=a.get("score", 0))
-            for a in data.get("artists", [])
+            _artist_search_hit(a, score=a.score)
+            for a in data.artists
         ]
         exact = next((
             row for row in results
@@ -565,20 +681,18 @@ def search_artists(query: str) -> list[dict[str, object]]:
 
 
 def _normalize_artist_release_group(
-    rg: _MBReleaseGroupRefJSON,
+    rg: _MBReleaseGroupRef,
     *,
     is_appearance: bool,
 ) -> ArtistCatalogueRow:
     """Shape direct and track-appearance MB rows into one artist-page contract."""
-    ac = rg.get("artist-credit", [])
-    credit_name = " / ".join(a.get("name", "?") for a in ac) if ac else ""
-    primary_artist_id = (
-        ac[0].get("artist", _EMPTY_MB_ARTIST_REF).get("id") if ac else None
-    )
+    ac = rg.artist_credit
+    credit_name = " / ".join(a.name or "?" for a in ac) if ac else ""
+    primary_artist_id = ac[0].artist.id if ac else None
     # MusicBrainz represents an unclassified release group with JSON null,
     # not only by omitting the field. The shared catalogue contract keeps
     # display text non-null and carries structural knowledge separately.
-    primary_type = rg.get("primary-type") or ""
+    primary_type = rg.primary_type or ""
     _structural: dict[str, ArtistStructuralType] = {
         "Album": "Album", "EP": "EP", "Single": "Single",
     }
@@ -587,18 +701,18 @@ def _normalize_artist_release_group(
     if structural_type is not None:
         primary_types.append(structural_type)
     return ArtistCatalogueRow(
-        id=rg.get("id", ""),
-        title=rg.get("title") or "",
+        id=rg.id,
+        title=rg.title or "",
         type=primary_type,
         source="mb",
         identity_kind="work",
         primary_types=primary_types,
-        secondary_types=rg.get("secondary-types") or [],
+        secondary_types=rg.secondary_types or [],
         format_qualifiers=[],
         # Release status is unioned set-wise inside get_artist_release_groups
         # before rows leave this adapter.
         provenance=[],
-        first_release_date=rg.get("first-release-date") or "",
+        first_release_date=rg.first_release_date or "",
         artist_credit=credit_name,
         primary_artist_id=primary_artist_id or "",
         is_appearance=is_appearance,
@@ -620,14 +734,11 @@ def get_artist_release_groups(artist_mbid: str) -> list[ArtistCatalogueRow]:
         entries: dict[str, ArtistCatalogueRow] = {}
         provenance_by_rg: dict[str, set[ArtistProvenance]] = {}
 
-        def collect_release_provenance(release: _MBReleaseBrowseHitJSON) -> None:
-            rg = release.get("release-group")
-            if not isinstance(rg, dict):
+        def collect_release_provenance(release: _MBReleaseBrowseHit) -> None:
+            rg = release.release_group
+            if rg is None or not rg.id:
                 return
-            rg_id = rg.get("id")
-            if not isinstance(rg_id, str) or not rg_id:
-                return
-            status = release.get("status")
+            status = release.status
             provenance: ArtistProvenance | None = None
             if status == "Official":
                 provenance = "ordinary"
@@ -636,32 +747,35 @@ def get_artist_release_groups(artist_mbid: str) -> list[ArtistCatalogueRow]:
             elif status == "Bootleg":
                 provenance = "unofficial"
             if provenance is not None:
-                provenance_by_rg.setdefault(rg_id, set()).add(provenance)
+                provenance_by_rg.setdefault(rg.id, set()).add(provenance)
 
         def fetch_release_groups(
             offset: int, limit: int,
-        ) -> _MBReleaseGroupBrowseResponseJSON:
-            return _get(
+        ) -> _MBReleaseGroupBrowseResponse:
+            raw = _get(
                 f"{MB_API_BASE}/release-group?artist={_quote_mb_identifier(artist_mbid)}"
                 f"&inc=artist-credits&fmt=json&limit={limit}&offset={offset}"
             )
+            return msgspec.convert(raw, type=_MBReleaseGroupBrowseResponse)
 
         def fetch_direct_releases(
             offset: int, limit: int,
-        ) -> _MBReleaseBrowseResponseJSON:
-            return _get(
+        ) -> _MBReleaseBrowseResponse:
+            raw = _get(
                 f"{MB_API_BASE}/release?artist={_quote_mb_identifier(artist_mbid)}"
                 f"&inc=release-groups&fmt=json&limit={limit}&offset={offset}"
             )
+            return msgspec.convert(raw, type=_MBReleaseBrowseResponse)
 
         def fetch_track_appearances(
             offset: int, limit: int,
-        ) -> _MBReleaseBrowseResponseJSON:
-            return _get(
+        ) -> _MBReleaseBrowseResponse:
+            raw = _get(
                 f"{MB_API_BASE}/release?track_artist={_quote_mb_identifier(artist_mbid)}"
                 "&inc=release-groups+artist-credits"
                 f"&fmt=json&limit={limit}&offset={offset}"
             )
+            return msgspec.convert(raw, type=_MBReleaseBrowseResponse)
 
         # The three families are independent.  Each helper's remaining pages
         # fan out after its own first page, and _get keeps their combined load
@@ -669,29 +783,38 @@ def get_artist_release_groups(artist_mbid: str) -> list[ArtistCatalogueRow]:
         families = _parallel_results({
             "release_groups": lambda: _fetch_browse_pages(
                 fetch_release_groups,
-                lambda page: page.get("release-group-count", 0),
-                lambda page: page.get("release-groups", []),
-                lambda item: item.get("id", ""),
+                lambda page: page.release_group_count,
+                lambda page: page.release_groups,
+                lambda item: item.id,
             ),
             "direct_releases": lambda: _fetch_browse_pages(
                 fetch_direct_releases,
-                lambda page: page.get("release-count", 0),
-                lambda page: page.get("releases", []),
-                lambda item: item.get("id", ""),
+                lambda page: page.release_count,
+                lambda page: page.releases,
+                lambda item: item.id,
             ),
             "track_appearances": lambda: _fetch_browse_pages(
                 fetch_track_appearances,
-                lambda page: page.get("release-count", 0),
-                lambda page: page.get("releases", []),
-                lambda item: item.get("id", ""),
+                lambda page: page.release_count,
+                lambda page: page.releases,
+                lambda item: item.id,
             ),
         }, max_workers=3)
+        # _parallel_results' return type is homogeneous per its shared
+        # ``Result`` TypeVar, so a dict fanning out THREE genuinely
+        # different per-key result types cannot statically discriminate
+        # `families["release_groups"]` from `families["direct_releases"]`
+        # by key alone — pyright infers every entry as the union of all
+        # three. The `isinstance` asserts below are real narrowing (each
+        # job always returns its own declared type; this can never fail
+        # at runtime) rather than a `cast`/`type: ignore` escape hatch.
         release_group_pages = families["release_groups"]
         direct_release_pages = families["direct_releases"]
         track_appearance_pages = families["track_appearances"]
 
         for data in release_group_pages:
-            for rg in data.get("release-groups", []):
+            assert isinstance(data, _MBReleaseGroupBrowseResponse)
+            for rg in data.release_groups:
                 entry = _normalize_artist_release_group(
                     rg, is_appearance=False,
                 )
@@ -701,14 +824,16 @@ def get_artist_release_groups(artist_mbid: str) -> list[ArtistCatalogueRow]:
         # directly credited releases without a status filter so mixed
         # Official/Promotion/Bootleg evidence survives as a set.
         for release_data in direct_release_pages:
-            for release in release_data.get("releases", []):
+            assert isinstance(release_data, _MBReleaseBrowseResponse)
+            for release in release_data.releases:
                 collect_release_provenance(release)
 
         for track_data in track_appearance_pages:
-            for release in track_data.get("releases", []):
+            assert isinstance(track_data, _MBReleaseBrowseResponse)
+            for release in track_data.releases:
                 collect_release_provenance(release)
-                rg = release.get("release-group")
-                if rg is None or not rg.get("id"):
+                rg = release.release_group
+                if rg is None or not rg.id:
                     continue
                 entry = _normalize_artist_release_group(
                     rg, is_appearance=True,
@@ -742,20 +867,18 @@ def get_release_group(rg_mbid: str) -> dict[str, object]:
     drop-in target.
     """
     def _fetch() -> dict[str, object]:
-        data: _MBReleaseGroupRefJSON = _get(
+        raw = _get(
             f"{MB_API_BASE}/release-group/{_quote_mb_identifier(rg_mbid)}?inc=artist-credits&fmt=json")
-        ac = data.get("artist-credit", [{}])
-        artist = (
-            ac[0].get("artist", _EMPTY_MB_ARTIST_REF)
-            if ac else _EMPTY_MB_ARTIST_REF
-        )
+        data = msgspec.convert(raw, type=_MBReleaseGroupRef)
+        ac = data.artist_credit
+        artist = ac[0].artist if ac else _EMPTY_MB_ARTIST_REF
         return {
-            "id": data.get("id", ""),
-            "title": data.get("title", ""),
-            "type": data.get("primary-type", ""),
-            "first_release_date": data.get("first-release-date", ""),
-            "artist_id": artist.get("id", ""),
-            "artist_name": artist.get("name", ""),
+            "id": data.id,
+            "title": data.title or "",
+            "type": data.primary_type or "",
+            "first_release_date": data.first_release_date or "",
+            "artist_id": artist.id,
+            "artist_name": artist.name,
         }
 
     return _cache.memoize_meta(f"mb:release-group:{rg_mbid}:meta", _fetch)
@@ -780,10 +903,10 @@ def get_release_group_year(rg_mbid: str) -> int | None:
     ``lib.field_resolver_service._classify_lookup_exception``.
     """
     def _fetch() -> int | None:
-        data: _MBReleaseGroupRefJSON = _get(
-            f"{MB_API_BASE}/release-group/{_quote_mb_identifier(rg_mbid)}?fmt=json")
+        raw = _get(f"{MB_API_BASE}/release-group/{_quote_mb_identifier(rg_mbid)}?fmt=json")
+        data = msgspec.convert(raw, type=_MBReleaseGroupRef)
         from lib.util import parse_mb_first_release_year
-        return parse_mb_first_release_year(dict(data))
+        return parse_mb_first_release_year(msgspec.to_builtins(data))
 
     return _cache.memoize_meta(
         f"mb:release-group:{rg_mbid}:year", _fetch)
@@ -793,38 +916,40 @@ def get_release_group_releases(rg_mbid: str) -> dict[str, object]:
     """Get all releases for a release group. Returns list of release summaries."""
     def _fetch() -> dict[str, object]:
         # First get the release group metadata
-        rg_data: _MBReleaseGroupRefJSON = _get(
+        raw_meta = _get(
             f"{MB_API_BASE}/release-group/{_quote_mb_identifier(rg_mbid)}?fmt=json")
+        rg_data = msgspec.convert(raw_meta, type=_MBReleaseGroupRef)
 
         # Then browse all releases (paginated — the lookup endpoint caps at 25)
         releases: list[dict[str, object]] = []
         offset = 0
         while True:
-            data: _MBReleaseGroupReleasesResponseJSON = _get(
+            raw = _get(
                 f"{MB_API_BASE}/release?release-group={_quote_mb_identifier(rg_mbid)}"
                 f"&inc=media&fmt=json&limit=100&offset={offset}"
             )
-            for r in data.get("releases", []):
-                track_count = sum(m.get("track-count", 0) for m in r.get("media", []))
-                formats = [(m.get("format") or "?") for m in r.get("media", [])]
+            data = msgspec.convert(raw, type=_MBReleaseGroupReleasesResponse)
+            for r in data.releases:
+                track_count = sum(m.track_count for m in r.media)
+                formats = [(m.format or "?") for m in r.media]
                 releases.append({
-                    "id": r.get("id", ""),
-                    "title": r.get("title", ""),
-                    "date": r.get("date", ""),
-                    "country": r.get("country", ""),
-                    "status": r.get("status", ""),
+                    "id": r.id,
+                    "title": r.title,
+                    "date": r.date,
+                    "country": r.country or "",
+                    "status": r.status or "",
                     "track_count": track_count,
                     "format": ", ".join(formats) if formats else "?",
-                    "media_count": len(r.get("media", [])),
+                    "media_count": len(r.media),
                 })
-            total = data.get("release-count", 0)
+            total = data.release_count
             offset += 100
             if offset >= total:
                 break
 
         return {
-            "title": rg_data.get("title", ""),
-            "type": rg_data.get("primary-type", ""),
+            "title": rg_data.title or "",
+            "type": rg_data.primary_type or "",
             "releases": releases,
         }
 
@@ -833,16 +958,16 @@ def get_release_group_releases(rg_mbid: str) -> dict[str, object]:
 
 def _fetch_release_raw(
     release_mbid: str, *, fresh: bool = False,
-) -> _MBReleaseFullJSON:
+) -> dict[str, object]:
     """Shared fetch+cache path for ``get_release_raw`` and ``get_release``.
 
     One network/cache round trip regardless of which shape the caller
-    wants: ``get_release_raw`` widens the result to ``dict[str, object]``
-    for external raw-field consumers; ``get_release`` (via
-    ``_strip_release``) consumes this module's internal typed slice
-    directly. Never duplicate this fetch — add a second caller instead.
+    wants: ``get_release_raw`` returns this untouched wide dict directly;
+    ``get_release`` decodes it into ``_MBReleaseFullStruct`` (validated)
+    before calling ``_strip_release``. Never duplicate this fetch — add a
+    second caller instead.
     """
-    def _fetch() -> _MBReleaseFullJSON:
+    def _fetch() -> dict[str, object]:
         return _get(
             f"{MB_API_BASE}/release/{_quote_mb_identifier(release_mbid)}"
             f"?inc=recordings+artist-credits+media+release-groups+labels&fmt=json"
@@ -869,44 +994,62 @@ def get_release_raw(
     `_strip_release`. Consumers that need raw fields (the field
     resolver service for label-info / per-track artist-credit /
     release-group primary-type) call this directly — the return type here
-    is a plain ``dict[str, object]`` (not the narrower ``_MBReleaseFullJSON``
-    this module uses internally) precisely so those wider fields stay
-    readable via ``.get()`` without this module's internal slice gating them.
+    is a plain ``dict[str, object]``, deliberately never decoded into any
+    of this module's strict Structs, precisely because real callers
+    (``lib.field_resolver_service``'s ``joinphrase``/label-info reads,
+    ``lib.library_completeness``'s ``recording.video``/``pregap`` reads,
+    ``web.routes.pipeline_mutations``'s nested release-group primary-type
+    read for VA Rule 2) read fields wider than any narrow slice this
+    module could safely declare without becoming a moving target every
+    time one of them needs one more field.
     """
     return dict(_fetch_release_raw(release_mbid, fresh=fresh))
 
 
-def _strip_release(data: _MBReleaseFullJSON) -> dict[str, object]:
-    """Slim a raw MB release JSON down to the shape the frontend +
+def _strip_release(data: _MBReleaseFullStruct) -> dict[str, object]:
+    """Slim a validated MB release Struct down to the shape the frontend +
     pipeline DB inserts want. Pure function over `data`."""
-    artist_credit = data.get("artist-credit", [{}])
-    artist_name = artist_credit[0].get("name", "Unknown") if artist_credit else "Unknown"
-    artist_id = (artist_credit[0].get("artist", {}).get("id") if artist_credit else None)
-    rg_id = (data.get("release-group") or {}).get("id")
+    artist_credit = data.artist_credit
+    artist_name = (artist_credit[0].name or "Unknown") if artist_credit else "Unknown"
+    artist_id = (artist_credit[0].artist.id or None) if artist_credit else None
+    rg_id = (data.release_group.id or None) if data.release_group is not None else None
 
     tracks: list[dict[str, object]] = []
-    for medium in data.get("media", []):
-        disc = medium.get("position", 1)
-        if "pregap" in medium:
-            pg = medium["pregap"]
-            length_ms = pg.get("length") or (pg.get("recording") or {}).get("length")
+    for medium in data.media:
+        disc = medium.position
+        if medium.pregap is not None:
+            pg = medium.pregap
+            length_ms = pg.length
+            if length_ms is None and pg.recording is not None:
+                length_ms = pg.recording.length
             tracks.append({
                 "disc_number": disc,
                 "track_number": 0,
-                "title": pg.get("title", ""),
+                "title": pg.title,
                 "length_seconds": round(length_ms / 1000, 1) if length_ms else None,
             })
-        for track in medium.get("tracks", []):
-            length_ms = track.get("length") or (track.get("recording") or {}).get("length")
+        for track in medium.tracks:
+            length_ms = track.length
+            if length_ms is None and track.recording is not None:
+                length_ms = track.recording.length
+            if track.position is not None:
+                track_number: int | str = track.position
+            elif track.number is not None:
+                try:
+                    track_number = int(track.number)
+                except ValueError:
+                    track_number = track.number
+            else:
+                track_number = 0
             tracks.append({
                 "disc_number": disc,
-                "track_number": track.get("position", track.get("number", 0)),
-                "title": track.get("title", ""),
+                "track_number": track_number,
+                "title": track.title,
                 "length_seconds": round(length_ms / 1000, 1) if length_ms else None,
             })
 
     year = None
-    release_date = data.get("date")
+    release_date = data.date
     if release_date:
         try:
             year = int(release_date[:4])
@@ -914,15 +1057,15 @@ def _strip_release(data: _MBReleaseFullJSON) -> dict[str, object]:
             pass
 
     return {
-        "id": data.get("id", ""),
-        "title": data.get("title", ""),
+        "id": data.id,
+        "title": data.title,
         "artist_name": artist_name,
         "artist_id": artist_id,
         "release_group_id": rg_id,
-        "date": data.get("date", ""),
+        "date": data.date,
         "year": year,
-        "country": data.get("country", ""),
-        "status": data.get("status", ""),
+        "country": data.country,
+        "status": data.status,
         "tracks": tracks,
     }
 
@@ -938,25 +1081,28 @@ def get_release(
     artist/title/track data into `album_requests` / `request_tracks`.
 
     Built on top of the shared ``_fetch_release_raw`` fetch+cache path so
-    the raw MB JSON is the single cached truth; this just re-derives the
-    slim shape per call. The re-derivation is a pure traversal, ~microseconds.
+    the raw MB JSON is the single cached truth; this decodes that same
+    cached dict into ``_MBReleaseFullStruct`` (validated) and re-derives
+    the slim shape per call — the re-derivation plus decode is a pure
+    traversal, still ~microseconds.
     """
     raw = _fetch_release_raw(release_mbid, fresh=fresh)
-    return _strip_release(raw)
+    data = msgspec.convert(raw, type=_MBReleaseFullStruct)
+    return _strip_release(data)
 
 
 def get_artist_name(artist_mbid: str) -> str:
     """Look up an artist's name by MBID."""
     def _fetch() -> str:
-        data: _MBArtistRefJSON = _get(
-            f"{MB_API_BASE}/artist/{_quote_mb_identifier(artist_mbid)}?fmt=json")
-        return data.get("name", "")
+        raw = _get(f"{MB_API_BASE}/artist/{_quote_mb_identifier(artist_mbid)}?fmt=json")
+        data = msgspec.convert(raw, type=_MBArtistRef)
+        return data.name
 
     return _cache.memoize_meta(f"mb:artist:{artist_mbid}:name", _fetch)
 
 
 def assert_exact_release_id_order(
-    expected_ids: list[str], releases: list[_MBReleaseFullJSON],
+    expected_ids: list[str], releases: list[_MBReleaseFullStruct],
 ) -> None:
     """Fail closed unless detailed pagination preserves canonical identity/order.
 
@@ -965,7 +1111,7 @@ def assert_exact_release_id_order(
     alter membership, so they must not be allowed to add, lose, duplicate, or
     reorder a release.
     """
-    actual_ids = [release.get("id", "") for release in releases]
+    actual_ids = [release.id for release in releases]
     if actual_ids != expected_ids:
         raise MusicBrainzArtistCatalogueIncomplete(
             "recording browse did not conserve canonical direct-release IDs: "
@@ -979,32 +1125,36 @@ def get_artist_releases_with_recordings(
     """Paginated fetch of all releases for an artist with recordings and release-group info.
 
     Returns raw MB release dicts with media[].tracks[].recording and release-group fields.
+    Each release is validated on ingest via ``_MBReleaseFullStruct`` and
+    handed back through ``msgspec.to_builtins`` so ``lib.artist_releases``
+    keeps consuming plain dicts (see ``_MBReleaseFullJSON``'s docstring).
     """
     def _fetch() -> list[_MBReleaseFullJSON]:
         def fetch_canonical(
             offset: int, limit: int,
-        ) -> _MBReleaseBrowseResponseJSON:
-            return _get(
+        ) -> _MBReleaseBrowseResponse:
+            raw = _get(
                 f"{MB_API_BASE}/release?artist={_quote_mb_identifier(artist_mbid)}"
                 f"&fmt=json&limit={limit}&offset={offset}"
             )
+            return msgspec.convert(raw, type=_MBReleaseBrowseResponse)
 
         canonical_pages = _fetch_browse_pages(
-            fetch_canonical, lambda page: page.get("release-count", 0),
-            lambda page: page.get("releases", []),
-            lambda item: item.get("id", ""),
+            fetch_canonical, lambda page: page.release_count,
+            lambda page: page.releases,
+            lambda item: item.id,
         )
         canonical_ids = [
-            release.get("id", "")
+            release.id
             for page in canonical_pages
-            for release in page.get("releases", [])
+            for release in page.releases
         ]
         if len(canonical_ids) != len(set(canonical_ids)):
             raise MusicBrainzArtistCatalogueIncomplete(
                 "canonical direct-release browse contained duplicate IDs",
             )
 
-        def fetch_segment(start: int) -> list[_MBReleaseFullJSON]:
+        def fetch_segment(start: int) -> list[_MBReleaseFullStruct]:
             """Fill one fixed canonical offset segment using its exact remainder.
 
             MusicBrainz may return fewer releases than requested when media and
@@ -1014,14 +1164,15 @@ def get_artist_releases_with_recordings(
             """
             end = min(start + 100, len(canonical_ids))
             offset = start
-            segment: list[_MBReleaseFullJSON] = []
+            segment: list[_MBReleaseFullStruct] = []
             while offset < end:
-                data: _MBArtistReleasesWithRecordingsResponseJSON = _get(
+                raw = _get(
                     f"{MB_API_BASE}/release?artist={_quote_mb_identifier(artist_mbid)}"
                     "&inc=recordings+media+release-groups&fmt=json"
                     f"&limit={end - offset}&offset={offset}"
                 )
-                page = data.get("releases", [])
+                data = msgspec.convert(raw, type=_MBArtistReleasesWithRecordingsResponse)
+                page = data.releases
                 if not page:
                     break
                 segment.extend(page)
@@ -1040,11 +1191,10 @@ def get_artist_releases_with_recordings(
         ]
 
         canonical_id_set = set(canonical_ids)
-        by_id: dict[str, _MBReleaseFullJSON] = {}
+        by_id: dict[str, _MBReleaseFullStruct] = {}
         for release in detailed_pages:
-            release_id = release.get("id", "")
-            if release_id in canonical_id_set:
-                by_id.setdefault(release_id, release)
+            if release.id in canonical_id_set:
+                by_id.setdefault(release.id, release)
 
         missing_ids = [release_id for release_id in canonical_ids if release_id not in by_id]
         if missing_ids:
@@ -1052,11 +1202,12 @@ def get_artist_releases_with_recordings(
             # Completeness outranks the fast path: fetch only those canonical
             # leaves, still under the shared mirror cap, rather than silently
             # dropping a pressing or guessing from an adjacent row.
-            def fetch_missing(release_id: str) -> _MBReleaseFullJSON:
-                return _get(
+            def fetch_missing(release_id: str) -> _MBReleaseFullStruct:
+                raw = _get(
                     f"{MB_API_BASE}/release/{_quote_mb_identifier(release_id)}"
                     "?inc=recordings+media+release-groups&fmt=json",
                 )
+                return msgspec.convert(raw, type=_MBReleaseFullStruct)
 
             repairs = _parallel_results(
                 {release_id: (lambda release_id=release_id: fetch_missing(release_id))
@@ -1065,15 +1216,15 @@ def get_artist_releases_with_recordings(
             )
             for release_id in missing_ids:
                 repaired = repairs[release_id]
-                if repaired.get("id", "") != release_id:
+                if repaired.id != release_id:
                     raise MusicBrainzArtistCatalogueIncomplete(
                         "recording repair returned a different release ID",
                     )
                 by_id[release_id] = repaired
         releases = [by_id[release_id] for release_id in canonical_ids]
         assert_exact_release_id_order(canonical_ids, releases)
-        return releases
+        return [msgspec.to_builtins(release) for release in releases]
 
     cached = _cache.memoize_meta(
-        f"mb:artist:{artist_mbid}:releases_with_recordings:v2", _fetch)
+        f"mb:artist:{artist_mbid}:releases_with_recordings:v3", _fetch)
     return [{**item} for item in cached]
