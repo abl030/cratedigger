@@ -25,6 +25,7 @@ from unittest.mock import MagicMock
 
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.import_execution import (
+    CancellationToken,
     ExecutionLeaseSnapshot,
     ExecutionOwnerProof,
     OwnerSessionIdentity,
@@ -67,7 +68,12 @@ class TestRecordingProcessAlbum(unittest.TestCase):
             ),
         )
 
-        result = recorder(entry, ctx, import_job_id=73, owner_proof=owner_proof)
+        token = CancellationToken()
+
+        result = recorder(
+            entry, ctx, import_job_id=73,
+            cancellation_token=token, owner_proof=owner_proof,
+        )
 
         self.assertIs(result, outcome)
         self.assertEqual(len(recorder.calls), 1)
@@ -78,6 +84,7 @@ class TestRecordingProcessAlbum(unittest.TestCase):
         self.assertIsNone(call.validate_fn)
         self.assertIsNone(call.handle_valid_fn)
         self.assertIsNone(call.dispatch_fn)
+        self.assertIs(call.cancellation_token, token)
         self.assertIs(call.owner_proof, owner_proof)
 
 

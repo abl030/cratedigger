@@ -522,6 +522,13 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
             handle_valid.call_args.kwargs["import_job_id"],
             claimed.id,
         )
+        self.assertEqual(
+            handle_valid.call_args.kwargs["owner_proof"],
+            ExecutionOwnerProof(
+                execution_lease=execution_lease,
+                owner_session_identity=owner_session_identity,
+            ),
+        )
 
     def test_action_time_candidate_drift_requeues_before_import(self):
         from lib.download_validation import _process_beets_validation
