@@ -335,10 +335,17 @@ export function renderPressingRow(rel, ctx) {
   //     active request in this RG should be replaced with the
   //     clicked row's MBID. Enabled only when an existing
   //     non-replaced row already targets a sibling MBID in the same RG.
-  //     Disabled either for that confirmed-absence reason or because
-  //     the active-RG lookup itself failed (issue #1355 item 6);
-  //     ``ctx.rgLookupUnavailable`` tells ``renderReplaceButton`` which
-  //     explanation to show without changing the disabled state.
+  //     A disabled button carries one of two explanations
+  //     (issue #1355 item 6), chosen by ``ctx.rgLookupUnavailable``
+  //     without changing the disabled state itself: confirmed absence,
+  //     or the active-RG lookup itself failed. That second explanation
+  //     is claimed only on the MB path (``rgLookupUnavailable`` is
+  //     forced false for Discogs below) — a Discogs row's
+  //     ``release_group_id`` is either a Discogs master id (a release
+  //     under a master) or ``null`` (a masterless release), never an MB
+  //     release-group UUID, so the cache could never have answered the
+  //     question for either shape, regardless of whether the fetch
+  //     itself succeeded.
   //
   // ``releaseGroupId`` may be null for legacy rows; the picker
   // lazy-resolves it via ``POST /api/pipeline/<id>/resolve-rg``
@@ -460,7 +467,13 @@ export async function loadReleaseGroup(id, el, opts = {}) {
     const parentRgId = isDiscogs ? null : id;
 
     const artistName = state.browseArtist?.name || '';
-    const rgLookupUnavailable = activeRgsUnavailable();
+    // Only an MB release-group id is ever a member of the active-RG
+    // cache, so "the lookup failed" is a meaningful explanation only on
+    // the MB path — a Discogs row's id is never in that namespace, so
+    // the button there is always disabled for the ordinary
+    // confirmed-absence reason, never "unavailable" (issue #1355 item 6
+    // review finding 1).
+    const rgLookupUnavailable = !isDiscogs && activeRgsUnavailable();
     const renderRelease = (rel) => {
       const rgForReplace = rel.release_group_id || parentRgId || null;
       return renderPressingRow(rel, {

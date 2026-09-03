@@ -6,11 +6,11 @@
  *
  * `discography.js::loadReleaseGroup` is the composed entry that turns
  * this module's cache state into the operator-visible Replace button
- * explanation, so the last three sections drive it directly (mocking
- * only `fetch`) rather than hand-building the `ctx` object
- * `renderPressingRow` receives — a swapped `canReplace`/
- * `rgLookupUnavailable` field, or a stale `activeRgsUnavailable()` read,
- * would fail those sections.
+ * explanation, so the composed-path sections below drive it directly
+ * (mocking only `fetch`) rather than hand-building the `ctx` object
+ * `renderPressingRow` receives. See the comment above those sections
+ * for exactly which ones a field-mapping bug fails and why one of them
+ * cannot.
  *
  * Run with: node tests/test_js_active_rgs.mjs
  */
@@ -45,7 +45,6 @@ t.section('loadActiveRgs() — successful fetch caches real membership');
   await loadActiveRgs();
   t.ok(hasActiveRg('rg-1'), 'a release group present in the response reports true');
   t.ok(!hasActiveRg('rg-9'), 'a release group absent from the response reports false');
-  t.ok(!activeRgsUnavailable(), 'a successful load is not flagged unavailable');
 }
 
 t.section('loadActiveRgs() — HTTP failure is disabled AND flagged unavailable, not confirmed absence');
@@ -109,13 +108,145 @@ t.section('invalidateActiveRgs() — clears the unavailable flag along with the 
   t.ok(!activeRgsUnavailable(), 'invalidate resets the unavailable flag, not just the cache');
 }
 
+/** A controllable Promise: resolve()/reject() release it from outside. */
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+t.section('loadActiveRgs() — a stale in-flight FAILURE cannot clobber a fresher invalidate + reload; it adopts the fresh answer');
+{
+  invalidateActiveRgs();
+  const staleGate = deferred();
+  let call = 0;
+  stubGlobals({
+    fetch: async () => {
+      call += 1;
+      if (call === 1) {
+        // The first (stale) attempt hangs here until the test releases
+        // it — simulating a slow response that outlives an
+        // invalidateActiveRgs() call triggered by an unrelated operator
+        // action (add/replace/remove) while this fetch is in flight.
+        await staleGate.promise;
+        return httpErrorResponse(500);
+      }
+      return okJsonResponse({ release_group_ids: ['rg-fresh'] });
+    },
+  });
+  const staleLoad = loadActiveRgs();
+  // Simulates the unrelated mutation that invalidates the cache while
+  // the stale fetch above is still pending.
+  invalidateActiveRgs();
+  await loadActiveRgs();
+  t.ok(hasActiveRg('rg-fresh'), 'the fresh reload result is in place');
+  t.ok(!activeRgsUnavailable(), 'the fresh successful reload is not flagged unavailable');
+  staleGate.resolve();
+  const staleResult = await staleLoad;
+  t.ok(hasActiveRg('rg-fresh'), 'a late-resolving stale FAILURE does not clobber the fresher cache');
+  t.ok(!activeRgsUnavailable(),
+    'a late-resolving stale FAILURE does not falsely flag a fresher successful load as unavailable');
+  t.ok(staleResult.has('rg-fresh'),
+    'the stale caller itself adopts the fresh answer (re-enters loadActiveRgs) rather than reporting a confirmed-empty set — deleting the success-branch generation guard would make this the ONLY assertion in this file that observes the caller-facing return value, not just module state');
+}
+
+t.section('loadActiveRgs() — a stale in-flight SUCCESS cannot overwrite a fresher successful reload with older data');
+{
+  invalidateActiveRgs();
+  const staleGate = deferred();
+  let call = 0;
+  stubGlobals({
+    fetch: async () => {
+      call += 1;
+      if (call === 1) {
+        // The stale attempt eventually SUCCEEDS too, just with data
+        // that is no longer current by the time it lands — this is the
+        // shape that specifically exercises the success-branch
+        // generation guard, distinct from the failure-branch guard the
+        // previous section exercises.
+        await staleGate.promise;
+        return okJsonResponse({ release_group_ids: ['rg-stale'] });
+      }
+      return okJsonResponse({ release_group_ids: ['rg-fresh'] });
+    },
+  });
+  const staleLoad = loadActiveRgs();
+  invalidateActiveRgs();
+  await loadActiveRgs();
+  t.ok(hasActiveRg('rg-fresh'), 'the fresh reload result is in place');
+  staleGate.resolve();
+  await staleLoad;
+  t.ok(hasActiveRg('rg-fresh'), 'the fresh result survives a late-resolving stale SUCCESS');
+  t.ok(!hasActiveRg('rg-stale'),
+    'a late-resolving stale SUCCESS does not overwrite the cache with its own, no-longer-current data');
+}
+
+t.section('loadActiveRgs() — a caller arriving after a stale attempt settles still joins the current in-flight attempt, not a redundant fetch');
+{
+  invalidateActiveRgs();
+  const staleGate = deferred();
+  const freshGate = deferred();
+  let call = 0;
+  stubGlobals({
+    fetch: async () => {
+      call += 1;
+      if (call === 1) {
+        await staleGate.promise;
+        return httpErrorResponse(500);
+      }
+      await freshGate.promise;
+      return okJsonResponse({ release_group_ids: ['rg-fresh'] });
+    },
+  });
+  const staleLoad = loadActiveRgs();
+  invalidateActiveRgs();
+  const freshLoad = loadActiveRgs(); // call #2, still pending (hangs on freshGate)
+  staleGate.resolve();
+  // The stale attempt's own generation guard re-enters loadActiveRgs
+  // and adopts whatever is currently in flight (the fresh attempt,
+  // still pending on freshGate) — so staleLoad itself will not settle
+  // until freshGate does. Flush the microtask queue with a macrotask
+  // boundary instead of awaiting staleLoad directly, so the stale
+  // attempt's finally block runs (proving/disproving the finally guard)
+  // without deadlocking on the fresh attempt this test deliberately
+  // holds open a moment longer.
+  await new Promise((resolve) => { setTimeout(resolve, 0); });
+  // A third caller arrives AFTER the stale attempt has fully settled
+  // (including its finally block) but BEFORE the fresh attempt has —
+  // this is exactly the window where an unconditional `inflight = null`
+  // in the stale attempt's finally would let this caller believe
+  // nothing is in flight and start a THIRD fetch, instead of joining
+  // the fresh attempt that is still genuinely pending.
+  const thirdLoad = loadActiveRgs();
+  freshGate.resolve();
+  await Promise.all([staleLoad, freshLoad, thirdLoad]);
+  t.equal(call, 2,
+    'a caller arriving between a stale attempt\'s settlement and the current attempt\'s settlement joins the current in-flight fetch rather than starting a redundant third one');
+  t.ok(hasActiveRg('rg-fresh'), 'the joined attempt still produces the correct result');
+}
+
 /*
  * Composed render path — loadReleaseGroup() is the entry discography.js
- * exposes that turns this cache's state into the button's visible
- * explanation. renderPressingRow / renderReplaceButton stay leaves of
- * that entry (per tests/test_js_discography.mjs's own header), so only
- * loadReleaseGroup can prove the composition: which cache state produces
- * which sentence.
+ * exposes that fetches a release group's pressings, awaits
+ * loadActiveRgs() in parallel, and builds the ctx object renderPressingRow
+ * receives. Driving it directly (rather than hand-building that ctx)
+ * proves the real field mapping.
+ *
+ * A swap of canReplace/rgLookupUnavailable in discography.js fails BOTH
+ * the "failed active-RG lookup" and "confirmed present" sections below
+ * (each has canReplace != rgLookupUnavailable, so a swap flips its
+ * outcome). A stale activeRgsUnavailable() read taken before the fetch
+ * settles fails only the "failed active-RG lookup" section — hoisting the
+ * read above Promise.all would read the pre-invalidate value (false) on
+ * EVERY section, but only that section's correct value is genuinely
+ * true, so only there does hoisting produce a visible difference. The
+ * "confirmed absence" section cannot catch the swap at all — hasActiveRg()
+ * and activeRgsUnavailable() are both false there by construction (a
+ * successful load reporting a genuine absence), so swapping two equal
+ * values is invisible; no fixture change closes this, since the section's
+ * own definition forces both to false. It exists to pin the legacy
+ * tooltip text, not to discriminate the mapping.
  */
 
 /** One MB pressing row with no pipeline/library overlay — routes renderPressingRow into inverted-mode Replace, the only mode this cache affects. */
@@ -169,7 +300,7 @@ t.section('loadReleaseGroup() composed path — a failed active-RG lookup render
     sourceId: '129bebd8-a7b9-4099-b0bc-545b704e7a95',
     activeRgsFails: true,
   });
-  t.contains(html, 'disabled title="Could not check for an existing request in this release group. Try again."',
+  t.contains(html, 'disabled title="Could not check for an existing request in this release group. Collapse and re-expand to retry."',
     'a failed active-RG lookup renders the unavailable explanation, not the confirmed-absence one');
   t.excludes(html, 'title="No existing request in this release group"',
     'the confirmed-absence explanation is not shown for a lookup that never confirmed anything');
@@ -182,9 +313,58 @@ t.section('loadReleaseGroup() composed path — a real match still enables the b
     sourceId: '129bebd8-a7b9-4099-b0bc-545b704e7a95',
     activeRgsBody: { release_group_ids: ['rg-composed-3'] },
   });
-  t.excludes(html, 'disabled', 'a confirmed active request in the same release group enables the button');
   t.contains(html, 'window.openReplacePicker({targetMbid:',
     'the enabled button still wires the inverted-mode click handler');
+  // renderReplaceButton's enabled branch template is exactly
+  // `<button class="${className}"${style} onclick="...">` — no title
+  // attribute anywhere in it. Assert that adjacency directly (the
+  // button's own style attribute immediately followed by its onclick,
+  // nothing interposed) rather than excluding "title=" from the whole
+  // row, which also legitimately contains one on the search-plan
+  // inspector button whenever a pipeline id is present. A mutant that
+  // adds a false title string to the enabled branch's return value
+  // breaks this exact adjacency (found in review of issue #1355 item 6:
+  // such a mutant passed every other assertion in this file and the
+  // whole JS unit suite).
+  t.contains(html,
+    'class="btn" style="padding:2px 8px;font-size:0.7em;white-space:nowrap;" onclick="event.stopPropagation(); window.openReplacePicker({targetMbid:',
+    'the enabled Replace button carries no title attribute between its style and onclick attributes');
+}
+
+/**
+ * A Discogs release under a master carries release_group_id set to the
+ * Discogs MASTER id (web/discogs.py), never an MB release-group UUID —
+ * a value hasActiveRg's cache can never meaningfully answer for,
+ * regardless of whether the active-rgs fetch itself succeeded.
+ */
+async function expandDiscogsReleaseGroup({ rgId, sourceId, activeRgsFails }) {
+  pipelineStore.clear();
+  invalidateActiveRgs();
+  const relEl = element();
+  stubGlobals({
+    fetch: async (url) => {
+      if (String(url).includes('/api/pipeline/active-rgs')) {
+        if (activeRgsFails) throw new TypeError('network down');
+        return okJsonResponse({ release_group_ids: [] });
+      }
+      return okJsonResponse({ releases: [unclaimedPressing(sourceId, String(rgId))] });
+    },
+  });
+  await loadReleaseGroup(rgId, null, { targetEl: relEl, source: 'discogs', identityKind: 'work' });
+  return relEl.innerHTML;
+}
+
+t.section('loadReleaseGroup() composed path — a Discogs row never claims "unavailable" (issue #1355 item 6 review finding 1)');
+{
+  const html = await expandDiscogsReleaseGroup({
+    rgId: 424242,
+    sourceId: '999999',
+    activeRgsFails: true,
+  });
+  t.contains(html, 'disabled title="No existing request in this release group"',
+    'a Discogs row stays disabled with the confirmed-absence text even though the active-rgs lookup itself failed');
+  t.excludes(html, 'Could not check',
+    'the unavailable explanation is never claimed for a Discogs row — its id is never in the MB-only cache regardless of fetch outcome');
 }
 
 t.done();

@@ -255,13 +255,18 @@ export function renderBadRipButton(state, opts = {}) {
  *   existing non-replaced request in the same release group
  *   (``opts.enabled === true``); disabled otherwise so the affordance
  *   communicates "nothing to replace here" without requiring a click.
- *   A disabled button carries one of two different explanations,
- *   chosen by ``opts.unavailable`` (issue #1355 item 6): the active-RG
- *   lookup came back and confirmed no existing request, or the lookup
- *   itself failed (network/HTTP error, or a malformed response) and
- *   the disabled state is a fail-closed default, not a confirmed
- *   answer. Either way the button stays disabled — this only changes
- *   what the operator is told about why.
+ *   A disabled button carries one of two different explanations
+ *   (issue #1355 item 6). The caller passes ``opts.unavailable: true``
+ *   when the active-RG lookup failed AND its answer would have been
+ *   meaningful for this row — i.e. the row's release-group id is one
+ *   the cache could actually contain. Omitting it (or passing
+ *   ``false``) claims the confirmed-absence explanation instead, which
+ *   is also the correct thing to pass when the lookup simply doesn't
+ *   apply to this row (e.g. a Discogs id, never a member of the MB-only
+ *   cache) even if the fetch itself failed — a failed check on a
+ *   question that could never have been answered is not "unavailable",
+ *   it's irrelevant. Either way the button stays disabled — this only
+ *   changes what the operator is told about why.
  *   Click → ``window.openReplacePicker({targetMbid, releaseGroupId,
  *   targetLabel})``.
  *
@@ -319,7 +324,7 @@ export function renderReplaceButton(args, opts = {}) {
   const targetArg = jsArg(args.targetLabel || '');
   if (!enabled) {
     const title = opts.unavailable
-      ? 'Could not check for an existing request in this release group. Try again.'
+      ? 'Could not check for an existing request in this release group. Collapse and re-expand to retry.'
       : 'No existing request in this release group';
     return `<button class="${className}"${style} disabled title="${title}">${label}</button>`;
   }
