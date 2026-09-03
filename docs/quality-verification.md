@@ -1812,10 +1812,15 @@ readiness gates that read it (`lib.quality.pipeline._require_evidence_ready`
 and `lib.quality_evidence._load_candidate_evidence_for_source`) pass `False`
 exactly when `candidate_preimport_reject_fact(evidence) is not None` —
 technically any of the five facts that classifier can name, including
-`mixed_source`, though `evidence_from_measurement` itself only ever produces
-evidence for the four named above (a mixed-source candidate always reaches
-the harness for real, so its evidence is never measurement-only). The
-producer leaves `format`/`min_bitrate_kbps`/`avg_bitrate_kbps`/
+`mixed_source`, though `lib.quality_evidence.persist_candidate_evidence_from_measurement`
+(the only path that turns an `evidence_from_measurement` result into a
+persisted, readiness-gated candidate row) only ever reaches this gate for
+the four named above; a mixed-source candidate always reaches the real
+harness for its persisted evidence. (`evidence_from_measurement` itself is
+also called for a transient, never-persisted preview sidecar on every
+lossless candidate regardless of fact — that call never touches the
+readiness gate this paragraph describes.) The producer leaves
+`format`/`min_bitrate_kbps`/`avg_bitrate_kbps`/
 `median_bitrate_kbps` honestly `None`. A row with no reject fact and no
 quality measurement still fails the gate exactly as before — the exemption
 is keyed to the fact, not to "any early reject." `current` (HAVE) evidence
