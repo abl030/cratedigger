@@ -29,6 +29,7 @@ from lib.artist_catalogue import (
     ArtistProvenance,
     ArtistStructuralType,
 )
+from lib.json_narrow import is_object_list, is_str_object_dict
 
 # Use the `web.` package-qualified path to keep the web metadata cache
 # separate from the pipeline's peer-cache implementation.
@@ -431,8 +432,13 @@ class _MBReleaseFullStruct(msgspec.Struct, rename="kebab"):
     id: str = ""
     title: str = ""
     date: str = ""
-    country: str = ""
-    status: str = ""
+    # Nullable, proven against a 1,057-release live-mirror census (review
+    # finding on issue #1355 item 5): 2.3% of real full-release lookups
+    # carry an explicit JSON null ``country``, 1.1% a null ``status`` —
+    # the same drift ``_MBReleaseGroupReleaseSummary`` above was already
+    # proven to have, just not carried over here on the first pass.
+    country: str | None = None
+    status: str | None = None
     artist_credit: list[_MBArtistCreditName] = msgspec.field(default_factory=list[_MBArtistCreditName])
     release_group: _MBReleaseGroupRef | None = None
     media: list[_MBFullMedium] = msgspec.field(default_factory=list[_MBFullMedium])
@@ -1119,6 +1125,42 @@ def assert_exact_release_id_order(
         )
 
 
+def _release_full_to_json_dict(release: _MBReleaseFullStruct) -> _MBReleaseFullJSON:
+    """Convert a validated ``_MBReleaseFullStruct`` into the exact
+    ``_MBReleaseFullJSON`` plain-dict shape ``lib.artist_releases``
+    consumes via ``.get(key, default)``.
+
+    ``msgspec.to_builtins`` always emits every declared field, so a
+    Struct field left at its ``None``/absent-key default (``country``,
+    ``status``, ``release_group``, a track's ``recording``) becomes a
+    PRESENT ``null`` in the built dict rather than an ABSENT key —
+    ``r.get("release-group", {})`` then returns ``None``, not ``{}``,
+    and a later ``.get(...)`` on it raises ``AttributeError`` (issue
+    #1355 item 5 review finding F2). Delete exactly the keys
+    ``lib.artist_releases`` reads with a ``.get(key, default)`` fallback
+    when the corresponding Struct field is ``None``, restoring the
+    genuinely-absent-key shape its ``.get()`` calls expect."""
+    built = msgspec.to_builtins(release)
+    if release.country is None:
+        del built["country"]
+    if release.status is None:
+        del built["status"]
+    if release.release_group is None:
+        del built["release-group"]
+    media_list: object = built.get("media")
+    if is_object_list(media_list):
+        for medium_struct, medium_built in zip(release.media, media_list, strict=True):
+            if not is_str_object_dict(medium_built):
+                continue
+            tracks_list: object = medium_built.get("tracks")
+            if not is_object_list(tracks_list):
+                continue
+            for track_struct, track_built in zip(medium_struct.tracks, tracks_list, strict=True):
+                if is_str_object_dict(track_built) and track_struct.recording is None:
+                    del track_built["recording"]
+    return built
+
+
 def get_artist_releases_with_recordings(
     artist_mbid: str,
 ) -> list[_MBReleaseFullJSON]:
@@ -1126,8 +1168,10 @@ def get_artist_releases_with_recordings(
 
     Returns raw MB release dicts with media[].tracks[].recording and release-group fields.
     Each release is validated on ingest via ``_MBReleaseFullStruct`` and
-    handed back through ``msgspec.to_builtins`` so ``lib.artist_releases``
-    keeps consuming plain dicts (see ``_MBReleaseFullJSON``'s docstring).
+    handed back through ``_release_full_to_json_dict`` so
+    ``lib.artist_releases`` keeps consuming plain dicts with the exact
+    genuinely-absent-key shape its ``.get(key, default)`` reads expect
+    (see ``_MBReleaseFullJSON``'s docstring).
     """
     def _fetch() -> list[_MBReleaseFullJSON]:
         def fetch_canonical(
@@ -1223,7 +1267,7 @@ def get_artist_releases_with_recordings(
                 by_id[release_id] = repaired
         releases = [by_id[release_id] for release_id in canonical_ids]
         assert_exact_release_id_order(canonical_ids, releases)
-        return [msgspec.to_builtins(release) for release in releases]
+        return [_release_full_to_json_dict(release) for release in releases]
 
     cached = _cache.memoize_meta(
         f"mb:artist:{artist_mbid}:releases_with_recordings:v3", _fetch)

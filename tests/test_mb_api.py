@@ -491,6 +491,62 @@ class TestNormalizeArtistReleaseGroup(unittest.TestCase):
         self.assertEqual(row.primary_types, ["Album"])
 
 
+class TestGetReleaseTolerantOfLiveMirrorNulls(unittest.TestCase):
+    """Issue #1355 item 5 review finding F1 — a live-mirror census found
+    2.3%/1.1% of real full-release lookups carry an explicit JSON
+    ``null`` ``country``/``status``. ``_MBReleaseFullStruct`` used to
+    declare both plain ``str``, so ``get_release`` raised
+    ``msgspec.ValidationError`` (a 500) on every one of those releases —
+    a live regression this pin reproduces and then proves fixed."""
+
+    def test_null_country_and_status_pass_through_like_before(self) -> None:
+        payload = {
+            "id": "rel-null-cs", "title": "Bootleg Pressing", "date": "1999",
+            "country": None, "status": "Bootleg",
+            "media": [],
+        }
+        with _mock_urlopen(payload):
+            result = get_release("rel-null-cs", fresh=True)
+        self.assertIsNone(result["country"])
+        self.assertEqual(result["status"], "Bootleg")
+
+    def test_get_artist_releases_with_recordings_omits_null_and_absent_nested_fields(
+        self,
+    ) -> None:
+        """The plain-dict contract lib.artist_releases consumes must
+        never carry an explicit null where a genuinely-absent key was
+        expected (review finding F2) — a null/absent release-group,
+        country, status, or track recording must be OMITTED, not
+        present-as-None, or lib.artist_releases's .get(key, {}) calls
+        return None instead of {} and crash on the next .get()."""
+        artist_id = "artist-null-fields"
+        canonical = {"release-count": 1, "releases": [{"id": "rel-1"}]}
+        detailed = {
+            "release-count": 1,
+            "releases": [{
+                "id": "rel-1", "title": "No Release Group", "date": "2020",
+                "country": None, "status": None,
+                "media": [{
+                    "position": 1,
+                    "tracks": [{"position": 1, "title": "Track One"}],
+                }],
+            }],
+        }
+        with _mock_urlopen_by_fragment({
+            f"/release?artist={artist_id}&fmt=json": canonical,
+            f"/release?artist={artist_id}&inc=recordings": detailed,
+        }):
+            releases = get_artist_releases_with_recordings(artist_id)
+        self.assertEqual(len(releases), 1)
+        release = releases[0]
+        self.assertNotIn("country", release)
+        self.assertNotIn("status", release)
+        self.assertNotIn("release-group", release)
+        media = release.get("media", [])
+        track = media[0].get("tracks", [])[0]
+        self.assertNotIn("recording", track)
+
+
 class TestGetReleaseNormalizesFullPayload(unittest.TestCase):
     """``get_release``/``_strip_release`` field-by-field, against a real
     full-release shape (``inc=recordings+artist-credits+media+release-
@@ -764,6 +820,17 @@ class TestWireBoundaryValidation(unittest.TestCase):
         bad = {"id": "rel-bad-title", "title": 12345, "date": "2024"}
         with _mock_urlopen(bad), self.assertRaises(msgspec.ValidationError):
             get_release("rel-bad-title", fresh=True)
+
+    def test_get_release_rejects_non_str_track_number(self) -> None:
+        """``number`` is MB's printed vinyl-side label ("A1"/"B2") — a
+        string at the wire. An int there (the historical TypedDict's
+        false claim) must be rejected, not silently accepted."""
+        bad = {
+            "id": "rel-bad-number", "title": "T", "date": "2024",
+            "media": [{"position": 1, "tracks": [{"number": 7, "title": "X"}]}],
+        }
+        with _mock_urlopen(bad), self.assertRaises(msgspec.ValidationError):
+            get_release("rel-bad-number", fresh=True)
 
     def test_get_artist_name_rejects_non_str_name(self) -> None:
         bad = {"id": "artist-bad-name", "name": 12345}
