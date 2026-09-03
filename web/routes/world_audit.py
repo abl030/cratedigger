@@ -6,7 +6,11 @@ import logging
 
 import msgspec
 
-from lib.world_audit_service import audit_world_from_borrowed_factory
+from lib.world_audit_service import (
+    WORLD_AUDIT_HTTP_STATUS,
+    audit_world_from_borrowed_factory,
+    world_audit_outcome,
+)
 from web.routes._registry import RouteHandler, RouteRegistration, route
 from web.runtime import runtime
 
@@ -14,6 +18,17 @@ log = logging.getLogger(__name__)
 
 
 def get_world_audit(h: RouteHandler, params: dict[str, list[str]]) -> None:
+    """Status-code mapping (issue #1355 item 4), derived via
+    ``lib.world_audit_service.world_audit_outcome``: ``clean``/
+    ``observations_only`` -> 200 (a COMPLETE report, whatever it observed);
+    ``integrity_failed`` -> 200 too (a genuine Bucket A finding stays a
+    successful answer — the payload's own ``status`` carries it, mirroring
+    the sibling retag-divergence audit's ``divergence_found`` -> 200);
+    ``beets_unavailable`` (``complete == False``) -> 503 (transient/
+    retryable — the audit never actually ran). This used to return 200 for
+    ``beets_unavailable`` too — a pre-existing deviation from
+    ``GET /api/audit/retag-divergence``'s own convention, closed here.
+    """
     del params
     rt = runtime()
     try:
@@ -29,7 +44,11 @@ def get_world_audit(h: RouteHandler, params: dict[str, list[str]]) -> None:
         log.exception("world audit failed unexpectedly")
         h._json({"error": "World audit failed"}, status=503)
         return
-    h._json(payload)
+    outcome = world_audit_outcome(report)
+    status_code = (
+        200 if outcome == "integrity_failed" else WORLD_AUDIT_HTTP_STATUS[outcome]
+    )
+    h._json(payload, status=status_code)
 
 
 ROUTES: list[RouteRegistration] = [

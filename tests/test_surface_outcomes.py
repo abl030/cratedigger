@@ -129,6 +129,17 @@ REGISTRY: tuple[RegisteredOutcomeMaps, ...] = (
     RegisteredOutcomeMaps("lib.local_import_service", "LOCAL_IMPORT_HTTP_STATUS"),
     RegisteredOutcomeMaps("lib.merge_rekey_service", "MERGE_REKEY_HTTP_STATUS"),
     RegisteredOutcomeMaps("lib.beets_tag_sync", "TAG_SYNC_HTTP_STATUS"),
+    # `integrity_failed` is a real outcome of `world_audit_outcome` but is
+    # deliberately NOT a member of this map (see its docstring in
+    # lib/world_audit_service.py) — exit 1 for an HTTP-200 outcome cannot
+    # obey the ordinary status-derived convention this registry enforces,
+    # mirroring the retag-divergence audit's own unregistered
+    # `divergence_found` -> 1 case.
+    RegisteredOutcomeMaps(
+        "lib.world_audit_service",
+        "WORLD_AUDIT_HTTP_STATUS",
+        "WORLD_AUDIT_EXIT_CODES",
+    ),
 )
 
 

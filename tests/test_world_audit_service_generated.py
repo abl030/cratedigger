@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from dataclasses import dataclass, replace
 from typing import Literal
+from unittest.mock import patch
 
 from hypothesis import example, given
 from hypothesis import strategies as st
@@ -18,10 +19,13 @@ import tests._hypothesis_profiles  # noqa: F401  (loads active profile)
 from lib.beets_db import BeetsDB, BeetsWorldAlbum, CurrentBeetsResolution
 from lib.release_identity import ReleaseIdentity
 from lib.world_audit_service import (
+    WORLD_AUDIT_EXIT_CODES,
+    WORLD_AUDIT_HTTP_STATUS,
     WorldAuditReport,
     audit_world,
     audit_world_from_borrowed_factory,
     audit_world_from_factory,
+    world_audit_outcome,
 )
 from lib.world_invariants import (
     LibraryAlbumSnapshot,
@@ -265,6 +269,27 @@ def assert_resolver_failure_contract(
             f"{report.groups.b.members[0].detail!r}"
         )
 
+    # Issue #1355 item 4: an incomplete/beets-unavailable report must be a
+    # non-successful CLI exit and HTTP status, not the proxy `complete`
+    # field alone — drive the exact derivation
+    # `cmd_audit_world`/`get_world_audit` use and assert the DECIDED
+    # values, matching what an operator or cron actually observes.
+    outcome = world_audit_outcome(report)
+    exit_code = (
+        1 if outcome == "integrity_failed" else WORLD_AUDIT_EXIT_CODES[outcome]
+    )
+    if exit_code != 5:
+        raise AssertionError(
+            f"availability failure CLI exit code drifted: {exit_code}"
+        )
+    status_code = (
+        200 if outcome == "integrity_failed" else WORLD_AUDIT_HTTP_STATUS[outcome]
+    )
+    if status_code != 503:
+        raise AssertionError(
+            f"availability failure HTTP status drifted: {status_code}"
+        )
+
 
 class TestWorldAuditResolverFailureGenerated(unittest.TestCase):
     @given(world=_resolver_failure_worlds())
@@ -317,6 +342,40 @@ class TestWorldAuditResolverFailureGenerated(unittest.TestCase):
 
         with self.assertRaisesRegex(AssertionError, "reported complete"):
             assert_resolver_failure_contract(world, known_bad)
+
+    def test_checker_rejects_a_wrong_availability_cli_exit_code(self) -> None:
+        """Issue #1355 item 4: proves the new decided-exit-code clause
+        actually trips, rather than being an unfalsifiable extra line."""
+        world = _ResolverFailureWorld(
+            owned=True,
+            kind="availability",
+            sqlite_code=sqlite3.SQLITE_BUSY,
+            sqlite_exception="operational",
+        )
+        observation = _observe(world)
+
+        with (
+            patch.dict(WORLD_AUDIT_EXIT_CODES, {"beets_unavailable": 0}),
+            self.assertRaisesRegex(AssertionError, "CLI exit code drifted"),
+        ):
+            assert_resolver_failure_contract(world, observation)
+
+    def test_checker_rejects_a_wrong_availability_http_status(self) -> None:
+        """Issue #1355 item 4: proves the new decided-HTTP-status clause
+        actually trips, rather than being an unfalsifiable extra line."""
+        world = _ResolverFailureWorld(
+            owned=True,
+            kind="availability",
+            sqlite_code=sqlite3.SQLITE_BUSY,
+            sqlite_exception="operational",
+        )
+        observation = _observe(world)
+
+        with (
+            patch.dict(WORLD_AUDIT_HTTP_STATUS, {"beets_unavailable": 200}),
+            self.assertRaisesRegex(AssertionError, "HTTP status drifted"),
+        ):
+            assert_resolver_failure_contract(world, observation)
 
     def test_checker_rejects_operational_error_only_auth_classifier(self) -> None:
         world = _ResolverFailureWorld(

@@ -39,11 +39,39 @@ class TestWorldAuditRoute(_FakeDbWebServerCase):
         )
         self.assertEqual(beets.close_calls, 0)
 
-    def test_missing_beets_is_an_incomplete_bucket_b_observation(self) -> None:
-        with install_runtime(replace(runtime(), shared_beets=None)):
+    def test_integrity_failure_still_returns_two_hundred(self) -> None:
+        """Issue #1355 item 4: a genuine Bucket A finding is a COMPLETE
+        answer, not an incomplete one — it stays HTTP 200 with the finding
+        carried in the payload's own `status`, exactly like before this
+        change (mutmut breadth pass survivors 31/33/34 on
+        `web/routes/world_audit.py::get_world_audit`: no test previously
+        drove this branch through the route at all)."""
+        beets = FakeBeetsDB()
+        self.db.seed_request(make_request_row(
+            id=744,
+            mb_release_id=None,
+            discogs_release_id=None,
+            status="imported",
+        ))
+        with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, payload = self._get("/api/audit/world")
 
         self.assertEqual(status, 200)
+        self.assertEqual(payload["status"], "integrity_failed")
+        self.assertTrue(payload["complete"])
+        self.assertEqual(
+            [row["code"] for row in payload["groups"]["a"]["members"]],
+            ["request_identity_missing"],
+        )
+
+    def test_missing_beets_is_an_incomplete_bucket_b_observation(self) -> None:
+        """Issue #1355 item 4: an incomplete report is a non-successful
+        status — this used to return 200, a pre-existing deviation from
+        `GET /api/audit/retag-divergence`'s own convention."""
+        with install_runtime(replace(runtime(), shared_beets=None)):
+            status, payload = self._get("/api/audit/world")
+
+        self.assertEqual(status, 503)
         self.assertEqual(payload["status"], "observations_only")
         self.assertFalse(payload["complete"])
         self.assertEqual(
@@ -72,7 +100,7 @@ class TestWorldAuditRoute(_FakeDbWebServerCase):
         with patch.object(WebRuntime, "beets_db", side_effect=failure):
             status, payload = self._get("/api/audit/world")
 
-        self.assertEqual(status, 200)
+        self.assertEqual(status, 503)
         self.assertFalse(payload["complete"])
         self.assertEqual(
             [row["code"] for row in payload["groups"]["b"]["members"]],

@@ -464,17 +464,26 @@ The public report groups every finding by the authority that owns it:
 Machine-readable output has `status` (`clean`, `observations_only`, or
 `integrity_failed`), `complete`, separate `counts.bucket_a|bucket_b|bucket_c`,
 and `groups.a|b|c`, each with `bucket`, `owner`, `count`, and `members`. There
-is no public flat violations list or all-findings alarm count. Clean and
-B/C-only reports exit 0 from the CLI and return HTTP 200 from the API. Any A
-finding makes the CLI exit 1 while the API still returns HTTP 200 with
+is no public flat violations list or all-findings alarm count. A COMPLETE
+clean or B/C-only report exits 0 from the CLI and returns HTTP 200 from the
+API — Bucket B/C observations are surfaced without failing the command. Any
+A finding makes the CLI exit 1 while the API still returns HTTP 200 with
 `status=integrity_failed`, preserving all B/C observations beside it.
 
-An expected inability to open or query the canonical Beets authority returns
-HTTP 200/CLI 0 with `complete=false` and the Bucket B
-`current_beets_authority_unavailable` observation. An unexpected schema,
-decoder, invariant, programming, close, or serialization defect remains a
-transport failure: CLI exit 5 or HTTP 503. Incompleteness is never evidence
-that an album is absent.
+An expected inability to open or query the canonical Beets authority —
+`complete=false`, the Bucket B `current_beets_authority_unavailable`
+observation — is a non-successful CLI exit 5 / HTTP 503 (issue #1355 item 4):
+the audit never actually ran, so exit 0 there would let a cron, systemd unit,
+agent, or `&&` chain read "audit completed cleanly" from a run that lacked
+authority. This used to be CLI 0 / HTTP 200, a pre-existing deviation from
+`pipeline-cli audit retag-divergence`'s own `beets_unavailable` -> 5/503
+convention (below); the deviation is closed. An unexpected schema, decoder,
+invariant, programming, close, or serialization defect remains a transport
+failure: CLI exit 5 or HTTP 503, same as the Beets-unavailable case, though
+programmatic callers should not need to distinguish the two —
+`groups.b.members` names `current_beets_authority_unavailable` when the cause
+is availability, and the `error` field is set when it is a transport defect.
+Incompleteness is never evidence that an album is absent.
 
 The separate `cratedigger-world-audit-debt-gate` automation binary applies a
 stricter exact-known-cohort policy to a complete report. It may reject a new
@@ -679,14 +688,16 @@ actually ran at all, so `0`/`200` there would let a cron or
 nothing). Only `clean` means "I answered the question and the cohort is
 empty" — every other status means either a real finding or an incomplete
 answer, and none of the three non-clean statuses may be silently read as
-success. **This deliberately diverges from `pipeline-cli audit world` /
-`GET /api/audit/world`, which exit `0`/`200` for their own analogous
-beets-unavailable bucket** — that sibling itself deviates from the same
-documented convention; changing an already-shipped command's exit-code
-contract is out of this issue's scope and is left as a follow-up (see
-post-ship reflection). An unexpected schema, decoder, invariant,
-programming, close, or serialization defect remains a transport failure:
-CLI exit 5 or HTTP 503. A downstream reader closing a CLI pipe early (e.g.
+success. `pipeline-cli audit world` / `GET /api/audit/world` used to exit
+`0`/`200` for their own analogous beets-unavailable bucket, a pre-existing
+deviation from this same documented convention; issue #1355 item 4 closed
+it, so both siblings now exit `5`/`503` for their beets-unavailable case
+alike. World audit has no `incomplete` counterpart — a whole-library scan
+carries no truncation deadline the way the retag census's bounded API route
+does, so its only incomplete cause is Beets being unavailable outright. An
+unexpected schema, decoder, invariant, programming, close, or serialization
+defect remains a transport failure: CLI exit 5 or HTTP 503. A downstream
+reader closing a CLI pipe early (e.g.
 `pipeline-cli audit retag-divergence | head`, or any consumer that exits
 before reading anything) exits 0, never 120. stdout to a pipe is
 block-buffered, not flushed per `print()` call, so a `BrokenPipeError` from

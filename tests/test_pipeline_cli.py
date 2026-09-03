@@ -7793,7 +7793,12 @@ class TestWorldAuditCLI(unittest.TestCase):
             {row["code"] for row in payload["groups"]["b"]["members"]},
         )
 
-    def test_expected_beets_unavailability_is_incomplete_bucket_b(self) -> None:
+    def test_expected_beets_unavailability_is_incomplete_and_exits_five(
+        self,
+    ) -> None:
+        """Issue #1355 item 4: an incomplete report is a non-successful
+        exit — this used to exit 0, a pre-existing deviation from the
+        sibling retag-divergence audit's own convention."""
         import scripts.pipeline_cli.audit as audit_cli
 
         failure = sqlite3.OperationalError("database is locked")
@@ -7813,7 +7818,7 @@ class TestWorldAuditCLI(unittest.TestCase):
             )
 
         payload = json.loads(output.getvalue())
-        self.assertEqual(rc, 0)
+        self.assertEqual(rc, 5)
         self.assertEqual(payload["status"], "observations_only")
         self.assertFalse(payload["complete"])
         self.assertEqual(
