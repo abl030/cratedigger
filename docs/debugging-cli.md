@@ -692,9 +692,11 @@ success. `pipeline-cli audit world` / `GET /api/audit/world` used to exit
 `0`/`200` for their own analogous beets-unavailable bucket, a pre-existing
 deviation from this same documented convention; issue #1355 item 4 closed
 it, so both siblings now exit `5`/`503` for their beets-unavailable case
-alike. World audit has no `incomplete` counterpart — a whole-library scan
-carries no truncation deadline the way the retag census's bounded API route
-does, so its only incomplete cause is Beets being unavailable outright. An
+alike. World audit has no `incomplete` counterpart: `build_world_audit_report`
+has exactly one producer of `complete=false` (`_unavailable_beets_report`),
+so its only incomplete cause is Beets being unavailable outright, unlike
+retag divergence's own `incomplete`, which can also come from per-album
+unreadable/empty/refused-only findings with no deadline involved at all. An
 unexpected schema, decoder, invariant, programming, close, or serialization
 defect remains a transport failure: CLI exit 5 or HTTP 503. A downstream
 reader closing a CLI pipe early (e.g.

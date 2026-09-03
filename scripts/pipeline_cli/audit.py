@@ -413,6 +413,16 @@ def cmd_audit_world(db: WorldAuditPipelineDB, args: object) -> int:
                 typed_args.beets_directory,
             ),
         )
+        # Decided inside the try, with everything else below: a defect in
+        # `world_audit_outcome` or the exit-code lookup must land on the
+        # documented exit 5, never escape uncaught to the interpreter's
+        # bare exit 1 — which would collide with the exit 1 `cmd_audit_
+        # world` documents for `integrity_failed` itself (independent
+        # reader finding, issue #1355 item 4).
+        outcome = world_audit_outcome(report)
+        exit_code = (
+            1 if outcome == "integrity_failed" else WORLD_AUDIT_EXIT_CODES[outcome]
+        )
         if typed_args.json:
             print(json.dumps(msgspec.to_builtins(report), indent=2))
         else:
@@ -428,10 +438,7 @@ def cmd_audit_world(db: WorldAuditPipelineDB, args: object) -> int:
             "detail": str(exc),
         }))
         return 5
-    outcome = world_audit_outcome(report)
-    if outcome == "integrity_failed":
-        return 1
-    return WORLD_AUDIT_EXIT_CODES[outcome]
+    return exit_code
 
 
 def add_audit_subparser(

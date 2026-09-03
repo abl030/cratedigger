@@ -40,14 +40,19 @@ def get_world_audit(h: RouteHandler, params: dict[str, list[str]]) -> None:
 
         report = audit_world_from_borrowed_factory(rt.db(), beets_factory)
         payload = msgspec.to_builtins(report)
+        # Decided inside the try, alongside the render: a defect in
+        # `world_audit_outcome` or the status-code lookup must land on
+        # the documented 503, never escape uncaught past this handler's
+        # own error response (independent reader finding, issue #1355
+        # item 4).
+        outcome = world_audit_outcome(report)
+        status_code = (
+            200 if outcome == "integrity_failed" else WORLD_AUDIT_HTTP_STATUS[outcome]
+        )
     except Exception:
         log.exception("world audit failed unexpectedly")
         h._json({"error": "World audit failed"}, status=503)
         return
-    outcome = world_audit_outcome(report)
-    status_code = (
-        200 if outcome == "integrity_failed" else WORLD_AUDIT_HTTP_STATUS[outcome]
-    )
     h._json(payload, status=status_code)
 
 
