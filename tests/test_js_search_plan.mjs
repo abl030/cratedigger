@@ -420,8 +420,12 @@ function makeInspection(overrides = {}) {
       is_wanted: true, has_active_plan: false, generator_id_mismatch: false,
       has_deterministic_failure: true, has_retryable_failure: false,
     },
+    // Flat plan dict, the shape lib/search_plan_inspection.py::_plan_to_dict
+    // actually produces (and tests/web/test_routes_search_plan.py's
+    // PLAN_ROW_REQUIRED_FIELDS pins for the real route response) - not a
+    // {plan: {...}} wrapper, which no producer ever emits.
     latest_failed_deterministic: {
-      plan: { failure_class: 'no_runnable_query', error_message: 'metadata incomplete' },
+      failure_class: 'no_runnable_query', error_message: 'metadata incomplete',
     },
   });
   const html = renderSummaryPanel({ inspection, history: { rows: [] } });
@@ -562,9 +566,11 @@ function makeHistoryRows() {
         variant: 'fallback', query: 'old_q', result_count: 0,
         elapsed_s: 1.0, final_state: 'Completed' },
     ]},
+    // Flat plan dict, matching lib/search_plan_inspection.py::_plan_to_dict
+    // (see the AE fixture above for the full producer note).
     latest_failed_deterministic: {
-      plan: { id: 580, generator_id: '13', failure_class: 'no_runnable_query',
-        error_message: 'metadata incomplete', created_at: '2026-05-08T00:00:00Z' },
+      id: 580, generator_id: '13', failure_class: 'no_runnable_query',
+      error_message: 'metadata incomplete', created_at: '2026-05-08T00:00:00Z',
     },
     provenance: {
       omitted_candidates: ['weird thing'],

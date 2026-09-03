@@ -22,21 +22,6 @@ import { state, toast } from './state.js';
 import { esc, awstDateTime } from './util.js';
 
 /**
- * Normalise the failure-plan payload to the flat plan dict shape.
- *
- * The production API returns a flat plan dict (per `_plan_to_dict`) with
- * `failure_class` / `error_message` at the top level; some tests
- * construct `{plan: {...}}`. Reading both covers both producers without
- * forking code paths.
- *
- * @param {Object|null|undefined} failed
- * @returns {Object|null|undefined}
- */
-function normaliseFailed(failed) {
-  return (failed && failed.plan) ? failed.plan : failed;
-}
-
-/**
  * Default number of `search_log` rows fetched per history page.
  *
  * WARNING: This value MUST match `HISTORY_PAGE_DEFAULT_LIMIT` in
@@ -420,9 +405,11 @@ export function renderSummaryPanel(args) {
     </div>`;
 
   // No active plan — render failure class + sanitised error if present.
+  // `latest_failed_deterministic` is the flat plan dict produced by
+  // `lib/search_plan_inspection.py::_plan_to_dict` (`failure_class` /
+  // `error_message` at the top level) — read it directly.
   if (!activePlan) {
-    const failed = inspection.latest_failed_deterministic;
-    const failurePlan = normaliseFailed(failed);
+    const failurePlan = inspection.latest_failed_deterministic;
     const failureClass = (failurePlan && failurePlan.failure_class) || null;
     const failureError = (failurePlan && failurePlan.error_message) || null;
 
@@ -1008,12 +995,13 @@ function renderPlanHealth(inspection) {
     ? activePlan.plan.provenance
     : {};
 
+  // `failure` is the flat plan dict produced by
+  // `lib/search_plan_inspection.py::_plan_to_dict` — read it directly.
   const renderFailure = (failure, label) => {
     if (!failure) return '';
-    const plan = normaliseFailed(failure);
-    const klass = (plan && plan.failure_class) || 'unknown';
-    const errMsg = (plan && plan.error_message) || '';
-    const ts = plan && plan.created_at ? awstDateTime(plan.created_at) : '';
+    const klass = failure.failure_class || 'unknown';
+    const errMsg = failure.error_message || '';
+    const ts = failure.created_at ? awstDateTime(failure.created_at) : '';
     return `<div class="sp-health-failure">
       <div class="sp-health-failure-label">${esc(label)} <span class="sp-health-failure-class">${esc(klass)}</span></div>
       ${ts ? `<div class="sp-health-failure-when">${esc(ts)}</div>` : ''}
