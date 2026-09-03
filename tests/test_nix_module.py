@@ -1541,6 +1541,103 @@ def _shared_module_worlds_rest() -> dict[str, object]:
               };
             };
           };
+
+        # Issue #1355 Worth-exploring item 2: processingDir was checked
+        # only with `hasPrefix "/"`, and its disjointness from
+        # slskd.downloadDir was a plain lexical string comparison, so a
+        # `.`/`..` component could pass evaluation while naming a tree
+        # that physically overlaps slskd's download directory. Same
+        # eval-safety property as localImportAssertions above (reads only
+        # .config.assertions, never forces .system.build.toplevel).
+        processingPathAssertions =
+          let
+            prefixes = [
+              "services.cratedigger.processingDir"
+              "services.cratedigger.slskd.downloadDir"
+            ];
+            evaluate = extra:
+              let
+                system = lib.nixosSystem {
+                  system = builtins.currentSystem;
+                  modules = [
+                    { nixpkgs.pkgs = modulePkgs; }
+                    f.nixosModules.default
+                    ({ ... }: {
+                      services.cratedigger = {
+                        enable = true;
+                        src = ./.;
+                        slskd.apiKeyFile = "/run/secrets/slskd-key";
+                        slskd.downloadDir = "/srv/slskd";
+                        pipelineDb.createLocally = true;
+                        beets.runtime = {
+                          package = beetsPackage;
+                          configDir = "/etc/beets";
+                          expectedLibrary = "/srv/beets/beets-library.db";
+                          expectedDirectory = "/srv/music";
+                          expectedStateFile = "/var/lib/beets/state.pickle";
+                          expectedSecretInclude = "/run/secrets/beets.yaml";
+                        };
+                      };
+                    })
+                    extra
+                  ];
+                };
+              in map (assertion: assertion.message)
+                (builtins.filter
+                  (assertion:
+                    !assertion.assertion
+                    && lib.any
+                      (p: lib.hasPrefix p assertion.message)
+                      prefixes)
+                  system.config.assertions);
+          in {
+            dotDotSegment = evaluate {
+              services.cratedigger.processingDir =
+                "/var/lib/cratedigger/processing/../processing";
+            };
+            dotSegment = evaluate {
+              services.cratedigger.processingDir =
+                "/var/lib/cratedigger/./processing";
+            };
+            doubledSlash = evaluate {
+              services.cratedigger.processingDir =
+                "/var/lib//cratedigger/processing";
+            };
+            trailingSlash = evaluate {
+              services.cratedigger.processingDir =
+                "/var/lib/cratedigger/processing/";
+            };
+            downloadDirDotDot = evaluate {
+              services.cratedigger.slskd.downloadDir =
+                lib.mkForce "/srv/slskd/../slskd";
+            };
+            # The concrete gap #1355 WE2 named: a `..` component makes
+            # processingDir resolve to the SAME real directory as
+            # downloadDir, but the plain lexical hasPrefix/equality
+            # disjointness comparison never converges on the raw strings,
+            # so the OLD code reported no violation at all. Only the new
+            # normalization assertion on processingDir catches this.
+            overlapEscapesLexicalCheck = evaluate {
+              services.cratedigger.processingDir =
+                "/data/cratedigger/processing/../../slskd";
+              services.cratedigger.slskd.downloadDir = lib.mkForce "/data/slskd";
+            };
+            # Regression guard: a plainly nested, already-normalized pair
+            # must still trip the (unchanged) disjointness assertion.
+            disjointRegressionStillFires = evaluate {
+              services.cratedigger.processingDir = "/srv/cratedigger/processing";
+              services.cratedigger.slskd.downloadDir =
+                lib.mkForce "/srv/cratedigger/processing/nested";
+            };
+            # Must-still-work: the live doc2 wrapper's exact shape
+            # (dataDir default "/mnt/virtio/cratedigger" + "/processing",
+            # slskd.downloadDir overridden to "/mnt/virtio/music/slskd").
+            validLiveShape = evaluate {
+              services.cratedigger.processingDir = "/mnt/virtio/cratedigger/processing";
+              services.cratedigger.slskd.downloadDir =
+                lib.mkForce "/mnt/virtio/music/slskd";
+            };
+          };
       }
     '''
     return _cached_nix_eval_json(expression)
@@ -2850,6 +2947,78 @@ class TestLocalImportModuleContract(unittest.TestCase):
                 self.assertEqual(worlds[bad_world], [expected_message])
         self.assertEqual(worlds["validDir"], [])
         self.assertEqual(worlds["disabledWithBadDir"], [])
+
+
+class TestProcessingPathNormalizationContract(unittest.TestCase):
+    """Issue #1355 Worth-exploring item 2.
+
+    ``processingDir`` was checked only with a bare ``hasPrefix "/"``, and
+    its disjointness from ``slskd.downloadDir`` was a plain lexical
+    ``removeSuffix "/"`` + ``hasPrefix`` string comparison. A ``..``
+    component could make two configured options resolve to the same real
+    directory while module evaluation reported no violation at all —
+    ``lib/fs_authority.py::open_private_processing_root`` still caught it
+    at runtime via ``os.path.realpath``, but only after
+    ``nixos-rebuild switch`` had already declared the configuration good.
+    The fix reuses the module's existing ``isAbsoluteNormalizedPath``
+    helper (already used for the Beets runtime paths and
+    ``localImport.dir``) for both options, so the disjointness comparison
+    that follows only ever sees inputs normalized by contract.
+    """
+
+    def test_both_options_are_checked_with_the_shared_normalized_path_helper(
+        self,
+    ) -> None:
+        text = _nix_source(MODULE_NIX)
+        idx = text.index(
+            "services.cratedigger.processingDir must be lexically disjoint")
+        block = text[max(0, idx - 1200):idx]
+        self.assertIn("isAbsoluteNormalizedPath cfg.processingDir", block)
+        self.assertIn(
+            "isAbsoluteNormalizedPath cfg.slskd.downloadDir", block)
+        # The disjointness assertion itself stays exactly as it was — a
+        # plain lexical comparison — because its inputs are now guaranteed
+        # normalized by the two assertions above.
+        self.assertIn("removeSuffix \"/\" cfg.processingDir", text)
+        self.assertIn("removeSuffix \"/\" cfg.slskd.downloadDir", text)
+
+    def test_assertion_firing_matrix(self) -> None:
+        """Evaluated-world coverage: a ``..`` segment, a ``.`` segment, a
+        doubled slash, and a trailing slash each fire the new
+        ``processingDir`` normalization clause; a ``..`` segment on
+        ``slskd.downloadDir`` fires its own new clause; the concrete gap
+        the issue named (a ``..`` segment making two options resolve to
+        the same real directory while the lexical disjointness comparison
+        sees no overlap) is caught ONLY by the new normalization clause;
+        a plainly nested, already-normalized pair still trips the
+        unchanged disjointness assertion; and the live doc2 wrapper's
+        exact shape passes cleanly.
+        """
+        worlds = _shared_module_worlds_rest()["processingPathAssertions"]
+        assert isinstance(worlds, dict)
+        processing_dir_message = (
+            "services.cratedigger.processingDir must be an absolute "
+            "normalized path (no trailing slash, no . or .. components, "
+            "no doubled slashes)."
+        )
+        download_dir_message = (
+            "services.cratedigger.slskd.downloadDir must be an absolute "
+            "normalized path when set (no trailing slash, no . or .. "
+            "components, no doubled slashes)."
+        )
+        disjoint_message = (
+            "services.cratedigger.processingDir must be lexically "
+            "disjoint from services.cratedigger.slskd.downloadDir"
+        )
+        for bad_world in ("dotDotSegment", "dotSegment", "doubledSlash",
+                          "trailingSlash", "overlapEscapesLexicalCheck"):
+            with self.subTest(world=bad_world):
+                self.assertEqual(worlds[bad_world], [processing_dir_message])
+        self.assertEqual(
+            worlds["downloadDirDotDot"], [download_dir_message])
+        self.assertEqual(
+            worlds["disjointRegressionStillFires"], [disjoint_message])
+        self.assertEqual(worlds["validLiveShape"], [])
 
 
 class TestOwnedRedisContract(unittest.TestCase):

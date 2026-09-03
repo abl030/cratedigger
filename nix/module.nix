@@ -2129,8 +2129,12 @@ in {
         message = "services.cratedigger.slskd.downloadDir is not set: point it at the directory slskd downloads land in (slskd's directories.downloads).";
       }
       {
-        assertion = lib.hasPrefix "/" cfg.processingDir;
-        message = "services.cratedigger.processingDir must be an absolute path";
+        assertion = isAbsoluteNormalizedPath cfg.processingDir;
+        message = "services.cratedigger.processingDir must be an absolute normalized path (no trailing slash, no . or .. components, no doubled slashes).";
+      }
+      {
+        assertion = cfg.slskd.downloadDir == null || isAbsoluteNormalizedPath cfg.slskd.downloadDir;
+        message = "services.cratedigger.slskd.downloadDir must be an absolute normalized path when set (no trailing slash, no . or .. components, no doubled slashes).";
       }
       {
         assertion = cfg.slskd.downloadDir == null || (
