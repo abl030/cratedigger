@@ -753,6 +753,22 @@ class _EvidenceMixin(_PipelineDBBase):
             CROSS JOIN file_rows
             LEFT JOIN preserved_file_rows
               ON preserved_file_rows.relative_path = file_rows.relative_path
+            -- Issue #1355 Batch E (E1): a concurrent writer of the exact
+            -- same content address can lose the row-level race on
+            -- ``upserted`` (it blocks on the winner's uncommitted INSERT,
+            -- then resumes) while this DELETE ran against its own
+            -- pre-block snapshot and therefore never saw the winner's
+            -- already-committed file rows. Its own plain INSERT above
+            -- then collided with them. The two writers share a content
+            -- address, so relative_path/size_bytes/extension/container/
+            -- codec and ordinal are identical by construction (they are
+            -- exactly what the fingerprint hashes, sorted the same way);
+            -- only decode_ok can legitimately differ, and it is already
+            -- committed correctly by whichever writer won. DO NOTHING
+            -- keeps that committed row exactly as it is rather than
+            -- risking an update computed from this writer's own stale
+            -- preserved_file_rows read.
+            ON CONFLICT (evidence_id, relative_path) DO NOTHING
             """,
             (
                 spectral_write_intent == "replace",

@@ -9392,6 +9392,94 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         self.assertTrue(claimed.on_disk_v0_research_attempted)
         self.assertIsNone(claimed.v0_metric)
 
+    def test_concurrent_same_address_upsert_does_not_raise_unique_violation(self):
+        """Issue #1355 Batch E (E1, WE1 residual): two sessions upserting the
+        SAME content address at once used to raise
+        ``psycopg2.errors.UniqueViolation`` on
+        ``album_quality_evidence_files_evidence_id_relative_path_key``.
+
+        Mechanism: the loser's DELETE-then-reinsert of
+        ``album_quality_evidence_files`` runs against its own snapshot from
+        before the winner committed (only the INSERT-with-conflict on
+        ``album_quality_evidence`` itself re-checks against the fresh row),
+        so the loser never sees the winner's already-committed file rows and
+        its own plain INSERT collides with them.
+
+        This is a deterministic real-PostgreSQL two-session repro (Rule A),
+        not a hopeful race: the holder session keeps its INSERT uncommitted
+        with ``autocommit`` off, and the test polls ``pg_locks`` to prove the
+        contender has genuinely blocked on the holder's row before releasing
+        it -- a fixed sleep would be a flaky stand-in for that proof.
+        """
+        from lib.pipeline_db import PipelineDB
+
+        evidence = self._seed(mb_release_id="race-mbid")
+
+        holder = PipelineDB(TEST_DSN)
+        holder.conn.autocommit = False
+        holder_started = threading.Event()
+        release_holder = threading.Event()
+
+        def run_holder() -> None:
+            holder.upsert_album_quality_evidence(evidence)
+            holder_started.set()
+            release_holder.wait(timeout=10)
+            holder.conn.commit()
+
+        holder_thread = threading.Thread(target=run_holder)
+        holder_thread.start()
+        self.assertTrue(
+            holder_started.wait(timeout=5),
+            "holder never completed its uncommitted INSERT",
+        )
+
+        contender = PipelineDB(TEST_DSN)
+        contender_exc: BaseException | None = None
+
+        def run_contender() -> None:
+            nonlocal contender_exc
+            try:
+                contender.upsert_album_quality_evidence(evidence)
+            except BaseException as exc:  # noqa: BLE001 - captured for assertion below
+                contender_exc = exc
+
+        contender_thread = threading.Thread(target=run_contender)
+        contender_thread.start()
+
+        # Prove the contender is genuinely blocked on the holder's
+        # uncommitted row before releasing it -- both are the only two
+        # writers in this test, so any ungranted lock is theirs.
+        deadline = time.monotonic() + 5.0
+        blocked = False
+        while time.monotonic() < deadline:
+            cur = self.db._execute("SELECT 1 FROM pg_locks WHERE NOT granted")
+            if cur.fetchone() is not None:
+                blocked = True
+                break
+            time.sleep(0.02)
+        self.assertTrue(blocked, "contender never blocked on the holder's row lock")
+
+        release_holder.set()
+        holder_thread.join(timeout=5)
+        contender_thread.join(timeout=5)
+        holder.close()
+        contender.close()
+
+        self.assertIsNone(
+            contender_exc,
+            f"concurrent same-address upsert raised: {contender_exc!r}",
+        )
+
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None
+        self.assertEqual(
+            {f.relative_path for f in stored.files},
+            {f.relative_path for f in evidence.files},
+        )
+
     def test_current_spectral_write_overwrites_with_fresh_measured_audit(self):
         """Issue #815 fresh-audit-wins (real-PG round-trip). A fresh measured
         installed-subject audit of the exact snapshot re-persists over ANY
