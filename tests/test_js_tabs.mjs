@@ -1,7 +1,7 @@
 // @ts-check
 import { readFileSync } from 'node:fs';
 import { suite } from './js_harness.mjs';
-import { tabDefs, isTabName, tabLabel, tabHasAsyncRender, dispatchTabShown } from '../web/js/tabs.js';
+import { tabDefs, isTabName, tabHasAsyncRender, dispatchTabShown } from '../web/js/tabs.js';
 
 const t = suite(import.meta.url);
 
@@ -58,21 +58,6 @@ t.section('isTabName()');
   t.notOk(isTabName('Browse'), "isTabName('Browse') is false — internal names are lowercase, not the visible label");
   t.notOk(isTabName(''), 'isTabName(empty string) is false');
   t.notOk(isTabName('unknown'), 'isTabName of an unregistered name is false');
-}
-
-t.section('tabLabel()');
-
-{
-  const cases = [
-    ['browse', 'Browse'],
-    ['recents', 'Recents'],
-    ['pipeline', 'Pipeline'],
-    ['manual', 'Wrong Matches'],
-    ['unknown', null],
-  ];
-  for (const [name, expected] of cases) {
-    t.equal(tabLabel(name), expected, `tabLabel('${name}') === ${JSON.stringify(expected)}`);
-  }
 }
 
 t.section('tabHasAsyncRender() — the single fact showTab\'s dispatch and closeSearchPlanDetail both read');

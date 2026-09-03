@@ -81,15 +81,6 @@ export function isTabName(name) {
 }
 
 /**
- * @param {string} name
- * @returns {string|null} The visible label, or null for an unknown name.
- */
-export function tabLabel(name) {
-  const tab = findTab(name);
-  return tab ? tab.label : null;
-}
-
-/**
  * Whether showing `name` triggers an async follow-up render. Read by
  * `closeSearchPlanDetail` to decide whether the destination's own render
  * will consume the stashed scroll restore, or whether to apply it
