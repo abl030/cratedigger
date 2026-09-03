@@ -256,6 +256,20 @@ def _reject_request_auto_import(
         if import_job_id is not None and db.get_import_job(import_job_id) is not None
         else None
     )
+    # World failures with a reviewable folder are kept + banned + shown
+    # (issue #1077, D1/D4): denylist the contributing peers exactly like the
+    # candidate-match reject lane does, so the pipeline never re-fetches the
+    # identical copy while it sits in the worklist. Built once and passed
+    # through ``_record_rejection_and_maybe_requeue`` so the job-backed and
+    # job-less branches commit the SAME denylist entries — the job-backed
+    # branch atomically alongside its owning job's terminal write, the
+    # job-less branch atomically alongside this call's own request
+    # transition and audit row (issue #1355 item 3).
+    denylist_reason = f"auto-import world failure: {failed_result.scenario}"
+    denylists = tuple(
+        TerminalDenylist(username, denylist_reason, apply_cooldown=True)
+        for username in sorted(usernames)
+    )
     checkpoint(cancellation_token)
     persisted = _record_rejection_and_maybe_requeue(
         db,
@@ -266,27 +280,16 @@ def _reject_request_auto_import(
         validation_result=failed_result.to_json(),
         requeue=True,
         import_job_id=owned_import_job_id,
+        denylists=denylists,
+        cooled_down_users=ctx.cooled_down_users,
     )
-    # World failures with a reviewable folder are kept + banned + shown
-    # (issue #1077, D1/D4): denylist the contributing peers exactly like the
-    # candidate-match reject lane does, so the pipeline never re-fetches the
-    # identical copy while it sits in the worklist.
-    denylist_reason = f"auto-import world failure: {failed_result.scenario}"
     if isinstance(persisted, PendingImportTerminalOutcome):
-        persisted = persisted.append_denylists(*(
-            TerminalDenylist(username, denylist_reason, apply_cooldown=True)
-            for username in sorted(usernames)
-        ))
         return DispatchOutcome(
             success=False,
             message=detail,
             terminal_outcome=persisted,
             post_commit_wrong_match_scenario=failed_result.scenario,
         )
-    for username in usernames:
-        db.add_denylist(request_id, username, denylist_reason)
-        if db.check_and_apply_cooldown(username):
-            ctx.cooled_down_users.add(username)
     _run_post_rejection_wrong_match_cleanup(
         ctx,
         persisted,

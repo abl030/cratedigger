@@ -52,6 +52,8 @@ if TYPE_CHECKING:
         ImportTerminalOutcome,
         PendingImportTerminalOutcome,
         PreviewTerminalOutcome,
+        RequestRejectionOutcome,
+        RequestRejectionResult,
         TerminalOutcomeResult,
     )
     from lib.validation_envelope import ValidationProjectionUnset
@@ -129,11 +131,15 @@ class DispatchDB(
     (``AutomationOwnerCheckpointDB``, which is also where its
     ``deadline_seconds`` parameter is deliberately omitted — that
     narrowing is that port's, not this one's). The remaining fourteen are
-    declared in the body, plus two — ``merge_rekey_collision`` and
-    ``update_request_release_for_merge`` — that dispatch never calls at
-    all: they are restated only so this port satisfies
-    ``lib.download_validation.MergeRekeyDB``, which cannot be a base class
-    because that module imports ``lib.dispatch``.
+    declared in the body, plus three that dispatch never calls at all,
+    restated only to satisfy a different port's contract:
+    ``merge_rekey_collision`` and ``update_request_release_for_merge``
+    (``lib.download_validation.MergeRekeyDB``, which cannot be a base
+    class because that module imports ``lib.dispatch``), and
+    ``mark_import_job_failed`` (dead in production entirely as of issue
+    #1355 item 3, which deleted its last real caller — see the
+    ``tools/vulture/whitelist.py`` entries and the "Residuals from item 3"
+    comment on that issue).
 
     Where a declaration below narrows what the real ``PipelineDB`` offers,
     that is deliberate — the port declares what dispatch needs, not
@@ -240,6 +246,10 @@ class DispatchDB(
     def persist_preview_terminal_outcome(
         self, command: PreviewTerminalOutcome,
     ) -> TerminalOutcomeResult: ...
+
+    def persist_request_rejection_outcome(
+        self, command: RequestRejectionOutcome,
+    ) -> RequestRejectionResult: ...
 
     def log_download(
         self,

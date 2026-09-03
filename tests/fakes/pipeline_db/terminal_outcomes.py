@@ -9,7 +9,7 @@ import json
 from collections.abc import (
     Callable,
 )
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import timedelta
 from typing import (
     TYPE_CHECKING,
@@ -50,6 +50,8 @@ from lib.terminal_outcomes import (
     AutomationTerminalAuthority,
     ImportTerminalOutcome,
     PreviewTerminalOutcome,
+    RequestRejectionOutcome,
+    RequestRejectionResult,
     TerminalOutcomeResult,
     automation_world_failure_self_heal,
     cleanup_journal_refusal_matches,
@@ -549,6 +551,114 @@ class _FakeTerminalOutcomesMixin(_FakePipelineDBBase):
             cooled_down_users=frozenset(cooled),
         )
 
+    def persist_request_rejection_outcome(
+        self,
+        command: RequestRejectionOutcome,
+    ) -> RequestRejectionResult:
+        """Mirrors ``PipelineDB.persist_request_rejection_outcome`` (#1355
+        item 3): the job-less sibling of ``persist_import_terminal_outcome``
+        — snapshot/restore proves the same all-or-nothing commit the real
+        transaction gives, with no job-status write to fence.
+        """
+        snapshot = self._terminal_state_snapshot()
+        boundary_index = 0
+
+        def boundary(label: str) -> None:
+            nonlocal boundary_index
+            boundary_index += 1
+            self._terminal_outcome_write_boundary(boundary_index, label)
+
+        try:
+            transition_db = _FakeTerminalTransitionsDB(self, boundary)
+            applied: transitions.TransitionApplied | None = None
+            if command.transition is not None:
+                applied = transitions.require_transition_applied(
+                    transitions.finalize_request(
+                        transition_db,
+                        command.request_id,
+                        command.transition,
+                    )
+                )
+            audit = command.audit
+            download_log_id = self.log_download(
+                request_id=command.request_id,
+                soulseek_username=audit.soulseek_username,
+                contributor_usernames=audit.contributor_usernames,
+                filetype=audit.filetype,
+                download_path=audit.download_path,
+                beets_distance=audit.beets_distance,
+                beets_scenario=audit.beets_scenario,
+                beets_detail=audit.beets_detail,
+                valid=audit.valid,
+                outcome=audit.outcome,
+                staged_path=audit.staged_path,
+                error_message=audit.error_message,
+                bitrate=audit.bitrate,
+                sample_rate=audit.sample_rate,
+                bit_depth=audit.bit_depth,
+                is_vbr=audit.is_vbr,
+                was_converted=audit.was_converted,
+                original_filetype=audit.original_filetype,
+                slskd_filetype=audit.slskd_filetype,
+                actual_filetype=audit.actual_filetype,
+                actual_min_bitrate=audit.actual_min_bitrate,
+                spectral_grade=audit.spectral_grade,
+                spectral_bitrate=audit.spectral_bitrate,
+                existing_min_bitrate=audit.existing_min_bitrate,
+                existing_spectral_bitrate=audit.existing_spectral_bitrate,
+                import_result=audit.import_result,
+                validation_result=audit.validation_result,
+                final_format=audit.final_format,
+                v0_probe_kind=audit.v0_probe_kind,
+                v0_probe_min_bitrate=audit.v0_probe_min_bitrate,
+                v0_probe_avg_bitrate=audit.v0_probe_avg_bitrate,
+                v0_probe_median_bitrate=audit.v0_probe_median_bitrate,
+                existing_v0_probe_kind=audit.existing_v0_probe_kind,
+                existing_v0_probe_min_bitrate=audit.existing_v0_probe_min_bitrate,
+                existing_v0_probe_avg_bitrate=audit.existing_v0_probe_avg_bitrate,
+                existing_v0_probe_median_bitrate=(
+                    audit.existing_v0_probe_median_bitrate
+                ),
+                source_download_log_id=audit.source_download_log_id,
+            )
+            boundary("download_log")
+            cooled: set[str] = set()
+            for entry in command.denylists:
+                denied_before = len(self.denylist)
+                self.add_denylist(command.request_id, entry.username, entry.reason)
+                if len(self.denylist) > denied_before:
+                    boundary("denylist")
+                if entry.apply_cooldown and self.check_and_apply_cooldown(
+                    entry.username
+                ):
+                    cfg = CooldownConfig()
+                    self.add_cooldown(
+                        entry.username,
+                        _utcnow() + timedelta(days=cfg.cooldown_days),
+                        f"{cfg.failure_threshold} consecutive failures",
+                    )
+                    cooled.add(entry.username)
+                    boundary("cooldown")
+            for entry in command.cooldowns:
+                if self.check_and_apply_cooldown(entry.username):
+                    cfg = CooldownConfig()
+                    self.add_cooldown(
+                        entry.username,
+                        _utcnow() + timedelta(days=cfg.cooldown_days),
+                        f"{cfg.failure_threshold} consecutive failures",
+                    )
+                    cooled.add(entry.username)
+                    boundary("cooldown")
+        except Exception:
+            self._restore_terminal_state(snapshot)
+            raise
+        self.persist_request_rejection_outcome_calls.append(command)
+        return RequestRejectionResult(
+            download_log_id=download_log_id,
+            transition=applied,
+            cooled_down_users=frozenset(cooled),
+        )
+
     def _require_fake_automation_terminal(
         self,
         *,
@@ -807,7 +917,7 @@ class _FakeTerminalOutcomesMixin(_FakePipelineDBBase):
             if job is not None and job.get("job_type") == IMPORT_JOB_YOUTUBE
             else "slskd"
         )
-        kwargs = audit.as_log_kwargs()
+        kwargs = {item.name: getattr(audit, item.name) for item in fields(audit)}
         if not audit.contributor_usernames and source is not None:
             kwargs["contributor_usernames"] = (
                 source.candidate_contributor_usernames or ()
@@ -1046,7 +1156,7 @@ class _FakeTerminalOutcomesMixin(_FakePipelineDBBase):
             audit = self._fake_automation_audit(command.audit, authority)
             download_log_id = cast(Any, self.log_download)(
                 request_id=command.request_id,
-                **audit.as_log_kwargs(),
+                **{item.name: getattr(audit, item.name) for item in fields(audit)},
             )
             boundary("download_log")
             cooled: set[str] = set()

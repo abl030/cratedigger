@@ -611,6 +611,7 @@ class TestHaveAnalysisFailureContracts(unittest.TestCase):
                         ("contributor-peer",),
                     )
                     self.assertEqual(audit.filetype, "flac")
+                    self.assertEqual(audit.beets_scenario, "have_analysis_error")
                     self.assertEqual(audit.staged_path, "/staging/candidate")
                     self.assertEqual(audit.error_message, raw_error)
                     self.assertEqual(audit.source_download_log_id, 91)

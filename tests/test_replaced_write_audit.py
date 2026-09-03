@@ -129,6 +129,18 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "placeholder discipline, and counter vocabulary"
         ),
     ),
+    ("lib/pipeline_db/terminal_outcomes.py", "7684b3f047aabd5f"): (
+        (
+            "issue #1355 item 3: ``_TransactionalTransitionsDB.get_request`` "
+            "uses the SAME fixed shared presentation projection and one value "
+            "placeholder as ``requests.py``'s own reviewed twin "
+            "(``ead47926ac19037a``) — a read-only SELECT, never a write. "
+            "Fixing it to include ``processing_owner`` (previously a bare "
+            "``SELECT * FROM album_requests``) is what makes "
+            "``persist_request_rejection_outcome``'s job-less transition safe "
+            "against a request a different worker still owns."
+        ),
+    ),
     ("lib/pipeline_db/dashboard.py", "6a6227ef5b3e4640"): (
         (
             "issue #1348: the cycle-metrics INSERT interpolates one "

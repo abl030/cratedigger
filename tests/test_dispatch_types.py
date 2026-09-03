@@ -131,6 +131,7 @@ class TestDispatchTypeContracts(unittest.TestCase):
                 "merge_rekey_collision",
                 "persist_import_terminal_outcome",
                 "persist_preview_terminal_outcome",
+                "persist_request_rejection_outcome",
                 "record_attempt",
                 "record_import_job_beets_child",
                 "request_marked_incomplete",

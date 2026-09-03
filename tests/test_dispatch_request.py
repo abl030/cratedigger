@@ -204,6 +204,7 @@ class TestDispatchDBPort(unittest.TestCase):
             "authorize_import_job_launch",
             "capture_automation_import_completion",
             "persist_import_terminal_outcome",
+            "persist_request_rejection_outcome",
             "request_marked_incomplete",
         ):
             self.assertIn(name, members)

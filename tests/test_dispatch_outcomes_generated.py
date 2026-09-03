@@ -1328,6 +1328,68 @@ def assert_validation_projection_matches_payload(db: FakePipelineDB) -> None:
         )
 
 
+def assert_denylist_writes_are_bundled(
+    db: FakePipelineDB, request_id: int,
+) -> None:
+    """Issue #1355 item 3: every ``source_denylist`` row for ``request_id``
+    must be traceable to a ``denylists`` entry on ONE of the two terminal-
+    outcome commits (job-backed ``persist_import_terminal_outcome`` or
+    job-less ``persist_request_rejection_outcome``) — never a separate
+    ``db.add_denylist`` call outside either bundle. A writer that reverts to
+    denylisting a peer in its own loop, after already committing the
+    rejection's transition and audit row, reintroduces the exact
+    partial-write window this issue exists to close.
+    """
+    bundled_usernames = {
+        entry.username
+        for command in db.persist_request_rejection_outcome_calls
+        if command.request_id == request_id
+        for entry in command.denylists
+    } | {
+        entry.username
+        for command in db.persist_import_terminal_outcome_calls
+        if command.request_id == request_id
+        for entry in command.denylists
+    }
+    written_usernames = {
+        entry.username
+        for entry in db.denylist
+        if entry.request_id == request_id
+    }
+    if bundled_usernames != written_usernames:
+        raise AssertionError(
+            "source_denylist rows drifted from the terminal-outcome "
+            f"bundle: bundled={sorted(bundled_usernames)!r} written="
+            f"{sorted(written_usernames)!r}"
+        )
+
+
+def assert_writer_denylisted_username(
+    db: FakePipelineDB, request_id: int, username: str,
+) -> None:
+    """Companion to ``assert_denylist_writes_are_bundled``: that checker
+    only compares the bundled and written SETS, so a writer that stops
+    supplying ``denylists`` entirely (both sides empty) passes it silently
+    — a mutant-runner finding on issue #1355 item 3 (M15/M27): dropping
+    ``denylists=denylists`` from either ``_pending_rejection_outcome`` or
+    ``_reject_request_auto_import``'s call survived every generated
+    assertion in this module. This asserts the username a writer's own
+    world-failure/downgrade policy is KNOWN to always denylist actually
+    landed in ``source_denylist`` — proving the write happened at all, not
+    only that it was bundled when it did.
+    """
+    written_usernames = {
+        entry.username
+        for entry in db.denylist
+        if entry.request_id == request_id
+    }
+    if username not in written_usernames:
+        raise AssertionError(
+            f"expected {username!r} to be denylisted for request "
+            f"{request_id}; source_denylist has {sorted(written_usernames)!r}"
+        )
+
+
 def assert_quality_side_reject_honors_caller_flag(
     decision: str, requeue_on_failure: bool, db: FakePipelineDB,
 ) -> None:
@@ -1585,6 +1647,11 @@ class TestGeneratedEveryRejectionWriterProjection(unittest.TestCase):
             real_filesystem=True,
         )
         assert_validation_projection_matches_payload(db)
+        assert_denylist_writes_are_bundled(db, 42)
+        # World failures always denylist their contributing peer (D1/D4) —
+        # proves the write actually happened, which the bundling check
+        # alone cannot (both sides read empty if it silently stopped).
+        assert_writer_denylisted_username(db, 42, "generated-user")
 
 
     def test_every_rejection_writer_preserves_explicit_nulls(self):
@@ -1642,6 +1709,17 @@ class TestGeneratedEveryRejectionWriterProjection(unittest.TestCase):
             scenario=scenario,
         )
         assert_validation_projection_matches_payload(db)
+        assert_denylist_writes_are_bundled(db, 42)
+        # This helper always drives "evidence_decision" through a fixed
+        # decision="downgrade" (dispatch_action("downgrade").denylist is
+        # unconditionally True) and "request_auto_import" through a world
+        # failure (always denylisted, D1/D4) — both independent of the
+        # generated distance/scenario, so both always write exactly
+        # "generated-user". "database_source"/"dispatch_rejection" never
+        # denylist here (neither passes usernames), so they are correctly
+        # excluded rather than asserted empty.
+        if writer in ("evidence_decision", "request_auto_import"):
+            assert_writer_denylisted_username(db, 42, "generated-user")
 
 
 class TestGeneratedHaveAnalysisAbortLifecycle(unittest.TestCase):
@@ -2767,6 +2845,40 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 db.download_logs.append(row)
                 with self.assertRaisesRegex(AssertionError, pattern):
                     assert_validation_projection_matches_payload(db)
+
+    def test_denylist_bundle_checker_names_the_stray_write(self):
+        """Q1 for ``assert_denylist_writes_are_bundled`` (issue #1355 item
+        3): a ``source_denylist`` row with no matching terminal-outcome
+        command entry — the exact shape a reverted-to-a-separate-loop
+        regression would produce — trips the checker's one clause."""
+        from tests.fakes import DenylistEntry
+
+        db = FakePipelineDB()
+        db.denylist.append(DenylistEntry(42, "stray-peer", "no bundle"))
+
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"^source_denylist rows drifted from the terminal-outcome "
+            r"bundle: bundled=\[\] written=\['stray-peer'\]$",
+        ):
+            assert_denylist_writes_are_bundled(db, 42)
+
+    def test_writer_denylisted_username_checker_names_the_missing_write(
+        self,
+    ):
+        """Q1 for ``assert_writer_denylisted_username`` (issue #1355 item
+        3, mutant-runner findings M15/M27): an empty ``source_denylist``
+        table — the exact shape a dropped ``denylists=denylists`` argument
+        produces, which ``assert_denylist_writes_are_bundled`` alone cannot
+        catch since both its sides read empty — trips this checker."""
+        db = FakePipelineDB()
+
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"^expected 'generated-user' to be denylisted for request 42; "
+            r"source_denylist has \[\]$",
+        ):
+            assert_writer_denylisted_username(db, 42, "generated-user")
 
     def test_hypothesis_harness_detects_planted_bad_router(self):
         """End-to-end RED proof: strategies + checker + Hypothesis catch a

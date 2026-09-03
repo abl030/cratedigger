@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal
 
 import msgspec
@@ -87,34 +87,6 @@ class TerminalDownloadAudit:
     existing_v0_probe_avg_bitrate: int | None = None
     existing_v0_probe_median_bitrate: int | None = None
     source_download_log_id: int | None = None
-
-    def as_log_kwargs(self) -> dict[str, object]:
-        """Project every dataclass field onto its matching ``log_download``
-        keyword parameter, by name.
-
-        NOT exact — never was, and issue #1176 PR1 widened the gap further:
-        ``log_download`` also accepts ``transfer_detail`` (never carried by
-        this terminal-outcome Struct) and, as of migration 080, ``source``
-        (also absent here).
-
-        This method has exactly ONE production caller:
-        ``_record_have_analysis_error``'s job-less branch
-        (``lib/dispatch/outcome_actions.py``, reached when
-        ``import_job_id is None``), which spreads this dict into a DIRECT
-        ``db.log_download(request_id=..., **kwargs)`` call via
-        ``_finalize_request_and_log_rejection``. For THAT row,
-        ``log_download``'s own ``source`` parameter genuinely is the
-        writer — and since neither this Struct nor that call site ever
-        passes ``source=``, it lands as the ``'slskd'`` default
-        regardless of what caused the rejection. The job-BACKED branch of
-        the same caller (``import_job_id is not None``) returns earlier,
-        before this method is ever invoked, as a
-        ``PendingImportTerminalOutcome`` — its row is written later by
-        ``_insert_terminal_download_audit``'s job_type-derived SQL CASE
-        (``lib/pipeline_db/terminal_outcomes.py``), a wholly separate
-        writer this dict never reaches.
-        """
-        return {item.name: getattr(self, item.name) for item in fields(self)}
 
 
 @dataclass(frozen=True)
@@ -368,6 +340,45 @@ class PendingImportTerminalOutcome:
     ) -> PendingImportTerminalOutcome:
         """Authorize the successful-import stop-supersession exception."""
         return replace(self, successful_terminal_acceptance=True)
+
+
+@dataclass(frozen=True)
+class RequestRejectionOutcome:
+    """The job-less sibling of ``PendingImportTerminalOutcome`` (issue #1355
+    item 3).
+
+    A job-backed rejection has no request-lifecycle authority of its own —
+    it builds a ``PendingImportTerminalOutcome`` and waits for the owning
+    import job to finish it later, atomically, alongside that job's own
+    terminal status write. A job-less rejection has no import job to wait
+    for, so this command carries everything needed to commit immediately:
+    the optional request transition, the mandatory ``download_log`` audit
+    row, and any denylist/cooldown entries. ``PipelineDB.
+    persist_request_rejection_outcome`` commits all of it in one PostgreSQL
+    transaction — a request transitioned back to ``wanted`` with no audit
+    row explaining why, or denylisted peers with no matching transition, are
+    exactly the partial-write worlds this type exists to make unreachable.
+
+    ``transition`` is ``None`` for a rejection that neither requeues nor
+    preserves ``imported`` (e.g. force-import's ``requeue_on_failure=False``
+    lane) — the audit row and any denylist/cooldown entries still commit,
+    the request's own lifecycle status is simply left untouched.
+    """
+
+    request_id: int
+    audit: TerminalDownloadAudit
+    transition: RequestTransition | None = None
+    denylists: tuple[TerminalDenylist, ...] = ()
+    cooldowns: tuple[TerminalCooldown, ...] = ()
+
+
+@dataclass(frozen=True)
+class RequestRejectionResult:
+    """Rows and side effects produced by a committed job-less rejection."""
+
+    download_log_id: int
+    transition: TransitionApplied | None
+    cooled_down_users: frozenset[str] = field(default_factory=lambda: frozenset())
 
 
 def non_automation_failure_terminal_outcome(

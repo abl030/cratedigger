@@ -14,7 +14,6 @@ TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "lib/destructive_release_service.py": {"any": 9},
     "lib/disk_coverage_service.py": {"any": 5},
     "lib/dispatch/evidence_gate.py": {"any": 1},
-    "lib/dispatch/outcome_actions.py": {"any": 4},
     "lib/download.py": {"any": 2},
     "lib/download_reconstruction.py": {"any": 2},
     "lib/download_rejection.py": {"any": 3},

@@ -23,6 +23,7 @@ import msgspec
 import psycopg2
 import psycopg2.extras
 
+from lib.pipeline_db.rows import AlbumRequestPresentationRow, album_request_row
 from lib.quality import (
     SpectralMeasurement,
     V0ProbeEvidence,
@@ -175,6 +176,27 @@ def processing_owner_payload(
         )
     )
     return payload
+
+
+def request_presentation_row(
+    raw: Mapping[str, object],
+) -> AlbumRequestPresentationRow:
+    """Validate a request row and attach its exact owner projection.
+
+    The one adapter from a ``REQUEST_PRESENTATION_SELECT`` /
+    ``REQUEST_PRESENTATION_FROM`` cursor row to
+    ``AlbumRequestPresentationRow``. Every reader of such a row — the
+    ordinary ``_RequestsMixin`` read path and, inside a terminal-outcome
+    transaction, ``_TransactionalTransitionsDB.get_request`` (issue #1355
+    item 3) — calls this instead of re-deriving the projection, so a bare
+    ``SELECT *`` can never silently drop ``processing_owner`` and starve
+    ``processing_locked_conflict`` of the field it needs.
+    """
+    row = album_request_row(raw)
+    return msgspec.convert(
+        {**row, "processing_owner": processing_owner_payload(raw)},
+        type=AlbumRequestPresentationRow,
+    )
 
 
 # ``update_request_fields`` is deliberately a metadata-only compare-and-set
