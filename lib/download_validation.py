@@ -45,8 +45,7 @@ from lib.import_evidence import (
 )
 from lib.import_execution import (
     CancellationToken,
-    ExecutionLeaseSnapshot,
-    OwnerSessionIdentity,
+    ExecutionOwnerProof,
     checkpoint,
 )
 from lib.import_manifest import (
@@ -101,8 +100,7 @@ class HandleValidFn(Protocol):
         quality_gate_fn: QualityGateFn | None = None,
         dispatch_fn: DispatchCoreFn | None = None,
         cancellation_token: CancellationToken | None = None,
-        execution_lease: ExecutionLeaseSnapshot | None = None,
-        owner_session_identity: OwnerSessionIdentity | None = None,
+        owner_proof: ExecutionOwnerProof | None = None,
     ) -> DispatchOutcome | None: ...
 
 
@@ -119,8 +117,7 @@ class ValidateFn(Protocol):
         handle_valid_fn: HandleValidFn | None = None,
         dispatch_fn: DispatchCoreFn | None = None,
         cancellation_token: CancellationToken | None = None,
-        execution_lease: ExecutionLeaseSnapshot | None = None,
-        owner_session_identity: OwnerSessionIdentity | None = None,
+        owner_proof: ExecutionOwnerProof | None = None,
     ) -> DispatchOutcome | None: ...
 
 
@@ -964,8 +961,7 @@ def _process_beets_validation(
     handle_valid_fn: HandleValidFn | None = None,
     dispatch_fn: DispatchCoreFn | None = None,
     cancellation_token: CancellationToken | None = None,
-    execution_lease: ExecutionLeaseSnapshot | None = None,
-    owner_session_identity: OwnerSessionIdentity | None = None,
+    owner_proof: ExecutionOwnerProof | None = None,
     canonical_release_fn: CanonicalReleaseFn = _PRODUCTION_CANONICAL_RELEASE_FN,
     retag_fn: MergeRetagFn = _retag_merged_album_with_beets,
     tag_sync_fn: MergeTagSyncFn = _sync_release_tags_with_beets,
@@ -1082,23 +1078,13 @@ def _process_beets_validation(
                 db,
                 import_job_id=import_job_id,
                 reason=reason,
-                expected_execution_lease=execution_lease,
+                expected_execution_lease=(
+                    owner_proof.execution_lease if owner_proof is not None else None
+                ),
             )
         resolved_handle_valid = (
             handle_valid_fn if handle_valid_fn is not None else _handle_valid_result
         )
-        if cancellation_token is None:
-            return resolved_handle_valid(
-                album_data,
-                bv_result,
-                staged_album,
-                ctx,
-                import_job_id=import_job_id,
-                prevalidated_candidate_result=candidate_result,
-                dispatch_fn=dispatch_fn,
-                execution_lease=execution_lease,
-                owner_session_identity=owner_session_identity,
-            )
         return resolved_handle_valid(
             album_data,
             bv_result,
@@ -1108,8 +1094,7 @@ def _process_beets_validation(
             prevalidated_candidate_result=candidate_result,
             dispatch_fn=dispatch_fn,
             cancellation_token=cancellation_token,
-            execution_lease=execution_lease,
-            owner_session_identity=owner_session_identity,
+            owner_proof=owner_proof,
         )
     return _handle_rejected_result(
         album_data,
@@ -1132,8 +1117,7 @@ def _handle_valid_result(
     quality_gate_fn: QualityGateFn | None = None,
     dispatch_fn: DispatchCoreFn | None = None,
     cancellation_token: CancellationToken | None = None,
-    execution_lease: ExecutionLeaseSnapshot | None = None,
-    owner_session_identity: OwnerSessionIdentity | None = None,
+    owner_proof: ExecutionOwnerProof | None = None,
 ) -> DispatchOutcome | None:
     """Dispatch a valid exact-release result from its authoritative path.
 
@@ -1206,12 +1190,12 @@ def _handle_valid_result(
                 f"{staged_album.current_path} so the next cycle can "
                 "idempotently resume from process_completed_album."
             )
-            if execution_lease is not None:
+            if owner_proof is not None:
                 return _requeue_import_job_to_preview(
                     ctx.pipeline_db_source._get_db(),
                     import_job_id=import_job_id,
                     reason="release lock contention",
-                    expected_execution_lease=execution_lease,
+                    expected_execution_lease=owner_proof.execution_lease,
                 )
             return DispatchOutcome(
                 success=False,
@@ -1340,8 +1324,13 @@ def _handle_valid_result(
                 candidate_import_job_id=import_job_id,
                 candidate_download_log_id=None,
                 prevalidated_candidate_result=prevalidated_candidate_result,
-                execution_lease=execution_lease,
-                owner_session_identity=owner_session_identity,
+                execution_lease=(
+                    owner_proof.execution_lease if owner_proof is not None else None
+                ),
+                owner_session_identity=(
+                    owner_proof.owner_session_identity
+                    if owner_proof is not None else None
+                ),
             )
             dispatch = (
                 dispatch_fn if dispatch_fn is not None

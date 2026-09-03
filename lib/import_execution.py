@@ -1014,6 +1014,29 @@ class OwnerSessionIdentity:
 
 
 @dataclass(frozen=True)
+class ExecutionOwnerProof:
+    """The #898 exact-owner pair, threaded together through one lifecycle.
+
+    ``execution_lease`` and ``owner_session_identity`` are supplied or
+    omitted together everywhere the completed-download lifecycle
+    (``lib.download_processing``, ``lib.download``,
+    ``lib.download_validation``) re-threads them — no call site there has
+    ever passed one without the other. Bundling them turns that co-nullity
+    from an unenforced convention into a type: a caller cannot construct a
+    request that reverifies liveness without also naming the session it
+    expects to still hold ``IMPORT``.
+
+    Deliberately excludes ``cancellation_token``: several reject paths in
+    that same lifecycle carry a token with no owner proof at all, so a
+    three-way bundle would force those call sites to name an ownership pair
+    they never use.
+    """
+
+    execution_lease: ExecutionLeaseSnapshot
+    owner_session_identity: OwnerSessionIdentity
+
+
+@dataclass(frozen=True)
 class OwnerSessionProbe:
     live: bool
     reason: str

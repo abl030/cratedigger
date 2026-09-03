@@ -34,6 +34,7 @@ from lib.grab_list import GrabListEntry
 from lib.import_execution import (
     CancellationToken,
     ExecutionLeaseSnapshot,
+    ExecutionOwnerProof,
     OwnerSessionIdentity,
     ProcessIdentity,
 )
@@ -8753,23 +8754,17 @@ class TestProcessingOwnerPostgresFilesystemSlice(unittest.TestCase):
                 *,
                 import_job_id: int,
                 cancellation_token: CancellationToken | None = None,
-                execution_lease: ExecutionLeaseSnapshot | None = None,
-                owner_session_identity: OwnerSessionIdentity | None = None,
+                owner_proof: ExecutionOwnerProof | None = None,
                 **_kwargs: object,
             ) -> CompletionResult:
-                assert (
-                    cancellation_token is not None
-                    and execution_lease is not None
-                    and owner_session_identity is not None
-                )
+                assert cancellation_token is not None and owner_proof is not None
                 return process_completed_album(
                     album_data,
                     ctx,
                     import_job_id=import_job_id,
                     handle_valid_fn=validated_handler,
                     cancellation_token=cancellation_token,
-                    execution_lease=execution_lease,
-                    owner_session_identity=owner_session_identity,
+                    owner_proof=owner_proof,
                 )
 
             def execute_validated(

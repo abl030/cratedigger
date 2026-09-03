@@ -57,8 +57,7 @@ class TestProcessAlbumProtocolBoundary(unittest.TestCase):
                 "materialize_before_file_copy",
                 "materialize_fn",
                 "cancellation_token",
-                "execution_lease",
-                "owner_session_identity",
+                "owner_proof",
             ],
         )
         self.assertEqual(
@@ -71,8 +70,7 @@ class TestProcessAlbumProtocolBoundary(unittest.TestCase):
                 "Callable[[], None] | None",
                 "Callable[..., download_materialization.MaterializeResult] | None",
                 "CancellationToken | None",
-                "ExecutionLeaseSnapshot | None",
-                "OwnerSessionIdentity | None",
+                "ExecutionOwnerProof | None",
             ],
         )
         self.assertEqual(_annotation(call.returns), "CompletionResult")

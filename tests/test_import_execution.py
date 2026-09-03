@@ -25,6 +25,7 @@ from lib.import_execution import (
     ExecutionCancelled,
     ExecutionLeaseSnapshot,
     ExecutionLivenessEvidence,
+    ExecutionOwnerProof,
     InvocationObservation,
     InvocationState,
     MonitoredProcessGroup,
@@ -198,6 +199,34 @@ class TestExecutionLeaseCapture(unittest.TestCase):
                 systemd_unit=" ",
                 invocation_id="invocation-a",
             )
+
+
+class TestExecutionOwnerProof(unittest.TestCase):
+    """The #898 owner pair, bundled for the completed-download lifecycle."""
+
+    def test_holds_both_fields_and_compares_by_value(self) -> None:
+        identity = OwnerSessionIdentity(connection_object_id=1, backend_pid=2)
+        proof = ExecutionOwnerProof(
+            execution_lease=_lease(),
+            owner_session_identity=identity,
+        )
+
+        self.assertEqual(proof.execution_lease, _lease())
+        self.assertIs(proof.owner_session_identity, identity)
+        self.assertEqual(
+            proof,
+            ExecutionOwnerProof(
+                execution_lease=_lease(),
+                owner_session_identity=identity,
+            ),
+        )
+        self.assertNotEqual(
+            proof,
+            ExecutionOwnerProof(
+                execution_lease=_lease(child=False),
+                owner_session_identity=identity,
+            ),
+        )
 
 
 class TestExecutionLivenessDecision(unittest.TestCase):

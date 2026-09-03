@@ -59,6 +59,7 @@ from lib.import_execution import (
     ExecutionLeaseSnapshot,
     ExecutionLivenessDecision,
     ExecutionLivenessProbe,
+    ExecutionOwnerProof,
     OwnerSessionIdentity,
     checkpoint,
     checkpoint_automation_owner,
@@ -1333,8 +1334,10 @@ def execute_automation_import_job(
             import_job_id=job.id,
             process_album_fn=process_album_fn,
             cancellation_token=cancellation_token,
-            execution_lease=execution_lease,
-            owner_session_identity=owner_session_identity,
+            owner_proof=ExecutionOwnerProof(
+                execution_lease=execution_lease,
+                owner_session_identity=owner_session_identity,
+            ),
         )
     finally:
         if created_ctx:

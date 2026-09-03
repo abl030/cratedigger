@@ -24,6 +24,12 @@ import unittest
 from unittest.mock import MagicMock
 
 from lib.grab_list import DownloadFile, GrabListEntry
+from lib.import_execution import (
+    ExecutionLeaseSnapshot,
+    ExecutionOwnerProof,
+    OwnerSessionIdentity,
+    ProcessIdentity,
+)
 from lib.pipeline_db import PipelineDB
 from lib.quality import ValidationResult
 from tests.fakes import (
@@ -49,8 +55,19 @@ class TestRecordingProcessAlbum(unittest.TestCase):
         ctx = make_ctx_with_fake_db(db)
         outcome = CompletionDeferred(detail="release_lock_contention")
         recorder = RecordingProcessAlbum(outcome=outcome)
+        owner_proof = ExecutionOwnerProof(
+            execution_lease=ExecutionLeaseSnapshot(
+                host_boot_id="boot-a",
+                invocation_id="invocation-a",
+                systemd_unit="cratedigger-importer.service",
+                worker=ProcessIdentity(pid=101, start_ticks=1001),
+            ),
+            owner_session_identity=OwnerSessionIdentity(
+                connection_object_id=1, backend_pid=2,
+            ),
+        )
 
-        result = recorder(entry, ctx, import_job_id=73)
+        result = recorder(entry, ctx, import_job_id=73, owner_proof=owner_proof)
 
         self.assertIs(result, outcome)
         self.assertEqual(len(recorder.calls), 1)
@@ -61,6 +78,7 @@ class TestRecordingProcessAlbum(unittest.TestCase):
         self.assertIsNone(call.validate_fn)
         self.assertIsNone(call.handle_valid_fn)
         self.assertIsNone(call.dispatch_fn)
+        self.assertIs(call.owner_proof, owner_proof)
 
 
 class TestFakePipelineDBCoreSeams(unittest.TestCase):

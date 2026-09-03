@@ -33,7 +33,7 @@ from lib.download_ownership import DownloadOwnershipWriter
 from lib.import_execution import (
     CancellationToken,
     ExecutionLeaseSnapshot,
-    OwnerSessionIdentity,
+    ExecutionOwnerProof,
     ProcessIdentity,
 )
 from lib.pipeline_db import AlbumRequestRow, TransferLedgerRow
@@ -3126,9 +3126,8 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 import_job_id: int,
                 handle_valid_fn: HandleValidFn | None = None,
                 dispatch_fn: DispatchCoreFn | None = None,
-                execution_lease: ExecutionLeaseSnapshot | None = None,
                 cancellation_token: CancellationToken | None = None,
-                owner_session_identity: OwnerSessionIdentity | None = None,
+                owner_proof: ExecutionOwnerProof | None = None,
             ) -> DispatchOutcome | None:
                 del (
                     album_data,
@@ -3136,9 +3135,8 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                     ctx,
                     handle_valid_fn,
                     dispatch_fn,
-                    execution_lease,
                     cancellation_token,
-                    owner_session_identity,
+                    owner_proof,
                 )
                 validate_calls.append(import_job_id)
                 return stub_outcome
