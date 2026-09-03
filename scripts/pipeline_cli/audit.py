@@ -19,7 +19,12 @@ from lib.retag_divergence_audit import (
     scan_retag_divergence_from_factory,
     scan_retag_divergence_single_album_from_factory,
 )
-from lib.world_audit_service import WorldAuditReport, audit_world_from_factory
+from lib.world_audit_service import (
+    WORLD_AUDIT_EXIT_CODES,
+    WorldAuditReport,
+    audit_world_from_factory,
+    world_audit_outcome,
+)
 
 if TYPE_CHECKING:
     from lib.world_audit_service import WorldAuditPipelineDB
@@ -229,11 +234,10 @@ def cmd_audit_retag_divergence(db: object, args: object) -> int:
     IOERR/LOCKED/PERM — plus `PermissionError`/`FileNotFoundError`) is
     exactly the transient/retryable class that table maps to 5/503 (#1093
     review round 3, finding 1). Only ``clean`` exits 0 — the audit ran and
-    the cohort really is empty. NOTE: `cmd_audit_world` still exits 0 for
-    its own analogous beets-unavailable bucket — a pre-existing deviation
-    from the same documented convention, deliberately left alone here (see
-    the PR body / post-ship reflection) as an existing command's contract
-    change outside this issue's scope.
+    the cohort really is empty. `cmd_audit_world` used to exit 0 for its
+    own analogous beets-unavailable bucket — a pre-existing deviation from
+    this same documented convention, closed by issue #1355 item 4: it now
+    exits 5 for `beets_unavailable` too, matching this command exactly.
 
     Exit 5 also covers an unexpected transport/decode/render defect — the
     whole body below runs inside the try so a
@@ -383,6 +387,22 @@ def cmd_audit_world(db: WorldAuditPipelineDB, args: object) -> int:
     — get caught by the broad `except Exception`, which then tried to
     print the error JSON and raised a SECOND `BrokenPipeError` that
     nothing caught).
+
+    Exit-code mapping (issue #1355 item 4), derived via
+    `lib.world_audit_service.world_audit_outcome`: `clean`/
+    `observations_only` -> `0` (a COMPLETE report, whatever it observed —
+    Bucket B/C findings stay visible without failing the command); `1` iff
+    `status == "integrity_failed"` (a genuine Bucket A finding — the one
+    thing this instrument exists to surface, mirroring the sibling retag-
+    divergence audit's own `divergence_found` -> `1`, both deliberately
+    outside the ordinary CLI ⇄ API Surface Symmetry convention table);
+    `beets_unavailable` (`complete == False`) -> `5` (transient/retryable
+    — the audit never actually ran, so exit `0` there would let a cron or
+    `&&` chain read "clean" from a report that answered nothing). This
+    used to exit `0` for `beets_unavailable` too — a pre-existing
+    deviation from `cmd_audit_retag_divergence`'s own convention, closed
+    by #1355 item 4; the current test pinning `beets_unavailable` now
+    expects exit `5`, matching the sibling exactly.
     """
     try:
         typed_args = msgspec.convert(vars(args), type=_AuditWorldArgs)
@@ -392,6 +412,16 @@ def cmd_audit_world(db: WorldAuditPipelineDB, args: object) -> int:
                 typed_args.beets_db,
                 typed_args.beets_directory,
             ),
+        )
+        # Decided inside the try, with everything else below: a defect in
+        # `world_audit_outcome` or the exit-code lookup must land on the
+        # documented exit 5, never escape uncaught to the interpreter's
+        # bare exit 1 — which would collide with the exit 1 `cmd_audit_
+        # world` documents for `integrity_failed` itself (independent
+        # reader finding, issue #1355 item 4).
+        outcome = world_audit_outcome(report)
+        exit_code = (
+            1 if outcome == "integrity_failed" else WORLD_AUDIT_EXIT_CODES[outcome]
         )
         if typed_args.json:
             print(json.dumps(msgspec.to_builtins(report), indent=2))
@@ -408,7 +438,7 @@ def cmd_audit_world(db: WorldAuditPipelineDB, args: object) -> int:
             "detail": str(exc),
         }))
         return 5
-    return 1 if report.status == "integrity_failed" else 0
+    return exit_code
 
 
 def add_audit_subparser(

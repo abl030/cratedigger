@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from dataclasses import dataclass, replace
 from typing import Literal
+from unittest.mock import patch
 
 from hypothesis import example, given
 from hypothesis import strategies as st
@@ -18,10 +19,13 @@ import tests._hypothesis_profiles  # noqa: F401  (loads active profile)
 from lib.beets_db import BeetsDB, BeetsWorldAlbum, CurrentBeetsResolution
 from lib.release_identity import ReleaseIdentity
 from lib.world_audit_service import (
+    WORLD_AUDIT_EXIT_CODES,
+    WORLD_AUDIT_HTTP_STATUS,
     WorldAuditReport,
     audit_world,
     audit_world_from_borrowed_factory,
     audit_world_from_factory,
+    world_audit_outcome,
 )
 from lib.world_invariants import (
     LibraryAlbumSnapshot,
@@ -67,6 +71,7 @@ class _AuditObservation:
     list_world_albums_calls: int
     resolve_current_releases_calls: tuple[tuple[ReleaseIdentity, ...], ...]
     close_calls: int
+    cli_exit_code: int
 
 
 class _ResolverFailureBeets(FakeBeetsDB):
@@ -147,6 +152,51 @@ def _pipeline_db_with_exact_request() -> FakePipelineDB:
     return pipeline_db
 
 
+def _drive_cli_exit_code(world: _ResolverFailureWorld) -> int:
+    """Drive the REAL `pipeline-cli audit world` outer adapter over the
+    same resolver failure, through its own independent `_ResolverFailureBeets`
+    handle (never the service-level observation's — sharing one would
+    corrupt the call counters `assert_resolver_failure_contract` checks).
+
+    Issue #1355 item 4, independent reader finding: the checker used to
+    only re-derive `world_audit_outcome`/`WORLD_AUDIT_EXIT_CODES` inline,
+    which agrees with the shared library function by construction but
+    says nothing about whether `cmd_audit_world` itself still calls it.
+    This drives the actual CLI entry point `cmd_audit_world` reaches
+    through — `_open_beets` — exactly as `tests/test_pipeline_cli.py`'s
+    deterministic pins do, over generated resolver-failure worlds rather
+    than one fixed scenario (`cmd_audit_world` has only an owned Beets
+    handle, so this drive collapses `world.owned`; the borrowed lane
+    stays covered at the service level and by the route pins below).
+    `GET /api/audit/world` stays pin-only here: `tests/web/test_routes_
+    world_audit.py` already drives the real route deterministically
+    across all three status branches (200 clean, 503 beets-unavailable
+    x2, 200 integrity-failed), so an equivalent per-example drive inside
+    this property would add cost without covering a gap those pins leave
+    open.
+    """
+    import argparse
+    import contextlib
+    import io
+
+    from scripts.pipeline_cli import audit as audit_cli
+
+    failure = _failure_for(world)
+    beets = _ResolverFailureBeets(failure)
+    with (
+        patch.object(audit_cli, "_open_beets", return_value=beets),
+        contextlib.redirect_stdout(io.StringIO()),
+    ):
+        return audit_cli.cmd_audit_world(
+            _pipeline_db_with_exact_request(),
+            argparse.Namespace(
+                beets_db="unused.db",
+                beets_directory="/unused/library",
+                json=True,
+            ),
+        )
+
+
 def _observe(world: _ResolverFailureWorld) -> _AuditObservation:
     failure = _failure_for(world)
     beets = _ResolverFailureBeets(failure)
@@ -181,6 +231,7 @@ def _observe(world: _ResolverFailureWorld) -> _AuditObservation:
         resolve_current_releases_calls=tuple(
             beets.resolve_current_releases_calls
         ),
+        cli_exit_code=_drive_cli_exit_code(world),
         close_calls=beets.close_calls,
     )
 
@@ -209,6 +260,16 @@ def assert_resolver_failure_contract(
         raise AssertionError(
             "world-audit handle lifecycle drifted: "
             f"owned={world.owned}, close_calls={observation.close_calls}"
+        )
+    # Issue #1355 item 4: drives the REAL `cmd_audit_world` adapter (not a
+    # re-derivation of `world_audit_outcome`) for the whole generated
+    # resolver-failure world space — availability failures reach exit 5
+    # via `world_audit_outcome`'s `beets_unavailable`; every other kind
+    # reaches it via the CLI's own unexpected-exception handling. Either
+    # way, this instrument never exits 0 or 1 for a resolver failure.
+    if observation.cli_exit_code != 5:
+        raise AssertionError(
+            f"cmd_audit_world exit code drifted: {observation.cli_exit_code}"
         )
 
     if not world.admitted:
@@ -265,6 +326,24 @@ def assert_resolver_failure_contract(
             f"{report.groups.b.members[0].detail!r}"
         )
 
+    # Issue #1355 item 4: an incomplete/beets-unavailable report must be a
+    # non-successful HTTP status too, not the proxy `complete` field alone.
+    # The CLI side is checked above through the real `cmd_audit_world`
+    # adapter; `GET /api/audit/world` stays behind this shared derivation
+    # rather than a full route drive (see `_drive_cli_exit_code`'s
+    # docstring for why that asymmetry is deliberate) — this calls the
+    # same shared `world_audit_outcome`/`WORLD_AUDIT_HTTP_STATUS` the
+    # route does, with the route's own branch expression re-derived here
+    # rather than driven through the route itself.
+    outcome = world_audit_outcome(report)
+    status_code = (
+        200 if outcome == "integrity_failed" else WORLD_AUDIT_HTTP_STATUS[outcome]
+    )
+    if status_code != 503:
+        raise AssertionError(
+            f"availability failure HTTP status drifted: {status_code}"
+        )
+
 
 class TestWorldAuditResolverFailureGenerated(unittest.TestCase):
     @given(world=_resolver_failure_worlds())
@@ -318,6 +397,43 @@ class TestWorldAuditResolverFailureGenerated(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "reported complete"):
             assert_resolver_failure_contract(world, known_bad)
 
+    def test_checker_rejects_a_wrong_availability_cli_exit_code(self) -> None:
+        """Issue #1355 item 4: proves the new decided-exit-code clause
+        actually trips, rather than being an unfalsifiable extra line.
+
+        `cli_exit_code` is computed once, inside `_observe`, by actually
+        driving `cmd_audit_world` — so the map must be patched BEFORE
+        `_observe` runs, not merely around the checker call, or the real
+        adapter would read the map unpatched and the drift would never
+        happen."""
+        world = _ResolverFailureWorld(
+            owned=True,
+            kind="availability",
+            sqlite_code=sqlite3.SQLITE_BUSY,
+            sqlite_exception="operational",
+        )
+        with patch.dict(WORLD_AUDIT_EXIT_CODES, {"beets_unavailable": 0}):
+            observation = _observe(world)
+            with self.assertRaisesRegex(AssertionError, "exit code drifted"):
+                assert_resolver_failure_contract(world, observation)
+
+    def test_checker_rejects_a_wrong_availability_http_status(self) -> None:
+        """Issue #1355 item 4: proves the new decided-HTTP-status clause
+        actually trips, rather than being an unfalsifiable extra line."""
+        world = _ResolverFailureWorld(
+            owned=True,
+            kind="availability",
+            sqlite_code=sqlite3.SQLITE_BUSY,
+            sqlite_exception="operational",
+        )
+        observation = _observe(world)
+
+        with (
+            patch.dict(WORLD_AUDIT_HTTP_STATUS, {"beets_unavailable": 200}),
+            self.assertRaisesRegex(AssertionError, "HTTP status drifted"),
+        ):
+            assert_resolver_failure_contract(world, observation)
+
     def test_checker_rejects_operational_error_only_auth_classifier(self) -> None:
         world = _ResolverFailureWorld(
             owned=False,
@@ -334,6 +450,7 @@ class TestWorldAuditResolverFailureGenerated(unittest.TestCase):
             list_world_albums_calls=1,
             resolve_current_releases_calls=((_EXPECTED_IDENTITY,),),
             close_calls=0,
+            cli_exit_code=5,
         )
 
         with self.assertRaisesRegex(AssertionError, "availability failure escaped"):

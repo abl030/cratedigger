@@ -113,11 +113,11 @@ def get_retag_divergence_audit(h: RouteHandler, params: dict[str, list[str]]) ->
     (transient/retryable — the audit never actually ran at all). Both non-
     200 mappings follow `.claude/rules/code-quality.md` § CLI ⇄ API
     Surface Symmetry's convention table (`409` wrong state, `503`
-    transient/retryable) — #1093 review round 4, finding 5. NOTE:
-    `GET /api/audit/world` still returns 200 for its own analogous
-    beets-unavailable bucket — a pre-existing deviation from that same
-    convention, deliberately left alone here (see the PR body / post-ship
-    reflection).
+    transient/retryable) — #1093 review round 4, finding 5.
+    `GET /api/audit/world` used to return 200 for its own analogous
+    beets-unavailable bucket — a pre-existing deviation from this same
+    convention, closed by issue #1355 item 4: it now returns 503 for
+    `beets_unavailable` too, matching this route exactly.
     """
     after_album_id, ok = _parse_after_album_id(params)
     if not ok:

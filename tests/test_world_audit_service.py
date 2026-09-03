@@ -6,17 +6,23 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from typing import ClassVar
 
 from lib.beets_db import BeetsDB, BeetsWorldAlbum, CurrentBeetsResolution
 from lib.quality_evidence import snapshot_audio_files
 from lib.release_identity import ReleaseIdentity
 from lib.world_audit_service import (
+    WORLD_AUDIT_EXIT_CODES,
+    WORLD_AUDIT_HTTP_STATUS,
     WorldAuditCounts,
+    WorldAuditGroup,
+    WorldAuditGroups,
     WorldAuditReport,
     audit_world,
     audit_world_from_borrowed_factory,
     audit_world_from_factory,
     build_world_audit_report,
+    world_audit_outcome,
 )
 from lib.world_invariants import WorldViolation
 from tests.evidence_helpers import make_album_quality_evidence
@@ -738,6 +744,75 @@ class TestWorldAuditService(unittest.TestCase):
         ambiguous = report.groups.b.members[0]
         self.assertIn("multiple_matches", ambiguous.detail)
         self.assertEqual(ambiguous.album_ids, (4, 5))
+
+
+def _report(*, status: str, complete: bool) -> WorldAuditReport:
+    """A report shaped exactly enough to drive ``world_audit_outcome`` —
+    not necessarily one ``build_world_audit_report`` would itself produce
+    (issue #1355 item 4's priority-ordering case needs
+    ``complete=False`` alongside every ``status`` value, including
+    ``integrity_failed``, which no real producer combines with an
+    incomplete report today)."""
+
+    empty = WorldAuditGroup(bucket="A", owner="cratedigger_integrity", count=0, members=())
+    return WorldAuditReport(
+        status=status,
+        complete=complete,
+        counts=WorldAuditCounts(0, 0, 0, 0),
+        audited_invariants=(),
+        temporal_invariants_not_auditable=(),
+        groups=WorldAuditGroups(
+            a=empty,
+            b=WorldAuditGroup(bucket="B", owner="current_holdings_projection", count=0, members=()),
+            c=WorldAuditGroup(bucket="C", owner="beets_library", count=0, members=()),
+        ),
+    )
+
+
+class TestWorldAuditOutcome(unittest.TestCase):
+    """Issue #1355 item 4: the shared completeness/availability + integrity
+    outcome both ``cmd_audit_world`` and ``get_world_audit`` derive from."""
+
+    CASES: ClassVar[list[tuple[str, str, bool, str]]] = [
+        ("complete clean", "clean", True, "clean"),
+        ("complete observations", "observations_only", True, "observations_only"),
+        ("complete integrity failure", "integrity_failed", True, "integrity_failed"),
+        ("incomplete observations", "observations_only", False, "beets_unavailable"),
+        # Completeness takes priority over status even in a combination no
+        # real producer emits today (see `_report`'s docstring) — proves
+        # the ordering, not just today's one reachable incomplete shape.
+        ("incomplete clean", "clean", False, "beets_unavailable"),
+        ("incomplete integrity failure", "integrity_failed", False, "beets_unavailable"),
+    ]
+
+    def test_outcome_prioritizes_completeness_over_status(self) -> None:
+        for desc, status, complete, expected in self.CASES:
+            with self.subTest(desc=desc):
+                report = _report(status=status, complete=complete)
+                self.assertEqual(world_audit_outcome(report), expected)
+
+    def test_unrecognized_status_fails_closed(self) -> None:
+        report = _report(status="bogus", complete=True)
+        with self.assertRaisesRegex(ValueError, r"unrecognized world audit status: 'bogus'"):
+            world_audit_outcome(report)
+
+    def test_http_status_and_exit_code_maps_agree_with_convention(self) -> None:
+        self.assertEqual(
+            WORLD_AUDIT_HTTP_STATUS,
+            {"clean": 200, "observations_only": 200, "beets_unavailable": 503},
+        )
+        self.assertEqual(
+            WORLD_AUDIT_EXIT_CODES,
+            {"clean": 0, "observations_only": 0, "beets_unavailable": 5},
+        )
+
+    def test_integrity_failed_is_not_a_member_of_either_registered_map(self) -> None:
+        # See the docstring on `world_audit_outcome`/`WorldAuditOutcome`:
+        # exit 1 for an HTTP-200 outcome cannot obey the ordinary
+        # status-derived convention `tests/test_surface_outcomes.py`
+        # enforces on registered maps.
+        self.assertNotIn("integrity_failed", WORLD_AUDIT_HTTP_STATUS)
+        self.assertNotIn("integrity_failed", WORLD_AUDIT_EXIT_CODES)
 
 
 if __name__ == "__main__":

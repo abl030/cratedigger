@@ -21,6 +21,7 @@ from lib.beets_db import (
 from lib.quality import AlbumQualityEvidence
 from lib.quality_evidence import fingerprint_album_path
 from lib.release_identity import ReleaseIdentity
+from lib.surface_outcomes import exit_codes_from_http
 from lib.world_invariants import (
     DenylistAuthoritySnapshot,
     EvidenceDiskSnapshot,
@@ -92,6 +93,59 @@ class WorldAuditReport(msgspec.Struct, frozen=True):
             + self.groups.b.members
             + self.groups.c.members
         )
+
+
+WorldAuditOutcome = Literal[
+    "clean", "observations_only", "integrity_failed", "beets_unavailable",
+]
+"""The one completeness/availability + integrity outcome both
+``pipeline-cli audit world`` and ``GET /api/audit/world`` branch on
+(issue #1355 item 4). ``report.complete`` takes priority over
+``report.status``: an incomplete scan cannot also vouch for Bucket A
+integrity, so an unavailable Beets authority is always
+``beets_unavailable`` regardless of what ``status`` happens to carry.
+``integrity_failed`` keeps its own pre-existing HTTP 200 / CLI exit 1
+handling wherever this is consumed and is deliberately NOT a member of
+:data:`WORLD_AUDIT_HTTP_STATUS` / :data:`WORLD_AUDIT_EXIT_CODES`: the
+shared surface-outcome registry audit (``tests/test_surface_outcomes.py``)
+requires every registered map's exit code to obey the ordinary
+status-derived convention, and exit 1 for an HTTP-200 outcome cannot —
+mirroring the sibling retag-divergence audit's own, similarly
+unregistered ``divergence_found`` -> exit 1 case
+(``lib/retag_divergence_audit.py``)."""
+
+
+def world_audit_outcome(report: WorldAuditReport) -> WorldAuditOutcome:
+    """Derive the shared outcome both real outer adapters branch on."""
+
+    if not report.complete:
+        return "beets_unavailable"
+    if report.status == "clean":
+        return "clean"
+    if report.status == "observations_only":
+        return "observations_only"
+    if report.status == "integrity_failed":
+        return "integrity_failed"
+    raise ValueError(f"unrecognized world audit status: {report.status!r}")
+
+
+#: The conventional subset of :data:`WorldAuditOutcome` — deliberately
+#: excludes ``integrity_failed`` (see its docstring above). 200 for a
+#: complete report whatever it observed, 503 (transient/retryable) for an
+#: incomplete one: the audit never actually ran, so 200 there would let a
+#: cron or ``&&`` chain read "clean" from a report that answered nothing.
+WORLD_AUDIT_HTTP_STATUS: dict[str, int] = {
+    "clean": 200,
+    "observations_only": 200,
+    "beets_unavailable": 503,
+}
+
+#: Derived branch-for-branch from :data:`WORLD_AUDIT_HTTP_STATUS` through
+#: the repository's CLI ⇄ API surface-outcome convention
+#: (``lib/surface_outcomes.py``).
+WORLD_AUDIT_EXIT_CODES: dict[str, int] = exit_codes_from_http(
+    WORLD_AUDIT_HTTP_STATUS
+)
 
 
 class BeetsAuthorityUnavailable(msgspec.Struct, frozen=True):
@@ -520,16 +574,20 @@ def audit_world_from_borrowed_factory(
 __all__ = [
     "AUDITED_INVARIANTS",
     "TEMPORAL_INVARIANTS_NOT_AUDITABLE",
+    "WORLD_AUDIT_EXIT_CODES",
+    "WORLD_AUDIT_HTTP_STATUS",
     "BeetsAuthorityUnavailable",
     "WorldAuditBeetsDB",
     "WorldAuditBeetsFactory",
     "WorldAuditCounts",
     "WorldAuditGroup",
     "WorldAuditGroups",
+    "WorldAuditOutcome",
     "WorldAuditPipelineDB",
     "WorldAuditReport",
     "audit_world",
     "audit_world_from_borrowed_factory",
     "audit_world_from_factory",
     "build_world_audit_report",
+    "world_audit_outcome",
 ]
