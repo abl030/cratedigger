@@ -92,8 +92,11 @@ class LatestDownloadSummary(TypedDict):
 #: ``_evidence_format`` is deliberately a SECOND alias over the same
 #: column as ``_evidence_source_format``: the overlay folds that one into
 #: the legacy ``source_format`` key ONLY for lineage 3/4 rows, so 26,503 of
-#: 30,467 live rows hand the renderer ``None`` there while the decider's
-#: ``measurement.format`` is never NULL. Reusing it would let the render
+#: 30,467 live rows hand the renderer ``None`` there. (Issue #1355 item 2:
+#: the decider's ``measurement.format`` CAN itself be NULL now, on an
+#: early-reject candidate with no files to read a real extension from —
+#: ``_evidence_format``'s own value is then also NULL, so this alias split
+#: still can't launder one into the other.) Reusing it would let the render
 #: adapter resolve a different codec from the same evidence row.
 #: ``_evidence_was_converted_from`` is deliberately NULL: canonical evidence
 #: may be co-referenced as current, but this projection is always candidate

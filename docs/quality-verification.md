@@ -1810,13 +1810,22 @@ alongside the real reject reason. `policy_incomplete_reasons(
 require_quality_measurement=...)` now takes an explicit flag; the two
 readiness gates that read it (`lib.quality.pipeline._require_evidence_ready`
 and `lib.quality_evidence._load_candidate_evidence_for_source`) pass `False`
-exactly when the candidate already carries one of those four facts
-(`candidate_preimport_reject_fact(evidence) is not None`), and the producer
-leaves `format`/`min_bitrate_kbps`/`avg_bitrate_kbps`/`median_bitrate_kbps`
-honestly `None`. A row with no reject fact and no quality measurement still
-fails the gate exactly as before — the exemption is keyed to the fact, not to
-"any early reject." `current` (HAVE) evidence keeps the strict contract
-unconditionally; it is never built by this measurement-only writer.
+exactly when `candidate_preimport_reject_fact(evidence) is not None` —
+technically any of the five facts that classifier can name, including
+`mixed_source`, though `evidence_from_measurement` itself only ever produces
+evidence for the four named above (a mixed-source candidate always reaches
+the harness for real, so its evidence is never measurement-only). The
+producer leaves `format`/`min_bitrate_kbps`/`avg_bitrate_kbps`/
+`median_bitrate_kbps` honestly `None`. A row with no reject fact and no
+quality measurement still fails the gate exactly as before — the exemption
+is keyed to the fact, not to "any early reject." `current` (HAVE) evidence
+keeps the strict contract unconditionally; it is never built by this
+measurement-only writer. Two other production callers —
+`current_evidence_rebuild_reasons` and
+`lib.download_rejection._compute_rejection_backfill` — never learned about
+the new keyword and call `policy_incomplete_reasons()` with no argument;
+both read `current` evidence, so the unconditional `True` default is exactly
+the behavior they already depended on.
 Migration 084 nulled the 28 live rows the old code had already fabricated.
 
 **HAVE spectral persistence is fail-closed on absence and fresh-audit-wins on

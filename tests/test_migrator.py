@@ -1890,23 +1890,59 @@ class TestNullFabricatedEarlyRejectQualityMigration(unittest.TestCase):
       019's DDL defaults, not an observed fact
     """
 
+    #: Real migration file discovery, never a hand-copied SQL literal
+    #: (test-fidelity.md Rule C): ``setUpClass`` applies every migration
+    #: BELOW 84, the class seeds every fixture row while the DB is still
+    #: pinned at that pre-084 schema, and only then does ``apply_migrations``
+    #: run migration 84 itself, for real, exactly once, over the seeded
+    #: rows — the same shape a live deploy takes. Every test method reads
+    #: the already-migrated row back; none of them ever executes a copy of
+    #: the migration's own SQL.
+    _EVIDENCE_IDS: ClassVar[dict[str, int]] = {}
+
     @classmethod
     def setUpClass(cls) -> None:
         cls._db_name = "cratedigger_test_mig084_replay"
         cls._dsn = _create_fresh_database(cls._db_name)
         cls._migration_dir = tempfile.mkdtemp(prefix="cratedigger-mig084-")
         for migration in discover_migrations(DEFAULT_MIGRATIONS_DIR):
-            if migration.version <= 84:
+            if migration.version < 84:
                 shutil.copy(migration.path, cls._migration_dir)
         apply_migrations(cls._dsn, cls._migration_dir)
+
+        bad_hash_id = cls._make_bad_audio_hash(b"mig084-fingerprint")
+        for desc, overrides in cls._BITRATE_CASES:
+            resolved = dict(overrides)
+            if resolved.get("matched_bad_audio_hash_id") is True:
+                resolved["matched_bad_audio_hash_id"] = bad_hash_id
+            cls._EVIDENCE_IDS[f"bitrate:{desc}"] = cls._make_evidence(
+                f"mig084-bitrate-{desc}", **resolved,
+            )
+        for desc, overrides in cls._FORMAT_CASES:
+            cls._EVIDENCE_IDS[f"format:{desc}"] = cls._make_evidence(
+                f"mig084-format-{desc}", **overrides,
+            )
+
+        # Migration 84 itself, applied for real, exactly once, over every
+        # seeded row above — this is the actual file the deploy runs, not a
+        # copy of its SQL.
+        for migration in discover_migrations(DEFAULT_MIGRATIONS_DIR):
+            if migration.version == 84:
+                shutil.copy(migration.path, cls._migration_dir)
+        applied = apply_migrations(cls._dsn, cls._migration_dir)
+        applied_versions = [m.version for m in applied]
+        assert 84 in applied_versions, (
+            f"migration 84 did not run: applied={applied_versions}"
+        )
 
     @classmethod
     def tearDownClass(cls) -> None:
         shutil.rmtree(cls._migration_dir)
         _drop_database(cls._db_name)
 
-    def _query(self, sql: str, params: tuple = ()):
-        conn = psycopg2.connect(self._dsn)
+    @classmethod
+    def _query_cls(cls, sql: str, params: tuple = ()):
+        conn = psycopg2.connect(cls._dsn)
         conn.autocommit = True
         try:
             with conn.cursor() as cur:
@@ -1915,8 +1951,9 @@ class TestNullFabricatedEarlyRejectQualityMigration(unittest.TestCase):
         finally:
             conn.close()
 
-    def _exec(self, sql: str, params: tuple = ()) -> None:
-        conn = psycopg2.connect(self._dsn)
+    @classmethod
+    def _exec_cls(cls, sql: str, params: tuple = ()) -> None:
+        conn = psycopg2.connect(cls._dsn)
         conn.autocommit = True
         try:
             with conn.cursor() as cur:
@@ -1924,30 +1961,66 @@ class TestNullFabricatedEarlyRejectQualityMigration(unittest.TestCase):
         finally:
             conn.close()
 
-    _UPDATE_BITRATE_SQL = """
-        UPDATE album_quality_evidence
-        SET min_bitrate_kbps = NULL,
-            avg_bitrate_kbps = NULL,
-            median_bitrate_kbps = NULL
-        WHERE lineage_version >= 4
-          AND min_bitrate_kbps = 0
-          AND avg_bitrate_kbps = 0
-          AND median_bitrate_kbps = 0
-          AND (
-            audio_corrupt = TRUE
-            OR matched_bad_audio_hash_id IS NOT NULL
-            OR folder_layout = 'nested'
-            OR audio_file_count = 0
-          )
-    """
-    _UPDATE_FORMAT_SQL = """
-        UPDATE album_quality_evidence
-        SET format = NULL,
-            storage_format = NULL
-        WHERE lineage_version >= 4
-          AND audio_file_count = 0
-          AND format IS NOT NULL
-    """
+    def _query(self, sql: str, params: tuple = ()):
+        return self._query_cls(sql, params)
+
+    def _exec(self, sql: str, params: tuple = ()) -> None:
+        self._exec_cls(sql, params)
+
+    _BITRATE_CASES: ClassVar[list[tuple[str, dict]]] = [
+        ("audio_corrupt nulled", {"audio_corrupt": True}),
+        (
+            # 26 of the 28 real live rows are exactly lineage_version=4
+            # (measured on doc2), not the CURRENT_EVIDENCE_LINEAGE_VERSION
+            # every other case here defaults to — pin the >= boundary
+            # itself, not just a value safely above or below it.
+            "lineage_version exactly 4 nulled",
+            {"audio_corrupt": True, "lineage_version": 4},
+        ),
+        (
+            "bad_audio_hash nulled",
+            {"matched_bad_audio_hash_id": True},  # resolved to a real id below
+        ),
+        ("nested_layout nulled", {"folder_layout": "nested"}),
+        ("empty_fileset nulled", {"audio_file_count": 0}),
+        (
+            "pre-U1 lineage untouched",
+            {"audio_corrupt": True, "lineage_version": 3},
+        ),
+        (
+            "real nonzero bitrate untouched",
+            {
+                "audio_corrupt": True,
+                "min_bitrate_kbps": 245,
+                "avg_bitrate_kbps": 256,
+                "median_bitrate_kbps": 252,
+            },
+        ),
+        ("no reject fact at all untouched", {}),
+    ]
+    _BITRATE_EXPECTED: ClassVar[dict[str, tuple]] = {
+        "audio_corrupt nulled": (None, None, None),
+        "lineage_version exactly 4 nulled": (None, None, None),
+        "bad_audio_hash nulled": (None, None, None),
+        "nested_layout nulled": (None, None, None),
+        "empty_fileset nulled": (None, None, None),
+        "pre-U1 lineage untouched": (0, 0, 0),
+        "real nonzero bitrate untouched": (245, 256, 252),
+        "no reject fact at all untouched": (0, 0, 0),
+    }
+    _FORMAT_CASES: ClassVar[list[tuple[str, dict]]] = [
+        ("empty_fileset format nulled", {"audio_file_count": 0}),
+        ("non-empty real-file format untouched", {"audio_file_count": 2}),
+        (
+            "pre-U1 lineage untouched",
+            {"audio_file_count": 0, "lineage_version": 3},
+        ),
+    ]
+    _FORMAT_EXPECTED: ClassVar[dict[str, tuple]] = {
+        "empty_fileset format nulled": (None, None),
+        "non-empty real-file format untouched": ("MP3", "MP3"),
+        "pre-U1 lineage untouched": ("MP3", "MP3"),
+    }
 
     @staticmethod
     def _audio_validation_json(corrupt: bool) -> str:
@@ -1980,8 +2053,9 @@ class TestNullFabricatedEarlyRejectQualityMigration(unittest.TestCase):
             "omitted_diagnostics": 0,
         })
 
+    @classmethod
     def _make_evidence(
-        self,
+        cls,
         mbid: str,
         *,
         lineage_version: int = CURRENT_EVIDENCE_LINEAGE_VERSION,
@@ -1996,7 +2070,7 @@ class TestNullFabricatedEarlyRejectQualityMigration(unittest.TestCase):
         matched_bad_audio_hash_id: int | None = None,
     ) -> int:
         fingerprint = f"fp-{mbid}"
-        self._exec(
+        cls._exec_cls(
             """
             INSERT INTO album_quality_evidence (
                 mb_release_id, snapshot_fingerprint, source_path, measured_at,
@@ -2014,29 +2088,27 @@ class TestNullFabricatedEarlyRejectQualityMigration(unittest.TestCase):
                 min_bitrate_kbps, avg_bitrate_kbps, median_bitrate_kbps,
                 audio_corrupt, folder_layout, audio_file_count,
                 matched_bad_audio_hash_id,
-                self._audio_validation_json(audio_corrupt),
+                cls._audio_validation_json(audio_corrupt),
             ),
         )
-        return self._query(
+        return cls._query_cls(
             "SELECT id FROM album_quality_evidence WHERE mb_release_id = %s",
             (mbid,),
         )[0][0]
 
-    def _make_bad_audio_hash(self, hash_value: bytes) -> int:
-        self._exec(
+    @classmethod
+    def _make_bad_audio_hash(cls, hash_value: bytes) -> int:
+        cls._exec_cls(
             """
             INSERT INTO bad_audio_hashes (hash_value, audio_format)
             VALUES (%s, 'mp3')
             """,
             (hash_value,),
         )
-        return self._query(
+        return cls._query_cls(
             "SELECT id FROM bad_audio_hashes WHERE hash_value = %s",
             (hash_value,),
         )[0][0]
-
-    def _cleanup_evidence(self, eid: int) -> None:
-        self._exec("DELETE FROM album_quality_evidence WHERE id = %s", (eid,))
 
     def test_schema_migrations_records_084(self):
         rows = self._query(
@@ -2045,99 +2117,31 @@ class TestNullFabricatedEarlyRejectQualityMigration(unittest.TestCase):
         self.assertEqual(rows, [(84,)])
 
     def test_bitrate_fingerprint_nulls_and_leaves_controls_untouched(self):
-        bad_hash_id = self._make_bad_audio_hash(b"mig084-fingerprint")
-        CASES = [
-            (
-                "audio_corrupt nulled",
-                {"audio_corrupt": True},
-                (None, None, None),
-            ),
-            (
-                "bad_audio_hash nulled",
-                {"matched_bad_audio_hash_id": bad_hash_id},
-                (None, None, None),
-            ),
-            (
-                "nested_layout nulled",
-                {"folder_layout": "nested"},
-                (None, None, None),
-            ),
-            (
-                "empty_fileset nulled",
-                {"audio_file_count": 0},
-                (None, None, None),
-            ),
-            (
-                "pre-U1 lineage untouched",
-                {"audio_corrupt": True, "lineage_version": 3},
-                (0, 0, 0),
-            ),
-            (
-                "real nonzero bitrate untouched",
-                {
-                    "audio_corrupt": True,
-                    "min_bitrate_kbps": 245,
-                    "avg_bitrate_kbps": 256,
-                    "median_bitrate_kbps": 252,
-                },
-                (245, 256, 252),
-            ),
-            (
-                "no reject fact at all untouched",
-                {},
-                (0, 0, 0),
-            ),
-        ]
-        for desc, overrides, expected in CASES:
+        for desc, _overrides in self._BITRATE_CASES:
             with self.subTest(desc=desc):
-                eid = self._make_evidence(f"mig084-bitrate-{desc}", **overrides)
-                try:
-                    self._exec(self._UPDATE_BITRATE_SQL)
-                    row = self._query(
-                        """
-                        SELECT min_bitrate_kbps, avg_bitrate_kbps,
-                               median_bitrate_kbps
-                        FROM album_quality_evidence WHERE id = %s
-                        """,
-                        (eid,),
-                    )[0]
-                    self.assertEqual(row, expected)
-                finally:
-                    self._cleanup_evidence(eid)
+                eid = self._EVIDENCE_IDS[f"bitrate:{desc}"]
+                row = self._query(
+                    """
+                    SELECT min_bitrate_kbps, avg_bitrate_kbps,
+                           median_bitrate_kbps
+                    FROM album_quality_evidence WHERE id = %s
+                    """,
+                    (eid,),
+                )[0]
+                self.assertEqual(row, self._BITRATE_EXPECTED[desc])
 
     def test_format_fingerprint_nulls_only_empty_fileset(self):
-        CASES = [
-            (
-                "empty_fileset format nulled",
-                {"audio_file_count": 0},
-                (None, None),
-            ),
-            (
-                "non-empty real-file format untouched",
-                {"audio_file_count": 2},
-                ("MP3", "MP3"),
-            ),
-            (
-                "pre-U1 lineage untouched",
-                {"audio_file_count": 0, "lineage_version": 3},
-                ("MP3", "MP3"),
-            ),
-        ]
-        for desc, overrides, expected in CASES:
+        for desc, _overrides in self._FORMAT_CASES:
             with self.subTest(desc=desc):
-                eid = self._make_evidence(f"mig084-format-{desc}", **overrides)
-                try:
-                    self._exec(self._UPDATE_FORMAT_SQL)
-                    row = self._query(
-                        """
-                        SELECT format, storage_format
-                        FROM album_quality_evidence WHERE id = %s
-                        """,
-                        (eid,),
-                    )[0]
-                    self.assertEqual(row, expected)
-                finally:
-                    self._cleanup_evidence(eid)
+                eid = self._EVIDENCE_IDS[f"format:{desc}"]
+                row = self._query(
+                    """
+                    SELECT format, storage_format
+                    FROM album_quality_evidence WHERE id = %s
+                    """,
+                    (eid,),
+                )[0]
+                self.assertEqual(row, self._FORMAT_EXPECTED[desc])
 
 
 class TestSearchLogPreFilterSkipCountSchema(unittest.TestCase):
