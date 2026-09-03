@@ -1254,8 +1254,10 @@ in {
       defaultText = lib.literalExpression ''"''${cfg.stateDir}/processing"'';
       description = ''
         Private Cratedigger-owned root for materialized albums and preview
-        snapshots.  It must be absolute, disjoint from slskd.downloadDir,
-        and beneath a parent that is not writable by slskd or another group.
+        snapshots.  Must be an absolute normalized path (no trailing slash,
+        no . or .. components, no doubled slashes), disjoint from
+        slskd.downloadDir, and beneath a parent that is not writable by
+        slskd or another group.
       '';
     };
 
@@ -1466,7 +1468,11 @@ in {
       downloadDir = mkOption {
         type = types.nullOr types.str;
         default = null;
-        description = "Directory slskd downloads land in.";
+        description = ''
+          Directory slskd downloads land in.  When set, must be an
+          absolute normalized path (no trailing slash, no . or ..
+          components, no doubled slashes).
+        '';
       };
       deleteSearches = mkOption {
         type = types.bool;

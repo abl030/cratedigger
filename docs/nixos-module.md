@@ -431,10 +431,18 @@ directly beneath a root-owned, non-group-writable parent. Do not run slskd as
 the Cratedigger user and do not put processing beneath a parent writable by
 slskd. The module rejects a relative path, a `.`/`..` component, a doubled
 slash, a trailing slash, and lexical overlap for both `processingDir` and
-`slskd.downloadDir` at evaluation time — normalizing both before comparing
-them closes a gap where a `..` component could make the lexical disjointness
-check miss two options naming the same physical tree — while the runtime also
-refuses symlinked/unsafe roots.
+`slskd.downloadDir` at evaluation time — the two path-shape assertions close a
+gap where a `..` component made the older, unnormalized lexical disjointness
+comparison miss two options naming the same physical tree, since it never ran
+`isAbsoluteNormalizedPath` on either side before comparing them. At runtime,
+`lib/fs_authority.py::open_private_processing_root` already rejects that same
+`..` case on its own, via a lexical `os.path.normpath` comparison that runs
+before either root is opened; a later `os.path.realpath` comparison in the
+same function exists for the separate case of a symlink or bind mount making
+two lexically distinct paths physically the same. Either way, the practical
+effect of this evaluation-time fix is that a misconfigured deployment now
+fails at `nixos-rebuild switch` with a named message instead of only at
+runtime.
 
 The descriptor-verified publish into `albums/` is the trust transition:
 Cratedigger may repair or normalize that owned working copy in place before

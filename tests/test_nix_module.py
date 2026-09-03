@@ -1611,6 +1611,13 @@ def _shared_module_worlds_rest() -> dict[str, object]:
               services.cratedigger.slskd.downloadDir =
                 lib.mkForce "/srv/slskd/../slskd";
             };
+            # The new downloadDir normalization clause is null-guarded
+            # (`cfg.slskd.downloadDir == null || isAbsoluteNormalizedPath
+            # ...`) so an UNSET downloadDir must fire only the pre-existing
+            # "is not set" assertion, never the new normalization one.
+            missingDownloadDir = evaluate {
+              services.cratedigger.slskd.downloadDir = lib.mkForce null;
+            };
             # The concrete gap #1355 WE2 named: a `..` component makes
             # processingDir resolve to the SAME real directory as
             # downloadDir, but the plain lexical hasPrefix/equality
@@ -2956,43 +2963,69 @@ class TestProcessingPathNormalizationContract(unittest.TestCase):
     its disjointness from ``slskd.downloadDir`` was a plain lexical
     ``removeSuffix "/"`` + ``hasPrefix`` string comparison. A ``..``
     component could make two configured options resolve to the same real
-    directory while module evaluation reported no violation at all —
-    ``lib/fs_authority.py::open_private_processing_root`` still caught it
-    at runtime via ``os.path.realpath``, but only after
-    ``nixos-rebuild switch`` had already declared the configuration good.
-    The fix reuses the module's existing ``isAbsoluteNormalizedPath``
-    helper (already used for the Beets runtime paths and
-    ``localImport.dir``) for both options, so the disjointness comparison
-    that follows only ever sees inputs normalized by contract.
+    directory while module evaluation reported no violation at all.
+    Runtime still catches it: ``lib/fs_authority.py::open_private_
+    processing_root`` calls ``paths_overlap`` — which itself applies
+    ``os.path.normpath`` — on the raw configured paths BEFORE either root
+    is opened, so a plain ``..`` collapses there with no filesystem
+    access at all. (A separate, later ``os.path.realpath`` comparison in
+    the same function exists for a different case entirely: physical
+    overlap reached through a symlink or bind mount, which no amount of
+    lexical normalization can see.) Either way the config only fails
+    after ``nixos-rebuild switch`` has already declared it good — the fix
+    reuses the module's existing ``isAbsoluteNormalizedPath`` helper
+    (already used for the Beets runtime paths and ``localImport.dir``)
+    on both options, so evaluation now catches a malformed path
+    directly, and the unchanged disjointness assertion only ever gets
+    inputs that already passed that check.
     """
 
     def test_both_options_are_checked_with_the_shared_normalized_path_helper(
         self,
     ) -> None:
         text = _nix_source(MODULE_NIX)
-        idx = text.index(
-            "services.cratedigger.processingDir must be lexically disjoint")
-        block = text[max(0, idx - 1200):idx]
-        self.assertIn("isAbsoluteNormalizedPath cfg.processingDir", block)
+        # Each pin is anchored to its OWN assertion's message, not to a
+        # shared lookback window keyed off a third assertion's position —
+        # a mutant-runner finding: relocating the downloadDir assertion
+        # (a pure reorder, no behavior change) must not trip this test.
+        processing_idx = text.index(
+            "services.cratedigger.processingDir must be an absolute "
+            "normalized path")
+        processing_block = text[max(0, processing_idx - 400):processing_idx]
         self.assertIn(
-            "isAbsoluteNormalizedPath cfg.slskd.downloadDir", block)
-        # The disjointness assertion itself stays exactly as it was — a
-        # plain lexical comparison — because its inputs are now guaranteed
-        # normalized by the two assertions above.
+            "isAbsoluteNormalizedPath cfg.processingDir", processing_block)
+        download_idx = text.index(
+            "services.cratedigger.slskd.downloadDir must be an absolute "
+            "normalized path when set")
+        download_block = text[max(0, download_idx - 400):download_idx]
+        self.assertIn(
+            "isAbsoluteNormalizedPath cfg.slskd.downloadDir", download_block)
+        # The disjointness assertion's own comparison is unchanged — a
+        # plain lexical `removeSuffix "/"` + `hasPrefix`/equality check —
+        # because its inputs are now guaranteed normalized by the two
+        # assertions above, not because the comparison itself changed.
         self.assertIn("removeSuffix \"/\" cfg.processingDir", text)
         self.assertIn("removeSuffix \"/\" cfg.slskd.downloadDir", text)
+        disjoint_idx = text.index(
+            "services.cratedigger.processingDir must be lexically disjoint")
+        disjoint_block = text[max(0, disjoint_idx - 400):disjoint_idx]
+        self.assertIn(
+            'in !(lib.hasPrefix "${processing}/" downloads', disjoint_block)
 
     def test_assertion_firing_matrix(self) -> None:
         """Evaluated-world coverage: a ``..`` segment, a ``.`` segment, a
         doubled slash, and a trailing slash each fire the new
         ``processingDir`` normalization clause; a ``..`` segment on
-        ``slskd.downloadDir`` fires its own new clause; the concrete gap
-        the issue named (a ``..`` segment making two options resolve to
-        the same real directory while the lexical disjointness comparison
-        sees no overlap) is caught ONLY by the new normalization clause;
-        a plainly nested, already-normalized pair still trips the
-        unchanged disjointness assertion; and the live doc2 wrapper's
-        exact shape passes cleanly.
+        ``slskd.downloadDir`` fires its own new clause, and an UNSET
+        ``downloadDir`` fires only the pre-existing "is not set" clause
+        (proving the new clause's ``== null ||`` guard actually silences
+        it, not just that a null value happens to also satisfy it); the
+        concrete gap the issue named (a ``..`` segment making two options
+        resolve to the same real directory while the lexical disjointness
+        comparison sees no overlap) is caught ONLY by the new
+        normalization clause; a plainly nested, already-normalized pair
+        still trips the unchanged disjointness assertion; and the live
+        doc2 wrapper's exact shape passes cleanly.
         """
         worlds = _shared_module_worlds_rest()["processingPathAssertions"]
         assert isinstance(worlds, dict)
@@ -3006,6 +3039,11 @@ class TestProcessingPathNormalizationContract(unittest.TestCase):
             "normalized path when set (no trailing slash, no . or .. "
             "components, no doubled slashes)."
         )
+        download_dir_unset_message = (
+            "services.cratedigger.slskd.downloadDir is not set: point it "
+            "at the directory slskd downloads land in (slskd's "
+            "directories.downloads)."
+        )
         disjoint_message = (
             "services.cratedigger.processingDir must be lexically "
             "disjoint from services.cratedigger.slskd.downloadDir"
@@ -3016,6 +3054,8 @@ class TestProcessingPathNormalizationContract(unittest.TestCase):
                 self.assertEqual(worlds[bad_world], [processing_dir_message])
         self.assertEqual(
             worlds["downloadDirDotDot"], [download_dir_message])
+        self.assertEqual(
+            worlds["missingDownloadDir"], [download_dir_unset_message])
         self.assertEqual(
             worlds["disjointRegressionStillFires"], [disjoint_message])
         self.assertEqual(worlds["validLiveShape"], [])
