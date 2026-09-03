@@ -131,23 +131,41 @@ class TestParallelResultsFailureLifecycle(unittest.TestCase):
     """
 
     def test_one_job_exception_cancels_every_future_and_shuts_down_without_waiting(self):
+        """``max_workers`` equals the job count (3-for-3), so every job gets
+        its own worker with nothing left queued — there is no scheduling
+        race over a leftover job. ``raiser`` additionally waits for proof
+        that both siblings have actually started before it raises, so by
+        construction both are provably RUNNING (never merely pending) at
+        the moment the exception fires and the cancel loop runs. An
+        earlier version of this test left a genuinely queued third job,
+        whose fate depended on a real scheduling race between the freed
+        worker and this test's own cancel loop (harmless in the case
+        observed, but a latent flake in the untested case — a still
+        -queued future cancelled by the executor's own
+        ``cancel_futures=True`` drain, rather than by this loop, appends
+        an extra recorded ``cancel`` after the ``shutdown`` entry).
+        """
         calls, recording_cancel, recording_shutdown = _wrap_executor_lifecycle()
-        slow_released = threading.Event()
+        release = threading.Event()
+        sibling_a_started = threading.Event()
+        sibling_b_started = threading.Event()
 
         def raiser():
+            self.assertTrue(sibling_a_started.wait(timeout=5), "sibling_a never started")
+            self.assertTrue(sibling_b_started.wait(timeout=5), "sibling_b never started")
             raise _ProbeError("boom")
 
-        def slow():
-            slow_released.wait(timeout=5)
-            return "late"
+        def sibling_a():
+            sibling_a_started.set()
+            release.wait(timeout=5)
+            return "a"
 
-        # max_workers=2 so "raiser" and "slow" both start immediately.
-        # "third" is submitted after them: once "raiser" finishes, its
-        # freed worker races the main thread's own cancel loop to dequeue
-        # "third" next, so this test does NOT rely on "third" staying
-        # pending — only on cancel() being called on every future in the
-        # dict regardless of the state the race left it in (see below).
-        jobs = {"raiser": raiser, "slow": slow, "third": lambda: "unused"}
+        def sibling_b():
+            sibling_b_started.set()
+            release.wait(timeout=5)
+            return "b"
+
+        jobs = {"raiser": raiser, "sibling_a": sibling_a, "sibling_b": sibling_b}
 
         with mock.patch.object(concurrent.futures.Future, "cancel", recording_cancel), \
              mock.patch.object(
@@ -155,14 +173,14 @@ class TestParallelResultsFailureLifecycle(unittest.TestCase):
              ):
             start = time.monotonic()
             with self.assertRaises(_ProbeError):
-                parallel_results(jobs, max_workers=2)
+                parallel_results(jobs, max_workers=3)
             elapsed = time.monotonic() - start
 
-        slow_released.set()  # let the still-running worker finish; no leaked thread
+        release.set()  # let the still-running siblings finish; no leaked thread
 
         self.assertLess(
             elapsed, 1.0,
-            "shutdown(wait=False) must not block on the still-running 'slow' job",
+            "shutdown(wait=False) must not block on a still-running sibling",
         )
         # One cancel() call per future in the dict, unconditionally — the
         # loop asks every future to stop, not only the one that raised.
