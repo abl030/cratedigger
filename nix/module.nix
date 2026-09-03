@@ -1254,8 +1254,10 @@ in {
       defaultText = lib.literalExpression ''"''${cfg.stateDir}/processing"'';
       description = ''
         Private Cratedigger-owned root for materialized albums and preview
-        snapshots.  It must be absolute, disjoint from slskd.downloadDir,
-        and beneath a parent that is not writable by slskd or another group.
+        snapshots.  Must be an absolute normalized path (no trailing slash,
+        no . or .. components, no doubled slashes), disjoint from
+        slskd.downloadDir, and beneath a parent that is not writable by
+        slskd or another group.
       '';
     };
 
@@ -1466,7 +1468,11 @@ in {
       downloadDir = mkOption {
         type = types.nullOr types.str;
         default = null;
-        description = "Directory slskd downloads land in.";
+        description = ''
+          Directory slskd downloads land in.  When set, must be an
+          absolute normalized path (no trailing slash, no . or ..
+          components, no doubled slashes).
+        '';
       };
       deleteSearches = mkOption {
         type = types.bool;
@@ -2129,8 +2135,12 @@ in {
         message = "services.cratedigger.slskd.downloadDir is not set: point it at the directory slskd downloads land in (slskd's directories.downloads).";
       }
       {
-        assertion = lib.hasPrefix "/" cfg.processingDir;
-        message = "services.cratedigger.processingDir must be an absolute path";
+        assertion = isAbsoluteNormalizedPath cfg.processingDir;
+        message = "services.cratedigger.processingDir must be an absolute normalized path (no trailing slash, no . or .. components, no doubled slashes).";
+      }
+      {
+        assertion = cfg.slskd.downloadDir == null || isAbsoluteNormalizedPath cfg.slskd.downloadDir;
+        message = "services.cratedigger.slskd.downloadDir must be an absolute normalized path when set (no trailing slash, no . or .. components, no doubled slashes).";
       }
       {
         assertion = cfg.slskd.downloadDir == null || (

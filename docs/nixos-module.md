@@ -50,11 +50,11 @@ upstream module and adds:
 | `musicbrainz.apiBase` | `https://musicbrainz.org` | Cratedigger's MB origin for web, CLI, and pipeline lookups. The external Beets owner must configure its own corresponding `musicbrainz` policy. Public default is functional but ~1 req/s. |
 | `discogs.apiBase` | `null` | Discogs mirror origin. Mirror-REQUIRED: unset ⇒ Discogs browse off with a 503 mirror-required message (public api.discogs.com does not serve this API shape). |
 | `stateDir` | `/var/lib/cratedigger` | Mutable runtime state (lock, denylists, processing metadata). Application config is an immutable store file. |
-| `processingDir` | `${stateDir}/processing` | Private `0700` Cratedigger-owned root: canonical albums and their same-filesystem failure quarantine live in `albums/`, bounded preview scratch in `preview/`. Must be absolute and disjoint from slskd's download tree. |
+| `processingDir` | `${stateDir}/processing` | Private `0700` Cratedigger-owned root: canonical albums and their same-filesystem failure quarantine live in `albums/`, bounded preview scratch in `preview/`. Must be an absolute normalized path (no trailing slash, no `.`/`..` components, no doubled slashes) and lexically disjoint from slskd's download tree. |
 | `localImport.enable` | `false` | Enable the manual local-import lane (issue #1176): "here's a request ID, here's a folder on disk, import it." Off by default. `pipeline-cli import-local <request_id> <path>` / `POST /api/pipeline/import-local`. |
 | `localImport.dir` | `null` | Absolute root the local-import lane may read from. Deliberately has NO working default even when enabled — see "Manual local-import lane" below. |
 | `slskd.apiKeyFile` | (required) | Path to a file containing the raw slskd API key (one line). |
-| `slskd.downloadDir` | (required) | Where slskd downloads land. |
+| `slskd.downloadDir` | (required) | Where slskd downloads land. When set, must be an absolute normalized path (no trailing slash, no `.`/`..` components, no doubled slashes). |
 | `slskd.hostUrl` | `http://localhost:5030` | slskd HTTP base URL. |
 | `pipelineDb.dsn` | `null` | PostgreSQL DSN. Required unless `createLocally`. |
 | `pipelineDb.createLocally` | `false` | Provision local PostgreSQL: role + database named after `cfg.user`, unix-socket peer auth (no password material anywhere), socket DSN default, migrate unit ordered after `postgresql-setup.service` has provisioned the role and database. doc2 keeps `false` + its nspawn DSN. |
@@ -429,8 +429,20 @@ Cratedigger identity; tmpfiles may age-clean only `preview/` children. Put a
 large processing root
 directly beneath a root-owned, non-group-writable parent. Do not run slskd as
 the Cratedigger user and do not put processing beneath a parent writable by
-slskd. The module rejects relative and lexically overlapping paths, while the
-runtime also refuses symlinked/unsafe roots.
+slskd. The module rejects a relative path, a `.`/`..` component, a doubled
+slash, a trailing slash, and lexical overlap for both `processingDir` and
+`slskd.downloadDir` at evaluation time — the two path-shape assertions close a
+gap where a `..` component made the older, unnormalized lexical disjointness
+comparison miss two options naming the same physical tree, since it never ran
+`isAbsoluteNormalizedPath` on either side before comparing them. At runtime,
+`lib/fs_authority.py::open_private_processing_root` already rejects that same
+`..` case on its own, via a lexical `os.path.normpath` comparison that runs
+before either root is opened; a later `os.path.realpath` comparison in the
+same function exists for the separate case of a symlink or bind mount making
+two lexically distinct paths physically the same. Either way, the practical
+effect of this evaluation-time fix is that a misconfigured deployment now
+fails at `nixos-rebuild switch` with a named message instead of only at
+runtime.
 
 The descriptor-verified publish into `albums/` is the trust transition:
 Cratedigger may repair or normalize that owned working copy in place before
