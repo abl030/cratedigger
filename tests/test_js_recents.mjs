@@ -26,6 +26,7 @@ import {
   renderRecentsSubnav,
   triageLabelText,
 } from '../web/js/recents.js';
+import { closeSearchPlanDetail } from '../web/js/search_plan.js';
 import { state } from '../web/js/state.js';
 import { esc } from '../web/js/util.js';
 import { validDualProviderProof } from './fixtures/cd_rip_proof.mjs';
@@ -774,6 +775,54 @@ t.section('Acquisition row wires window.toggleDetail with (acquisition-<id>, id)
     'YouTube acquisition row keys the detail on the yt log id but navigates by request id');
   t.contains(yt, 'id="acquisition-youtube-301"',
     'YouTube detail placeholder id matches the toggle target');
+}
+
+// --- WE-3: loadRecents() is the scroll-restore completion boundary ---
+//
+// Mirrors the pipeline.js pin: search_plan.js::closeSearchPlanDetail
+// stashes the origin scroll position for a recents-tab origin and
+// leaves it un-consumed; loadRecents() is the real destination and
+// consumes it only once its own fetch-driven render is done.
+
+t.section('loadRecents() consumes a pending scroll restore only after its own render completes');
+{
+  const content = { innerHTML: '' };
+  const scrollCalls = [];
+  let resolveFetch;
+  const fetchGate = new Promise((resolve) => { resolveFetch = resolve; });
+  const globals = stubGlobals({
+    document: domStub({ 'recents-content': content }),
+    window: /** @type {any} */ ({
+      scrollTo(_x, y) { scrollCalls.push(y); },
+      showTab() {},
+    }),
+    fetch: async () => {
+      await fetchGate;
+      return { ok: true, status: 200, async json() { return { log: [] }; } };
+    },
+  });
+  state.recentsFilter = 'imported'; // avoid the 'all' fallback fetch branch
+  state.searchPlanDetailContext = {
+    requestId: 99, originTab: 'recents', originScrollY: 321, originSubView: 'history',
+  };
+  state.recentsSub = 'acquisition';
+  closeSearchPlanDetail();
+  t.equal(state.recentsSub, 'history', 'origin subView restored to history before loadRecents runs');
+  t.equal(scrollCalls.length, 0,
+    'closeSearchPlanDetail does not restore scroll itself for a recents origin');
+
+  const rendered = loadRecents();
+  await Promise.resolve();
+  await Promise.resolve();
+  t.equal(scrollCalls.length, 0,
+    'scrollTo is not called while the recents log fetch is still pending');
+
+  resolveFetch();
+  await rendered;
+  t.equal(scrollCalls.length, 1,
+    'scrollTo is called exactly once after loadRecents finishes rendering');
+  t.equal(scrollCalls[0], 321, 'restores the exact stashed scroll position');
+  globals.restore();
 }
 
 t.done();

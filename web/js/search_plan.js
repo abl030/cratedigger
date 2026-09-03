@@ -619,6 +619,51 @@ export function snapshotActiveTab() {
 }
 
 /**
+ * Module-scoped scroll position awaiting restoration once the
+ * destination tab's own render finishes.
+ *
+ * `closeSearchPlanDetail` stashes the origin scroll position here
+ * instead of guessing how long the destination's re-render will take.
+ * The destination's own render function ({@link consumePendingScrollRestore}'s
+ * callers: `loadPipeline`, `loadRecents`, `loadWrongMatches`) reads and
+ * clears it at the true end of its own render, so the restore always
+ * lands after the DOM it is scrolling against, never before.
+ *
+ * @type {number | null}
+ */
+let pendingScrollRestore = null;
+
+/**
+ * Stash a scroll position for the next destination render to consume.
+ *
+ * @param {number} y
+ * @returns {void}
+ */
+function stashScrollRestore(y) {
+  pendingScrollRestore = y;
+}
+
+/**
+ * Apply and clear a stashed scroll restoration, if one is pending.
+ *
+ * Called by a destination tab's render function at the exact end of its
+ * own render (every branch and every early return), so a restore that
+ * was never stashed is a no-op and one that was stashed always fires
+ * after the DOM it targets is in its final layout. Never call this
+ * before the destination has finished writing its own DOM.
+ *
+ * @returns {void}
+ */
+export function consumePendingScrollRestore() {
+  if (pendingScrollRestore === null) return;
+  const y = pendingScrollRestore;
+  pendingScrollRestore = null;
+  if (typeof window !== 'undefined' && typeof window.scrollTo === 'function') {
+    window.scrollTo(0, y);
+  }
+}
+
+/**
  * Open the per-request search-plan detail page under the Pipeline tab.
  *
  * Captures the originating tab + sub-view + scroll position into
@@ -682,8 +727,11 @@ export function openSearchPlanDetail(requestId, _originEl) {
  * the Pipeline dashboard so the operator is never stranded.
  *
  * Mutations: clears `state.searchPlanDetailContext`, restores
- * `state.pipelineView` when the origin tab was Pipeline, schedules a
- * `window.scrollTo` on the next frame.
+ * `state.pipelineView` when the origin tab was Pipeline, stashes the
+ * origin scroll position via {@link consumePendingScrollRestore}'s
+ * module-scoped pending value for the destination's own render to
+ * apply (or applies it immediately for a destination with no
+ * follow-up render of its own).
  *
  * @returns {void}
  */
@@ -730,43 +778,25 @@ export function closeSearchPlanDetail() {
   if (typeof window !== 'undefined') {
     const showTab = /** @type {(name: string) => void} */ (
       /** @type {any} */ (window).showTab);
+    // Stash before calling showTab, not after: `loadPipeline`,
+    // `loadRecents`, and `loadWrongMatches` each consume-and-clear this
+    // at the true end of their own render, so the restore lands after
+    // the destination's DOM is in its final layout instead of racing a
+    // fixed frame count against it (previously 5 chained
+    // `requestAnimationFrame` ticks — a heuristic that a slow device or
+    // a render awaiting I/O could still beat). Any other destination —
+    // browse, or an unmapped tab name — gets no follow-up render from
+    // `showTab` at all, so nothing else will ever consume the stash;
+    // apply it immediately in that case.
+    stashScrollRestore(scrollY);
+    const destinationConsumesRestore = typeof showTab === 'function'
+      && (tab === 'pipeline' || tab === 'recents' || tab === 'manual');
     if (typeof showTab === 'function') {
       showTab(tab);
     }
-    // Scroll-restore heuristic — approach (b).
-    //
-    // The proper fix (approach (a)) would be to stash `scrollY` in a
-    // module-scoped `pendingScrollRestore: number | null` and have each
-    // destination tab's render function (loadPipeline, renderPipeline,
-    // loadRecents, …) consume and clear it at the END of its render, so
-    // the restore lands AFTER the re-render rather than before it.  That
-    // wiring lives in `web/js/pipeline.js`, `web/js/recents.js`, and
-    // `web/js/browse.js` — outside the scope of this file.
-    //
-    // Instead we chain 5 rAF ticks (≈ 83 ms at 60 fps).  This is enough
-    // time for the synchronous follow-up render that `showTab` triggers to
-    // complete, so the final scrollTo lands AFTER the re-render rather
-    // than before it.  It is a heuristic: a slow device or a tab-render
-    // that itself awaits I/O can still win the race.  Prefer approach (a)
-    // if this ever misfires in production.
-    const scheduler = (typeof window.requestAnimationFrame === 'function')
-      ? window.requestAnimationFrame.bind(window)
-      : (
-        /** @param {() => void} fn */
-        function fallback(fn) { setTimeout(fn, 0); return 0; }
-      );
-    // Chain 5 rAF ticks before applying the restore.
-    const restoreScroll = () => {
-      if (typeof window.scrollTo === 'function') {
-        window.scrollTo(0, scrollY);
-      }
-    };
-    let chain = restoreScroll;
-    for (let i = 0; i < 4; i++) {
-      const next = chain;
-      chain = () => scheduler(next);
+    if (!destinationConsumesRestore) {
+      consumePendingScrollRestore();
     }
-    scheduler(chain);
   }
 }
 

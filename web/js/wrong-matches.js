@@ -2,6 +2,7 @@
 import { API, toast } from './state.js';
 import { esc, externalReleaseUrl, sourceLabel, wrongMatchExplorerFailureCopy } from './util.js';
 import { renderReplaceButton } from './release_actions.js';
+import { consumePendingScrollRestore } from './search_plan.js';
 import {
   handleProcessingLockedConflict,
   refetchProcessingRequest,
@@ -459,26 +460,37 @@ async function ensureWrongMatchExplorer(logId) {
  * Load and display wrong-match rejections from failed_imports.
  */
 export async function loadWrongMatches() {
-  // #1106 F6: derive the toolbar's state on EVERY call, even when the
-  // cached queue is not re-fetched below -- a tab switch must still
-  // reflect a sweep started elsewhere (the CLI, another tab) without
-  // requiring a manual Refresh first.
-  await _deriveTriageButtonState();
-  if (_loaded) return;
-  const el = document.getElementById('wrong-matches-content');
-  if (!el) return;
-  el.innerHTML = '<div class="loading">Loading wrong matches...</div>';
+  // The `finally` guarantees exactly one consume per call regardless of
+  // which branch below returns early (including the `_loaded` cache
+  // short-circuit, which still counts as "this tab's render is done") —
+  // the search-plan back button's completion boundary
+  // (search_plan.js::closeSearchPlanDetail) relies on this being the
+  // true end of the Wrong Matches tab's render, not a fixed delay after
+  // it starts.
   try {
-    // U10: opt-in toggle persists in localStorage. Default: filtered.
-    const includeReplaced = localStorage.getItem('wrongMatches.includeReplaced') === 'true';
-    const url = `${API}/api/wrong-matches${includeReplaced ? '?include_replaced=true' : ''}`;
-    const r = await fetch(url);
-    const data = await r.json();
-    _loaded = true;
-    renderWrongMatches(data, el);
+    // #1106 F6: derive the toolbar's state on EVERY call, even when the
+    // cached queue is not re-fetched below -- a tab switch must still
+    // reflect a sweep started elsewhere (the CLI, another tab) without
+    // requiring a manual Refresh first.
     await _deriveTriageButtonState();
-  } catch (e) {
-    el.innerHTML = '<div style="color:#f66;">Failed to load wrong matches</div>';
+    if (_loaded) return;
+    const el = document.getElementById('wrong-matches-content');
+    if (!el) return;
+    el.innerHTML = '<div class="loading">Loading wrong matches...</div>';
+    try {
+      // U10: opt-in toggle persists in localStorage. Default: filtered.
+      const includeReplaced = localStorage.getItem('wrongMatches.includeReplaced') === 'true';
+      const url = `${API}/api/wrong-matches${includeReplaced ? '?include_replaced=true' : ''}`;
+      const r = await fetch(url);
+      const data = await r.json();
+      _loaded = true;
+      renderWrongMatches(data, el);
+      await _deriveTriageButtonState();
+    } catch (e) {
+      el.innerHTML = '<div style="color:#f66;">Failed to load wrong matches</div>';
+    }
+  } finally {
+    consumePendingScrollRestore();
   }
 }
 

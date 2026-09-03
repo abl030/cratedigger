@@ -3,7 +3,7 @@ import { state, API } from './state.js';
 import { awstDate, awstTime, esc } from './util.js';
 import { toggleDetail } from './pipeline.js';
 import { renderEvidenceStrip } from './history.js';
-import { renderSearchPlanButton } from './search_plan.js';
+import { consumePendingScrollRestore, renderSearchPlanButton } from './search_plan.js';
 import { processingOwnerPresentation } from './release_action_state.js';
 import { renderConvergencePrompt } from './convergence.js';
 import { cdRipProofPresentation } from './cd_rip_proof.js';
@@ -495,29 +495,38 @@ export function renderRecentsCounts() {
  * @returns {Promise<void>}
  */
 export async function loadRecents() {
-  const el = document.getElementById('recents-content');
-  if (state.recentsSub === 'imports') {
-    await loadImports();
-    return;
-  }
-  if (state.recentsSub === 'acquisition') {
-    await loadAcquisition();
-    return;
-  }
-  el.innerHTML = renderRecentsSubnav() + '<div class="loading">Loading...</div>';
+  // The `finally` guarantees exactly one consume per call regardless of
+  // which branch below runs or returns early — the search-plan back
+  // button's completion boundary (search_plan.js::closeSearchPlanDetail)
+  // relies on this being the true end of the Recents tab's render, not
+  // a fixed delay after it starts.
   try {
-    const r = await fetch(recentsLogUrl());
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const data = await r.json();
-    const items = data.log || [];
-    if (data.counts) state.recentsCounts = data.counts;
-    if (state.recentsFilter === 'all') await loadRecentsMatchRatesFallback();
+    const el = document.getElementById('recents-content');
+    if (state.recentsSub === 'imports') {
+      await loadImports();
+      return;
+    }
+    if (state.recentsSub === 'acquisition') {
+      await loadAcquisition();
+      return;
+    }
+    el.innerHTML = renderRecentsSubnav() + '<div class="loading">Loading...</div>';
+    try {
+      const r = await fetch(recentsLogUrl());
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      const items = data.log || [];
+      if (data.counts) state.recentsCounts = data.counts;
+      if (state.recentsFilter === 'all') await loadRecentsMatchRatesFallback();
 
-    let html = renderRecentsSubnav() + renderRecentsCounts();
-    html += renderRecentsItems(
-      items,
-      state.recentsFilter === 'all' ? state.recentsCounts : null,
-    );
-    el.innerHTML = html;
-  } catch (e) { el.innerHTML = renderRecentsSubnav() + '<div class="loading">Failed to load log</div>'; }
+      let html = renderRecentsSubnav() + renderRecentsCounts();
+      html += renderRecentsItems(
+        items,
+        state.recentsFilter === 'all' ? state.recentsCounts : null,
+      );
+      el.innerHTML = html;
+    } catch (e) { el.innerHTML = renderRecentsSubnav() + '<div class="loading">Failed to load log</div>'; }
+  } finally {
+    consumePendingScrollRestore();
+  }
 }

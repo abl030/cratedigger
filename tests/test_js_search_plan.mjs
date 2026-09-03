@@ -25,6 +25,7 @@ import {
   renderDetailPage,
   renderSearchPlanDetail,
   closeSearchPlanDetail,
+  consumePendingScrollRestore,
   searchPlanRefreshDetail,
   parseAdvanceTarget,
   renderAdvanceForm,
@@ -774,10 +775,21 @@ function makeHistoryRows() {
 t.section('closeSearchPlanDetail() / openSearchPlanDetail()');
 
 /**
- * Tiny shim — capture window-side effects without a real DOM.
+ * Tiny shim -- capture window-side effects without a real DOM.
+ *
+ * `impl` may be async: `closeSearchPlanDetail` no longer restores
+ * scroll on a fixed frame count for a pipeline/recents/manual origin --
+ * it stashes and leaves consumption to the destination's own render
+ * (`loadPipeline`/`loadRecents`/`loadWrongMatches`, composed pins in
+ * their own test files). A caller here that wants to prove "not called
+ * before completion, called exactly once after" drives real microtask
+ * ticks and the real exported `consumePendingScrollRestore` standing in
+ * for that destination render finishing.
+ *
+ * @param {(win: any, calls: {showTab: string[], scrollTo: number[]}) => void | Promise<void>} impl
  */
-function withFakeWindow(impl) {
-  const calls = { showTab: [], scrollTo: [], rafCount: 0, scheduledScrolls: [] };
+async function withFakeWindow(impl) {
+  const calls = { showTab: /** @type {string[]} */ ([]), scrollTo: /** @type {number[]} */ ([]) };
   const prevState = state.searchPlanDetailContext;
   const prevPipelineView = state.pipelineView;
   /** @type {any} */
@@ -785,13 +797,6 @@ function withFakeWindow(impl) {
     scrollY: 0,
     /** @param {number} _x @param {number} y */
     scrollTo(_x, y) { calls.scrollTo.push(y); },
-    /** @param {() => void} fn */
-    requestAnimationFrame(fn) {
-      calls.rafCount += 1;
-      // Run the callback inline — the test then inspects calls.scrollTo.
-      fn();
-      return calls.rafCount;
-    },
     /** @param {string} name */
     showTab(name) { calls.showTab.push(name); },
   };
@@ -804,7 +809,7 @@ function withFakeWindow(impl) {
     }),
   });
   try {
-    impl(fakeWindow, calls);
+    await impl(fakeWindow, calls);
   } finally {
     state.searchPlanDetailContext = prevState;
     state.pipelineView = prevPipelineView;
@@ -813,9 +818,11 @@ function withFakeWindow(impl) {
 }
 
 {
-  // AE3: originTab='browse', originScrollY=420 → showTab('browse'),
-  // scrollTo scheduled to 420.
-  withFakeWindow((win, calls) => {
+  // AE3: originTab='browse', originScrollY=420. Browse has no
+  // follow-up render on a tab switch (its DOM is untouched), so
+  // closeSearchPlanDetail restores scroll itself, immediately -- no
+  // destination to defer to.
+  await withFakeWindow((win, calls) => {
     state.searchPlanDetailContext = {
       requestId: 2566,
       originTab: 'browse',
@@ -826,15 +833,24 @@ function withFakeWindow(impl) {
     t.ok(calls.showTab.length === 1 && calls.showTab[0] === 'browse',
       'AE3: showTab("browse") called once');
     t.ok(calls.scrollTo.length === 1 && calls.scrollTo[0] === 420,
-      'AE3: window.scrollTo(0, 420) scheduled via requestAnimationFrame');
+      'AE3: window.scrollTo(0, 420) restored immediately -- browse has no destination render to wait for');
     t.ok(state.searchPlanDetailContext === null,
       'AE3: stash cleared after close');
   });
 }
 
 {
-  // Origin tab is pipeline+long-tail: pipelineView restored to long-tail.
-  withFakeWindow((win, calls) => {
+  // Origin tab is pipeline+long-tail: pipelineView restored to
+  // long-tail, and -- unlike browse -- closeSearchPlanDetail must NOT
+  // apply the restore itself. loadPipeline() is the real destination
+  // render and owns consuming it (composed pin in
+  // tests/test_js_pipeline.mjs, which drives a genuinely deferred
+  // fetch). This test proves the search_plan.js half of that contract
+  // directly: the stash survives real microtask ticks untouched, firing
+  // the consume function -- standing in for the destination's render
+  // finishing -- restores exactly once with the exact position, and a
+  // second consume call is a no-op.
+  await withFakeWindow(async (win, calls) => {
     state.searchPlanDetailContext = {
       requestId: 100,
       originTab: 'pipeline',
@@ -847,14 +863,26 @@ function withFakeWindow(impl) {
       'pipeline-origin: pipelineView restored to long-tail');
     t.ok(calls.showTab.length === 1 && calls.showTab[0] === 'pipeline',
       'pipeline-origin: showTab("pipeline") called');
-    t.ok(calls.scrollTo.length === 1 && calls.scrollTo[0] === 64,
-      'pipeline-origin: scrollTo scheduled to origin scrollY');
+    t.equal(calls.scrollTo.length, 0,
+      'pipeline-origin: scrollTo not called immediately -- the destination owns consuming the stash');
+    await Promise.resolve();
+    await Promise.resolve();
+    t.equal(calls.scrollTo.length, 0,
+      'pipeline-origin: scrollTo still not called after real microtask ticks -- no timer or frame heuristic remains');
+    consumePendingScrollRestore();
+    t.equal(calls.scrollTo.length, 1,
+      'pipeline-origin: scrollTo called exactly once once the destination render completes');
+    t.equal(calls.scrollTo[0], 64,
+      'pipeline-origin: restores the exact origin scroll position');
+    consumePendingScrollRestore();
+    t.equal(calls.scrollTo.length, 1,
+      'pipeline-origin: a second consume call is a no-op -- exactly once, not at-least-once');
   });
 }
 
 {
   // Origin tab is pipeline+dashboard: pipelineView restored to dashboard.
-  withFakeWindow((win, calls) => {
+  await withFakeWindow((win, calls) => {
     state.searchPlanDetailContext = {
       requestId: 100,
       originTab: 'pipeline',
@@ -865,12 +893,15 @@ function withFakeWindow(impl) {
     closeSearchPlanDetail();
     t.equal(state.pipelineView, 'dashboard',
       'pipeline-origin dashboard subView restored');
+    consumePendingScrollRestore();
   });
 }
 
 {
-  // Origin tab is recents+acquisition: restore recentsSub.
-  withFakeWindow((win, calls) => {
+  // Origin tab is recents+acquisition: restore recentsSub. Recents also
+  // defers the restore to its own destination render (composed pin in
+  // tests/test_js_recents.mjs).
+  await withFakeWindow((win, calls) => {
     state.searchPlanDetailContext = {
       requestId: 99,
       originTab: 'recents',
@@ -883,12 +914,17 @@ function withFakeWindow(impl) {
       'recents-origin: recentsSub restored to acquisition');
     t.ok(calls.showTab[0] === 'recents',
       'recents-origin: showTab("recents") called');
+    t.equal(calls.scrollTo.length, 0,
+      'recents-origin: scrollTo not called immediately -- the destination owns consuming the stash');
+    consumePendingScrollRestore();
+    t.ok(calls.scrollTo.length === 1 && calls.scrollTo[0] === 100,
+      'recents-origin: scrollTo fires with the origin scroll position once consumed');
   });
 }
 
 {
   // PR5 renamed the importer subview to Imports; Back must restore it.
-  withFakeWindow((win, calls) => {
+  await withFakeWindow((win, calls) => {
     state.searchPlanDetailContext = {
       requestId: 101,
       originTab: 'recents',
@@ -901,12 +937,15 @@ function withFakeWindow(impl) {
       'recents-origin: Imports subview restored');
     t.ok(calls.showTab[0] === 'recents',
       'imports-origin: showTab("recents") called');
+    consumePendingScrollRestore();
   });
 }
 
 {
-  // No origin context: fallback to pipeline/dashboard, no throw.
-  withFakeWindow((win, calls) => {
+  // No origin context: fallback to pipeline/dashboard, no throw. There
+  // is no stashed scroll position in this path (no ctx means no
+  // scrollY to restore), so no consume is expected either.
+  await withFakeWindow((win, calls) => {
     state.searchPlanDetailContext = null;
     state.pipelineView = 'search-plan-detail';
     let threw = false;
@@ -920,6 +959,8 @@ function withFakeWindow(impl) {
       'no-origin: fallback to pipelineView=dashboard');
     t.ok(calls.showTab.length === 1 && calls.showTab[0] === 'pipeline',
       'no-origin: fallback shows the pipeline tab');
+    t.equal(calls.scrollTo.length, 0,
+      'no-origin: no scroll position was ever stashed, so nothing restores');
   });
 }
 

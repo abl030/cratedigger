@@ -4,6 +4,7 @@
  */
 
 import {
+  loadPipeline,
   mergeRekeyRequest,
   recheckRetagDivergenceAlbum,
   renderCurrentLibraryRow,
@@ -15,6 +16,7 @@ import {
   syncRetagDivergenceAlbum,
   toggleDetail,
 } from '../web/js/pipeline.js';
+import { closeSearchPlanDetail } from '../web/js/search_plan.js';
 import { state } from '../web/js/state.js';
 import { jsArg } from '../web/js/util.js';
 
@@ -992,6 +994,55 @@ t.section('toggleDetail() on an open panel collapses it without refetching');
   await toggleDetail(4242);
   t.equal(fetches, 1, 'closing it again does not refetch');
   t.equal(panel.classList.contains('open'), false, 'the panel is collapsed');
+}
+
+// --- WE-3: loadPipeline() is the scroll-restore completion boundary --
+//
+// search_plan.js::closeSearchPlanDetail stashes the origin scroll
+// position and, for a pipeline-tab origin, deliberately does not
+// consume it itself — loadPipeline() is the real destination render and
+// owns consuming it exactly once its own DOM update is done. This
+// drives BOTH real functions across the module boundary:
+// closeSearchPlanDetail establishes the stash the way the back button
+// really does, and loadPipeline's own fetch is deferred so the test can
+// prove ordering, not just eventual truth.
+
+t.section('loadPipeline() consumes a pending scroll restore only after its own render completes');
+{
+  const content = element();
+  const scrollCalls = [];
+  let resolveFetch;
+  const fetchGate = new Promise((resolve) => { resolveFetch = resolve; });
+  stubGlobals({
+    document: domStub({ 'pipeline-content': content }),
+    window: /** @type {any} */ ({
+      scrollTo(_x, y) { scrollCalls.push(y); },
+      showTab() {},
+    }),
+    fetch: async () => {
+      await fetchGate;
+      return { ok: true, status: 200, async json() { return { counts: {}, drift_rows: [] }; } };
+    },
+  });
+  state.searchPlanDetailContext = {
+    requestId: 42, originTab: 'pipeline', originScrollY: 777, originSubView: 'dashboard',
+  };
+  state.pipelineView = 'search-plan-detail';
+  closeSearchPlanDetail();
+  t.equal(scrollCalls.length, 0,
+    'closeSearchPlanDetail does not restore scroll itself for a pipeline origin');
+
+  const rendered = loadPipeline();
+  await Promise.resolve();
+  await Promise.resolve();
+  t.equal(scrollCalls.length, 0,
+    'scrollTo is not called while the dashboard fetch is still pending');
+
+  resolveFetch();
+  await rendered;
+  t.equal(scrollCalls.length, 1,
+    'scrollTo is called exactly once after loadPipeline finishes rendering');
+  t.equal(scrollCalls[0], 777, 'restores the exact stashed scroll position');
 }
 
 t.done();
