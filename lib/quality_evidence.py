@@ -819,9 +819,10 @@ def _filetype_band_to_format(filetype_band: str) -> str | None:
 
     Used for the measurement-only evidence path (audio_corrupt / bad_hash /
     nested / empty), where the harness never ran and there is no measured
-    format string. The result must be specific enough that the importer's
-    ``policy_incomplete_reasons`` check passes (``measurement.format`` must not
-    be None). For mixed filetypes we pick the dominant lossless/lossy container.
+    format string. ``None`` on an empty band is the honest answer (issue
+    #1355 item 2): the importer's readiness gate no longer requires a format
+    on these rows. For mixed filetypes we pick the dominant lossless/lossy
+    container.
     """
     band = (filetype_band or "").strip().lower()
     if not band:
@@ -985,15 +986,22 @@ def evidence_from_measurement(
     ``audio_corrupt``, ``matched_bad_audio_hash_*``, ``folder_layout``,
     ``audio_file_count``, and the spectral measurements.
 
-    The synthesized ``AudioQualityMeasurement`` only carries enough data to
-    satisfy ``AlbumQualityEvidence.policy_incomplete_reasons`` (format + at
-    least one bitrate metric). The importer rejects on the U1 facts upstream
-    of the quality gate, so the synthesized measurement never drives an
-    accept decision.
+    The synthesized ``AudioQualityMeasurement`` carries whatever real quality
+    facts the measurement actually observed (a real per-file extension for
+    ``format``, a caller-supplied bitrate hint) and leaves the rest ``None``
+    (issue #1355 item 2) — it never invents a format or a bitrate the
+    harness never ran to measure. ``full_pipeline_decision_from_evidence``
+    rejects on one of the four U1 facts before it ever reads
+    ``measurement``, and its readiness gate
+    (``AlbumQualityEvidence.policy_incomplete_reasons``) no longer demands a
+    quality measurement on a row that already carries one of those facts —
+    see ``lib.quality.pipeline._require_evidence_ready`` and
+    ``_load_candidate_evidence_for_source`` below.
 
     When ``audio_file_count=0`` and ``files`` is empty, returns ``empty_fileset``
     evidence — ``AlbumQualityEvidence.storage_validation_errors`` accepts this
-    case (the explicit empty-inventory signal).
+    case (the explicit empty-inventory signal). There is no file to read a
+    format off, so ``format`` is honestly ``None`` for that case.
     """
 
     if files is None:
@@ -1006,18 +1014,17 @@ def evidence_from_measurement(
         measurement.audio_file_count
         if measurement.audio_file_count else len(files)
     )
-    # Synthesize a minimal AudioQualityMeasurement. The importer rejects on
-    # the U1 facts (audio_corrupt, nested, etc.) before reading these,
-    # but ``policy_incomplete_reasons`` requires format + a bitrate metric.
+    # Synthesize a minimal AudioQualityMeasurement from only what was
+    # actually observed. The importer rejects on the U1 facts (audio_corrupt,
+    # nested, etc.) before ever reading these, and the readiness gate no
+    # longer demands a format or bitrate on a row that carries one of those
+    # facts (issue #1355 item 2) — so there is nothing left to invent.
+    # ``filetype_band`` reflects a real per-file extension whenever files
+    # exist; it is only ever empty for ``empty_fileset``, where there is no
+    # file to read a format from.
     filetype_band = measurement.filetype_band or derive_filetype_band(files)
-    format_label = _filetype_band_to_format(filetype_band) or "MP3"
+    format_label = _filetype_band_to_format(filetype_band)
     min_bitrate_kbps = measurement.min_bitrate_kbps
-    if min_bitrate_kbps is None:
-        # Fall back to a placeholder so policy_incomplete_reasons passes.
-        # The actual value never drives a decision: the importer rejects on
-        # audio_corrupt/nested/empty/bad_hash/spectral_reject before reading
-        # min_bitrate_kbps.
-        min_bitrate_kbps = 0
     download_spectral = measurement.download_spectral
     audio_measurement = AudioQualityMeasurement(
         min_bitrate_kbps=min_bitrate_kbps,
@@ -1968,9 +1975,14 @@ def _load_candidate_evidence_for_source(
             "stale",
             "candidate source changed since evidence capture",
         )
-    errors = evidence.policy_incomplete_reasons()
     measurement = evidence.measurement
     preimport_fact = candidate_preimport_reject_fact(evidence)
+    # A reject-fact row is honestly unmeasured on purpose (issue #1355 item
+    # 2, ``lib.quality_evidence.evidence_from_measurement``) — the decision
+    # this evidence feeds rejects on that fact before it ever reads quality.
+    errors = evidence.policy_incomplete_reasons(
+        require_quality_measurement=preimport_fact is None,
+    )
     if (
         persistence_receipt is not None
         and persistence_receipt.spectral_outcome in {"failed", "empty"}

@@ -4505,6 +4505,118 @@ class TestBadAudioHashSlice(unittest.TestCase):
         self.assertEqual(len(db.denylist), 0)
 
 
+class TestEarlyRejectEvidenceHonestyThroughFullPipelineSlice(unittest.TestCase):
+    """Issue #1355 item 2: the real producer feeds the real decider.
+
+    ``lib.quality_evidence.evidence_from_measurement`` is the writer for a
+    reject the preview worker persists without ever running the harness.
+    Before this fix it fabricated ``format="MP3"``/``min_bitrate_kbps=0``
+    on an unmeasured candidate so the readiness gate inside
+    ``full_pipeline_decision_from_evidence`` would accept the row; after it,
+    the row is honestly unmeasured and the SAME gate accepts it anyway,
+    because the gate itself no longer demands quality on a row that already
+    carries one of the four reject facts. Runs both real functions against
+    the same evidence, never a hand-built row, per the widest-boundary
+    composition rule (a module-scope test on either function alone would
+    not catch a mismatch between what one honestly produces and what the
+    other still demands)."""
+
+    def setUp(self) -> None:
+        self.root = tempfile.mkdtemp()
+        with open(os.path.join(self.root, "01.mp3"), "wb") as handle:
+            handle.write(b"audio 1")
+        with open(os.path.join(self.root, "02.mp3"), "wb") as handle:
+            handle.write(b"audio 2")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_unmeasured_reject_facts_reject_without_raising(self):
+        from lib.measurement import PreimportMeasurement
+        from lib.quality_evidence import evidence_from_measurement
+
+        CASES = (
+            (
+                "audio_corrupt",
+                PreimportMeasurement(
+                    audio_corrupt=True,
+                    audio_validation=make_audio_corrupt_validation_report(
+                        "01.mp3"
+                    ),
+                    corrupt_files=["01.mp3"],
+                    folder_layout="flat",
+                    audio_file_count=2,
+                    filetype_band="mp3",
+                    min_bitrate_kbps=None,
+                ),
+                None,
+                "preimport_audio",
+                "reject_corrupt",
+            ),
+            (
+                "bad_audio_hash",
+                PreimportMeasurement(
+                    matched_bad_hash_id=7,
+                    matched_bad_track_path="01.mp3",
+                    folder_layout="flat",
+                    audio_file_count=2,
+                    filetype_band="mp3",
+                    min_bitrate_kbps=None,
+                ),
+                None,
+                "preimport_bad_hash",
+                "reject_bad_hash",
+            ),
+            (
+                "nested_layout",
+                PreimportMeasurement(
+                    folder_layout="nested",
+                    audio_file_count=2,
+                    filetype_band="mp3",
+                    min_bitrate_kbps=None,
+                ),
+                None,
+                "preimport_nested",
+                "reject_nested",
+            ),
+            (
+                "empty_fileset",
+                PreimportMeasurement(
+                    folder_layout="flat",
+                    audio_file_count=0,
+                    filetype_band="",
+                    min_bitrate_kbps=None,
+                ),
+                [],
+                "preimport_empty_fileset",
+                "reject_empty",
+            ),
+        )
+        for fact, measurement, files, decision_key, decision_value in CASES:
+            with self.subTest(fact=fact):
+                built = evidence_from_measurement(
+                    mb_release_id=f"mb-{fact}-slice",
+                    source_path=self.root,
+                    measurement=measurement,
+                    files=files,
+                )
+                self.assertEqual(built.status, "ready")
+                assert built.evidence is not None
+                # The real producer really did leave quality unmeasured —
+                # otherwise this slice would not be exercising the fixed
+                # path at all.
+                self.assertIsNone(built.evidence.measurement.min_bitrate_kbps)
+
+                decision = full_pipeline_decision_from_evidence(
+                    built.evidence, None,
+                )
+
+                self.assertEqual(decision[decision_key], decision_value)
+                self.assertFalse(decision["imported"])
+                self.assertEqual(decision["final_status"], "wanted")
+                self.assertTrue(decision["keep_searching"])
+
+
 class TestSearchForensicsCaptureSlice(unittest.TestCase):
     """U5 integration slice: search_for_album → find_download → log_search.
 

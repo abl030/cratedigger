@@ -23,6 +23,7 @@ from lib.measurement import PreimportMeasurement
 from lib.quality import (
     CURRENT_EVIDENCE_LINEAGE_VERSION,
     AccurateRipBitMatch,
+    AlbumQualityEvidence,
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
@@ -42,6 +43,7 @@ from lib.quality_evidence import (
     candidate_evidence_from_persistence_receipt,
     candidate_evidence_persistence_receipt_semantic_error,
     current_evidence_preserves_source_spectral,
+    current_evidence_rebuild_reasons,
     current_spectral_evidence_policy_usable,
     evidence_from_album_info,
     evidence_from_import_result,
@@ -500,6 +502,112 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         assert result.evidence is not None
         self.assertIsNone(result.evidence.target_format)
         self.assertIsNone(result.evidence.target_is_cbr)
+
+    def test_early_reject_evidence_never_fabricates_unmeasured_quality(self):
+        """Issue #1355 item 2: a reject the preview worker never ran the
+        harness for leaves quality genuinely unobserved instead of
+        inventing "MP3, 0 kbps" — the four facts this writer builds
+        evidence for all take an unmeasured ``min_bitrate_kbps`` and, for
+        ``empty_fileset``, an unmeasured ``filetype_band`` too."""
+        CASES: list[
+            tuple[str, PreimportMeasurement, list[AlbumQualityEvidenceFile] | None, str | None]
+        ] = [
+            (
+                "audio_corrupt",
+                PreimportMeasurement(
+                    audio_corrupt=True,
+                    audio_validation=make_audio_corrupt_validation_report("01.mp3"),
+                    corrupt_files=["01.mp3"],
+                    folder_layout="flat",
+                    audio_file_count=2,
+                    filetype_band="mp3",
+                    min_bitrate_kbps=None,
+                ),
+                None,
+                "MP3",
+            ),
+            (
+                "bad_audio_hash",
+                PreimportMeasurement(
+                    matched_bad_hash_id=7,
+                    matched_bad_track_path="01.mp3",
+                    folder_layout="flat",
+                    audio_file_count=2,
+                    filetype_band="mp3",
+                    min_bitrate_kbps=None,
+                ),
+                None,
+                "MP3",
+            ),
+            (
+                "nested_layout",
+                PreimportMeasurement(
+                    folder_layout="nested",
+                    audio_file_count=2,
+                    filetype_band="mp3",
+                    min_bitrate_kbps=None,
+                ),
+                None,
+                "MP3",
+            ),
+            (
+                "empty_fileset",
+                PreimportMeasurement(
+                    folder_layout="flat",
+                    audio_file_count=0,
+                    filetype_band="",
+                    min_bitrate_kbps=None,
+                ),
+                [],
+                None,
+            ),
+        ]
+        for fact, measurement, files, expected_format in CASES:
+            with self.subTest(fact=fact):
+                result = evidence_from_measurement(
+                    mb_release_id=f"mb-{fact}",
+                    source_path=self.root,
+                    measurement=measurement,
+                    files=files,
+                )
+                self.assertEqual(result.status, "ready")
+                assert result.evidence is not None
+                self.assertEqual(
+                    result.evidence.measurement.format, expected_format,
+                    f"{fact}: format must reflect what was actually observed",
+                )
+                self.assertEqual(result.evidence.storage_format, expected_format)
+                self.assertIsNone(
+                    result.evidence.measurement.min_bitrate_kbps,
+                    f"{fact}: unmeasured bitrate must stay None, never 0",
+                )
+                self.assertIsNone(result.evidence.measurement.avg_bitrate_kbps)
+                self.assertIsNone(result.evidence.measurement.median_bitrate_kbps)
+
+    def test_early_reject_evidence_preserves_a_real_bitrate_hint_unmodified(self):
+        """The honesty fix cuts both ways: when the measurement DOES carry a
+        real bitrate (a caller-supplied hint), it must pass straight through
+        to min/avg/median — never replaced, never zeroed."""
+        result = evidence_from_measurement(
+            mb_release_id="mb-real-hint",
+            source_path=self.root,
+            measurement=PreimportMeasurement(
+                audio_corrupt=True,
+                audio_validation=make_audio_corrupt_validation_report("01.mp3"),
+                corrupt_files=["01.mp3"],
+                folder_layout="flat",
+                audio_file_count=2,
+                filetype_band="mp3",
+                min_bitrate_kbps=245,
+                is_vbr=False,
+            ),
+        )
+        self.assertEqual(result.status, "ready")
+        assert result.evidence is not None
+        self.assertEqual(result.evidence.measurement.min_bitrate_kbps, 245)
+        self.assertEqual(result.evidence.measurement.avg_bitrate_kbps, 245)
+        self.assertEqual(result.evidence.measurement.median_bitrate_kbps, 245)
+        self.assertTrue(result.evidence.measurement.is_cbr)
 
     def test_corrupt_path_matching_never_falls_back_to_duplicate_basename(self):
         """Only the exact disc-relative path gets decode_ok=false."""
@@ -1570,6 +1678,65 @@ class TestBlankSourcePathPolicy(unittest.TestCase):
         blank = make_album_quality_evidence(source_path="")
         with self.assertRaises(ValueError):
             full_pipeline_decision_from_evidence(complete, blank)
+
+
+class TestPolicyIncompleteReasonsQualityFlag(unittest.TestCase):
+    """Issue #1355 item 2: ``require_quality_measurement`` gates ONLY the
+    format/bitrate checks, defaulting to the original strict behavior so
+    every caller that never learned about the new parameter is unaffected.
+    """
+
+    def _unmeasured(self) -> AlbumQualityEvidence:
+        base = make_album_quality_evidence(source_path="/library/album")
+        return msgspec.structs.replace(
+            base,
+            measurement=msgspec.structs.replace(
+                base.measurement,
+                format=None,
+                min_bitrate_kbps=None,
+                avg_bitrate_kbps=None,
+                median_bitrate_kbps=None,
+            ),
+            storage_format=None,
+        )
+
+    def test_default_still_requires_quality_measurement(self):
+        unmeasured = self._unmeasured()
+        self.assertEqual(
+            unmeasured.policy_incomplete_reasons(),
+            unmeasured.policy_incomplete_reasons(
+                require_quality_measurement=True),
+        )
+        self.assertTrue(unmeasured.policy_incomplete_reasons())
+
+    def test_false_drops_only_the_quality_reasons(self):
+        unmeasured = self._unmeasured()
+        self.assertEqual(
+            unmeasured.policy_incomplete_reasons(
+                require_quality_measurement=False),
+            [],
+        )
+
+    def test_false_still_reports_structural_and_path_reasons(self):
+        blank_and_unmeasured = msgspec.structs.replace(
+            self._unmeasured(), source_path="",
+        )
+        reasons = blank_and_unmeasured.policy_incomplete_reasons(
+            require_quality_measurement=False)
+        self.assertTrue(
+            any("source_path" in reason for reason in reasons),
+            "the source_path check must survive the quality bypass",
+        )
+        self.assertFalse(
+            any("format" in reason or "bitrate" in reason for reason in reasons),
+            "the quality checks must not survive the bypass",
+        )
+
+    def test_current_evidence_rebuild_reasons_requires_quality_by_default(self):
+        """``current_evidence_rebuild_reasons`` never passes the new kwarg
+        explicitly — its safety depends entirely on the strict default."""
+        unmeasured = self._unmeasured()
+        self.assertTrue(current_evidence_rebuild_reasons(unmeasured))
 
 
 class TestAudioSnapshotMatches(unittest.TestCase):

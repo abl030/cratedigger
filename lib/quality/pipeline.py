@@ -1396,7 +1396,19 @@ def _require_evidence_ready(
     role: str,
     evidence: AlbumQualityEvidence,
 ) -> None:
-    reasons = evidence.policy_incomplete_reasons()
+    # A candidate carrying a durable folder/audio-integrity reject fact is
+    # rejected on that fact alone, upstream of ever reading its measurement
+    # (issue #1355 item 2) — so an honestly-unmeasured quality on such a row
+    # is not incompleteness. ``current`` keeps the strict contract: HAVE
+    # evidence is never built by the fabrication-prone measurement-only
+    # writer this exception exists for.
+    require_quality_measurement = not (
+        role == "candidate"
+        and candidate_preimport_reject_fact(evidence) is not None
+    )
+    reasons = evidence.policy_incomplete_reasons(
+        require_quality_measurement=require_quality_measurement,
+    )
     if reasons:
         joined = "; ".join(reasons)
         raise ValueError(f"{role} album quality evidence is incomplete: {joined}")

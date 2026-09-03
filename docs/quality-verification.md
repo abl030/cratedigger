@@ -1796,6 +1796,29 @@ incomplete, or unusable HAVE evidence follows the existing analysis and
 changed candidate snapshot misses the front gate and runs full preview
 measurement again.
 
+**`policy_incomplete_reasons` does not demand a quality measurement that was
+never observable (issue #1355 item 2).** A candidate the preview worker
+persists without ever running the harness — `audio_corrupt`, `bad_audio_hash`,
+`nested_layout`, or `empty_fileset`, built by
+`lib.quality_evidence.evidence_from_measurement` — genuinely has no format or
+bitrate to report; `full_pipeline_decision_from_evidence` rejects it on that
+fact alone, upstream of ever reading `measurement`. Before this fix the
+producer invented `format="MP3"` and `min_bitrate_kbps=0` (copied into avg and
+median) purely so the readiness gate would admit the row, and that fabricated
+"observation" was durable: it survived into Recents/history and the CLI
+alongside the real reject reason. `policy_incomplete_reasons(
+require_quality_measurement=...)` now takes an explicit flag; the two
+readiness gates that read it (`lib.quality.pipeline._require_evidence_ready`
+and `lib.quality_evidence._load_candidate_evidence_for_source`) pass `False`
+exactly when the candidate already carries one of those four facts
+(`candidate_preimport_reject_fact(evidence) is not None`), and the producer
+leaves `format`/`min_bitrate_kbps`/`avg_bitrate_kbps`/`median_bitrate_kbps`
+honestly `None`. A row with no reject fact and no quality measurement still
+fails the gate exactly as before — the exemption is keyed to the fact, not to
+"any early reject." `current` (HAVE) evidence keeps the strict contract
+unconditionally; it is never built by this measurement-only writer.
+Migration 084 nulled the 28 live rows the old code had already fabricated.
+
 **HAVE spectral persistence is fail-closed on absence and fresh-audit-wins on
 disagreement (issue #815).** Two rules govern how the request's on-disk (HAVE)
 spectral fact is written:
