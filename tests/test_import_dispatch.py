@@ -1320,11 +1320,16 @@ class TestAutomationWrongMatchPostCommitTriage(unittest.TestCase):
 class TestRecordRejectionAndRequeueSeam(unittest.TestCase):
     """Seam tests for the shared rejection finalizer."""
 
-    @patch("lib.dispatch.outcome_actions.finalize_request")
     def test_requeue_defers_from_status_lookup_to_finalize_request(
         self,
-        mock_finalize,
     ) -> None:
+        """The shared job-less rejection bundle (issue #1355 item 3) never
+        hardcodes ``from_status`` — the transition command it builds carries
+        none, so the real transition engine derives it from the live row.
+        Proven two ways: the committed command's own ``from_status`` field,
+        and the actually-applied effect (a live row starting in
+        ``unsearchable`` really lands in ``wanted`` with its attempt bumped
+        — hardcoding a stale ``from_status`` here would have refused it)."""
         from lib.dispatch import _record_rejection_and_maybe_requeue
 
         db = FakePipelineDB()
@@ -1344,12 +1349,15 @@ class TestRecordRejectionAndRequeueSeam(unittest.TestCase):
             requeue=True,
         )
 
-        mock_finalize.assert_called_once()
-        _db_arg, request_id, outcome = mock_finalize.call_args.args
-        self.assertEqual(request_id, 42)
-        self.assertIsNone(outcome.from_status)
-        self.assertEqual(outcome.attempt_type, "validation")
-        self.assertEqual(db.request(42)["validation_attempts"], 0)
+        self.assertEqual(len(db.persist_request_rejection_outcome_calls), 1)
+        command = db.persist_request_rejection_outcome_calls[0]
+        self.assertEqual(command.request_id, 42)
+        assert command.transition is not None
+        self.assertIsNone(command.transition.from_status)
+        self.assertEqual(command.transition.attempt_type, "validation")
+        row = db.request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["validation_attempts"], 1)
 
     def test_requeue_only_forwards_fields_persisted_by_wanted_transition(self) -> None:
         from lib.dispatch import _record_rejection_and_maybe_requeue
@@ -1377,6 +1385,98 @@ class TestRecordRejectionAndRequeueSeam(unittest.TestCase):
         self.assertEqual(row["search_filetype_override"], "flac,mp3 v0")
         self.assertIsNone(row["beets_distance"])
         self.assertIsNone(row["beets_scenario"])
+
+    def test_job_less_audit_carries_every_download_info_field(self) -> None:
+        """Every ``DownloadInfo`` field the audit is supposed to carry
+        actually lands on the committed ``download_log`` row — not just
+        the handful the other seam tests happen to assert. Mutation
+        testing (issue #1355 item 3) found this gap: nulling any single
+        field in ``_record_rejection_and_maybe_requeue``'s
+        ``TerminalDownloadAudit`` construction survived every existing
+        test."""
+        from lib.dispatch import _record_rejection_and_maybe_requeue
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        dl_info = DownloadInfo(
+            username="user1",
+            contributor_usernames=("user1", "user2"),
+            filetype="flac",
+            bitrate=1000,
+            sample_rate=44100,
+            bit_depth=16,
+            is_vbr=True,
+            was_converted=True,
+            original_filetype="mp3 320",
+            slskd_filetype="flac",
+            actual_filetype="mp3",
+            actual_min_bitrate=192,
+            download_spectral=SpectralMeasurement(grade="genuine", bitrate_kbps=320),
+            current_spectral=SpectralMeasurement(grade="likely_transcode", bitrate_kbps=192),
+            existing_min_bitrate=256,
+            import_result='{"decision":"downgrade"}',
+            v0_probe=V0ProbeEvidence(
+                kind="lossless_source_v0",
+                min_bitrate_kbps=200,
+                avg_bitrate_kbps=210,
+                median_bitrate_kbps=205,
+            ),
+            existing_v0_probe=V0ProbeEvidence(
+                kind="native_lossy",
+                min_bitrate_kbps=190,
+                avg_bitrate_kbps=195,
+                median_bitrate_kbps=193,
+            ),
+        )
+
+        _record_rejection_and_maybe_requeue(
+            db,
+            42,
+            dl_info,
+            detail="too low",
+            error="rejected error",
+            validation_result=ValidationResult(
+                distance=0.5, scenario="quality_downgrade", detail="too low",
+            ).to_json(),
+            requeue=True,
+            outcome_label="rejected",
+            staged_path="/tmp/staged-full-audit",
+            source_download_log_id=99,
+        )
+
+        db.assert_log(
+            self, 0,
+            outcome="rejected",
+            beets_detail="too low",
+            soulseek_username="user1",
+            candidate_contributor_usernames=["user1", "user2"],
+            filetype="flac",
+            staged_path="/tmp/staged-full-audit",
+            error_message="rejected error",
+            bitrate=1000,
+            sample_rate=44100,
+            bit_depth=16,
+            is_vbr=True,
+            was_converted=True,
+            original_filetype="mp3 320",
+            slskd_filetype="flac",
+            actual_filetype="mp3",
+            actual_min_bitrate=192,
+            spectral_grade="genuine",
+            spectral_bitrate=320,
+            existing_min_bitrate=256,
+            existing_spectral_bitrate=192,
+            import_result='{"decision":"downgrade"}',
+            source_download_log_id=99,
+            v0_probe_kind="lossless_source_v0",
+            v0_probe_min_bitrate=200,
+            v0_probe_avg_bitrate=210,
+            v0_probe_median_bitrate=205,
+            existing_v0_probe_kind="native_lossy",
+            existing_v0_probe_min_bitrate=190,
+            existing_v0_probe_avg_bitrate=195,
+            existing_v0_probe_median_bitrate=193,
+        )
 
 
 class TestRejectImportFromEvidenceDecision(unittest.TestCase):

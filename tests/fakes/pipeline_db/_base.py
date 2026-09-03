@@ -45,6 +45,7 @@ from lib.quality import (
 from lib.terminal_outcomes import (
     ImportTerminalOutcome,
     PreviewTerminalOutcome,
+    RequestRejectionOutcome,
     TerminalOutcomeResult,
 )
 from lib.validation_envelope import (
@@ -129,6 +130,7 @@ class _FakePipelineDBBase:
         self.denylist: list[DenylistEntry] = []
         self.persist_import_terminal_outcome_calls: list[ImportTerminalOutcome] = []
         self.persist_preview_terminal_outcome_calls: list[PreviewTerminalOutcome] = []
+        self.persist_request_rejection_outcome_calls: list[RequestRejectionOutcome] = []
         self.bad_audio_hashes: list[BadAudioHashRow] = []
         # Call-count tracking for the bad-audio-hash gate. Tests that
         # used to assert ``mock.assert_called_once()`` / ``assert_not_called()``

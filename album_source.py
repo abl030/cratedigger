@@ -342,92 +342,52 @@ class DatabaseSource:
         cooled_down_users: set[str] | None = None,
         import_job_id: int | None = None,
     ) -> int | None | PendingImportTerminalOutcome:
-        """Record a rejected validation and keep the album wanted for retry."""
+        """Record a rejected validation and keep the album wanted for retry.
+
+        Delegates to ``_record_rejection_and_maybe_requeue`` for BOTH the
+        job-backed and job-less cases, differing only in whether
+        ``import_job_id`` is attached (issue #1355 item 3): the job-backed
+        branch returns an uncommitted ``PendingImportTerminalOutcome`` for
+        its owning import job to finish atomically later; the job-less
+        branch now commits the request transition, the ``download_log``
+        audit row, and every denylist/cooldown entry together in one
+        PostgreSQL transaction (``PipelineDB.persist_request_rejection_outcome``),
+        instead of three separate autocommitted writes — never a
+        transitioned-but-unaudited or denylisted-but-still-searchable
+        request left behind by a mid-sequence crash. This closes the
+        atomicity gap only; it does not add the job-backed path's
+        operator-stop preservation arbitration
+        (``_apply_terminal_request_transition``) — an ``unsearchable``
+        request rejected through this job-less path still transitions to
+        ``wanted`` unconditionally, exactly as it did before this change.
+        """
+        from lib.dispatch import _record_rejection_and_maybe_requeue
         from lib.quality import DownloadInfo
+        from lib.terminal_outcomes import TerminalDenylist
+
         request_id = getattr(album_record, "db_request_id", None)
         if not request_id:
             return None
 
         db = self._get_db()
         dl = download_info if isinstance(download_info, DownloadInfo) else DownloadInfo()
-        if import_job_id is not None:
-            from lib.dispatch import _record_rejection_and_maybe_requeue
-            from lib.terminal_outcomes import (
-                PendingImportTerminalOutcome,
-                TerminalDenylist,
-            )
-
-            pending = _record_rejection_and_maybe_requeue(
-                db,
-                request_id,
-                dl,
-                detail=bv_result.detail,
-                error=bv_result.error,
-                validation_result=(dl.validation_result or bv_result.to_json()),
-                requeue=True,
-                search_filetype_override=search_filetype_override,
-                import_job_id=import_job_id,
-            )
-            assert isinstance(pending, PendingImportTerminalOutcome)
-            return pending.append_denylists(*(
-                TerminalDenylist(
-                    username,
-                    "beets validation rejected",
-                    apply_cooldown=True,
-                )
-                for username in sorted(usernames or ())
-            ))
-        from lib import transitions
-        transition_kwargs: dict[str, object] = {}
-        if search_filetype_override is not None:
-            transition_kwargs["search_filetype_override"] = search_filetype_override
-        transitions.require_transition_applied(
-            transitions.finalize_request(
-                db,
-                request_id,
-                transitions.RequestTransition.to_wanted_fields(
-                    attempt_type="validation",
-                    fields=transition_kwargs),
-            )
+        denylists = tuple(
+            TerminalDenylist(username, "beets validation rejected", apply_cooldown=True)
+            for username in sorted(usernames or ())
         )
-
-        validation_result = dl.validation_result or bv_result.to_json()
-
-        download_log_id = db.log_download(
-            request_id=request_id,
-            soulseek_username=dl.username,
-            filetype=dl.filetype,
-            beets_detail=bv_result.detail,
-            outcome="rejected",
-            error_message=bv_result.error,
-            bitrate=dl.bitrate,
-            sample_rate=dl.sample_rate,
-            bit_depth=dl.bit_depth,
-            is_vbr=dl.is_vbr,
-            was_converted=dl.was_converted,
-            original_filetype=dl.original_filetype,
-            slskd_filetype=dl.slskd_filetype,
-            actual_filetype=dl.actual_filetype,
-            actual_min_bitrate=dl.actual_min_bitrate,
-            spectral_grade=dl.download_spectral.grade if dl.download_spectral else None,
-            spectral_bitrate=(
-                dl.download_spectral.bitrate_kbps if dl.download_spectral else None
-            ),
-            existing_min_bitrate=dl.existing_min_bitrate,
-            existing_spectral_bitrate=(
-                dl.current_spectral.bitrate_kbps if dl.current_spectral else None
-            ),
-            import_result=dl.import_result,
-            validation_result=validation_result,
+        return _record_rejection_and_maybe_requeue(
+            db,
+            request_id,
+            dl,
+            detail=bv_result.detail,
+            error=bv_result.error,
+            validation_result=(dl.validation_result or bv_result.to_json()),
+            requeue=True,
+            search_filetype_override=search_filetype_override,
+            import_job_id=import_job_id,
+            denylists=denylists,
+            cooled_down_users=cooled_down_users,
         )
-
-        # Denylist source users + check cooldown
-        if usernames:
-            for username in usernames:
-                db.add_denylist(request_id, username, "beets validation rejected")
-                if db.check_and_apply_cooldown(username) and cooled_down_users is not None:
-                    cooled_down_users.add(username)
-        return download_log_id
 
     def get_denylisted_users(self, album_record: GrabListEntry) -> set[str]:
         """Get denylisted usernames for an album."""

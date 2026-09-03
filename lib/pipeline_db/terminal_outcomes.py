@@ -20,7 +20,10 @@ from lib.pipeline_db._core import _PipelineDBBase
 from lib.pipeline_db._shared import (
     BACKOFF_BASE_MINUTES,
     BACKOFF_MAX_MINUTES,
+    REQUEST_PRESENTATION_FROM,
+    REQUEST_PRESENTATION_SELECT,
     _msgspec_json_dumps,
+    request_presentation_row,
     validate_request_metadata_fields,
 )
 from lib.pipeline_db.cleanup_journal import (
@@ -31,11 +34,13 @@ from lib.pipeline_db.decisions import (
     SEARCH_BACKOFF_MAX_EXPONENT,
     search_backoff_minutes,
 )
-from lib.pipeline_db.rows import AlbumRequestRow, album_request_row
+from lib.pipeline_db.rows import AlbumRequestRow
 from lib.terminal_outcomes import (
     AutomationTerminalAuthority,
     ImportTerminalOutcome,
     PreviewTerminalOutcome,
+    RequestRejectionOutcome,
+    RequestRejectionResult,
     TerminalCooldown,
     TerminalDenylist,
     TerminalDownloadAudit,
@@ -122,12 +127,32 @@ class _TransactionalTransitionsDB:
         self._boundary = boundary
 
     def get_request(self, request_id: int) -> AlbumRequestRow | None:
+        # Must project ``processing_owner`` exactly like the real
+        # ``PipelineDB.get_request`` (issue #1355 item 3): a plain
+        # ``SELECT *`` leaves ``processing_locked_conflict`` unable to prove
+        # a currently-``processing`` row's exact owner, which it treats as a
+        # malformed row and raises ``TypeError`` instead of the intended
+        # conflict. This class is shared by all three terminal-outcome
+        # bundles — the two pre-existing job-backed ones
+        # (``persist_import_terminal_outcome``,
+        # ``persist_preview_terminal_outcome``) and the new job-less one
+        # (``persist_request_rejection_outcome``) added here — so the fix
+        # hardens all three; it was latent in the two pre-existing callers
+        # and would have been a fresh regression in the new one, since a
+        # job-less rejection is the first caller ordinarily positioned to
+        # meet a row a DIFFERENT worker still owns.
         cur = self._db._execute(
-            "SELECT * FROM album_requests WHERE id = %s",
+            f"""
+            SELECT {REQUEST_PRESENTATION_SELECT}
+            {REQUEST_PRESENTATION_FROM}
+            WHERE request_row.id = %s
+            """,
             (request_id,),
         )
         row = cur.fetchone()
-        return album_request_row(row) if row is not None else None
+        if row is None:
+            return None
+        return request_presentation_row(row)
 
     def set_downloading(
         self,
@@ -678,6 +703,81 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 transition,
             )
         ),)
+
+    def _insert_nonjob_download_audit(
+        self,
+        request_id: int,
+        audit: TerminalDownloadAudit,
+    ) -> int:
+        """The job-less ``download_log`` INSERT (issue #1355 item 3).
+
+        Mirrors ``log_download``'s own INSERT: no ``import_jobs`` join, no
+        candidate-evidence linkage, ``source`` left to the schema's
+        ``'slskd'`` default — none of that exists for a rejection with no
+        owning import job. The job-backed twin,
+        ``_insert_terminal_download_audit`` below, owns that shape.
+        Spelled directly against ``TerminalDownloadAudit``'s own typed
+        fields (not a dynamic dict spread — the same reasoning that
+        retired the Struct's now-deleted dict-spread bridge entirely) so
+        this stays inside ``persist_request_rejection_outcome``'s
+        transaction without a cross-mixin call into
+        ``lib/pipeline_db/download_log.py``.
+        """
+        beets_distance, beets_scenario = derive_validation_log_columns(
+            audit.validation_result,
+            beets_distance=audit.beets_distance,
+            beets_scenario=audit.beets_scenario,
+        )
+        contributor_usernames = list(normalize_contributor_usernames(
+            audit.contributor_usernames,
+        )) or None
+        cur = self._execute(
+            """
+            INSERT INTO download_log (
+                request_id, soulseek_username, candidate_contributor_usernames,
+                filetype, download_path,
+                beets_distance, beets_scenario, beets_detail, valid,
+                outcome, staged_path, error_message,
+                bitrate, sample_rate, bit_depth, is_vbr,
+                was_converted, original_filetype, slskd_filetype,
+                actual_filetype, actual_min_bitrate,
+                spectral_grade, spectral_bitrate,
+                existing_min_bitrate, existing_spectral_bitrate,
+                import_result, validation_result, final_format,
+                v0_probe_kind, v0_probe_min_bitrate,
+                v0_probe_avg_bitrate, v0_probe_median_bitrate,
+                existing_v0_probe_kind, existing_v0_probe_min_bitrate,
+                existing_v0_probe_avg_bitrate, existing_v0_probe_median_bitrate,
+                source_download_log_id
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s
+            )
+            RETURNING id
+            """,
+            (
+                request_id, audit.soulseek_username, contributor_usernames,
+                audit.filetype, audit.download_path,
+                beets_distance, beets_scenario, audit.beets_detail, audit.valid,
+                audit.outcome, audit.staged_path, audit.error_message,
+                audit.bitrate, audit.sample_rate, audit.bit_depth, audit.is_vbr,
+                audit.was_converted, audit.original_filetype, audit.slskd_filetype,
+                audit.actual_filetype, audit.actual_min_bitrate,
+                audit.spectral_grade, audit.spectral_bitrate,
+                audit.existing_min_bitrate, audit.existing_spectral_bitrate,
+                audit.import_result, audit.validation_result, audit.final_format,
+                audit.v0_probe_kind, audit.v0_probe_min_bitrate,
+                audit.v0_probe_avg_bitrate, audit.v0_probe_median_bitrate,
+                audit.existing_v0_probe_kind, audit.existing_v0_probe_min_bitrate,
+                audit.existing_v0_probe_avg_bitrate,
+                audit.existing_v0_probe_median_bitrate,
+                audit.source_download_log_id,
+            ),
+        )
+        row = cur.fetchone()
+        assert row is not None, "INSERT RETURNING should always return a row"
+        return int(row["id"])
 
     def _insert_terminal_download_audit(
         self,
@@ -1446,6 +1546,60 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
             download_log_id=download_log_id,
             job=job,
             transitions=tuple(applied),
+            cooled_down_users=frozenset(cooled),
+        )
+
+    def persist_request_rejection_outcome(
+        self,
+        command: RequestRejectionOutcome,
+    ) -> RequestRejectionResult:
+        """Atomically commit a job-less rejection (issue #1355 item 3).
+
+        The job-less counterpart of ``persist_import_terminal_outcome``: no
+        import job owns this rejection, so there is no job-status write and
+        no automation authority to validate — only the request transition
+        (if any), the mandatory ``download_log`` audit row, and any
+        denylist/cooldown entries, committed together as one PostgreSQL
+        transaction. A row lock is taken first so a concurrent terminal
+        writer for the same request cannot interleave with this bundle.
+
+        On any exception the whole bundle rolls back — the request is left
+        exactly where it was, for the existing processing-recovery machinery
+        to re-derive, never partially transitioned with no audit trail.
+        """
+        boundary = self._boundary_emitter()
+        with self._atomic():
+            transition_db = _TransactionalTransitionsDB(self, boundary)
+            self._lock_terminal_request_status(command.request_id)
+            applied: transitions.TransitionApplied | None = None
+            if command.transition is not None:
+                applied = transitions.require_transition_applied(
+                    transitions.finalize_request(
+                        transition_db,
+                        command.request_id,
+                        command.transition,
+                    )
+                )
+            download_log_id = self._insert_nonjob_download_audit(
+                command.request_id,
+                command.audit,
+            )
+            boundary("download_log")
+            cooled: set[str] = set()
+            for entry in command.denylists:
+                if self._persist_terminal_denylist(
+                    command.request_id,
+                    entry,
+                    boundary,
+                ):
+                    cooled.add(entry.username)
+            for entry in command.cooldowns:
+                if self._persist_terminal_cooldown(entry, boundary):
+                    cooled.add(entry.username)
+            self.conn.commit()
+        return RequestRejectionResult(
+            download_log_id=download_log_id,
+            transition=applied,
             cooled_down_users=frozenset(cooled),
         )
 

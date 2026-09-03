@@ -33,6 +33,7 @@ from lib.pipeline_db._shared import (
     _escape_like_pattern,
     _msgspec_json_dumps,
     processing_owner_payload,
+    request_presentation_row,
     validate_request_metadata_fields,
 )
 from lib.pipeline_db.decisions import SEARCH_BACKOFF_MAX_EXPONENT
@@ -207,15 +208,15 @@ class _RequestsMixin(_PipelineDBBase):
     def _request_presentation_row(
         raw: Mapping[str, object],
     ) -> AlbumRequestPresentationRow:
-        """Validate a request row and attach its exact owner projection."""
-        row = album_request_row(raw)
-        return msgspec.convert(
-            {
-                **row,
-                "processing_owner": processing_owner_payload(raw),
-            },
-            type=AlbumRequestPresentationRow,
-        )
+        """Validate a request row and attach its exact owner projection.
+
+        Thin delegate to the shared adapter (``lib.pipeline_db._shared
+        .request_presentation_row``, issue #1355 item 3) so every reader of
+        a ``REQUEST_PRESENTATION_SELECT`` row — this mixin's own queries and
+        ``_TransactionalTransitionsDB.get_request`` — shares one
+        implementation.
+        """
+        return request_presentation_row(raw)
 
     @classmethod
     def _artist_request_row(

@@ -9,7 +9,7 @@ evidence reject helper. ``finalize_request`` is the module-local DI seam
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import msgspec
 
@@ -49,6 +49,7 @@ from lib.terminal_outcomes import (
     AutomationTerminalAuthority,
     PendingImportTerminalOutcome,
     PreviewTerminalOutcome,
+    RequestRejectionOutcome,
     TerminalCooldown,
     TerminalDenylist,
     TerminalDownloadAudit,
@@ -145,22 +146,7 @@ def _reject_import_from_evidence_decision(
             have_spectral_audit=import_result.spectral.existing,
             cfg=quality_ranks,
         ).override
-    terminal_outcome = _record_rejection_and_maybe_requeue(
-        db,
-        request.request_id,
-        dl_info,
-        detail=detail,
-        error=detail if decision == "audio_corrupt" else None,
-        requeue=request.requeue_on_failure and not action.preserve_imported,
-        outcome_label="rejected",
-        search_filetype_override=search_filetype_override,
-        validation_result=rejection_validation,
-        staged_path=request.path,
-        attempt_result=attempt_result,
-        import_job_id=request.candidate_import_job_id,
-        source_download_log_id=request.candidate_download_log_id,
-        preserve_imported=action.preserve_imported,
-    )
+    denylists: tuple[TerminalDenylist, ...] = ()
     if action.denylist:
         usernames = extract_usernames(request.files or [])
         if dl_info.username:
@@ -185,19 +171,28 @@ def _reject_import_from_evidence_decision(
             if decision == "mixed_source"
             else f"rejected: {decision}"
         )
-        if isinstance(terminal_outcome, PendingImportTerminalOutcome):
-            terminal_outcome = terminal_outcome.append_denylists(*(
-                TerminalDenylist(username, reason, apply_cooldown=True)
-                for username in sorted(usernames)
-            ))
-        else:
-            for username in usernames:
-                db.add_denylist(request.request_id, username, reason)
-                if (
-                    request.cooled_down_users is not None
-                    and db.check_and_apply_cooldown(username)
-                ):
-                    request.cooled_down_users.add(username)
+        denylists = tuple(
+            TerminalDenylist(username, reason, apply_cooldown=True)
+            for username in sorted(usernames)
+        )
+    terminal_outcome = _record_rejection_and_maybe_requeue(
+        db,
+        request.request_id,
+        dl_info,
+        detail=detail,
+        error=detail if decision == "audio_corrupt" else None,
+        requeue=request.requeue_on_failure and not action.preserve_imported,
+        outcome_label="rejected",
+        search_filetype_override=search_filetype_override,
+        validation_result=rejection_validation,
+        staged_path=request.path,
+        attempt_result=attempt_result,
+        import_job_id=request.candidate_import_job_id,
+        source_download_log_id=request.candidate_download_log_id,
+        preserve_imported=action.preserve_imported,
+        denylists=denylists,
+        cooled_down_users=request.cooled_down_users,
+    )
     cleanup_plan: PostCommitCleanup | None = None
     # Bad rips are ban + delete, never quarantined (issue #1077, D3): a
     # corrupt candidate has no salvage value for operator review, so
@@ -383,8 +378,10 @@ def _do_mark_done(
         transition,
     ))
     # Explicit field-by-field bridge: pyright verifies every audit field
-    # against ``log_download``'s signature (names AND types), which the
-    # dynamic ``**as_log_kwargs()`` spread could not express.
+    # against ``log_download``'s signature (names AND types), which a
+    # dynamic dict spread could not express — the same reasoning that
+    # retired ``TerminalDownloadAudit.as_log_kwargs()`` entirely (issue
+    # #1355 item 3).
     return db.log_download(
         request_id=request_id,
         outcome=audit.outcome,
@@ -428,103 +425,61 @@ def _do_mark_done(
 
 def _finalize_request_and_log_rejection(
     db: DispatchDB,
-    request_id: int | None,
-    log_download_kwargs: dict[str, Any],
+    request_id: int,
+    audit: TerminalDownloadAudit,
     *,
     requeue_to_wanted: bool,
     search_filetype_override: str | None = None,
     record_validation_attempt: bool = True,
-    import_job_id: int | None = None,
-    import_job_error: str = "",
-    import_job_message: str | None = None,
-    import_job_result: dict[str, Any] | None = None,
-    denylist_username: str | None = None,
-    denylist_reason: str | None = None,
+    denylists: tuple[TerminalDenylist, ...] = (),
+    cooldowns: tuple[TerminalCooldown, ...] = (),
+    cooled_down_users: set[str] | None = None,
     preserve_imported: bool = False,
 ) -> int:
-    """Write an imperative rejection audit and optional lifecycle transition.
+    """Atomically commit a job-less rejection: the single source of truth
+    for "a candidate was rejected with no owning import job; clean up state
+    so the parent request can advance."
 
-    The single source of truth for "a candidate was rejected; clean up
-    state so the parent request can advance." Both the importer-side
-    ``_record_rejection_and_maybe_requeue`` (with full ``DownloadInfo``
-    context) and the direct installed-HAVE abort use this boundary. Queued
-    preview/import outcomes use their atomic terminal command objects instead.
+    Both the importer-side ``_record_rejection_and_maybe_requeue`` (with
+    full ``DownloadInfo`` context) and the direct installed-HAVE abort use
+    this boundary. Queued preview/import outcomes use their atomic terminal
+    command objects instead.
 
-    Side effects, in order:
+    The request transition, the ``download_log`` audit row, and any
+    ``denylists``/``cooldowns`` entries commit together in one PostgreSQL
+    transaction via ``db.persist_request_rejection_outcome`` (issue #1355
+    item 3) — a request returned to ``wanted`` with no audit row explaining
+    why, or a peer left un-denylisted after a "denylisted" rejection, are
+    exactly the partial-write worlds that bundle exists to make
+    unreachable.
 
-      1. Optional request transition via ``transitions.finalize_request``:
-         proof-locked candidates restore terminal ``imported``; ordinary
-         automatic rejects go to ``wanted``. When the wanted transition
-         fires and ``record_validation_attempt=True``, it also bumps the
-         validation attempt counter — matches pre-U4 importer behavior.
-      2. ``download_log`` row write via ``db.log_download(**log_download_kwargs)``.
-         Fires whenever ``request_id`` is present (raises otherwise — see
-         below). Returns the new row id.
-      3. ``source_denylist`` write when ``denylist_username`` is supplied
-         AND ``request_id is not None`` (denylist FK-references a
-         request). The importer-side entry point currently passes None
-         here and handles denylist externally; the preview-side path
-         passes a username when the 5-strikes rule applies.
-      4. ``import_jobs.status='failed'`` via ``mark_import_job_failed``
-         when ``import_job_id`` is supplied. The importer-side caller
-         leaves this to the worker (``scripts/importer.py``) so it
-         continues to pass None here; the preview-side caller fires it
-         so the poll loop's active-import-job guard releases.
-
-    Returns the new ``download_log`` row id. The ``request_not_found``
-    subcase (``request_id is None``) raises instead — the audit row
-    cannot be written because ``download_log.request_id`` is NOT NULL
-    (this was always true; the INSERT used to raise NotNullViolation).
-    The preview worker's lifecycle try/except absorbs it and the job is
-    already ``failed`` from its step 1, so the queue still converges.
+    Returns the new ``download_log`` row id.
     """
-    if preserve_imported and request_id is not None:
-        transitions.require_transition_applied(finalize_request(
-            db,
-            request_id,
-            transitions.RequestTransition.to_imported(),
-        ))
-    elif requeue_to_wanted and request_id is not None:
+    transition: transitions.RequestTransition | None = None
+    if preserve_imported:
+        transition = transitions.RequestTransition.to_imported()
+    elif requeue_to_wanted:
         transition_kwargs: dict[str, object] = {}
         if search_filetype_override is not None:
             transition_kwargs["search_filetype_override"] = search_filetype_override
-        transitions.require_transition_applied(finalize_request(
-            db,
-            request_id,
-            transitions.RequestTransition.to_wanted_fields(
-                attempt_type=(
-                    "validation" if record_validation_attempt else None
-                ),
-                fields=transition_kwargs),
-        ))
-
-    if request_id is None:
-        # Same control flow as the NotNullViolation this used to raise at
-        # the INSERT — download_log.request_id is NOT NULL — but with an
-        # honest message (#409 typing exposed the documented-but-impossible
-        # "request_not_found writes the log" subcase). The preview worker's
-        # lifecycle try/except catches it; the job is already failed.
-        raise ValueError(
-            "cannot write download_log rejection audit: request_id is None "
-            "and download_log.request_id is NOT NULL"
+        transition = transitions.RequestTransition.to_wanted_fields(
+            attempt_type=(
+                "validation" if record_validation_attempt else None
+            ),
+            fields=transition_kwargs,
         )
-    download_log_id = db.log_download(
+
+    result = db.persist_request_rejection_outcome(RequestRejectionOutcome(
         request_id=request_id,
-        **log_download_kwargs,
-    )
+        audit=audit,
+        transition=transition,
+        denylists=denylists,
+        cooldowns=cooldowns,
+    ))
+    if cooled_down_users is not None:
+        cooled_down_users.update(result.cooled_down_users)
 
-    if denylist_username:
-        db.add_denylist(request_id, denylist_username, reason=denylist_reason)
-
-    if import_job_id is not None:
-        db.mark_import_job_failed(
-            import_job_id,
-            error=import_job_error,
-            message=import_job_message,
-            result=import_job_result,
-        )
-
-    return download_log_id
+    return result.download_log_id
 
 
 def _record_rejection_and_maybe_requeue(
@@ -543,21 +498,29 @@ def _record_rejection_and_maybe_requeue(
     import_job_id: int | None = None,
     source_download_log_id: int | None = None,
     preserve_imported: bool = False,
+    denylists: tuple[TerminalDenylist, ...] = (),
+    cooled_down_users: set[str] | None = None,
 ) -> int | PendingImportTerminalOutcome:
     """Importer-side rejection entry point.
 
-    Builds the ``log_download`` kwargs from ``DownloadInfo`` (slskd context:
-    username, bitrate, spectral, V0 probe, etc.) and delegates to
-    ``_finalize_request_and_log_rejection``. Behavior is preserved from
-    pre-U4: optional requeue-to-wanted with attempt bump, mandatory
-    download_log row, no denylist (caller handles via ``action.denylist``
-    in ``dispatch_import_core``), no job-failed mark (caller in
-    ``scripts/importer.py`` handles it on the outer return).
+    Builds the shared ``TerminalDownloadAudit`` from ``DownloadInfo`` (slskd
+    context: username, bitrate, spectral, V0 probe, etc.) once, then
+    delegates to whichever terminal-outcome authority matches the caller:
+    a job-backed rejection returns a ``PendingImportTerminalOutcome`` for
+    its owning import job to finish later; a job-less rejection commits
+    immediately and atomically through ``_finalize_request_and_log_rejection``
+    (issue #1355 item 3). Both branches build the SAME ``denylists`` tuple
+    from the caller's usernames — the two lanes differ only in whether an
+    ``import_job_id`` is attached, never in how source peers are recorded.
 
     When ``requeue=True`` (auto-import): transitions to "wanted", records
     attempt. When ``requeue=False`` (force-import): only logs to
     download_log. ``preserve_imported=True`` is the proof-lock exception:
     it transitions back to terminal "imported" without an attempt bump.
+    ``cooled_down_users``, when supplied, is updated in place with every
+    username the job-less commit actually cooled down — job-backed commits
+    apply cooldowns later, at the owning job's own terminal write, so this
+    set is untouched on that branch.
 
     Returns the new ``download_log`` row id — captured by the
     auto-import path for downstream Wrong Matches triage.
@@ -568,54 +531,54 @@ def _record_rejection_and_maybe_requeue(
     """
     if attempt_result is not None:
         attempt_result.finalize_into(dl_info)
-    log_download_kwargs: dict[str, Any] = {
-        "soulseek_username": dl_info.username,
-        "contributor_usernames": dl_info.contributor_usernames,
-        "filetype": dl_info.filetype,
-        "beets_detail": detail,
-        "outcome": outcome_label,
-        "staged_path": staged_path,
-        "error_message": error,
-        "bitrate": dl_info.bitrate,
-        "sample_rate": dl_info.sample_rate,
-        "bit_depth": dl_info.bit_depth,
-        "is_vbr": dl_info.is_vbr,
-        "was_converted": dl_info.was_converted,
-        "original_filetype": dl_info.original_filetype,
-        "slskd_filetype": dl_info.slskd_filetype,
-        "actual_filetype": dl_info.actual_filetype,
-        "actual_min_bitrate": dl_info.actual_min_bitrate,
-        "spectral_grade": (dl_info.download_spectral.grade
-                           if dl_info.download_spectral else None),
-        "spectral_bitrate": (dl_info.download_spectral.bitrate_kbps
-                             if dl_info.download_spectral else None),
-        "existing_min_bitrate": dl_info.existing_min_bitrate,
-        "existing_spectral_bitrate": (dl_info.current_spectral.bitrate_kbps
-                                      if dl_info.current_spectral else None),
-        "import_result": dl_info.import_result,
-        "validation_result": validation_result,
-        "source_download_log_id": source_download_log_id,
-    }
-    log_download_kwargs.update(_v0_probe_log_fields(dl_info))
+    audit = TerminalDownloadAudit(
+        soulseek_username=dl_info.username,
+        contributor_usernames=dl_info.contributor_usernames,
+        filetype=dl_info.filetype,
+        beets_detail=detail,
+        outcome=outcome_label,
+        staged_path=staged_path,
+        error_message=error,
+        bitrate=dl_info.bitrate,
+        sample_rate=dl_info.sample_rate,
+        bit_depth=dl_info.bit_depth,
+        is_vbr=dl_info.is_vbr,
+        was_converted=dl_info.was_converted,
+        original_filetype=dl_info.original_filetype,
+        slskd_filetype=dl_info.slskd_filetype,
+        actual_filetype=dl_info.actual_filetype,
+        actual_min_bitrate=dl_info.actual_min_bitrate,
+        spectral_grade=(dl_info.download_spectral.grade
+                        if dl_info.download_spectral else None),
+        spectral_bitrate=(dl_info.download_spectral.bitrate_kbps
+                          if dl_info.download_spectral else None),
+        existing_min_bitrate=dl_info.existing_min_bitrate,
+        existing_spectral_bitrate=(dl_info.current_spectral.bitrate_kbps
+                                   if dl_info.current_spectral else None),
+        import_result=dl_info.import_result,
+        validation_result=validation_result,
+        source_download_log_id=source_download_log_id,
+        **_v0_probe_log_fields(dl_info),
+    )
     if import_job_id is not None:
         return _pending_rejection_outcome(
             request_id=request_id,
             import_job_id=import_job_id,
-            audit=TerminalDownloadAudit(**log_download_kwargs),
+            audit=audit,
             requeue=requeue,
             search_filetype_override=search_filetype_override,
             preserve_imported=preserve_imported,
+            denylists=denylists,
         )
     return _finalize_request_and_log_rejection(
         db,
         request_id,
-        log_download_kwargs,
+        audit,
         requeue_to_wanted=requeue,
         search_filetype_override=search_filetype_override,
         record_validation_attempt=True,
-        # Importer-side leaves job-failed + denylist to its caller.
-        import_job_id=None,
-        denylist_username=None,
+        denylists=denylists,
+        cooled_down_users=cooled_down_users,
         preserve_imported=preserve_imported,
     )
 
@@ -779,20 +742,15 @@ def _record_have_analysis_error(
             cooldowns=cooldowns,
         )
 
-    download_log_id = _finalize_request_and_log_rejection(
+    return _finalize_request_and_log_rejection(
         db,
         request.request_id,
-        audit.as_log_kwargs(),
+        audit,
         requeue_to_wanted=requeue_to_wanted,
         record_validation_attempt=requeue_to_wanted,
+        cooldowns=cooldowns,
+        cooled_down_users=request.cooled_down_users,
     )
-    if (
-        dl_info.username
-        and db.check_and_apply_cooldown(dl_info.username)
-        and request.cooled_down_users is not None
-    ):
-        request.cooled_down_users.add(dl_info.username)
-    return download_log_id
 
 
 def _pending_rejection_outcome(
@@ -803,6 +761,7 @@ def _pending_rejection_outcome(
     requeue: bool,
     search_filetype_override: str | None = None,
     preserve_imported: bool = False,
+    denylists: tuple[TerminalDenylist, ...] = (),
 ) -> PendingImportTerminalOutcome:
     """Build the DB-owned terminal rejection command without writing."""
     fields: dict[str, object] = {}
@@ -823,4 +782,5 @@ def _pending_rejection_outcome(
         import_job_id=import_job_id,
         initial_transition=transition,
         audit=audit,
+        denylists=denylists,
     )

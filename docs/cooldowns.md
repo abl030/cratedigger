@@ -33,7 +33,7 @@ CREATE TABLE user_cooldowns (
 
 ## Data flow
 
-1. **Trigger**: `_timeout_album()` (download.py), `reject_and_requeue()` (album_source.py), and the `_enqueue_completed_processing()` materialize-grace-expired reset (`download.py`, issue #822 item 4 — the residual materialize-failure path with no other cooldown coverage) all call `db.check_and_apply_cooldown(username)` after logging the outcome. That reset's row records the machine reason in `beets_detail` (issue #868).
+1. **Trigger**: `_timeout_album()` (download.py) calls `db.check_and_apply_cooldown(username)` directly after logging the timeout outcome. `reject_and_requeue()` (`album_source.py`) and the installed-HAVE abort (`_record_have_analysis_error` in `lib/dispatch/outcome_actions.py`) instead reach the SAME streak evaluator (`_cooldown_streak_verdict`, shared by `check_and_apply_cooldown` and the terminal-outcome writer) through `PipelineDB.persist_request_rejection_outcome` (issue #1355 item 3): the cooldown decision commits atomically alongside the request transition, `download_log` audit, and denylist writes, rather than as a separate autocommit call after them — `_record_have_analysis_error` used to call `check_and_apply_cooldown` directly after its own commit, which this change folded into the same transaction.
 
    Inclusion rule for the list below: every reason the vocabulary can emit is
    named, and the ones that are unreachable by construction are marked — the

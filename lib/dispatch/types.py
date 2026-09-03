@@ -52,6 +52,8 @@ if TYPE_CHECKING:
         ImportTerminalOutcome,
         PendingImportTerminalOutcome,
         PreviewTerminalOutcome,
+        RequestRejectionOutcome,
+        RequestRejectionResult,
         TerminalOutcomeResult,
     )
     from lib.validation_envelope import ValidationProjectionUnset
@@ -121,14 +123,14 @@ class DispatchDB(
     checkpoint, and the two media-server pin services — so this one port
     stays honest without restating their members.
 
-    ``lib/dispatch/`` calls 19 distinct DB methods. Five of them arrive
+    ``lib/dispatch/`` calls 20 distinct DB methods. Five of them arrive
     through those bases and are NOT declared below: ``get_request``,
     ``get_import_job``, ``get_request_current_evidence_id`` and
     ``load_album_quality_evidence_by_id`` (``QualityEvidenceDB``, via
     ``SidecarDB``), and ``_probe_owner_session``
     (``AutomationOwnerCheckpointDB``, which is also where its
     ``deadline_seconds`` parameter is deliberately omitted — that
-    narrowing is that port's, not this one's). The remaining fourteen are
+    narrowing is that port's, not this one's). The remaining fifteen are
     declared in the body, plus two — ``merge_rekey_collision`` and
     ``update_request_release_for_merge`` — that dispatch never calls at
     all: they are restated only so this port satisfies
@@ -240,6 +242,10 @@ class DispatchDB(
     def persist_preview_terminal_outcome(
         self, command: PreviewTerminalOutcome,
     ) -> TerminalOutcomeResult: ...
+
+    def persist_request_rejection_outcome(
+        self, command: RequestRejectionOutcome,
+    ) -> RequestRejectionResult: ...
 
     def log_download(
         self,

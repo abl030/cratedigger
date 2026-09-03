@@ -610,12 +610,10 @@ class _DownloadLogMixin(_PipelineDBBase):
                      # Migration 037 discriminator (``'slskd'`` / ``'youtube'``
                      # / ``'local'`` as of migration 080). Defaults to
                      # ``'slskd'`` so every existing DIRECT caller of this
-                     # method is unaffected. TWO writers reach the
-                     # operator-visible TERMINAL ``download_log`` row,
-                     # selected by whether the terminal outcome carries an
-                     # ``import_job_id``:
-                     #   - job-BACKED outcomes never call this method at
-                     #     all — they go through
+                     # method is unaffected. Three writers reach the
+                     # operator-visible TERMINAL ``download_log`` row:
+                     #   - job-BACKED outcomes (accept or reject) never call
+                     #     this method at all — they go through
                      #     ``_insert_terminal_download_audit``
                      #     (lib/pipeline_db/terminal_outcomes.py), which
                      #     derives ``source`` from the linked
@@ -623,18 +621,29 @@ class _DownloadLogMixin(_PipelineDBBase):
                      #     (widened for ``'local_import'`` -> ``'local'``
                      #     alongside this migration, issue #1176 PR1
                      #     round 2);
-                     #   - job-LESS outcomes (e.g.
-                     #     ``lib/dispatch/outcome_actions.py``'s
-                     #     ``_finalize_request_and_log_rejection``, reached
-                     #     when ``import_job_id`` is absent) call THIS
-                     #     method directly, so THIS parameter genuinely IS
-                     #     the writer for those rows — currently always the
-                     #     ``'slskd'`` default, since no job-less caller
-                     #     passes ``source=`` yet.
-                     # ``insert_youtube_running`` is a third, wholly
+                     #   - job-less REJECTIONS (``_finalize_request_and_
+                     #     log_rejection`` in ``lib/dispatch/
+                     #     outcome_actions.py``, reached when
+                     #     ``import_job_id`` is absent) commit through
+                     #     ``PipelineDB.persist_request_rejection_outcome``
+                     #     (issue #1355 item 3), whose own private
+                     #     ``_insert_nonjob_download_audit`` is the writer —
+                     #     NOT this method — so the audit row lands in the
+                     #     same transaction as the request transition and
+                     #     any denylist/cooldown writes;
+                     #   - job-less SUCCESS (``_do_mark_done``'s job-less
+                     #     branch) calls THIS method directly, so THIS
+                     #     parameter genuinely is the writer for that row —
+                     #     currently always the ``'slskd'`` default, since
+                     #     that caller never passes ``source=`` either.
+                     # ``insert_youtube_running`` is a fourth, wholly
                      # separate INSERT — the queue-only
-                     # ``'youtube_running'`` writer — unrelated to either
-                     # lane above.
+                     # ``'youtube_running'`` writer — unrelated to any lane
+                     # above. Several other call sites in this repo call
+                     # this method directly for a non-terminal write (an
+                     # in-progress timeout retry, a manual/local import
+                     # audit, ...); this comment is scoped to the terminal-
+                     # outcome writers only, not every caller.
                      source: str = "slskd",
                      ) -> int:
         beets_distance_value, beets_scenario_value = derive_validation_log_columns(
