@@ -839,6 +839,12 @@ async function withFakeWindow(impl) {
   try {
     await impl(fakeWindow, calls);
   } finally {
+    // Drain any stash a block forgot to consume, so a leftover pending
+    // restore can never leak into the next block's assertions -- this
+    // runs against the REAL fakeWindow still installed, so a drain here
+    // still records into THIS block's own `calls.scrollTo`, not a
+    // future block's.
+    consumePendingScrollRestore();
     state.searchPlanDetailContext = prevState;
     state.pipelineView = prevPipelineView;
     globals.restore();
@@ -921,7 +927,6 @@ async function withFakeWindow(impl) {
     closeSearchPlanDetail();
     t.equal(state.pipelineView, 'dashboard',
       'pipeline-origin dashboard subView restored');
-    consumePendingScrollRestore();
   });
 }
 
@@ -965,7 +970,6 @@ async function withFakeWindow(impl) {
       'recents-origin: Imports subview restored');
     t.ok(calls.showTab[0] === 'recents',
       'imports-origin: showTab("recents") called');
-    consumePendingScrollRestore();
   });
 }
 
@@ -989,6 +993,34 @@ async function withFakeWindow(impl) {
       'no-origin: fallback shows the pipeline tab');
     t.equal(calls.scrollTo.length, 0,
       'no-origin: no scroll position was ever stashed, so nothing restores');
+  });
+}
+
+{
+  // Mutant-runner finding: the stash must happen BEFORE showTab is
+  // called, not merely "eventually" -- a destination whose loader
+  // consumes synchronously (rather than after an await, as every real
+  // loader here does today) would see nothing pending yet if the
+  // ordering ever inverted. Simulate exactly that: a showTab stub that
+  // consumes the instant it is invoked, standing in for a fully
+  // synchronous destination render. If stashScrollRestore ever moved to
+  // run after showTab(tab), this synchronous consumer would find
+  // nothing pending and scrollTo would never fire.
+  await withFakeWindow((win, calls) => {
+    win.showTab = (name) => {
+      calls.showTab.push(name);
+      consumePendingScrollRestore();
+    };
+    state.searchPlanDetailContext = {
+      requestId: 555,
+      originTab: 'pipeline',
+      originScrollY: 999,
+      originSubView: 'dashboard',
+    };
+    state.pipelineView = 'search-plan-detail';
+    closeSearchPlanDetail();
+    t.ok(calls.scrollTo.length === 1 && calls.scrollTo[0] === 999,
+      'the stash is already set by the time showTab runs, so a synchronous destination consumer restores immediately');
   });
 }
 

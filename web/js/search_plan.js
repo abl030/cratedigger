@@ -161,8 +161,11 @@ export function captureOriginContext(input) {
 
 /**
  * Inverse of {@link captureOriginContext}. Pure — no DOM, no scroll, no
- * tab switching. The actual `showTab` / `window.scrollTo` calls happen
- * in U4's `closeSearchPlanDetail`; this helper just exposes the data
+ * tab switching. The actual `showTab` call happens in U4's
+ * `closeSearchPlanDetail`; the `window.scrollTo` call happens there too
+ * for a destination with no follow-up render (browse), or later, inside
+ * the destination's own render function, via
+ * {@link consumePendingScrollRestore}. This helper just exposes the data
  * shape so call-sites and tests share one definition.
  *
  * @param {import('./state.js').SearchPlanDetailContext} context

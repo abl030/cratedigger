@@ -2670,6 +2670,11 @@ t.section('loadWrongMatches() consumes a pending scroll restore only after its o
   invalidateWrongMatches();
   const content = element();
   const scrollCalls = [];
+  // Captured at the exact moment scrollTo fires -- proves the restore
+  // lands after the FINAL DOM write, not merely after the fetch settles
+  // (a mutant that moved the consume call to just before `renderWrongMatches`
+  // finished would still pass a fetch-timing-only assertion).
+  const htmlAtScrollTime = [];
   let resolveFetch;
   const fetchGate = new Promise((resolve) => { resolveFetch = resolve; });
   const globals = stubGlobals({
@@ -2678,7 +2683,7 @@ t.section('loadWrongMatches() consumes a pending scroll restore only after its o
     // own -- the ONLY fetch this render makes is the queue fetch below.
     document: domStub({ 'wrong-matches-content': content }),
     window: /** @type {any} */ ({
-      scrollTo(_x, y) { scrollCalls.push(y); },
+      scrollTo(_x, y) { scrollCalls.push(y); htmlAtScrollTime.push(content.innerHTML); },
       showTab() {},
     }),
     localStorage: { getItem() { return null; } },
@@ -2706,6 +2711,10 @@ t.section('loadWrongMatches() consumes a pending scroll restore only after its o
   t.equal(scrollCalls.length, 1,
     'scrollTo is called exactly once after loadWrongMatches finishes rendering');
   t.equal(scrollCalls[0], 512, 'restores the exact stashed scroll position');
+  t.excludes(htmlAtScrollTime[0], 'Loading wrong matches',
+    'scrollTo never fires while the loading placeholder is still showing');
+  t.equal(htmlAtScrollTime[0], content.innerHTML,
+    'the wrong-matches DOM was already in its final rendered state at the moment scrollTo fired');
   globals.restore();
 }
 

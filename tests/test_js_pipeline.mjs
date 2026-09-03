@@ -1011,12 +1011,17 @@ t.section('loadPipeline() consumes a pending scroll restore only after its own r
 {
   const content = element();
   const scrollCalls = [];
+  // Captured at the exact moment scrollTo fires -- proves the restore
+  // lands after the FINAL DOM write, not merely after the fetch settles
+  // (a mutant that moved the consume call to just before the last
+  // `el.innerHTML =` would still pass a fetch-timing-only assertion).
+  const htmlAtScrollTime = [];
   let resolveFetch;
   const fetchGate = new Promise((resolve) => { resolveFetch = resolve; });
   stubGlobals({
     document: domStub({ 'pipeline-content': content }),
     window: /** @type {any} */ ({
-      scrollTo(_x, y) { scrollCalls.push(y); },
+      scrollTo(_x, y) { scrollCalls.push(y); htmlAtScrollTime.push(content.innerHTML); },
       showTab() {},
     }),
     fetch: async () => {
@@ -1043,6 +1048,45 @@ t.section('loadPipeline() consumes a pending scroll restore only after its own r
   t.equal(scrollCalls.length, 1,
     'scrollTo is called exactly once after loadPipeline finishes rendering');
   t.equal(scrollCalls[0], 777, 'restores the exact stashed scroll position');
+  t.excludes(htmlAtScrollTime[0], 'Loading...',
+    'scrollTo never fires while the loading placeholder is still showing');
+  t.equal(htmlAtScrollTime[0], content.innerHTML,
+    'the dashboard DOM was already in its final rendered state at the moment scrollTo fired');
+}
+
+t.section('loadPipeline() consumes a pending scroll restore on its long-tail early-return branch too');
+{
+  // Mutant-runner finding (WE-3 review): the `finally` wraps the whole
+  // function, but the dashboard-branch pin above only proves that ONE
+  // branch converges on it -- hoisting just the long-tail early-return
+  // branch out of the `try` left every existing test in this suite
+  // green. closeSearchPlanDetail restores `pipelineView='long-tail'`
+  // for exactly this origin subView, which is the real trigger for this
+  // branch (see U3 in loadPipeline's own body), so drive it that way
+  // rather than setting pipelineView by hand.
+  const content = element();
+  const scrollCalls = [];
+  const globals = stubGlobals({
+    document: domStub({ 'pipeline-content': content }),
+    window: /** @type {any} */ ({
+      scrollTo(_x, y) { scrollCalls.push(y); },
+      showTab() {},
+    }),
+    fetch: async () => ({ ok: true, status: 200, async json() { return { results: [] }; } }),
+  });
+  state.searchPlanDetailContext = {
+    requestId: 43, originTab: 'pipeline', originScrollY: 4321, originSubView: 'long-tail',
+  };
+  state.pipelineView = 'search-plan-detail';
+  closeSearchPlanDetail();
+  t.equal(state.pipelineView, 'long-tail',
+    'origin subView restored to long-tail before loadPipeline runs');
+  await loadPipeline();
+  t.equal(scrollCalls.length, 1,
+    'the long-tail early-return branch also consumes the pending restore');
+  t.equal(scrollCalls[0], 4321,
+    'restores the exact stashed scroll position on the long-tail branch');
+  globals.restore();
 }
 
 t.done();
