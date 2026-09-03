@@ -21,6 +21,7 @@ from hypothesis import strategies as st
 import tests._hypothesis_profiles  # noqa: F401 — registers active profile
 from lib.va_identity import MB_VA_ARTIST_MBID
 from web.mb import (
+    _MB_MIRROR_CONCURRENCY,
     _MBArtistCreditName,
     _MBArtistRef,
     _MBReleaseGroupRef,
@@ -367,6 +368,47 @@ class TestArtistReleaseGroupsWithAppearances(unittest.TestCase):
             },
         ],
     }
+
+    def test_calls_the_shared_parallel_fanout_owner_for_its_three_families(self):
+        """Regression guard for issue #1355 WE5: this module must reach
+        ``web.parallel_fanout``'s shared owner rather than falling back to
+        a private per-module copy of the same lifecycle."""
+        calls: list[tuple[frozenset, int]] = []
+
+        def fake_parallel_results(jobs, *, max_workers):
+            calls.append((frozenset(jobs), max_workers))
+            return {key: job() for key, job in jobs.items()}
+
+        with patch("web.mb.parallel_results", side_effect=fake_parallel_results), \
+             _mock_urlopen_by_fragment({
+                "/release-group?artist=": self.DIRECT,
+                "/release?artist=": self.DIRECT_RELEASES,
+                "/release?track_artist=": self.TRACK_APPEARANCES,
+            }):
+            rows = get_artist_release_groups(self.ARTIST_ID)
+
+        # Each family's own single-page fetch (inside _fetch_browse_pages)
+        # also fans out through the same owner, one call per family for its
+        # page segments, plus the one call that fans the three families out
+        # against each other. Asserting the total count, not just the
+        # top-level call, is load-bearing: a regression that reintroduced a
+        # private copy at _fetch_browse_pages's own call site would
+        # otherwise be invisible here, since that site never uses the
+        # three-family key set the check below looks for.
+        self.assertEqual(len(calls), 4, calls)
+        family_keys = frozenset({"release_groups", "direct_releases", "track_appearances"})
+        top_level_calls = [call for call in calls if call[0] == family_keys]
+        segment_calls = [call for call in calls if call[0] != family_keys]
+        self.assertEqual(len(top_level_calls), 1, calls)
+        self.assertEqual(top_level_calls[0][1], 3)
+        self.assertEqual(len(segment_calls), 3, calls)
+        for keys, max_workers in segment_calls:
+            self.assertEqual(keys, frozenset({0}), calls)
+            self.assertEqual(max_workers, _MB_MIRROR_CONCURRENCY, calls)
+        # The fake still ran every job for real (just serially), so the
+        # downstream merge saw genuine data — swapping in the owner changed
+        # nothing else about the result.
+        self.assertEqual(len(rows), 2)
 
     def test_track_artist_release_groups_are_preserved_as_appearances(self):
         with _mock_urlopen_by_fragment({

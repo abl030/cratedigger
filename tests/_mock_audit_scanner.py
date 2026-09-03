@@ -356,6 +356,18 @@ _LEAF_SEAM_PATTERNS = [
     # keeps those contract tests focused on the wire shape.
     re.compile(r"^web\.routes\.imports\.cleanup_all_wrong_matches$"),
 
+    # Route-to-owner DI seam. ``web.routes.browse.parallel_results`` is the
+    # module-level binding for ``web.parallel_fanout.parallel_results``
+    # (issue #1355 WE5's shared fan-out lifecycle owner — also used by
+    # ``web.mb``/``web.discogs``, already leaf-exempt there via the blanket
+    # ``web.(mb|discogs).`` pattern above). ``web.routes.browse`` has no
+    # such blanket exemption, so the binding needs its own entry. The
+    # owner's own lifecycle (success, cancel-on-exception, shutdown
+    # ordering) is pinned directly in ``tests/test_web_parallel_fanout.py``;
+    # this route module's seam test only proves it reaches that owner
+    # rather than a private per-module copy.
+    re.compile(r"^web\.routes\.browse\.parallel_results$"),
+
     # Module-local DI seams for ``transitions.finalize_request``. Each
     # calling module binds ``finalize_request = transitions.finalize_request``
     # at import time so tests swap the dependency on the route/CLI/harness/

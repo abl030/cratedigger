@@ -484,6 +484,35 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         self.assertIs(data["both"][0]["discogs"]["is_appearance"], False)
         self.assertEqual(data["both"][0]["mb"]["provenance"], ["ordinary"])
 
+    def test_artist_compare_calls_the_shared_parallel_fanout_owner(self):
+        """Regression guard for issue #1355 WE5: this module must reach
+        ``web.parallel_fanout``'s shared owner rather than falling back to
+        a private per-module copy of the same lifecycle."""
+        calls: list[tuple[frozenset, int]] = []
+
+        def fake_parallel_results(jobs, *, max_workers):
+            calls.append((frozenset(jobs), max_workers))
+            return {key: job() for key, job in jobs.items()}
+
+        with (
+            patch("web.routes.browse.mb_api") as mock_mb,
+            patch("web.routes.browse.discogs_api") as mock_dg,
+            patch("web.routes.browse.parallel_results", side_effect=fake_parallel_results),
+        ):
+            mock_mb.search_artists.return_value = [{"id": self.ARTIST_ID, "name": "Radiohead"}]
+            mock_mb.get_artist_release_groups.return_value = _catalogue([])
+            mock_mb.get_artist_name.return_value = "Radiohead"
+            mock_dg.search_artists.return_value = [{"id": "3840", "name": "Radiohead"}]
+            mock_dg.get_artist_releases.return_value = _catalogue([])
+            mock_dg.get_artist_name.return_value = "Radiohead"
+            status, _data = self._get("/api/artist/compare?name=Radiohead")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(calls), 1)
+        keys, max_workers = calls[0]
+        self.assertEqual(keys, frozenset({"mb", "discogs"}))
+        self.assertEqual(max_workers, 2)
+
     def test_artist_compare_preserves_adapter_owned_provenance(self):
         """The route passes through MB's exact provenance union unchanged."""
         official_rg = {

@@ -1007,6 +1007,31 @@ class TestGetArtistReleases(unittest.TestCase):
 
     EMPTY_APPEARANCES: ClassVar = {"results": [], "total": 0, "page": 1, "per_page": 1}
 
+    def test_calls_the_shared_parallel_fanout_owner_for_masters_and_appearances(self):
+        """Regression guard for issue #1355 WE5: this module must reach
+        ``web.parallel_fanout``'s shared owner rather than falling back to
+        a private per-module copy of the same lifecycle."""
+        calls: list[tuple[frozenset, int]] = []
+
+        def fake_parallel_results(jobs, *, max_workers):
+            calls.append((frozenset(jobs), max_workers))
+            return {key: job() for key, job in jobs.items()}
+
+        with patch("web.discogs.parallel_results", side_effect=fake_parallel_results), \
+             _mock_urlopen_by_url({
+                "/masters": self.MASTERS_DATA,
+                "/appearances": self.EMPTY_APPEARANCES,
+            }):
+            rows = get_artist_releases(3840)
+
+        self.assertEqual(len(calls), 1)
+        keys, max_workers = calls[0]
+        self.assertEqual(keys, frozenset({"masters", "appearances"}))
+        self.assertEqual(max_workers, web.discogs._DISCOGS_ARTIST_CONCURRENCY)
+        # The fake still ran every job for real (just serially), so the
+        # downstream merge saw genuine data.
+        self.assertEqual(len(rows), 3)
+
     def _assert_incomplete_envelope_rejected(
         self, *, endpoint: str, payload: dict,
     ) -> None:
