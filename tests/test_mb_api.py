@@ -21,6 +21,7 @@ from hypothesis import strategies as st
 import tests._hypothesis_profiles  # noqa: F401 — registers active profile
 from lib.va_identity import MB_VA_ARTIST_MBID
 from web.mb import (
+    _MB_MIRROR_CONCURRENCY,
     _MBArtistCreditName,
     _MBArtistRef,
     _MBReleaseGroupRef,
@@ -386,13 +387,24 @@ class TestArtistReleaseGroupsWithAppearances(unittest.TestCase):
             }):
             rows = get_artist_release_groups(self.ARTIST_ID)
 
-        # Each family's own single-page fetch also fans out through the
-        # same owner (one call per family for its page segments), plus the
-        # one call that fans the three families out against each other.
+        # Each family's own single-page fetch (inside _fetch_browse_pages)
+        # also fans out through the same owner, one call per family for its
+        # page segments, plus the one call that fans the three families out
+        # against each other. Asserting the total count, not just the
+        # top-level call, is load-bearing: a regression that reintroduced a
+        # private copy at _fetch_browse_pages's own call site would
+        # otherwise be invisible here, since that site never uses the
+        # three-family key set the check below looks for.
+        self.assertEqual(len(calls), 4, calls)
         family_keys = frozenset({"release_groups", "direct_releases", "track_appearances"})
         top_level_calls = [call for call in calls if call[0] == family_keys]
+        segment_calls = [call for call in calls if call[0] != family_keys]
         self.assertEqual(len(top_level_calls), 1, calls)
         self.assertEqual(top_level_calls[0][1], 3)
+        self.assertEqual(len(segment_calls), 3, calls)
+        for keys, max_workers in segment_calls:
+            self.assertEqual(keys, frozenset({0}), calls)
+            self.assertEqual(max_workers, _MB_MIRROR_CONCURRENCY, calls)
         # The fake still ran every job for real (just serially), so the
         # downstream merge saw genuine data — swapping in the owner changed
         # nothing else about the result.

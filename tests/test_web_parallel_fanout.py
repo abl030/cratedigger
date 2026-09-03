@@ -141,9 +141,13 @@ class TestParallelResultsFailureLifecycle(unittest.TestCase):
             slow_released.wait(timeout=5)
             return "late"
 
-        # max_workers=2 so "raiser" and "slow" both start immediately;
-        # "queued" never gets a worker slot before the exception fires.
-        jobs = {"raiser": raiser, "slow": slow, "queued": lambda: "unused"}
+        # max_workers=2 so "raiser" and "slow" both start immediately.
+        # "third" is submitted after them: once "raiser" finishes, its
+        # freed worker races the main thread's own cancel loop to dequeue
+        # "third" next, so this test does NOT rely on "third" staying
+        # pending — only on cancel() being called on every future in the
+        # dict regardless of the state the race left it in (see below).
+        jobs = {"raiser": raiser, "slow": slow, "third": lambda: "unused"}
 
         with mock.patch.object(concurrent.futures.Future, "cancel", recording_cancel), \
              mock.patch.object(
@@ -170,10 +174,10 @@ class TestParallelResultsFailureLifecycle(unittest.TestCase):
 
     def test_a_still_running_sibling_never_blocks_the_prompt_raise(self):
         """The ``for future in done: future.result()`` check exists so the
-        final results comprehension is never reached while an earlier
-        -inserted sibling is still running. Without it, the comprehension
-        would call ``.result()`` on "slow" (still running) before it ever
-        reaches "raiser", and block until "slow" completes.
+        final results comprehension is never reached while an
+        earlier-inserted sibling is still running. Without it, the
+        comprehension would call ``.result()`` on "slow" (still running)
+        before it ever reaches "raiser", and block until "slow" completes.
         """
         slow_released = threading.Event()
 
