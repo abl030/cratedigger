@@ -329,7 +329,6 @@ class _EvidenceMixin(_PipelineDBBase):
                 -- changes nothing about its race profile.
                 SELECT
                     stored.id,
-                    stored.lineage_version,
                     stored.spectral_subject,
                     stored.was_converted_from,
                     EXISTS (
