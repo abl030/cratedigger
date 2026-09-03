@@ -595,6 +595,25 @@ class TestPipelineUpgradeQueued(unittest.TestCase):
             ),
             False,
         ),
+        (
+            # The owner decides by truthiness (`x or y`); a present-but-
+            # empty override must resolve exactly like an absent one, not
+            # like a real value.
+            "empty-string override is not an upgrade",
+            make_request_row(
+                status="wanted", search_filetype_override="",
+                target_format=None,
+            ),
+            False,
+        ),
+        (
+            "empty-string target format is not an upgrade",
+            make_request_row(
+                status="wanted", search_filetype_override=None,
+                target_format="",
+            ),
+            False,
+        ),
     )
 
     def test_branches(self) -> None:

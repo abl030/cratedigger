@@ -1,11 +1,15 @@
 """Generated parity property for the shared upgrade_queued decision.
 
 Issue #1355 item 6: `_pipeline_upgrade_queued` in `web/library_album_row.py`
-is the one owner both the list-row projection
-(`LibraryAlbumRow.from_pipeline_request`) and the detail projection
-(`web/library_album_detail_service.py::build_library_album_detail`) call.
-This drives both real outer adapters over generated pipeline rows and
-asserts they never disagree on `upgrade_queued`.
+is the one owner every projection that surfaces `upgrade_queued` calls:
+the pipeline-only list row (`LibraryAlbumRow.from_pipeline_request`), the
+in-library row overlay (`LibraryAlbumRow.with_pipeline_request` -- the
+adapter actually paired with the detail page for a beets-backed album),
+and the detail projection
+(`web/library_album_detail_service.py::build_library_album_detail`). This
+drives all three real outer adapters over generated pipeline rows and
+asserts none of them ever disagrees with the detail projection on
+`upgrade_queued`.
 """
 from __future__ import annotations
 
@@ -23,8 +27,11 @@ _STATUSES = (
     "initializing", "wanted", "downloading", "processing",
     "imported", "unsearchable", "replaced",
 )
-_OVERRIDES = (None, "flac", "mp3")
-_TARGET_FORMATS = (None, "lossless", "default")
+# Empty string is included alongside None and real values: the owner
+# decides by truthiness (`x or y`), so a present-but-empty column must
+# resolve the same as an absent one on both sides of the projection.
+_OVERRIDES = (None, "", "flac", "mp3")
+_TARGET_FORMATS = (None, "", "lossless", "default")
 # A well-formed MB UUID so the detail service's identity-attachment guard
 # resolves cleanly; identity is not the decision under test, only the three
 # fields below are.
@@ -32,14 +39,14 @@ _MB_RELEASE_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
 
 def upgrade_queued_agreement_violations(
-    list_value: bool, detail_value: bool,
+    left_value: bool, right_value: bool,
 ) -> list[str]:
     """Independent checker clause, self-tested below (Q1 + Q3)."""
     violations: list[str] = []
-    if list_value != detail_value:
+    if left_value != right_value:
         violations.append(
-            "list-row and detail projections disagree on upgrade_queued: "
-            f"list={list_value!r} detail={detail_value!r}"
+            "projections disagree on upgrade_queued: "
+            f"left={left_value!r} right={right_value!r}"
         )
     return violations
 
@@ -67,9 +74,27 @@ def _pipeline_row(world: dict[str, object]) -> dict[str, object]:
 
 
 def _list_row_upgrade_queued(row: dict[str, object]) -> bool:
+    """The pipeline-only list row (`from_pipeline_request`)."""
     return LibraryAlbumRow.from_pipeline_request(
         row, track_count=0,
     ).upgrade_queued
+
+
+def _attached_row_upgrade_queued(row: dict[str, object]) -> bool:
+    """The in-library row overlay (`with_pipeline_request`) -- the sibling
+    an operator actually sees paired with the detail page for one beets
+    album, distinct from the pipeline-only list row above."""
+    base = LibraryAlbumRow.from_beets_album(
+        {
+            "id": 7,
+            "album": "Test Album",
+            "artist": "Test Artist",
+            "track_count": 1,
+            "added": 0.0,
+        },
+        rank_fn=lambda _fmt, _kbps: "transparent",
+    )
+    return base.with_pipeline_request(row).upgrade_queued
 
 
 def _detail_upgrade_queued(row: dict[str, object]) -> bool:
@@ -90,7 +115,8 @@ def _detail_upgrade_queued(row: dict[str, object]) -> bool:
 
 
 class TestUpgradeQueuedProjectionsAgree(unittest.TestCase):
-    """The list-row and detail projections must never disagree."""
+    """No real projection may disagree with the detail page on
+    `upgrade_queued`."""
 
     @example(world={
         "status": "wanted", "search_filetype_override": "flac",
@@ -108,13 +134,24 @@ class TestUpgradeQueuedProjectionsAgree(unittest.TestCase):
         "status": "imported", "search_filetype_override": "flac",
         "target_format": "lossless",
     })
+    @example(world={
+        "status": "wanted", "search_filetype_override": "",
+        "target_format": None,
+    })
+    @example(world={
+        "status": "wanted", "search_filetype_override": None,
+        "target_format": "",
+    })
     @given(world=_upgrade_queued_worlds())
     def test_projections_agree(self, world: dict[str, object]) -> None:
         row = _pipeline_row(world)
-        list_value = _list_row_upgrade_queued(row)
         detail_value = _detail_upgrade_queued(row)
-        violations = upgrade_queued_agreement_violations(
-            list_value, detail_value)
+        list_value = _list_row_upgrade_queued(row)
+        attached_value = _attached_row_upgrade_queued(row)
+        violations = [
+            *upgrade_queued_agreement_violations(list_value, detail_value),
+            *upgrade_queued_agreement_violations(attached_value, detail_value),
+        ]
         self.assertEqual(violations, [], violations)
 
 

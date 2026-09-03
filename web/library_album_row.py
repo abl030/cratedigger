@@ -19,9 +19,10 @@ from lib.release_identity import (
 def _pipeline_upgrade_queued(row: Mapping[str, object] | None) -> bool:
     """Whether a pipeline request row is a wanted quality upgrade.
 
-    The one owner for this decision (issue #1355 item 6): both the list-row
-    projection here and `web/library_album_detail_service.py`'s detail
-    projection call this function rather than each spelling the check.
+    The one owner for this decision (issue #1355 item 6): both call sites
+    here (`from_pipeline_request` and `with_pipeline_request`) and
+    `web/library_album_detail_service.py`'s detail projection call this
+    function rather than each spelling the check.
     """
     return bool(
         row
