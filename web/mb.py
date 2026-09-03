@@ -460,12 +460,18 @@ class _MBArtistReleasesWithRecordingsResponse(msgspec.Struct, rename="kebab"):
 # ``_MBReleaseFullStruct`` above, so ``lib.artist_releases`` —
 # deliberately decoupled from any ``web.mb`` runtime import — keeps
 # consuming ``.get(key, default)``-style dicts. Not a bare
-# ``msgspec.to_builtins`` passthrough: that call alone would emit an
-# explicit JSON ``null`` for a Struct field left at its ``None`` default
-# (``country``, ``status``, ``release_group``, a track's ``recording``),
-# a PRESENT key where the pre-Struct dict-based code had a genuinely
-# ABSENT one — ``_release_full_to_json_dict`` deletes those keys back
-# to match (issue #1355 item 5 review finding F2).
+# ``msgspec.to_builtins`` passthrough: that call alone would leave a
+# null ``country``/``status``/``release_group``/track ``recording`` as
+# a PRESENT ``null`` key (issue #1355 item 5 review finding F2). For
+# ``release_group`` and a track's ``recording``, that null would defeat
+# ``lib.artist_releases``'s ``.get(key, {})`` fallback and crash on the
+# next ``.get()``, so the key is deleted — fail-closed legislation for a
+# shape MB has not actually been observed sending (0/1,057 releases,
+# 0/1,991 tracks). For ``country``/``status``, MB really does send an
+# explicit null (24 and 12 of 1,057 measured releases), which the
+# pre-Struct dict-based code passed through as ``None``; deleting the
+# key instead makes ``.get("country", "")`` return ``""`` — a real, if
+# presentation-invisible, behavior change, not a restore of prior shape.
 
 
 class _MBArtistRefJSON(TypedDict, total=False):
