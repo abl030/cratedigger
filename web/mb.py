@@ -455,11 +455,17 @@ class _MBArtistReleasesWithRecordingsResponse(msgspec.Struct, rename="kebab"):
 # ── TypedDict shapes still used as plain-dict type hints ────────────────
 #
 # ``get_release_raw`` returns the untouched wide dict (see its docstring);
-# ``get_artist_releases_with_recordings`` returns a plain dict per release
-# (via ``msgspec.to_builtins`` on the validated ``_MBReleaseFullStruct``
-# above) so ``lib.artist_releases`` — deliberately decoupled from any
-# ``web.mb`` runtime import — keeps consuming ``.get(...)``-style dicts
-# exactly as before.
+# ``get_artist_releases_with_recordings`` returns a plain dict per release,
+# built by ``_release_full_to_json_dict`` from the validated
+# ``_MBReleaseFullStruct`` above, so ``lib.artist_releases`` —
+# deliberately decoupled from any ``web.mb`` runtime import — keeps
+# consuming ``.get(key, default)``-style dicts. Not a bare
+# ``msgspec.to_builtins`` passthrough: that call alone would emit an
+# explicit JSON ``null`` for a Struct field left at its ``None`` default
+# (``country``, ``status``, ``release_group``, a track's ``recording``),
+# a PRESENT key where the pre-Struct dict-based code had a genuinely
+# ABSENT one — ``_release_full_to_json_dict`` deletes those keys back
+# to match (issue #1355 item 5 review finding F2).
 
 
 class _MBArtistRefJSON(TypedDict, total=False):
@@ -538,9 +544,9 @@ _MBReleaseFullJSON = TypedDict("_MBReleaseFullJSON", {
 }, total=False)
 """Plain-dict shape returned by ``get_artist_releases_with_recordings`` —
 each entry is validated on ingest via ``_MBReleaseFullStruct`` and handed
-out as a dict via ``msgspec.to_builtins``. ``lib.artist_releases`` imports
-this under ``TYPE_CHECKING`` for its own type hints (zero runtime coupling
-to this module) and needs this exact nested-TypedDict shape, not a
+out as a dict via ``_release_full_to_json_dict``. ``lib.artist_releases``
+imports this under ``TYPE_CHECKING`` for its own type hints (zero runtime
+coupling to this module) and needs this exact nested-TypedDict shape, not a
 flattened ``dict[str, object]``, to keep its own chained ``.get()`` reads
 strict-pyright-clean."""
 

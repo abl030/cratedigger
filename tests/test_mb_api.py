@@ -520,31 +520,63 @@ class TestGetReleaseTolerantOfLiveMirrorNulls(unittest.TestCase):
         present-as-None, or lib.artist_releases's .get(key, {}) calls
         return None instead of {} and crash on the next .get()."""
         artist_id = "artist-null-fields"
-        canonical = {"release-count": 1, "releases": [{"id": "rel-1"}]}
+        canonical = {
+            "release-count": 2,
+            "releases": [{"id": "rel-null"}, {"id": "rel-populated"}],
+        }
         detailed = {
-            "release-count": 1,
-            "releases": [{
-                "id": "rel-1", "title": "No Release Group", "date": "2020",
-                "country": None, "status": None,
-                "media": [{
-                    "position": 1,
-                    "tracks": [{"position": 1, "title": "Track One"}],
-                }],
-            }],
+            "release-count": 2,
+            "releases": [
+                {
+                    "id": "rel-null", "title": "No Release Group", "date": "2020",
+                    "country": None, "status": None,
+                    "media": [{
+                        "position": 1,
+                        "tracks": [{"position": 1, "title": "Track One"}],
+                    }],
+                },
+                {
+                    "id": "rel-populated", "title": "Has Everything", "date": "2021",
+                    "country": "GB", "status": "Official",
+                    "release-group": {"id": "rg-1"},
+                    "media": [{
+                        "position": 1,
+                        "tracks": [{
+                            "position": 1, "title": "Track Two",
+                            "recording": {"id": "rec-1"},
+                        }],
+                    }],
+                },
+            ],
         }
         with _mock_urlopen_by_fragment({
             f"/release?artist={artist_id}&fmt=json": canonical,
             f"/release?artist={artist_id}&inc=recordings": detailed,
         }):
             releases = get_artist_releases_with_recordings(artist_id)
-        self.assertEqual(len(releases), 1)
-        release = releases[0]
-        self.assertNotIn("country", release)
-        self.assertNotIn("status", release)
-        self.assertNotIn("release-group", release)
-        media = release.get("media", [])
-        track = media[0].get("tracks", [])[0]
-        self.assertNotIn("recording", track)
+        self.assertEqual(len(releases), 2)
+        null_release, populated_release = releases
+
+        # Null/absent fields are OMITTED, not present-as-None.
+        self.assertNotIn("country", null_release)
+        self.assertNotIn("status", null_release)
+        self.assertNotIn("release-group", null_release)
+        null_media = null_release.get("media", [])
+        null_track = null_media[0].get("tracks", [])[0]
+        self.assertNotIn("recording", null_track)
+
+        # Must-still-work: a genuinely populated sibling survives with
+        # its real values, not swept up by the same deletion logic.
+        self.assertEqual(populated_release.get("country"), "GB")
+        self.assertEqual(populated_release.get("status"), "Official")
+        rg = populated_release.get("release-group")
+        assert isinstance(rg, dict)
+        self.assertEqual(rg.get("id"), "rg-1")
+        populated_media = populated_release.get("media", [])
+        populated_track = populated_media[0].get("tracks", [])[0]
+        recording = populated_track.get("recording")
+        assert isinstance(recording, dict)
+        self.assertEqual(recording.get("id"), "rec-1")
 
 
 class TestGetReleaseNormalizesFullPayload(unittest.TestCase):
