@@ -87,6 +87,8 @@ from lib.pipeline_db.requests import (
 from lib.pipeline_db.terminal_outcomes import _TransactionalTransitionsDB
 from lib.quality import (
     CURRENT_EVIDENCE_LINEAGE_VERSION,
+    EVIDENCE_PROVENANCE_MEASURED,
+    EVIDENCE_SUBJECT_INSTALLED,
     ActiveDownloadState,
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
@@ -9535,8 +9537,16 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         assert loaded is not None
         self.assertEqual(loaded.measurement.spectral_grade, "likely_transcode")
         self.assertEqual(loaded.measurement.spectral_bitrate_kbps, 160)
-        self.assertEqual(loaded.measurement.spectral_subject, "installed")
-        self.assertEqual(loaded.measurement.spectral_provenance, "measured")
+        # Issue #1355 Batch E (E2): pinned against the shared constants, not
+        # the literal strings, so persist_current_spectral_measurement's SQL
+        # is proven bound to EVIDENCE_SUBJECT_INSTALLED /
+        # EVIDENCE_PROVENANCE_MEASURED rather than a third hardcoded copy.
+        self.assertEqual(
+            loaded.measurement.spectral_subject, EVIDENCE_SUBJECT_INSTALLED
+        )
+        self.assertEqual(
+            loaded.measurement.spectral_provenance, EVIDENCE_PROVENANCE_MEASURED
+        )
 
     def test_current_spectral_write_carries_capture_facts_real_pg(self):
         """Issue #829 Phase 5 finding A (round 3 review): every writer of

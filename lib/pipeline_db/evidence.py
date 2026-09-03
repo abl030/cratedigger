@@ -14,6 +14,7 @@ from lib.evidence_media_identity import (
 from lib.import_execution import ExecutionLeaseSnapshot
 from lib.pipeline_db._core import _PipelineDBBase
 from lib.quality import (
+    EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_INSTALLED,
     EVIDENCE_SUBJECT_SOURCE,
     AacLatticeCapture,
@@ -982,8 +983,8 @@ class _EvidenceMixin(_PipelineDBBase):
             UPDATE album_quality_evidence AS evidence
             SET spectral_grade = %s,
                 spectral_bitrate_kbps = %s,
-                spectral_subject = 'installed',
-                spectral_provenance = 'measured',
+                spectral_subject = %s,
+                spectral_provenance = %s,
                 cliff_hz = %s,
                 codec_family = %s,
                 ultrasonic_deficit_db = %s,
@@ -999,6 +1000,8 @@ class _EvidenceMixin(_PipelineDBBase):
             (
                 grade,
                 bitrate_kbps,
+                EVIDENCE_SUBJECT_INSTALLED,
+                EVIDENCE_PROVENANCE_MEASURED,
                 cliff_hz,
                 codec_family,
                 ultrasonic_deficit_db,
