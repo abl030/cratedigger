@@ -46,6 +46,7 @@ from lib.discogs_positions import (
 )
 from web.discogs import (
     LabelEntity,
+    _DiscogsArtistRef,
     _parse_year,
     _primary_artist_name,
     get_artist_name,
@@ -114,7 +115,7 @@ class TestParseYear(unittest.TestCase):
 class TestPrimaryArtistName(unittest.TestCase):
     def test_with_artists(self):
         self.assertEqual(
-            _primary_artist_name([{"id": 1, "name": "Radiohead"}]),
+            _primary_artist_name([_DiscogsArtistRef(id=1, name="Radiohead")]),
             "Radiohead",
         )
 
@@ -1793,6 +1794,46 @@ class TestGetLabelReleases(unittest.TestCase):
 
         with patch("web.discogs.urllib.request.urlopen", side_effect=_404), self.assertRaises(HTTPError):
             get_label_releases(99887763, include_sublabels=True)
+
+
+class TestWireBoundaryValidation(unittest.TestCase):
+    """Issue #1355 item 5 — every general-purpose Discogs endpoint that was
+    previously untyped now decodes through a strict ``msgspec.Struct``.
+    One RED test per newly-decoded endpoint family: feed a real field the
+    wrong wire type and assert ``msgspec.ValidationError`` fires at the
+    boundary rather than a ``.get()`` silently tolerating it."""
+
+    def test_search_releases_rejects_non_float_score(self) -> None:
+        bad = {"results": [{"id": 1, "title": "Bad Score", "score": "not-a-float"}]}
+        with _mock_urlopen(bad), self.assertRaises(msgspec.ValidationError):
+            search_releases("bad score query")
+
+    def test_search_artists_rejects_non_int_id(self) -> None:
+        bad = {"results": [{"id": "not-an-int", "name": "Bad Id"}]}
+        with _mock_urlopen(bad), self.assertRaises(msgspec.ValidationError):
+            search_artists("bad artist id query")
+
+    def test_get_master_releases_rejects_non_int_track_count(self) -> None:
+        bad = {
+            "title": "Bad Master",
+            "primary_type": "Album",
+            "releases": [{
+                "id": 1, "title": "Bad Release", "released": "2024",
+                "country": "US", "track_count": "twelve", "formats": [],
+            }],
+        }
+        with _mock_urlopen(bad), self.assertRaises(msgspec.ValidationError):
+            get_master_releases(9999901)
+
+    def test_get_release_rejects_non_str_title(self) -> None:
+        bad = {"id": 9999902, "title": 12345, "artists": [], "tracks": []}
+        with _mock_urlopen(bad), self.assertRaises(msgspec.ValidationError):
+            get_release(9999902, fresh=True)
+
+    def test_get_artist_name_rejects_non_str_name(self) -> None:
+        bad = {"id": 9999903, "name": 12345}
+        with _mock_urlopen(bad), self.assertRaises(msgspec.ValidationError):
+            get_artist_name(9999903)
 
 
 if __name__ == "__main__":

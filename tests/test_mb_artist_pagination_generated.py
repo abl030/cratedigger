@@ -335,7 +335,11 @@ class TestArtistRecordingPaginationPins(unittest.TestCase):
             assert_complete_order(world.ids, _old_offset_len_shape(world))
         with self.assertRaises(mb.MusicBrainzArtistCatalogueIncomplete):
             mb.assert_exact_release_id_order(
-                world.ids[:2], [{"id": world.ids[0]}, {"id": world.ids[0]}],
+                world.ids[:2],
+                [
+                    mb._MBReleaseFullStruct(id=world.ids[0]),
+                    mb._MBReleaseFullStruct(id=world.ids[0]),
+                ],
             )
         with self.assertRaisesRegex(AssertionError, "mirror cap exceeded"):
             assert_request_cap(5)

@@ -8,7 +8,7 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
-from web.discogs import _status_from_formats
+from web.discogs import _DiscogsFormat, _status_from_formats
 
 
 def _expected_status(*, promo: bool, unofficial: bool) -> str:
@@ -58,7 +58,7 @@ class TestDiscogsPressingProvenanceGenerated(unittest.TestCase):
         wire_value: str | list[str] = (
             ", ".join(descriptions) if as_string else descriptions
         )
-        actual = _status_from_formats([{"descriptions": wire_value}])
+        actual = _status_from_formats([_DiscogsFormat(descriptions=wire_value)])
         assert_pressing_status(
             _expected_status(promo=promo, unofficial=unofficial), actual,
         )
