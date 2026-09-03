@@ -26,7 +26,10 @@ from web.download_history_view import (
     DownloadHistoryViewRow,
     build_download_history_rows,
 )
-from web.library_album_row import select_exact_library_request_attachment
+from web.library_album_row import (
+    _pipeline_upgrade_queued,
+    select_exact_library_request_attachment,
+)
 
 if TYPE_CHECKING:
     from lib.pipeline_db.rows import ArtistRequestRow, DownloadLogWithEvidenceRow
@@ -306,14 +309,7 @@ def build_library_album_detail(
             "target_format": (
                 pipeline_request.get("target_format") if pipeline_request else None
             ),
-            "upgrade_queued": bool(
-                pipeline_request
-                and pipeline_request.get("status") == "wanted"
-                and (
-                    pipeline_request.get("search_filetype_override")
-                    or pipeline_request.get("target_format")
-                )
-            ),
+            "upgrade_queued": _pipeline_upgrade_queued(pipeline_request),
             "download_history": history_items,
             "convergence": convergence,
         },
