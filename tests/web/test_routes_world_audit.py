@@ -14,6 +14,17 @@ from web.runtime import WebRuntime, install_runtime, runtime
 
 
 class TestWorldAuditRoute(_FakeDbWebServerCase):
+    def test_clean_report_returns_two_hundred(self) -> None:
+        """No requests, no Beets albums, no denylist rows: nothing for
+        any invariant to observe, so the real `outcome` is `clean` rather
+        than `observations_only` — the route's other 200 case."""
+        with install_runtime(make_web_runtime(runtime(), beets=FakeBeetsDB())):
+            status, payload = self._get("/api/audit/world")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["status"], "clean")
+        self.assertTrue(payload["complete"])
+
     def test_reports_shared_service_payload(self) -> None:
         beets = FakeBeetsDB()
         self.db.seed_request(make_request_row(
