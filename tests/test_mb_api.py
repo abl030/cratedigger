@@ -21,6 +21,10 @@ from hypothesis import strategies as st
 import tests._hypothesis_profiles  # noqa: F401 — registers active profile
 from lib.va_identity import MB_VA_ARTIST_MBID
 from web.mb import (
+    _MBArtistCreditName,
+    _MBArtistRef,
+    _MBReleaseGroupRef,
+    _normalize_artist_release_group,
     _quote_mb_identifier,
     get_artist_name,
     get_artist_release_groups,
@@ -232,10 +236,16 @@ class TestSearchReleaseGroupsVaRewrite(unittest.TestCase):
         with _mock_urlopen(_ONE_RELEASE):
             results = search_release_groups("Rock Christmas Various Artists")
         self.assertEqual(len(results), 1)
-        self.assertEqual(results[0]["id"], "rg-1")
-        self.assertEqual(results[0]["artist_name"], "Various Artists")
-        self.assertEqual(results[0]["primary_type"], "Album")
-        self.assertEqual(results[0]["score"], 100)
+        self.assertEqual(results[0], {
+            "id": "rg-1",
+            "title": "Rock Christmas: The Very Best Of",
+            "primary_type": "Album",
+            "first_release_date": "2024",
+            "artist_id": MB_VA_ARTIST_MBID,
+            "artist_name": "Various Artists",
+            "artist_disambiguation": "add compilations to this artist",
+            "score": 100,
+        })
 
 
 class TestSearchArtistsRelatedIdentities(unittest.TestCase):
@@ -437,6 +447,257 @@ class TestArtistReleaseGroupsWithAppearances(unittest.TestCase):
         self.assertEqual(rows[0].type, "")
         self.assertEqual(rows[0].primary_types, [])
         self.assertEqual(rows[0].first_release_date, "")
+
+
+class TestNormalizeArtistReleaseGroup(unittest.TestCase):
+    """``_normalize_artist_release_group`` field-by-field — the existing
+    ``TestArtistReleaseGroupsWithAppearances`` above never asserts
+    ``.title``/``.type``/``.first_release_date``/``.primary_types``, and
+    never exercises a multi-name ``artist-credit`` join."""
+
+    def test_full_field_mapping_with_multi_artist_credit(self) -> None:
+        rg = _MBReleaseGroupRef(
+            id="rg-multi",
+            title="Split Release",
+            primary_type="EP",
+            secondary_types=["Live"],
+            first_release_date="2003-05-01",
+            artist_credit=[
+                _MBArtistCreditName(
+                    name="Artist A",
+                    artist=_MBArtistRef(id="artist-a-id", name="Artist A"),
+                ),
+                _MBArtistCreditName(
+                    name="Artist B",
+                    artist=_MBArtistRef(id="artist-b-id", name="Artist B"),
+                ),
+            ],
+        )
+        row = _normalize_artist_release_group(rg, is_appearance=True)
+        self.assertEqual(row.id, "rg-multi")
+        self.assertEqual(row.title, "Split Release")
+        self.assertEqual(row.type, "EP")
+        self.assertEqual(row.primary_types, ["EP"])
+        self.assertEqual(row.secondary_types, ["Live"])
+        self.assertEqual(row.first_release_date, "2003-05-01")
+        self.assertEqual(row.artist_credit, "Artist A / Artist B")
+        self.assertEqual(row.primary_artist_id, "artist-a-id")
+        self.assertIs(row.is_appearance, True)
+
+    def test_album_type_maps_to_the_single_structural_type(self) -> None:
+        rg = _MBReleaseGroupRef(id="rg-album", primary_type="Album")
+        row = _normalize_artist_release_group(rg, is_appearance=False)
+        self.assertEqual(row.type, "Album")
+        self.assertEqual(row.primary_types, ["Album"])
+
+
+class TestGetReleaseNormalizesFullPayload(unittest.TestCase):
+    """``get_release``/``_strip_release`` field-by-field, against a real
+    full-release shape (``inc=recordings+artist-credits+media+release-
+    groups+labels``) — mirrors ``tests/test_discogs_api.py::TestGetRelease
+    .test_normalizes_release``, MB's twin had no equivalent before issue
+    #1355 item 5 rewrote ``_strip_release`` onto ``_MBReleaseFullStruct``."""
+
+    RELEASE_DATA: ClassVar = {
+        "id": "rel-full",
+        "title": "The Bends",
+        "date": "1995-03-13",
+        "country": "GB",
+        "status": "Official",
+        "artist-credit": [{
+            "name": "Radiohead",
+            "artist": {"id": "a74b1b7f-71a5-4011-9441-d0b5e4122711", "name": "Radiohead"},
+        }],
+        "release-group": {"id": "rg-the-bends"},
+        "media": [{
+            "position": 1,
+            "format": "CD",
+            "tracks": [
+                {
+                    "position": 1, "number": "1", "title": "Planet Telex",
+                    "length": 264000,
+                    "recording": {"id": "rec-1", "length": 264000},
+                },
+                {
+                    "position": 2, "number": "2", "title": "The Bends",
+                    "length": 240000,
+                    "recording": {"id": "rec-2"},
+                },
+            ],
+        }],
+    }
+
+    def test_normalizes_release(self) -> None:
+        with _mock_urlopen(self.RELEASE_DATA):
+            result = get_release("rel-full", fresh=True)
+
+        self.assertEqual(result["id"], "rel-full")
+        self.assertEqual(result["title"], "The Bends")
+        self.assertEqual(result["artist_name"], "Radiohead")
+        self.assertEqual(result["artist_id"], "a74b1b7f-71a5-4011-9441-d0b5e4122711")
+        self.assertEqual(result["release_group_id"], "rg-the-bends")
+        self.assertEqual(result["date"], "1995-03-13")
+        self.assertEqual(result["year"], 1995)
+        self.assertEqual(result["country"], "GB")
+        self.assertEqual(result["status"], "Official")
+        tracks = result["tracks"]
+        assert isinstance(tracks, list)
+        self.assertEqual(len(tracks), 2)
+        self.assertEqual(tracks[0], {
+            "disc_number": 1, "track_number": 1, "title": "Planet Telex",
+            "length_seconds": 264.0,
+        })
+        # Second track's recording carries no explicit length — falls back
+        # to the track-level length, not the recording's (absent) one.
+        self.assertEqual(tracks[1], {
+            "disc_number": 1, "track_number": 2, "title": "The Bends",
+            "length_seconds": 240.0,
+        })
+
+    def test_missing_artist_credit_and_release_group_normalize_to_unknown(
+        self,
+    ) -> None:
+        bare = {
+            "id": "rel-bare", "title": "Bare Release",
+            "date": "2001", "country": "", "status": "",
+            "media": [],
+        }
+        with _mock_urlopen(bare):
+            result = get_release("rel-bare", fresh=True)
+        self.assertEqual(result["artist_name"], "Unknown")
+        self.assertIsNone(result["artist_id"])
+        self.assertIsNone(result["release_group_id"])
+        self.assertEqual(result["tracks"], [])
+
+    def test_pregap_becomes_track_zero(self) -> None:
+        with_pregap = {
+            "id": "rel-pregap", "title": "Hidden Intro", "date": "2010",
+            "country": "US", "status": "Official",
+            "media": [{
+                "position": 1, "format": "CD",
+                "pregap": {"title": "Untitled", "length": 5000},
+                "tracks": [
+                    {"position": 1, "number": "1", "title": "Real Track", "length": 180000},
+                ],
+            }],
+        }
+        with _mock_urlopen(with_pregap):
+            result = get_release("rel-pregap", fresh=True)
+        tracks = result["tracks"]
+        assert isinstance(tracks, list)
+        self.assertEqual(tracks[0], {
+            "disc_number": 1, "track_number": 0, "title": "Untitled",
+            "length_seconds": 5.0,
+        })
+        self.assertEqual(tracks[1]["track_number"], 1)
+
+    def test_vinyl_track_number_falls_back_to_the_printed_label(self) -> None:
+        """A track missing ``position`` falls back to parsing ``number``
+        (MB's printed label, e.g. ``"A1"`` for vinyl) as an int when it
+        can, else keeps the literal label string rather than losing it."""
+        no_position = {
+            "id": "rel-vinyl", "title": "Vinyl Only", "date": "1999",
+            "country": "US", "status": "Official",
+            "media": [{
+                "position": 1, "format": "Vinyl",
+                "tracks": [
+                    {"number": "7", "title": "Numeric Fallback"},
+                    {"number": "A1", "title": "Side Label"},
+                ],
+            }],
+        }
+        with _mock_urlopen(no_position):
+            result = get_release("rel-vinyl", fresh=True)
+        tracks = result["tracks"]
+        assert isinstance(tracks, list)
+        self.assertEqual(tracks[0]["track_number"], 7)
+        self.assertEqual(tracks[1]["track_number"], "A1")
+
+
+class TestGetReleaseGroupNormalizesFullPayload(unittest.TestCase):
+    """``get_release_group`` — no other test in this suite exercises its
+    real field-population behaviour end to end."""
+
+    def test_normalizes_full_payload(self) -> None:
+        payload = {
+            "id": "rg-1",
+            "title": "In Rainbows",
+            "primary-type": "Album",
+            "first-release-date": "2007-10-10",
+            "artist-credit": [{
+                "name": "Radiohead",
+                "artist": {"id": "a74b1b7f-71a5-4011-9441-d0b5e4122711", "name": "Radiohead"},
+            }],
+        }
+        with _mock_urlopen(payload):
+            result = get_release_group("rg-1")
+        self.assertEqual(result, {
+            "id": "rg-1",
+            "title": "In Rainbows",
+            "type": "Album",
+            "first_release_date": "2007-10-10",
+            "artist_id": "a74b1b7f-71a5-4011-9441-d0b5e4122711",
+            "artist_name": "Radiohead",
+        })
+
+    def test_missing_artist_credit_normalizes_to_empty_ref(self) -> None:
+        payload = {"id": "rg-2", "title": "No Credit", "primary-type": "Album"}
+        with _mock_urlopen(payload):
+            result = get_release_group("rg-2")
+        self.assertEqual(result["artist_id"], "")
+        self.assertEqual(result["artist_name"], "")
+
+
+class TestGetReleaseGroupReleasesNormalizesFullPayload(unittest.TestCase):
+    """``get_release_group_releases`` — no other test in this suite
+    exercises its real field-population behaviour end to end."""
+
+    def test_normalizes_full_payload(self) -> None:
+        with _mock_urlopen_by_fragment({
+            "/release-group/rg-releases?fmt=json": {
+                "id": "rg-releases", "title": "OK Computer", "primary-type": "Album",
+            },
+            "/release?release-group=": {
+                "release-count": 1,
+                "releases": [{
+                    "id": "rel-1", "title": "OK Computer", "date": "1997-06-16",
+                    "country": "GB", "status": "Official",
+                    "media": [
+                        {"format": "CD", "track-count": 12},
+                    ],
+                }],
+            },
+        }):
+            result = get_release_group_releases("rg-releases")
+        self.assertEqual(result["title"], "OK Computer")
+        self.assertEqual(result["type"], "Album")
+        releases = result["releases"]
+        assert isinstance(releases, list)
+        self.assertEqual(len(releases), 1)
+        self.assertEqual(releases[0], {
+            "id": "rel-1", "title": "OK Computer", "date": "1997-06-16",
+            "country": "GB", "status": "Official",
+            "track_count": 12, "format": "CD", "media_count": 1,
+        })
+
+    def test_null_country_and_status_normalize_to_empty_string(self) -> None:
+        with _mock_urlopen_by_fragment({
+            "/release-group/rg-null?fmt=json": {"id": "rg-null", "title": "T"},
+            "/release?release-group=": {
+                "release-count": 1,
+                "releases": [{
+                    "id": "rel-1", "title": "T", "date": "", "country": None,
+                    "status": None, "media": [],
+                }],
+            },
+        }):
+            result = get_release_group_releases("rg-null")
+        releases = result["releases"]
+        assert isinstance(releases, list)
+        row = releases[0]
+        assert isinstance(row, dict)
+        self.assertEqual(row["country"], "")
+        self.assertEqual(row["status"], "")
 
 
 class TestWireBoundaryValidation(unittest.TestCase):
