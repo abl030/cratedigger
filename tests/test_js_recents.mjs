@@ -834,16 +834,21 @@ t.section('loadRecents() consumes a pending scroll restore only after its own re
   globals.restore();
 }
 
-t.section('loadRecents() consumes a pending scroll restore on its imports early-return branch too');
-{
+t.section('loadRecents() consumes a pending scroll restore on its imports/acquisition early-return branches too');
+// Reader re-read finding: the first version of this test only drove the
+// `imports` subview -- `acquisition` shares the exact same early-return
+// shape (closeSearchPlanDetail can restore `recentsSub='acquisition'`
+// too, see the recents/acquisition origin block in
+// tests/test_js_search_plan.mjs) and was still unpinned, so the
+// symmetric mutant on that branch would have survived. Drive both.
+for (const subView of ['imports', 'acquisition']) {
   // Mutant-runner finding (WE-3 review): the `finally` wraps the whole
   // function, but the log-fetch pin above only proves that ONE branch
-  // converges on it -- hoisting just the imports/acquisition
-  // early-return branches out of the `try` left every existing test in
-  // this suite green. closeSearchPlanDetail restores
-  // `recentsSub='imports'` for exactly this origin subView, which is
-  // the real trigger for this branch, so drive it that way rather than
-  // setting recentsSub by hand.
+  // converges on it -- hoisting either early-return branch out of the
+  // `try` left every existing test in this suite green.
+  // closeSearchPlanDetail restores `recentsSub` to exactly this origin
+  // subView, which is the real trigger for this branch, so drive it
+  // that way rather than setting recentsSub by hand.
   const content = { innerHTML: '' };
   const scrollCalls = [];
   const globals = stubGlobals({
@@ -852,20 +857,22 @@ t.section('loadRecents() consumes a pending scroll restore on its imports early-
       scrollTo(_x, y) { scrollCalls.push(y); },
       showTab() {},
     }),
-    fetch: async () => ({ ok: true, status: 200, async json() { return { jobs: [], counts: {} }; } }),
+    fetch: async () => (subView === 'imports'
+      ? { ok: true, status: 200, async json() { return { jobs: [], counts: {} }; } }
+      : { ok: true, status: 200, async json() { return { acquisition: [], youtube_ingest: [] }; } }),
   });
   state.searchPlanDetailContext = {
-    requestId: 101, originTab: 'recents', originScrollY: 8765, originSubView: 'imports',
+    requestId: 101, originTab: 'recents', originScrollY: 8765, originSubView: subView,
   };
   state.recentsSub = 'history';
   closeSearchPlanDetail();
-  t.equal(state.recentsSub, 'imports',
-    'origin subView restored to imports before loadRecents runs');
+  t.equal(state.recentsSub, subView,
+    `origin subView restored to ${subView} before loadRecents runs`);
   await loadRecents();
   t.equal(scrollCalls.length, 1,
-    'the imports early-return branch also consumes the pending restore');
+    `the ${subView} early-return branch also consumes the pending restore`);
   t.equal(scrollCalls[0], 8765,
-    'restores the exact stashed scroll position on the imports branch');
+    `restores the exact stashed scroll position on the ${subView} branch`);
   globals.restore();
 }
 
