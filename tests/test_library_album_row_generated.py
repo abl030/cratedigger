@@ -39,14 +39,20 @@ _MB_RELEASE_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
 
 def upgrade_queued_agreement_violations(
-    left_value: bool, right_value: bool,
+    left_value: bool, right_value: bool, *, left_label: str,
 ) -> list[str]:
-    """Independent checker clause, self-tested below (Q1 + Q3)."""
+    """Independent checker clause, self-tested below (Q1 + Q3).
+
+    ``left_label`` names which adapter ``left_value`` came from, so a
+    generated failure names the diverging adapter instead of a bare
+    ``left=... right=...`` pair a reader has to re-derive by hand.
+    """
     violations: list[str] = []
     if left_value != right_value:
         violations.append(
-            "projections disagree on upgrade_queued: "
-            f"left={left_value!r} right={right_value!r}"
+            f"{left_label} disagrees with the detail projection on "
+            f"upgrade_queued: {left_label}={left_value!r} "
+            f"detail={right_value!r}"
         )
     return violations
 
@@ -91,6 +97,13 @@ def _attached_row_upgrade_queued(row: dict[str, object]) -> bool:
             "artist": "Test Artist",
             "track_count": 1,
             "added": 0.0,
+            # Present so this synthetic album is a combination the real
+            # entry point (LibraryAlbumRow.from_beets_album_with_pipeline)
+            # could actually observe -- an untracked beets album has no
+            # release identity, and its identity guard would reject an
+            # attached pipeline row otherwise. upgrade_queued itself does
+            # not read this field.
+            "mb_albumid": _MB_RELEASE_ID,
         },
         rank_fn=lambda _fmt, _kbps: "transparent",
     )
@@ -149,8 +162,10 @@ class TestUpgradeQueuedProjectionsAgree(unittest.TestCase):
         list_value = _list_row_upgrade_queued(row)
         attached_value = _attached_row_upgrade_queued(row)
         violations = [
-            *upgrade_queued_agreement_violations(list_value, detail_value),
-            *upgrade_queued_agreement_violations(attached_value, detail_value),
+            *upgrade_queued_agreement_violations(
+                list_value, detail_value, left_label="from_pipeline_request"),
+            *upgrade_queued_agreement_violations(
+                attached_value, detail_value, left_label="with_pipeline_request"),
         ]
         self.assertEqual(violations, [], violations)
 
@@ -159,12 +174,17 @@ class TestUpgradeQueuedCheckerClause(unittest.TestCase):
     """Known-bad self-test for the one checker clause above."""
 
     def test_clause_trips_on_disagreement(self) -> None:
-        violations = upgrade_queued_agreement_violations(True, False)
+        violations = upgrade_queued_agreement_violations(
+            True, False, left_label="from_pipeline_request")
         self.assertEqual(len(violations), 1)
         self.assertIn("disagree", violations[0])
+        self.assertIn("from_pipeline_request", violations[0])
 
     def test_clause_stays_quiet_when_projections_agree(self) -> None:
         for value in (True, False):
             with self.subTest(value=value):
                 self.assertEqual(
-                    upgrade_queued_agreement_violations(value, value), [])
+                    upgrade_queued_agreement_violations(
+                        value, value, left_label="from_pipeline_request"),
+                    [],
+                )
