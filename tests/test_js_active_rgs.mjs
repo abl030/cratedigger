@@ -9,7 +9,7 @@
  * explanation, so the composed-path sections below drive it directly
  * (mocking only `fetch`) rather than hand-building the `ctx` object
  * `renderPressingRow` receives. See the comment above those sections
- * for exactly which ones a field-mapping bug fails and why two of them
+ * for exactly which ones a field-mapping bug fails and why one of them
  * cannot.
  *
  * Run with: node tests/test_js_active_rgs.mjs
@@ -246,17 +246,13 @@ t.section('loadActiveRgs() — a caller arriving after a stale attempt settles s
  * correct value is genuinely true — so only there does hoisting produce
  * a visible difference.
  *
- * Two sections cannot catch the swap at all, for two different reasons.
- * "Confirmed absence renders the confirmed-absence explanation":
- * hasActiveRg() and activeRgsUnavailable() are both false there by
- * construction (a successful load reporting a genuine absence), so
- * swapping two equal values is invisible; no fixture change closes this,
- * since the section's own definition forces both to false. "A Discogs
- * row never claims unavailable": also both false, but for a different
- * mechanism — canReplace is false because a Discogs id is never a member
- * of the MB-only cache, and rgLookupUnavailable is forced false by the
- * !isDiscogs gate regardless of whether the fetch failed. Both sections
- * exist to pin their own tooltip text, not to discriminate the mapping.
+ * One section cannot catch the swap at all: "Confirmed absence renders
+ * the confirmed-absence explanation" has hasActiveRg() and
+ * activeRgsUnavailable() both false there by construction (a successful
+ * load reporting a genuine absence), so swapping two equal values is
+ * invisible; no fixture change closes this, since the section's own
+ * definition forces both to false. It exists to pin its own tooltip
+ * text, not to discriminate the mapping.
  */
 
 /** One MB pressing row with no pipeline/library overlay — routes renderPressingRow into inverted-mode Replace, the only mode this cache affects. */
@@ -305,6 +301,12 @@ t.section('loadReleaseGroup() composed path — confirmed absence renders the co
 
 t.section('loadReleaseGroup() composed path — a failed active-RG lookup renders the unavailable explanation, button still disabled');
 {
+  // This section also carries the "a MusicBrainz row is unchanged" pin
+  // for the issue #1355 residual sweep's Batch D gate correction: an MB
+  // release-group id always had, and still has, its own parentRgId
+  // fallback (untouched by the Discogs-side fix below), so this exact
+  // assertion is the regression guard proving the gate rewrite left the
+  // MB path alone.
   const html = await expandReleaseGroup({
     rgId: 'rg-composed-2',
     sourceId: '129bebd8-a7b9-4099-b0bc-545b704e7a95',
@@ -349,39 +351,105 @@ t.section('loadReleaseGroup() composed path — a real match still enables the b
 }
 
 /**
- * A Discogs release under a master carries release_group_id set to the
- * Discogs MASTER id (web/discogs.py), never an MB release-group UUID —
- * a value hasActiveRg's cache can never meaningfully answer for,
- * regardless of whether the active-rgs fetch itself succeeded.
+ * A Discogs release under a master carries no release_group_id field of
+ * its own — web/discogs.py's get_master_releases never puts one on its
+ * child rows, unlike the single-release endpoint synthesizeMasterlessRow
+ * reads from. Its only lookup key is the master id itself, reached
+ * through loadReleaseGroup's own parentRgId fallback — the same
+ * mechanism an MB release-group id already uses. A masterless Discogs
+ * release (fetched via /api/discogs/release/<id>, identityKind
+ * 'release') is the one shape with no key at all: a genuinely masterless
+ * release's master_id is null, so synthesizeMasterlessRow's own
+ * release_group_id comes out null too.
+ *
+ * This corrects the #1361 premise (issue #1355 item 6): a Discogs row's
+ * release_group_id was believed to be either a Discogs master id or
+ * null, never a value the MB-only active-RG cache could answer for
+ * either way — so the "could not check" explanation was gated on source
+ * (!isDiscogs) rather than on whether the row actually has a lookup key.
+ * Discogs requests persist their exact master in the same
+ * mb_release_group_id column MB releases use (KTD-1,
+ * lib/mbid_replace_service.py), and 215 live non-replaced requests carry
+ * a Discogs-shaped (numeric) value there, so a Discogs master row's
+ * lookup key CAN match the cache — a failed lookup on such a row owes
+ * the same honest "could not check" explanation an MB row gets, not the
+ * confirmed-absence claim a genuinely keyless (masterless) row keeps.
  */
-async function expandDiscogsReleaseGroup({ rgId, sourceId, activeRgsFails }) {
+async function expandDiscogsReleaseGroup({
+  rgId, sourceId, identityKind = 'work', activeRgsBody, activeRgsFails,
+}) {
   pipelineStore.clear();
   invalidateActiveRgs();
   const relEl = element();
+  const masterless = identityKind === 'release';
   stubGlobals({
     fetch: async (url) => {
       if (String(url).includes('/api/pipeline/active-rgs')) {
         if (activeRgsFails) throw new TypeError('network down');
-        return okJsonResponse({ release_group_ids: [] });
+        return okJsonResponse(activeRgsBody);
       }
-      return okJsonResponse({ releases: [unclaimedPressing(sourceId, String(rgId))] });
+      if (masterless) {
+        // /api/discogs/release/<id> payload for a genuinely masterless
+        // release — no master, so no release_group_id.
+        return okJsonResponse({
+          id: sourceId,
+          title: 'Everything Is Alive',
+          date: '2011-05-01',
+          country: 'AU',
+          formats: [{ name: 'CD' }],
+          tracks: new Array(10).fill({}),
+          release_group_id: null,
+        });
+      }
+      // /api/discogs/master/<id> payload — get_master_releases's child
+      // rows carry no release_group_id field at all; the master id
+      // reaches the row only through loadReleaseGroup's own parentRgId
+      // fallback.
+      return okJsonResponse({ releases: [unclaimedPressing(sourceId)] });
     },
   });
-  await loadReleaseGroup(rgId, null, { targetEl: relEl, source: 'discogs', identityKind: 'work' });
+  await loadReleaseGroup(rgId, null, { targetEl: relEl, source: 'discogs', identityKind });
   return relEl.innerHTML;
 }
 
-t.section('loadReleaseGroup() composed path — a Discogs row never claims "unavailable" (issue #1355 item 6 review finding 1)');
+t.section('loadReleaseGroup() composed path — a Discogs master row under a failed lookup renders the "could not check" tooltip (issue #1355 residual sweep, Batch D)');
 {
   const html = await expandDiscogsReleaseGroup({
     rgId: 424242,
     sourceId: '999999',
     activeRgsFails: true,
   });
+  t.contains(html, 'disabled title="Could not check for an existing request in this release group. Collapse and re-expand to retry."',
+    'a Discogs row under a master gets the honest "could not check" explanation on a failed lookup, the same as an MB row');
+  t.excludes(html, 'title="No existing request in this release group"',
+    'the confirmed-absence explanation is not shown for a lookup that never confirmed anything');
+}
+
+t.section('loadReleaseGroup() composed path — a masterless Discogs release under the same failure keeps its current text');
+{
+  const html = await expandDiscogsReleaseGroup({
+    rgId: '999999',
+    sourceId: '999999',
+    identityKind: 'release',
+    activeRgsFails: true,
+  });
   t.contains(html, 'disabled title="No existing request in this release group"',
-    'a Discogs row stays disabled with the confirmed-absence text even though the active-rgs lookup itself failed');
+    'a masterless Discogs release has no lookup key at all, so it keeps the confirmed-absence text even though the fetch failed');
   t.excludes(html, 'Could not check',
-    'the unavailable explanation is never claimed for a Discogs row — its id is never in the MB-only cache regardless of fetch outcome');
+    'the unavailable explanation is never claimed for a row with no lookup key to check');
+}
+
+t.section('loadReleaseGroup() composed path — a Discogs master row with an active Discogs request for that master still enables Replace (must-still-work, proves the premise correction)');
+{
+  const html = await expandDiscogsReleaseGroup({
+    rgId: 424242,
+    sourceId: '999999',
+    activeRgsBody: { release_group_ids: ['424242'] },
+  });
+  t.contains(html, 'window.openReplacePicker({targetMbid:',
+    'a real match on the master id enables the inverted-mode Replace button for a Discogs row, proving the cache genuinely holds Discogs-shaped ids');
+  t.excludes(html, 'Could not check',
+    'an enabled button carries no "could not check" explanation');
 }
 
 t.done();
