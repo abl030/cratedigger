@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from typing import Literal
 
-from hypothesis import example, given, settings
+from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
@@ -37,6 +37,7 @@ from tests.evidence_helpers import (
     make_audio_corrupt_validation_report,
 )
 from tests.fakes import FakePipelineDB
+from tests.finite_domain import finite_generated_domain
 from tests.helpers import make_request_row
 from tests.test_pipeline_db import make_db, requires_postgres
 
@@ -555,6 +556,41 @@ StoredSpectralShape = Literal[
 IncomingSpectralShape = Literal[
     "grade_present", "grade_absent", "preserved_source_now",
 ]
+# "own_request" links the row under test to a request via
+# current_evidence_id, matching what the earlier current_owned=True/False
+# boolean meant. "foreign_request" additionally seeds a SEPARATE decoy
+# evidence row owned by a DIFFERENT request, while the row under test
+# itself stays unowned -- the world a mutant collapsing "owned by THIS
+# row" into "owned by ANY row at all" needs to be told apart from "none"
+# (issue #1355 WE1 review round: mutant runner M2).
+Ownership = Literal["none", "own_request", "foreign_request"]
+
+_WE1_STORED_SHAPES: tuple[StoredSpectralShape, ...] = (
+    "preserved_source", "native_source", "installed_measured", "legacy_v1",
+)
+_WE1_OWNERSHIPS: tuple[Ownership, ...] = (
+    "none", "own_request", "foreign_request",
+)
+_WE1_INCOMING_SHAPES: tuple[IncomingSpectralShape, ...] = (
+    "grade_present", "grade_absent", "preserved_source_now",
+)
+_WE1_INTENTS: tuple[SpectralWriteIntent, ...] = ("merge", "replace")
+_WE1_DOMAIN_CARDINALITY = (
+    len(_WE1_STORED_SHAPES) * len(_WE1_OWNERSHIPS)
+    * len(_WE1_INCOMING_SHAPES) * len(_WE1_INTENTS)
+)
+
+
+def _verify_we1_spectral_domain() -> None:
+    for values in (
+        _WE1_STORED_SHAPES, _WE1_OWNERSHIPS, _WE1_INCOMING_SHAPES,
+        _WE1_INTENTS,
+    ):
+        if len(set(values)) != len(values):
+            raise AssertionError(
+                "WE1 spectral-preservation domain axis has duplicates: "
+                f"{values!r}"
+            )
 
 _WE1_FILES = [
     AlbumQualityEvidenceFile(
@@ -572,7 +608,7 @@ def _we1_stored_evidence(
     shape: StoredSpectralShape,
     mb_release_id: str,
 ) -> AlbumQualityEvidence:
-    """Build a stored row exercising one gate of ``spectral_write_decision``.
+    """Build a stored row exercising one gate of the spectral write policy.
 
     Every shape shares the same files/container/format so a same-address
     incoming write below always hits ``ON CONFLICT DO UPDATE`` rather than
@@ -581,10 +617,14 @@ def _we1_stored_evidence(
     if shape == "preserved_source":
         # R19-shaped: a known-lossy mp3 derivative of a recorded lossless
         # source. Only protected from replacement while current-owned.
-        # The capture facts (cliff_hz/codec_family/ultrasonic_deficit_db)
-        # carry a sentinel distinct from every other shape so a mutant that
-        # drops one of the eight columns from the shared decision becomes
-        # an observable mismatch, not a None-vs-None non-event.
+        # cliff_hz/ultrasonic_deficit_db carry a numeric sentinel distinct
+        # from every other shape so a mutant that drops one of those
+        # columns from the shared decision becomes an observable
+        # mismatch, not a None-vs-None non-event. codec_family is "mp3"
+        # in every non-grade_absent shape (mp3 is the only container this
+        # fixture uses), so it is discriminated only through the
+        # grade_absent incoming shape's None, not through a distinct
+        # per-shape value.
         measurement = AudioQualityMeasurement(
             min_bitrate_kbps=128, avg_bitrate_kbps=130, median_bitrate_kbps=129,
             format="MP3", spectral_grade="likely_transcode",
@@ -702,65 +742,113 @@ class TestSpectralPreservationSqlFakeParity(unittest.TestCase):
     of the same policy must agree.
 
     ``lib.pipeline_db.evidence`` computes the eight-column spectral-tuple
-    preserve/replace decision once per statement in a
-    ``spectral_write_decision`` CTE; ``tests.fakes.pipeline_db.evidence``
-    computes the identical policy independently in Python. Driving both
-    real adapters over the same generated stored/incoming world and
-    asserting they persist the same spectral tuple is stronger evidence
-    than re-deriving the formula a third time inside this test.
+    preserve/replace decision once per statement, spliced from the single
+    ``_SPECTRAL_TUPLE_USE_INCOMING_SQL`` constant into all eight column
+    ``CASE`` expressions inside the real ``INSERT ... ON CONFLICT DO
+    UPDATE``; ``tests.fakes.pipeline_db.evidence`` computes the identical
+    policy independently in Python. Driving both real adapters over the
+    same generated stored/incoming world and asserting they persist the
+    same spectral tuple is stronger evidence than re-deriving the formula
+    a third time inside this test.
+
+    The (stored_shape x ownership x incoming_shape x intent) domain is
+    small and fully enumerable, so it is exhaustively covered via
+    ``finite_generated_domain`` rather than sampled. A fixed
+    ``max_examples=20`` random sample previously missed a real 2-of-72
+    coverage gap: a mutant that dropped the A gate's replace-intent
+    scoping only diverges on ``(preserved_source, own_request, *,
+    merge)`` (issue #1355 WE1 review round, mutant runner finding M1).
+
+    Note on disjunct 4: for an incoming row with ``lineage_version >= 4``,
+    a ``spectral_subject`` set on the measurement forces a non-null
+    ``spectral_grade`` (``AudioQualityMeasurement.new_row_validation_
+    errors`` only enforces that pairing when its own ``two_axis`` flag is
+    true, which ``storage_validation_errors`` sets exactly for
+    ``lineage_version >= 4`` -- verified directly: a v3 evidence object
+    with ``spectral_subject="source"``, ``spectral_grade=None`` passes
+    ``storage_validation_errors()`` cleanly, while the identical shape at
+    v4 fails with "spectral markers require a spectral grade"). So for
+    any v4+ incoming row, satisfying ``current_evidence_preserves_source_
+    spectral`` (which never itself inspects ``spectral_grade``) also
+    satisfies "incoming spectral grade present", making disjunct 4 a
+    logical subset of disjunct 2. ``_we1_incoming_evidence`` only ever
+    builds ``CURRENT_EVIDENCE_LINEAGE_VERSION`` (v5) rows, so every
+    incoming shape this test can construct is subject to that
+    subsumption; a legacy v1/v3 incoming row could in principle satisfy
+    disjunct 4 without disjunct 2, but production writers do not emit
+    that shape (v1/v3 are historical only -- the two-axis vocabulary
+    starts at v4). This is a property of the original four-disjunct
+    formula this refactor preserves verbatim, not something introduced
+    or fixed here.
     """
 
-    @settings(max_examples=20, deadline=None)
+    @finite_generated_domain(
+        cardinality=_WE1_DOMAIN_CARDINALITY,
+        verify=_verify_we1_spectral_domain,
+    )
     @example(
         # The A gate: an R19-shaped, current-owned stored tuple survives a
         # replace-intent write carrying a fresh grade (the "dual role"
         # world real-PG pin `test_candidate_attempt_cannot_overwrite_dual_
         # role_source_spectral` already covers deterministically).
-        stored_shape="preserved_source", current_owned=True,
+        stored_shape="preserved_source", ownership="own_request",
         incoming_shape="grade_present", intent="replace",
+    )
+    @example(
+        # The A gate is scoped to replace-intent only: the SAME
+        # R19-shaped, current-owned tuple is NOT protected under a
+        # merge-intent write carrying a fresh grade -- disjunct 2 alone
+        # decides it. This is the exact cell mutant runner finding M1
+        # showed a 20-example random sample can miss.
+        stored_shape="preserved_source", ownership="own_request",
+        incoming_shape="grade_present", intent="merge",
     )
     @example(
         # Disjunct 2: a non-R19 source measurement stays freely
         # remeasurable (the real-PG pin `test_candidate_attempt_refreshes_
         # current_owned_native_source_spectral`'s world).
-        stored_shape="native_source", current_owned=True,
+        stored_shape="native_source", ownership="own_request",
         incoming_shape="grade_present", intent="replace",
     )
     @example(
         # Disjunct 1: a legacy pre-v4 row is rebuilt wholesale even when
         # the incoming writer carries no grade at all.
-        stored_shape="legacy_v1", current_owned=False,
+        stored_shape="legacy_v1", ownership="none",
         incoming_shape="grade_absent", intent="merge",
     )
     @example(
         # Disjunct 3: a replace-intent write against an R19-shaped stored
         # tuple that is NOT current-owned (a stale candidate-only cache
         # collision) always replaces, R19 shape notwithstanding.
-        stored_shape="preserved_source", current_owned=False,
+        stored_shape="preserved_source", ownership="none",
         incoming_shape="grade_absent", intent="replace",
     )
     @example(
-        # Disjunct 4: an installed-subject stored tuple is stale by
-        # definition once the incoming write is itself the R19-shaped
-        # derivative.
-        stored_shape="installed_measured", current_owned=True,
+        # Disjunct 3 again, but the row is owned by a DIFFERENT request
+        # rather than merely unowned: the SQL twin must check "owned BY
+        # THIS ROW", not "owned by anything at all" (mutant runner finding
+        # M2 -- a mutation collapsing that distinction was unreachable by
+        # "none"/"own_request" alone).
+        stored_shape="preserved_source", ownership="foreign_request",
+        incoming_shape="grade_absent", intent="replace",
+    )
+    @example(
+        # Disjunct 4 (see the class docstring on why it never decides
+        # alone): an installed-subject stored tuple is replaced once the
+        # incoming write is itself the R19-shaped derivative.
+        stored_shape="installed_measured", ownership="own_request",
         incoming_shape="preserved_source_now", intent="replace",
     )
     @given(
-        stored_shape=st.sampled_from((
-            "preserved_source", "native_source", "installed_measured",
-            "legacy_v1",
-        )),
-        current_owned=st.booleans(),
-        incoming_shape=st.sampled_from((
-            "grade_present", "grade_absent", "preserved_source_now",
-        )),
-        intent=st.sampled_from(("merge", "replace")),
+        stored_shape=st.sampled_from(_WE1_STORED_SHAPES),
+        ownership=st.sampled_from(_WE1_OWNERSHIPS),
+        incoming_shape=st.sampled_from(_WE1_INCOMING_SHAPES),
+        intent=st.sampled_from(_WE1_INTENTS),
     )
     def test_real_pg_and_fake_agree_on_spectral_tuple(
         self,
         stored_shape: StoredSpectralShape,
-        current_owned: bool,
+        ownership: Ownership,
         incoming_shape: IncomingSpectralShape,
         intent: SpectralWriteIntent,
     ) -> None:
@@ -787,7 +875,7 @@ class TestSpectralPreservationSqlFakeParity(unittest.TestCase):
                     snapshot_fingerprint=stored.snapshot_fingerprint,
                 )
                 assert found is not None and found.id is not None
-                if current_owned:
+                if ownership == "own_request":
                     request_id = db.add_request(
                         artist_name="WE1 parity",
                         album_title=mb_release_id,
@@ -795,6 +883,32 @@ class TestSpectralPreservationSqlFakeParity(unittest.TestCase):
                     )
                     self.assertTrue(
                         db.set_request_current_evidence(request_id, found.id)
+                    )
+                elif ownership == "foreign_request":
+                    # A DIFFERENT evidence row, owned by a DIFFERENT
+                    # request -- the row under test itself stays unowned.
+                    # Distinguishes "some row somewhere is owned" from
+                    # "THIS row is owned" (mutant runner finding M2).
+                    decoy = _we1_stored_evidence(
+                        "native_source", "we1-spectral-parity-decoy",
+                    )
+                    db.upsert_album_quality_evidence(decoy)
+                    decoy_found = db.find_album_quality_evidence(
+                        mb_release_id=decoy.mb_release_id,
+                        snapshot_fingerprint=decoy.snapshot_fingerprint,
+                    )
+                    assert (
+                        decoy_found is not None and decoy_found.id is not None
+                    )
+                    decoy_request_id = db.add_request(
+                        artist_name="WE1 parity decoy",
+                        album_title="decoy",
+                        source="request",
+                    )
+                    self.assertTrue(
+                        db.set_request_current_evidence(
+                            decoy_request_id, decoy_found.id,
+                        )
                     )
                 db.upsert_album_quality_evidence(
                     incoming, spectral_write_intent=intent,
