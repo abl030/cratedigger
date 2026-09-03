@@ -9,7 +9,7 @@
  * explanation, so the composed-path sections below drive it directly
  * (mocking only `fetch`) rather than hand-building the `ctx` object
  * `renderPressingRow` receives. See the comment above those sections
- * for exactly which ones a field-mapping bug fails and why one of them
+ * for exactly which ones a field-mapping bug fails and why two of them
  * cannot.
  *
  * Run with: node tests/test_js_active_rgs.mjs
@@ -148,7 +148,7 @@ t.section('loadActiveRgs() — a stale in-flight FAILURE cannot clobber a freshe
   t.ok(!activeRgsUnavailable(),
     'a late-resolving stale FAILURE does not falsely flag a fresher successful load as unavailable');
   t.ok(staleResult.has('rg-fresh'),
-    'the stale caller itself adopts the fresh answer (re-enters loadActiveRgs) rather than reporting a confirmed-empty set — deleting the success-branch generation guard would make this the ONLY assertion in this file that observes the caller-facing return value, not just module state');
+    'the stale caller itself adopts the fresh answer (re-enters loadActiveRgs) rather than reporting a confirmed-empty set — deleting the catch-branch generation guard would make this the ONLY assertion in this file that observes the caller-facing return value, not just module state');
 }
 
 t.section('loadActiveRgs() — a stale in-flight SUCCESS cannot overwrite a fresher successful reload with older data');
@@ -234,19 +234,29 @@ t.section('loadActiveRgs() — a caller arriving after a stale attempt settles s
  * proves the real field mapping.
  *
  * A swap of canReplace/rgLookupUnavailable in discography.js fails BOTH
- * the "failed active-RG lookup" and "confirmed present" sections below
- * (each has canReplace != rgLookupUnavailable, so a swap flips its
- * outcome). A stale activeRgsUnavailable() read taken before the fetch
- * settles fails only the "failed active-RG lookup" section — hoisting the
- * read above Promise.all would read the pre-invalidate value (false) on
- * EVERY section, but only that section's correct value is genuinely
- * true, so only there does hoisting produce a visible difference. The
- * "confirmed absence" section cannot catch the swap at all — hasActiveRg()
- * and activeRgsUnavailable() are both false there by construction (a
- * successful load reporting a genuine absence), so swapping two equal
- * values is invisible; no fixture change closes this, since the section's
- * own definition forces both to false. It exists to pin the legacy
- * tooltip text, not to discriminate the mapping.
+ * the "a failed active-RG lookup renders the unavailable explanation"
+ * and "a real match still enables the button" sections below (each has
+ * canReplace != rgLookupUnavailable, so a swap flips its outcome). A
+ * stale activeRgsUnavailable() read taken before the fetch settles fails
+ * only the "failed active-RG lookup" section — hoisting the read above
+ * Promise.all would read the POST-invalidate value (false, since
+ * expandReleaseGroup calls invalidateActiveRgs() before loadReleaseGroup
+ * ever runs) on every section, and that happens to already equal the
+ * correct value everywhere except the failed-lookup section, where the
+ * correct value is genuinely true — so only there does hoisting produce
+ * a visible difference.
+ *
+ * Two sections cannot catch the swap at all, for two different reasons.
+ * "Confirmed absence renders the confirmed-absence explanation":
+ * hasActiveRg() and activeRgsUnavailable() are both false there by
+ * construction (a successful load reporting a genuine absence), so
+ * swapping two equal values is invisible; no fixture change closes this,
+ * since the section's own definition forces both to false. "A Discogs
+ * row never claims unavailable": also both false, but for a different
+ * mechanism — canReplace is false because a Discogs id is never a member
+ * of the MB-only cache, and rgLookupUnavailable is forced false by the
+ * !isDiscogs gate regardless of whether the fetch failed. Both sections
+ * exist to pin their own tooltip text, not to discriminate the mapping.
  */
 
 /** One MB pressing row with no pipeline/library overlay — routes renderPressingRow into inverted-mode Replace, the only mode this cache affects. */
@@ -329,6 +339,13 @@ t.section('loadReleaseGroup() composed path — a real match still enables the b
   t.contains(html,
     'class="btn" style="padding:2px 8px;font-size:0.7em;white-space:nowrap;" onclick="event.stopPropagation(); window.openReplacePicker({targetMbid:',
     'the enabled Replace button carries no title attribute between its style and onclick attributes');
+  // The adjacency check above only covers a title inserted BEFORE
+  // onclick; a title appended immediately after the onclick attribute's
+  // closing quote (the shape the earlier whole-row `excludes(html,
+  // 'title=')` used to catch, before it was narrowed for being
+  // whole-row-scoped) needs its own check.
+  t.excludes(html, '})" title=',
+    'no title attribute is appended immediately after the onclick attribute either');
 }
 
 /**

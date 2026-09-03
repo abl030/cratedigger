@@ -261,12 +261,14 @@ export function renderBadRipButton(state, opts = {}) {
  *   meaningful for this row — i.e. the row's release-group id is one
  *   the cache could actually contain. Omitting it (or passing
  *   ``false``) claims the confirmed-absence explanation instead, which
- *   is also the correct thing to pass when the lookup simply doesn't
- *   apply to this row (e.g. a Discogs id, never a member of the MB-only
- *   cache) even if the fetch itself failed — a failed check on a
+ *   is what this surface has always claimed when the lookup simply
+ *   doesn't apply to this row (e.g. a Discogs id, never a member of the
+ *   MB-only cache) even if the fetch itself failed — a failed check on a
  *   question that could never have been answered is not "unavailable",
- *   it's irrelevant. Either way the button stays disabled — this only
- *   changes what the operator is told about why.
+ *   it's irrelevant. Distinguishing "irrelevant" from "confirmed absent"
+ *   as its own third explanation is out of scope for issue #1355 item 6.
+ *   Either way the button stays disabled — this only changes what the
+ *   operator is told about why.
  *   Click → ``window.openReplacePicker({targetMbid, releaseGroupId,
  *   targetLabel})``.
  *
