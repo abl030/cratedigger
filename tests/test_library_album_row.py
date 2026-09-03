@@ -9,7 +9,7 @@ import msgspec
 
 from lib.release_identity import ReleaseIdentity
 from tests.helpers import make_request_row
-from web.library_album_row import LibraryAlbumRow
+from web.library_album_row import LibraryAlbumRow, _pipeline_upgrade_queued
 
 
 def _valid_row_dict(**overrides: object) -> dict[str, object]:
@@ -547,3 +547,77 @@ class TestLibraryAlbumRow(unittest.TestCase):
                 _valid_row_dict(id="7"),
                 type=LibraryAlbumRow,
             )
+
+
+class TestPipelineUpgradeQueued(unittest.TestCase):
+    """`_pipeline_upgrade_queued` is the one owner every call site --
+    `from_pipeline_request`, `with_pipeline_request`, and the detail
+    projection -- calls (issue #1355 item 6)."""
+
+    CASES: tuple[tuple[str, dict[str, object] | None, bool], ...] = (
+        ("no row", None, False),
+        (
+            "status not wanted",
+            make_request_row(
+                status="imported", search_filetype_override="flac",
+                target_format=None,
+            ),
+            False,
+        ),
+        (
+            "override only",
+            make_request_row(
+                status="wanted", search_filetype_override="flac",
+                target_format=None,
+            ),
+            True,
+        ),
+        (
+            "target format only",
+            make_request_row(
+                status="wanted", search_filetype_override=None,
+                target_format="lossless",
+            ),
+            True,
+        ),
+        (
+            "both override and target format",
+            make_request_row(
+                status="wanted", search_filetype_override="flac",
+                target_format="lossless",
+            ),
+            True,
+        ),
+        (
+            "neither override nor target format",
+            make_request_row(
+                status="wanted", search_filetype_override=None,
+                target_format=None,
+            ),
+            False,
+        ),
+        (
+            # The owner decides by truthiness (`x or y`); a present-but-
+            # empty override must resolve exactly like an absent one, not
+            # like a real value.
+            "empty-string override is not an upgrade",
+            make_request_row(
+                status="wanted", search_filetype_override="",
+                target_format=None,
+            ),
+            False,
+        ),
+        (
+            "empty-string target format is not an upgrade",
+            make_request_row(
+                status="wanted", search_filetype_override=None,
+                target_format="",
+            ),
+            False,
+        ),
+    )
+
+    def test_branches(self) -> None:
+        for desc, row, expected in self.CASES:
+            with self.subTest(desc=desc):
+                self.assertEqual(_pipeline_upgrade_queued(row), expected)

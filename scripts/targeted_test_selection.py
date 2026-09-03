@@ -753,6 +753,17 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         # Verified: tests/test_library_album_detail_service.py's import
         # block reads ``from web.library_album_detail_service import``.
         "tests.test_library_album_detail_service",
+        # Issue #1355 item 6: build_library_album_detail's upgrade_queued
+        # key calls web.library_album_row._pipeline_upgrade_queued, the
+        # shared owner also called by LibraryAlbumRow.from_pipeline_request
+        # and .with_pipeline_request. basename:web/*.py only ever derives
+        # tests.test_web_library_album_detail_service and
+        # tests.web.test_library_album_detail_service (neither exists on
+        # disk) -- unlike lib/*.py, web/*.py has no _generated sibling
+        # probe at all -- so a solo edit here would otherwise select the
+        # parity property's absence -- the exact list/detail drift this
+        # item exists to prevent.
+        "tests.test_library_album_row_generated",
     ),
     "web/library_artist_service.py": (
         # Verified: tests/test_library_artist_service.py's import block

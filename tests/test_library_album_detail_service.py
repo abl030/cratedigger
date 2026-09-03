@@ -184,6 +184,25 @@ class TestLibraryAlbumDetailService(unittest.TestCase):
         self.assertEqual(detail.download_history[0].source, "slskd")
         self.assertEqual(detail.download_history[0].request_source, "request")
 
+    def test_build_library_album_detail_reports_upgrade_queued_true(self) -> None:
+        """A wanted request with an override is a queued upgrade (issue
+        #1355 item 6): the detail projection must reach True through the
+        shared owner, not only False as every other case in this file
+        pins."""
+        detail = build_library_album_detail(
+            detail_row=_beets_detail(),
+            pipeline_request=make_request_row(
+                id=42,
+                mb_release_id=RELEASE_ID,
+                status="wanted",
+                search_filetype_override="flac",
+                target_format=None,
+            ),
+            download_history=[],
+        )
+
+        self.assertTrue(detail.upgrade_queued)
+
     def test_download_history_surfaces_youtube_metadata(self) -> None:
         detail = build_library_album_detail(
             detail_row=_beets_detail(),
