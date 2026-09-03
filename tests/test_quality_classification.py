@@ -1598,6 +1598,51 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         self.assertTrue(result["keep_searching"])
         self.assertEqual(evidence_decision_name(result), "audio_corrupt")
 
+    def test_issue_1355_item_2_unmeasured_early_reject_still_denylists_the_peer(
+        self,
+    ):
+        """Issue #1355 item 2. Before this fix,
+        ``lib.quality_evidence.evidence_from_measurement`` fabricated
+        ``format="MP3"``/``min_bitrate_kbps=0`` on a candidate the harness
+        never measured, purely to satisfy this same function's readiness
+        gate. This evidence row is what it persists NOW for that candidate:
+        genuinely unmeasured quality, on the exact corrupt-plus-nested world
+        item 1's own scenario above uses. There is no flat-simulator twin
+        for this scenario — ``full_pipeline_decision`` takes ``min_bitrate``
+        as a required ``int`` and has no way to express "never measured"."""
+        import msgspec
+
+        from lib.quality import (
+            evidence_decision_name,
+            full_pipeline_decision_from_evidence,
+        )
+
+        candidate = self._build_candidate(
+            is_flac=False, min_bitrate=256, is_cbr=False,
+            audio_corrupt=True, folder_layout="nested",
+        )
+        unmeasured = msgspec.structs.replace(
+            candidate,
+            measurement=msgspec.structs.replace(
+                candidate.measurement,
+                format=None,
+                min_bitrate_kbps=None,
+                avg_bitrate_kbps=None,
+                median_bitrate_kbps=None,
+            ),
+            storage_format=None,
+        )
+
+        result = full_pipeline_decision_from_evidence(unmeasured, None)
+
+        self.assertEqual(result["preimport_audio"], "reject_corrupt")
+        self.assertIsNone(result["preimport_nested"])
+        self.assertFalse(result["imported"])
+        self.assertTrue(result["denylisted"])
+        self.assertEqual(result["final_status"], "wanted")
+        self.assertTrue(result["keep_searching"])
+        self.assertEqual(evidence_decision_name(result), "audio_corrupt")
+
     def test_request_3182_spectral_class_stays_with_the_encode_via_evidence(self):
         """Parity twin of the 6233/342 role-invariance reproduction.
 

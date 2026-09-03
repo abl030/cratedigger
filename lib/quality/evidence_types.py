@@ -964,8 +964,25 @@ class AlbumQualityEvidence(
             errors.extend(self.aac_lattice.validation_errors())
         return errors
 
-    def policy_incomplete_reasons(self) -> list[str]:
-        """Return reasons this row is not ready for action reducers."""
+    def policy_incomplete_reasons(
+        self, *, require_quality_measurement: bool = True,
+    ) -> list[str]:
+        """Return reasons this row is not ready for action reducers.
+
+        ``require_quality_measurement=False`` (issue #1355 item 2) drops the
+        format/bitrate checks below for a row whose durable folder/audio-
+        integrity facts already make quality measurement irrelevant to the
+        decision that will consume it — a corrupt, bad-hash, nested, or
+        empty-fileset candidate the preview worker persisted without ever
+        running the harness (``lib.quality_evidence.evidence_from_measurement``).
+        Callers pass ``False`` only when they have independently established
+        that fact (``lib.quality.pipeline.candidate_preimport_reject_fact``);
+        this method has no opinion on when that is true. Every other check
+        — structural validity and a recorded ``source_path`` — still applies
+        regardless, so a row that is merely malformed, or one with no
+        quality measurement AND no reject fact, still fails closed exactly
+        as before.
+        """
 
         reasons = self.storage_validation_errors()
         if not self.source_path.strip():
@@ -976,6 +993,8 @@ class AlbumQualityEvidence(
             # (download_log 37206: a blank-path legacy backfill kept the
             # French Quarter import spectrally blind forever).
             reasons.append("source_path is required")
+        if not require_quality_measurement:
+            return reasons
         if self.measurement.format is None:
             reasons.append("measurement.format is required")
         if (

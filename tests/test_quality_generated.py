@@ -3667,6 +3667,41 @@ class TestGeneratedEvidenceDecider(unittest.TestCase):
 
     @given(
         candidate=wild_ready_candidate_evidence(),
+        fact=st.sampled_from(_INTEGRITY_FACTS),
+    )
+    def test_generated_early_reject_fact_needs_no_quality_measurement(
+        self, candidate, fact,
+    ):
+        """Issue #1355 item 2's property: over the wild candidate world,
+        blanking format/bitrate and forcing exactly one reject fact never
+        turns the decision into a raise, and the decision is unaffected by
+        every other incidental dimension Hypothesis varies."""
+        unmeasured = msgspec.structs.replace(
+            candidate,
+            measurement=msgspec.structs.replace(
+                candidate.measurement,
+                format=None,
+                min_bitrate_kbps=None,
+                avg_bitrate_kbps=None,
+                median_bitrate_kbps=None,
+            ),
+            storage_format=None,
+        )
+        candidate = _with_integrity_fact(unmeasured, fact)
+
+        result = full_pipeline_decision_from_evidence(candidate, None)
+
+        expected_key = _expected_early_exit_key(candidate)
+        assert expected_key is not None
+        self.assertEqual(_EARLY_EXIT_FACT_NAMES[expected_key], fact)
+        self.assertEqual(
+            result[expected_key], _EARLY_EXIT_REJECT_VALUES[expected_key])
+        self.assertFalse(result["imported"])
+        self.assertEqual(result["final_status"], "wanted")
+        self.assertTrue(result["keep_searching"])
+
+    @given(
+        candidate=wild_ready_candidate_evidence(),
         integrity_fact=st.sampled_from(_INTEGRITY_FACTS),
     )
     def test_current_proof_precedes_integrity_before_any_import(
@@ -3725,6 +3760,47 @@ class TestGeneratedEvidenceDecider(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             full_pipeline_decision_from_evidence(no_bitrates, None)
+
+    def test_early_reject_fact_with_no_quality_measurement_still_decides(self):
+        """Issue #1355 item 2, the fixed-world half of the pair.
+
+        A candidate with NO reject fact and NO quality still fails closed
+        exactly as ``test_incomplete_evidence_fails_closed`` above pins.
+        This is the other half: a candidate WITH a durable reject fact and
+        genuinely unmeasured quality (what ``evidence_from_measurement``
+        now honestly persists) must decide, not raise — the fact makes
+        quality moot, so its absence is not incompleteness. A mutant
+        reverting ``_require_evidence_ready``'s bypass makes every subTest
+        here raise ``ValueError`` instead."""
+        base = build_parity_candidate_evidence(
+            is_flac=False, min_bitrate=245, is_cbr=False)
+        unmeasured = msgspec.structs.replace(
+            base,
+            measurement=msgspec.structs.replace(
+                base.measurement,
+                format=None,
+                min_bitrate_kbps=None,
+                avg_bitrate_kbps=None,
+                median_bitrate_kbps=None,
+            ),
+            storage_format=None,
+        )
+        for fact in _INTEGRITY_FACTS:
+            with self.subTest(fact=fact):
+                candidate = _with_integrity_fact(unmeasured, fact)
+                self.assertIsNone(candidate.measurement.format)
+                self.assertIsNone(candidate.measurement.min_bitrate_kbps)
+
+                result = full_pipeline_decision_from_evidence(candidate, None)
+
+                expected_key = _expected_early_exit_key(candidate)
+                assert expected_key is not None
+                self.assertEqual(_EARLY_EXIT_FACT_NAMES[expected_key], fact)
+                self.assertEqual(
+                    result[expected_key], _EARLY_EXIT_REJECT_VALUES[expected_key])
+                self.assertFalse(result["imported"])
+                self.assertEqual(result["final_status"], "wanted")
+                self.assertTrue(result["keep_searching"])
 
     def test_current_proof_is_absolute_without_mode_input(self):
         """Decision 21: the verified-lossless proof lock is inside the

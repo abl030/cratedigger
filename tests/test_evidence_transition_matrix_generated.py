@@ -63,6 +63,7 @@ def evidence_transition_violation(
     canonical_generation: int | None,
     decision_ready: bool,
     decision_name: str | None,
+    quality_observed: bool = True,
 ) -> str | None:
     """Name one violated #1030 transition invariant for shrinking/mutation."""
     terminal = early_fact != "none"
@@ -72,6 +73,16 @@ def evidence_transition_violation(
         return None if not decision_ready else "failed spectral attempt was admitted"
     if terminal and not decision_ready:
         return "terminal early fact was blocked before the unified decider"
+    # Issue #1355 item 2: an early reject's readiness never depends on
+    # quality having been observed, but a candidate with NEITHER a durable
+    # reject fact NOR a quality measurement is genuinely incomplete and must
+    # still fail closed — reached only once ``fresh_audit == "error"`` has
+    # already been handled above, so this clause never contradicts it.
+    if not terminal and not quality_observed and decision_ready:
+        return (
+            "incomplete candidate admitted without a reject fact or "
+            "quality measurement"
+        )
     if terminal and decision_name != _decision_name_for_early_fact(early_fact):
         return "unified decider did not receive the persisted early fact"
     if (
@@ -188,6 +199,7 @@ class TestEvidenceTransitionMatrixGenerated(unittest.TestCase):
         collision=True,
         early_fact="corrupt",
         fresh_audit="success",
+        quality_observed=True,
     )
     @example(
         role="dual",
@@ -197,6 +209,33 @@ class TestEvidenceTransitionMatrixGenerated(unittest.TestCase):
         collision=True,
         early_fact="none",
         fresh_audit="success",
+        quality_observed=True,
+    )
+    @example(
+        # Issue #1355 item 2's regression world: the preview worker never
+        # ran the harness, so quality is genuinely unmeasured. The
+        # candidate must still reach the unified decider on the reject
+        # fact alone.
+        role="candidate",
+        generation="null",
+        source_present=True,
+        lineage_shape="source_measured",
+        collision=True,
+        early_fact="corrupt",
+        fresh_audit="success",
+        quality_observed=False,
+    )
+    @example(
+        # The converse: no reject fact and no quality measurement is
+        # genuinely incomplete and must still fail closed.
+        role="candidate",
+        generation="null",
+        source_present=True,
+        lineage_shape="source_measured",
+        collision=True,
+        early_fact="none",
+        fresh_audit="success",
+        quality_observed=False,
     )
     @given(
         role=st.sampled_from(("candidate", "current", "dual")),
@@ -213,6 +252,7 @@ class TestEvidenceTransitionMatrixGenerated(unittest.TestCase):
             "none", "corrupt", "bad_hash", "nested", "empty", "mixed",
         )),
         fresh_audit=st.sampled_from(("success", "error", "absent")),
+        quality_observed=st.booleans(),
     )
     def test_persist_reload_admit_transition_matrix(
         self,
@@ -223,6 +263,7 @@ class TestEvidenceTransitionMatrixGenerated(unittest.TestCase):
         collision: bool,
         early_fact: EarlyFact,
         fresh_audit: FreshAudit,
+        quality_observed: bool,
     ) -> None:
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, mb_release_id="matrix-release"))
@@ -302,7 +343,7 @@ class TestEvidenceTransitionMatrixGenerated(unittest.TestCase):
                 folder_layout=("nested" if early_fact == "nested" else "flat"),
                 audio_file_count=len(files_for_attempt),
                 filetype_band="opus" if files_for_attempt else "",
-                min_bitrate_kbps=128,
+                min_bitrate_kbps=(128 if quality_observed else None),
                 spectral_audit=SpectralDetail(
                     candidate=detail,
                     existing=SpectralAnalysisDetail(attempted=False),
@@ -362,6 +403,7 @@ class TestEvidenceTransitionMatrixGenerated(unittest.TestCase):
                 ),
                 decision_ready=admitted.evidence is not None,
                 decision_name=decision_name,
+                quality_observed=quality_observed,
             )
             self.assertIsNone(violation, violation)
 
@@ -377,9 +419,15 @@ class TestEvidenceTransitionMatrixGenerated(unittest.TestCase):
                 == SPECTRAL_MEASUREMENT_VERSION
             )
             if source_present:
+                # Cache admission also needs a quality measurement UNLESS a
+                # durable reject fact already makes it irrelevant (issue
+                # #1355 item 2) — cache mode never bypasses the spectral-
+                # generation check itself, only the quality-completeness one
+                # that check is layered on top of.
+                quality_ready = early_fact != "none" or quality_observed
                 self.assertEqual(
                     cache.evidence is not None,
-                    not canonical_has_spectral or canonical_current,
+                    quality_ready and (not canonical_has_spectral or canonical_current),
                 )
             else:
                 self.assertIsNone(cache.evidence)
@@ -399,6 +447,70 @@ class TestEvidenceTransitionMatrixGenerated(unittest.TestCase):
             decision_name=None,
         )
         self.assertIn("terminal early fact", violation or "")
+
+    def test_known_bad_incomplete_candidate_without_a_fact_is_qualified(self):
+        """Q1: the issue #1355 item 2 converse clause trips on a genuinely
+        incomplete candidate (no reject fact, no quality) that was admitted
+        anyway."""
+        violation = evidence_transition_violation(
+            source_present=True,
+            early_fact="none",
+            fresh_audit="success",
+            collision=True,
+            role="candidate",
+            preserve_current_source_spectral=False,
+            old_generation=None,
+            canonical_grade=None,
+            canonical_generation=None,
+            decision_ready=True,
+            decision_name=None,
+            quality_observed=False,
+        )
+        self.assertIn(
+            "incomplete candidate admitted without a reject fact or "
+            "quality measurement",
+            violation or "",
+        )
+
+    def test_known_bad_incomplete_candidate_clause_stays_quiet_when_correct(
+        self,
+    ):
+        """Q3: the clause added above must not fire on either of production's
+        two correct answers — a genuinely incomplete non-terminal candidate
+        correctly refused (``decision_ready=False``), or a terminal reject
+        fact correctly admitted despite unmeasured quality (issue #1355
+        item 2's fix)."""
+        still_incomplete = evidence_transition_violation(
+            source_present=True,
+            early_fact="none",
+            fresh_audit="success",
+            collision=True,
+            role="candidate",
+            preserve_current_source_spectral=False,
+            old_generation=None,
+            canonical_grade=None,
+            canonical_generation=None,
+            decision_ready=False,
+            decision_name=None,
+            quality_observed=False,
+        )
+        self.assertIsNone(still_incomplete)
+
+        fact_admitted_unmeasured = evidence_transition_violation(
+            source_present=True,
+            early_fact="corrupt",
+            fresh_audit="success",
+            collision=True,
+            role="candidate",
+            preserve_current_source_spectral=False,
+            old_generation=None,
+            canonical_grade=None,
+            canonical_generation=None,
+            decision_ready=True,
+            decision_name="audio_corrupt",
+            quality_observed=False,
+        )
+        self.assertIsNone(fact_admitted_unmeasured)
 
     def test_known_bad_stale_tuple_merge_is_qualified(self):
         violation = evidence_transition_violation(
