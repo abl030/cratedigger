@@ -440,6 +440,34 @@ function makeInspection(overrides = {}) {
 }
 
 {
+  // WE-3 folded fix: a failure_class with a null error_message is a real
+  // producible row, not a hypothetical one. lib/pipeline_db/search_plan.py's
+  // create_failed_search_plan requires failure_class but defaults
+  // error_message=None (the migrations/014_persisted_search_plans.sql
+  // error_message column is nullable TEXT with no NOT NULL constraint), so
+  // a plan can legitimately persist with a failure class and no message.
+  // Every OTHER fixture in this file sets both fields together, which lets
+  // an `if (failureClass || failureError)` -> `&&` mutant at
+  // web/js/search_plan.js survive silently; this fixture is built the way
+  // the real writer's own defaults would produce one, and closes that gap.
+  const inspection = makeInspection({
+    active_plan: null,
+    currentness: {
+      is_wanted: true, has_active_plan: false, generator_id_mismatch: false,
+      has_deterministic_failure: true, has_retryable_failure: false,
+    },
+    latest_failed_deterministic: {
+      failure_class: 'no_runnable_query', error_message: null,
+    },
+  });
+  const html = renderSummaryPanel({ inspection, history: { rows: [] } });
+  t.contains(html, 'no_runnable_query',
+    'failure class surfaced even when error_message is null (producer default)');
+  t.excludes(html, 'No active plan',
+    'a real failure_class never falls through to the no-failure-recorded debug line');
+}
+
+{
   // Escape interpolation — hostile attempt query must be HTML-escaped.
   const history = {
     rows: [
