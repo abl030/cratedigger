@@ -255,6 +255,13 @@ export function renderBadRipButton(state, opts = {}) {
  *   existing non-replaced request in the same release group
  *   (``opts.enabled === true``); disabled otherwise so the affordance
  *   communicates "nothing to replace here" without requiring a click.
+ *   A disabled button carries one of two different explanations,
+ *   chosen by ``opts.unavailable`` (issue #1355 item 6): the active-RG
+ *   lookup came back and confirmed no existing request, or the lookup
+ *   itself failed (network/HTTP error, or a malformed response) and
+ *   the disabled state is a fail-closed default, not a confirmed
+ *   answer. Either way the button stays disabled — this only changes
+ *   what the operator is told about why.
  *   Click → ``window.openReplacePicker({targetMbid, releaseGroupId,
  *   targetLabel})``.
  *
@@ -268,6 +275,7 @@ export function renderBadRipButton(state, opts = {}) {
  * @param {ReleaseActionState|null} [args.processingState]
  * @param {Object} [opts]
  * @param {boolean} [opts.enabled]  // inverted-mode enable flag
+ * @param {boolean} [opts.unavailable]  // inverted-mode: disabled because the lookup failed, not because it confirmed absence
  * @param {string} [opts.className]
  * @param {string} [opts.style]
  * @param {string} [opts.label]
@@ -310,7 +318,10 @@ export function renderReplaceButton(args, opts = {}) {
   const rgArg = args.releaseGroupId ? jsArg(args.releaseGroupId) : 'null';
   const targetArg = jsArg(args.targetLabel || '');
   if (!enabled) {
-    return `<button class="${className}"${style} disabled title="No existing request in this release group">${label}</button>`;
+    const title = opts.unavailable
+      ? 'Could not check for an existing request in this release group. Try again.'
+      : 'No existing request in this release group';
+    return `<button class="${className}"${style} disabled title="${title}">${label}</button>`;
   }
   return `<button class="${className}"${style} onclick="${stopPropagation}window.openReplacePicker({targetMbid: ${mbidArg}, releaseGroupId: ${rgArg}, targetLabel: ${targetArg}})">${label}</button>`;
 }

@@ -13,7 +13,9 @@ import { renderLabelLinks } from './labels.js';
 import { renderSearchPlanButton } from './search_plan.js';
 import { renderYoutubeRescueControl } from './youtube_rescue_control.js';
 import { convergenceBadge } from './convergence.js';
-import { loadActiveRgs, hasActiveRg, invalidateActiveRgs } from './active_rgs.js';
+import {
+  loadActiveRgs, hasActiveRg, activeRgsUnavailable, invalidateActiveRgs,
+} from './active_rgs.js';
 import {
   renderReleaseRow, renderBeetsTrackRow, renderExpectedTrackRow, toggleExpand,
 } from './render_primitives.js';
@@ -304,7 +306,7 @@ export function statusChipHtml(status) {
  * other browse surface; an enabled beets removal remains visible.
  *
  * @param {Object} rel - Pressing row with pipeline/library overlay fields.
- * @param {{artistName: string, parentRgId: string|null, canReplace: boolean}} ctx
+ * @param {{artistName: string, parentRgId: string|null, canReplace: boolean, rgLookupUnavailable?: boolean}} ctx
  * @returns {string}
  */
 export function renderPressingRow(rel, ctx) {
@@ -333,6 +335,10 @@ export function renderPressingRow(rel, ctx) {
   //     active request in this RG should be replaced with the
   //     clicked row's MBID. Enabled only when an existing
   //     non-replaced row already targets a sibling MBID in the same RG.
+  //     Disabled either for that confirmed-absence reason or because
+  //     the active-RG lookup itself failed (issue #1355 item 6);
+  //     ``ctx.rgLookupUnavailable`` tells ``renderReplaceButton`` which
+  //     explanation to show without changing the disabled state.
   //
   // ``releaseGroupId`` may be null for legacy rows; the picker
   // lazy-resolves it via ``POST /api/pipeline/<id>/resolve-rg``
@@ -376,6 +382,7 @@ export function renderPressingRow(rel, ctx) {
       className: 'btn',
       style: 'padding:2px 8px;font-size:0.7em;white-space:nowrap;',
       enabled: ctx.canReplace,
+      unavailable: ctx.rgLookupUnavailable,
       stopPropagation: true,
     });
   }
@@ -453,12 +460,14 @@ export async function loadReleaseGroup(id, el, opts = {}) {
     const parentRgId = isDiscogs ? null : id;
 
     const artistName = state.browseArtist?.name || '';
+    const rgLookupUnavailable = activeRgsUnavailable();
     const renderRelease = (rel) => {
       const rgForReplace = rel.release_group_id || parentRgId || null;
       return renderPressingRow(rel, {
         artistName,
         parentRgId,
         canReplace: hasActiveRg(rgForReplace),
+        rgLookupUnavailable,
       });
     };
 

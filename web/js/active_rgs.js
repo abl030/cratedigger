@@ -17,10 +17,17 @@
  *     one fetch.
  *   - Cleared after any successful add / replace / remove via
  *     ``invalidateActiveRgs``; the next access re-fetches.
- *   - The fetch is fire-and-forget if it fails (network error) —
- *     ``hasActiveRg`` returns ``false`` on a missing cache, which
- *     keeps the button disabled and surfaces a benign "nothing to
- *     replace" tooltip rather than a hard error.
+ *   - The fetch is fire-and-forget if it fails (HTTP error, network
+ *     error, or a malformed response shape) — ``hasActiveRg`` returns
+ *     ``false`` on a missing cache, which keeps the button disabled and
+ *     is a safer default than enabling it speculatively. That failure
+ *     is not silent, though: ``activeRgsUnavailable`` tells the
+ *     renderer this attempt couldn't answer the question at all, so it
+ *     doesn't have to present "couldn't check" as "confirmed no
+ *     existing request" (issue #1355 item 6). Retrying is the same
+ *     lazy re-fetch that already happens on the next
+ *     ``loadActiveRgs`` call, since a failed attempt leaves the cache
+ *     null.
  */
 
 import { API } from './state.js';
@@ -30,6 +37,14 @@ let activeRgSet = null;
 
 /** @type {Promise<Set<string>>|null} */
 let inflight = null;
+
+/**
+ * Whether the most recently completed fetch attempt failed to answer
+ * the question, rather than confirming an empty collection. Cleared by
+ * a subsequent successful load, or by ``invalidateActiveRgs``.
+ * @type {boolean}
+ */
+let lastLoadUnavailable = false;
 
 /**
  * Fetch ``/api/pipeline/active-rgs`` and cache the result. Concurrent
@@ -45,16 +60,23 @@ export async function loadActiveRgs() {
       const r = await fetch(`${API}/api/pipeline/active-rgs`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const data = await r.json();
-      const ids = Array.isArray(data.release_group_ids)
-        ? data.release_group_ids
-        : [];
-      activeRgSet = new Set(ids.map(String));
+      if (!Array.isArray(data.release_group_ids)) {
+        // The API contract broke, not the collection. Route through the
+        // same catch as a transport failure rather than caching an
+        // empty set that would read as "confirmed no active requests".
+        throw new Error('malformed release_group_ids');
+      }
+      activeRgSet = new Set(data.release_group_ids.map(String));
+      lastLoadUnavailable = false;
       return activeRgSet;
     } catch (_e) {
       // Soft-fail: leave cache null so the next call retries. Consumers
       // observe an empty set this call, which keeps the button
-      // disabled — a safer default than enabling it speculatively.
+      // disabled — a safer default than enabling it speculatively —
+      // but ``activeRgsUnavailable`` now records that this call
+      // couldn't answer the question.
       activeRgSet = null;
+      lastLoadUnavailable = true;
       return new Set();
     } finally {
       inflight = null;
@@ -79,6 +101,21 @@ export function hasActiveRg(releaseGroupId) {
 }
 
 /**
+ * Whether the cache's most recent completed load attempt failed to
+ * answer the question (HTTP error, network error, or a malformed
+ * response) rather than confirming an empty collection. The renderer
+ * uses this to choose an honest explanation for a disabled
+ * inverted-mode Replace button — "couldn't check" instead of "no
+ * existing request" — while keeping the button itself disabled either
+ * way.
+ *
+ * @returns {boolean}
+ */
+export function activeRgsUnavailable() {
+  return lastLoadUnavailable;
+}
+
+/**
  * Clear the cache. Call after any mutation that may change the set:
  * successful add, replace, or remove. The next ``loadActiveRgs`` call
  * re-fetches.
@@ -86,4 +123,5 @@ export function hasActiveRg(releaseGroupId) {
 export function invalidateActiveRgs() {
   activeRgSet = null;
   inflight = null;
+  lastLoadUnavailable = false;
 }
