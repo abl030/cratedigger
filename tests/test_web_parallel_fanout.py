@@ -140,8 +140,8 @@ class TestParallelResultsFailureLifecycle(unittest.TestCase):
         earlier version of this test left a genuinely queued third job,
         whose fate depended on a real scheduling race between the freed
         worker and this test's own cancel loop (harmless in the case
-        observed, but a latent flake in the untested case — a still
-        -queued future cancelled by the executor's own
+        observed, but a latent flake in the untested case: a
+        still-queued future cancelled by the executor's own
         ``cancel_futures=True`` drain, rather than by this loop, appends
         an extra recorded ``cancel`` after the ``shutdown`` entry).
         """
