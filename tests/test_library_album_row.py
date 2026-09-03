@@ -550,8 +550,9 @@ class TestLibraryAlbumRow(unittest.TestCase):
 
 
 class TestPipelineUpgradeQueued(unittest.TestCase):
-    """`_pipeline_upgrade_queued` is the one owner both the list-row and
-    detail projections call (issue #1355 item 6)."""
+    """`_pipeline_upgrade_queued` is the one owner every call site --
+    `from_pipeline_request`, `with_pipeline_request`, and the detail
+    projection -- calls (issue #1355 item 6)."""
 
     CASES: tuple[tuple[str, dict[str, object] | None, bool], ...] = (
         ("no row", None, False),

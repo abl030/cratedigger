@@ -4,11 +4,13 @@ Issue #1355 item 6: `_pipeline_upgrade_queued` in `web/library_album_row.py`
 is the one owner every projection that surfaces `upgrade_queued` calls:
 the pipeline-only list row (`LibraryAlbumRow.from_pipeline_request`), the
 in-library row overlay (`LibraryAlbumRow.with_pipeline_request` -- the
-adapter actually paired with the detail page for a beets-backed album),
-and the detail projection
+overlay step behind the adapter an operator actually sees paired with the
+detail page, `LibraryAlbumRow.from_beets_album_with_pipeline`, called by
+`web/library_artist_service.py::build_library_artist_rows`), and the
+detail projection
 (`web/library_album_detail_service.py::build_library_album_detail`). This
-drives all three real outer adapters over generated pipeline rows and
-asserts none of them ever disagrees with the detail projection on
+drives all three real functions over generated pipeline rows and asserts
+none of them ever disagrees with the detail projection on
 `upgrade_queued`.
 """
 from __future__ import annotations
@@ -27,9 +29,14 @@ _STATUSES = (
     "initializing", "wanted", "downloading", "processing",
     "imported", "unsearchable", "replaced",
 )
-# Empty string is included alongside None and real values: the owner
-# decides by truthiness (`x or y`), so a present-but-empty column must
-# resolve the same as an absent one on both sides of the projection.
+# Empty string is included alongside None and real values so the
+# adapters are exercised on this shape too. This property only checks
+# that the adapters AGREE with each other, not that "" resolves like
+# None -- all three call the same owner, so an owner-level truthiness
+# bug moves every adapter together and this property stays green
+# either way. The deterministic subTest table in
+# tests/test_library_album_row.py is what pins "" to False against the
+# owner directly.
 _OVERRIDES = (None, "", "flac", "mp3")
 _TARGET_FORMATS = (None, "", "lossless", "default")
 # A well-formed MB UUID so the detail service's identity-attachment guard
