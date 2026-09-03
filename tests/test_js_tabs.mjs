@@ -99,11 +99,16 @@ t.section("dispatchTabShown() calls exactly the named tab's own onShow, never an
   // synchronously, so that shape passes even when the WRONG loader ran
   // (mutant-runner finding on this exact file: a `dispatchTabShown` that
   // ignored `name` and always ran TAB_DEFS[1]'s loader still reported
-  // "0 failed" here). `tabDefs()` returns the live TAB_DEFS array, not a
-  // defensive copy, so this test substitutes each entry's `onShow` with a
-  // recorder and asserts real invocation counts instead of "didn't throw".
-  // Per-name real-loader dispatch (the actual production loaders, through
-  // a DOM stub) is exercised by tests/test_js_main.mjs.
+  // "0 failed" here). `tabDefs()` returns the TAB_DEFS array itself, not a
+  // deep clone of its entries, which is what lets this test substitute an
+  // entry's `onShow` with a recorder and observe real invocation counts
+  // instead of "didn't throw": mutating `def.onShow` here mutates the
+  // exact object `findTab` looks up inside `dispatchTabShown`, whether
+  // `tabDefs()` hands back that array by reference or a shallow copy of
+  // it (verified empirically: a `TAB_DEFS.slice()` return still keeps
+  // this section passing, since the array entries are the same objects
+  // either way). Per-name real-loader dispatch (the actual production
+  // loaders, through a DOM stub) is exercised by tests/test_js_main.mjs.
   const defs = tabDefs();
   const originalOnShow = defs.map((d) => d.onShow);
   /** @type {Record<string, number>} */

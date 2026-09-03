@@ -212,12 +212,8 @@ t.section("closeSearchPlanDetail()'s deferred restore is genuinely consumed by t
   // consumePendingScrollRestore -- observed via a real window.scrollTo
   // recorder, not an intermediate boolean.
   const { closeSearchPlanDetail } = await import('../web/js/search_plan.js');
-  const asyncCases = [
-    ['recents', CONTENT_IDS.recents],
-    ['pipeline', CONTENT_IDS.pipeline],
-    ['manual', CONTENT_IDS.manual],
-  ];
-  for (const [tabName, contentId] of asyncCases) {
+  const asyncTabNames = ['recents', 'pipeline', 'manual'];
+  for (const tabName of asyncTabNames) {
     const app = buildAppDocument();
     /** @type {number[]} */
     const scrollCalls = [];
@@ -251,7 +247,7 @@ t.section("closeSearchPlanDetail()'s deferred restore is genuinely consumed by t
         await Promise.resolve();
       }
       t.deepEqual(scrollCalls, [4242],
-        `after showTab('${tabName}')'s real loader (#${contentId}) finishes, the real consumePendingScrollRestore fires window.scrollTo(0, 4242) exactly once`);
+        `after showTab('${tabName}')'s real loader finishes, the real consumePendingScrollRestore fires window.scrollTo(0, 4242) exactly once`);
     } finally {
       state.pipelineView = prevPipelineView;
       state.recentsSub = prevRecentsSub;
