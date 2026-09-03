@@ -185,11 +185,11 @@ def request_presentation_row(
 
     The one adapter from a ``REQUEST_PRESENTATION_SELECT`` /
     ``REQUEST_PRESENTATION_FROM`` cursor row to
-    ``AlbumRequestPresentationRow``. Every reader of a request row inside a
-    terminal-outcome transaction — the ordinary ``_RequestsMixin`` read path
-    and ``_TransactionalTransitionsDB.get_request`` (issue #1355 item 3) —
-    calls this instead of re-deriving the projection, so a bare ``SELECT *``
-    can never silently drop ``processing_owner`` and starve
+    ``AlbumRequestPresentationRow``. Every reader of such a row — the
+    ordinary ``_RequestsMixin`` read path and, inside a terminal-outcome
+    transaction, ``_TransactionalTransitionsDB.get_request`` (issue #1355
+    item 3) — calls this instead of re-deriving the projection, so a bare
+    ``SELECT *`` can never silently drop ``processing_owner`` and starve
     ``processing_locked_conflict`` of the field it needs.
     """
     row = album_request_row(raw)

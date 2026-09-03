@@ -1340,27 +1340,27 @@ def assert_denylist_writes_are_bundled(
     rejection's transition and audit row, reintroduces the exact
     partial-write window this issue exists to close.
     """
-    bundled_usernames = sorted(
+    bundled_usernames = {
         entry.username
         for command in db.persist_request_rejection_outcome_calls
         if command.request_id == request_id
         for entry in command.denylists
-    ) + sorted(
+    } | {
         entry.username
         for command in db.persist_import_terminal_outcome_calls
         if command.request_id == request_id
         for entry in command.denylists
-    )
-    written_usernames = sorted(
+    }
+    written_usernames = {
         entry.username
         for entry in db.denylist
         if entry.request_id == request_id
-    )
-    if sorted(bundled_usernames) != written_usernames:
+    }
+    if bundled_usernames != written_usernames:
         raise AssertionError(
             "source_denylist rows drifted from the terminal-outcome "
             f"bundle: bundled={sorted(bundled_usernames)!r} written="
-            f"{written_usernames!r}"
+            f"{sorted(written_usernames)!r}"
         )
 
 

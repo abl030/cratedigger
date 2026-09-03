@@ -40,11 +40,14 @@ hair-splitting; the branches were folded into
   test taxonomy, not a production router. The dispatch caller owns requeue
   policy. Terminal persistence applies the common quality/search policy while
   preserving operator search state on every non-accepting outcome when that
-  state is current as the request row is locked. Every terminal ``wanted``
-  transition uses that arbitration, including rejection and local-completion
-  bundles; policy fields and attempt/backoff accounting still apply without
-  clearing the stop. A successful exact-release terminal acceptance instead
-  records ``imported``.
+  state is current as the request row is locked. Every JOB-BACKED terminal
+  ``wanted`` transition uses that arbitration, including rejection and
+  local-completion bundles; policy fields and attempt/backoff accounting
+  still apply without clearing the stop. A successful exact-release terminal
+  acceptance instead records ``imported``. The job-less rejection bundle
+  (`PipelineDB.persist_request_rejection_outcome`, issue #1355 item 3) is a
+  deliberate exception: it applies its transition directly, without this
+  arbitration, so it does not preserve an operator-owned stop.
   Authority: "A successful exact-release terminal import acceptance supersedes
   an operator-owned `unsearchable` search stop and records the request as
   `imported`." — https://github.com/abl030/cratedigger/issues/737#issuecomment-5013436918

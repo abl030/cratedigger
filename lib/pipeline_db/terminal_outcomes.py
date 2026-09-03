@@ -1566,6 +1566,15 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
         On any exception the whole bundle rolls back — the request is left
         exactly where it was, for the existing processing-recovery machinery
         to re-derive, never partially transitioned with no audit trail.
+
+        Closes the atomicity gap only. Unlike the job-backed bundles, this
+        applies ``command.transition`` via a direct
+        ``transitions.finalize_request`` call rather than
+        ``_apply_terminal_request_transition``, so it does NOT preserve an
+        operator-owned ``unsearchable`` stop on a non-accepting outcome — a
+        job-less rejection against an ``unsearchable`` request still
+        transitions to ``wanted`` unconditionally, exactly as it did before
+        issue #1355 item 3.
         """
         boundary = self._boundary_emitter()
         with self._atomic():
