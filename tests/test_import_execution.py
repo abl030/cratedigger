@@ -11,7 +11,7 @@ import threading
 import time
 import unittest
 from itertools import pairwise
-from typing import Self
+from typing import Self, get_type_hints
 from unittest.mock import MagicMock, patch
 
 sys.path.append(os.path.dirname(__file__))
@@ -236,7 +236,18 @@ class TestExecutionOwnerProof(unittest.TestCase):
         ``IMPORT``, or vice versa (review finding, WE8 mutant runner: this
         co-nullity claim had no direct test). Checked by introspection,
         not by a deliberately-wrong constructor call, so the pin does not
-        need a Pyright escape hatch to assert the call would fail."""
+        need a Pyright escape hatch to assert the call would fail.
+
+        ``field.type`` is not enough on its own: ``lib/import_execution.py``
+        has ``from __future__ import annotations``, so
+        ``dataclasses.fields()`` reports each field's annotation as an
+        unevaluated string ('ExecutionLeaseSnapshot', not the class), and
+        widening a field to ``X | None`` still has no default -- it stays
+        "required" by this check's own no-default assertions while quietly
+        admitting the exact ``None`` the whole bundle exists to forbid on
+        one side. ``typing.get_type_hints`` resolves the string annotations
+        into the real classes and is what actually catches that widening
+        (Batch F, F4; issue #1355 residual triage round 2)."""
         field_names = {
             field.name: field for field in dataclasses.fields(ExecutionOwnerProof)
         }
@@ -252,6 +263,16 @@ class TestExecutionOwnerProof(unittest.TestCase):
                 field.default_factory, dataclasses.MISSING,
                 f"{name} must have no default_factory — both fields are required",
             )
+        self.assertEqual(
+            get_type_hints(ExecutionOwnerProof),
+            {
+                "execution_lease": ExecutionLeaseSnapshot,
+                "owner_session_identity": OwnerSessionIdentity,
+            },
+            "a field resolving to anything other than its bare class "
+            "(e.g. widened to `X | None`) defeats the required-together "
+            "invariant this type exists to enforce",
+        )
 
     def test_frozen_rejects_field_reassignment(self) -> None:
         proof = ExecutionOwnerProof(
