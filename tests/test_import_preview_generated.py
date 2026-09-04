@@ -342,7 +342,12 @@ def preview_reject_precedence_violations(
     ``preimport_corrupt_outranks_nested`` makes BOTH this surface and the
     decider fall through to nothing, so the disagreement clause alone stays
     quiet — the decider agrees with the wrong answer because it shares the
-    same broken function). Issue #1355 item 1's residual, "Batch C".
+    same broken function). This clause is sound only because every world
+    this property drives carries a nonzero ``audio_file_count`` (this
+    function's own caller always passes ``audio_file_count=1``); a future
+    strategy widened to generate a genuine empty fileset would need this
+    clause to also check ``expected_fact != "empty_fileset"``, or it would
+    accuse correct code. Issue #1355 item 1's residual, "Batch C".
     """
     violations: list[str] = []
     if expected_fact in _REJECT_FACTS and preview_decision != expected_fact:
