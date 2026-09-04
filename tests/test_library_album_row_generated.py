@@ -17,9 +17,15 @@ Batch F, F2 (issue #1355 residual triage round 2): the property used to
 stop one hop short of the outermost real adapter,
 `LibraryAlbumRow.from_beets_album_with_pipeline` -- it drove
 `from_beets_album` and `with_pipeline_request` directly instead of the
-overlay adapter that composes them, so a defect in the composition itself
-(the identity-attachment step between the two calls) had no arm to catch
-it. `_overlay_adapter_upgrade_queued` now drives that adapter directly.
+overlay adapter that composes them, so if that composition stopped
+calling `with_pipeline_request` (the only place `upgrade_queued` is
+ever written), no arm would notice: the other three arms agree with
+each other everywhere in this property's domain regardless (the
+adapter's own remaining step, re-stamping `mb_albumid`/`source` from
+the attached identity, never touches `upgrade_queued`).
+`_overlay_adapter_upgrade_queued` now drives that adapter directly, so
+a defect in whether the overlay actually runs has an arm that can see
+it.
 """
 from __future__ import annotations
 
