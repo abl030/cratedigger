@@ -9,9 +9,17 @@ detail page, `LibraryAlbumRow.from_beets_album_with_pipeline`, called by
 `web/library_artist_service.py::build_library_artist_rows`), and the
 detail projection
 (`web/library_album_detail_service.py::build_library_album_detail`). This
-drives all three real functions over generated pipeline rows and asserts
+drives all four real functions over generated pipeline rows and asserts
 none of them ever disagrees with the detail projection on
 `upgrade_queued`.
+
+Batch F, F2 (issue #1355 residual triage round 2): the property used to
+stop one hop short of the outermost real adapter,
+`LibraryAlbumRow.from_beets_album_with_pipeline` -- it drove
+`from_beets_album` and `with_pipeline_request` directly instead of the
+overlay adapter that composes them, so a defect in the composition itself
+(the identity-attachment step between the two calls) had no arm to catch
+it. `_overlay_adapter_upgrade_queued` now drives that adapter directly.
 """
 from __future__ import annotations
 
@@ -21,6 +29,7 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
+from lib.release_identity import ReleaseIdentity
 from tests.helpers import make_request_row
 from web.library_album_detail_service import build_library_album_detail
 from web.library_album_row import LibraryAlbumRow
@@ -117,6 +126,29 @@ def _attached_row_upgrade_queued(row: dict[str, object]) -> bool:
     return base.with_pipeline_request(row).upgrade_queued
 
 
+def _overlay_adapter_upgrade_queued(row: dict[str, object]) -> bool:
+    """The true outermost overlay adapter (`from_beets_album_with_pipeline`)
+    -- one hop past `with_pipeline_request`, and the one
+    `build_library_artist_rows` actually calls for an in-library album
+    with an attached pipeline request."""
+    album = {
+        "id": 7,
+        "album": "Test Album",
+        "artist": "Test Artist",
+        "track_count": 1,
+        "added": 0.0,
+        "mb_albumid": _MB_RELEASE_ID,
+    }
+    identity = ReleaseIdentity.from_id(_MB_RELEASE_ID)
+    assert identity is not None
+    return LibraryAlbumRow.from_beets_album_with_pipeline(
+        album,
+        pipeline_row=row,
+        rank_fn=lambda _fmt, _kbps: "transparent",
+        attached_identity=identity,
+    ).upgrade_queued
+
+
 def _detail_upgrade_queued(row: dict[str, object]) -> bool:
     detail_row: dict[str, object] = {
         "id": 7,
@@ -168,11 +200,15 @@ class TestUpgradeQueuedProjectionsAgree(unittest.TestCase):
         detail_value = _detail_upgrade_queued(row)
         list_value = _list_row_upgrade_queued(row)
         attached_value = _attached_row_upgrade_queued(row)
+        overlay_value = _overlay_adapter_upgrade_queued(row)
         violations = [
             *upgrade_queued_agreement_violations(
                 list_value, detail_value, left_label="from_pipeline_request"),
             *upgrade_queued_agreement_violations(
                 attached_value, detail_value, left_label="with_pipeline_request"),
+            *upgrade_queued_agreement_violations(
+                overlay_value, detail_value,
+                left_label="from_beets_album_with_pipeline"),
         ]
         self.assertEqual(violations, [], violations)
 
