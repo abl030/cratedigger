@@ -26,8 +26,10 @@ if TYPE_CHECKING:
         ImportAttemptResult,
     )
     from lib.import_evidence import CandidateEvidenceActionResult
-    from lib.pipeline_db import DownloadLogOutcome
+    from lib.pipeline_db import DownloadLogOutcome, PipelineDB
     from lib.quality import SpectralDetail
+
+import psycopg2.extras
 
 from lib.grab_list import DownloadFile
 from lib.import_execution import (
@@ -505,6 +507,41 @@ def handoff_automation_owner(
             f"request {request_id} handoff failed: {result.outcome}"
         )
     return result.job
+
+
+def fail_import_job_via_sql(
+    db: PipelineDB,
+    job_id: int,
+    *,
+    error: str,
+    result: dict[str, object] | None = None,
+    message: str | None = None,
+) -> None:
+    """Terminalize one non-automation job as ``failed``, for real-DB
+    fixture setup only.
+
+    ``PipelineDB.mark_import_job_failed`` had zero production callers and
+    was deleted (issue #1355 item A3); this reproduces its exact SQL shape
+    as fixture machinery ONLY, for tests that need a pre-existing failed
+    job row and are not themselves exercising that writer's own behavior
+    (which no longer exists to exercise).
+    """
+    db._execute(
+        """
+        UPDATE import_jobs
+        SET status = 'failed',
+            result = %s,
+            message = %s,
+            error = %s,
+            completed_at = NOW(),
+            updated_at = NOW()
+        WHERE id = %s
+          AND job_type <> 'automation_import'
+          AND status IN ('queued', 'running')
+        """,
+        (psycopg2.extras.Json(result or {}), message, error, job_id),
+    )
+    db.conn.commit()
 
 
 def noop_quality_gate(**_kwargs: object) -> None:

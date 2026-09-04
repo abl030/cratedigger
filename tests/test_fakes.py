@@ -418,6 +418,13 @@ class TestPipelineDBFakeContract(unittest.TestCase):
             "arm_request_creation_race",
             "queue_execute_results",
             "seed_youtube_album_mapping",
+            # PipelineDB.mark_import_job_failed had zero production
+            # callers and was deleted (issue #1355 item A3). The fake's
+            # own copy stays as internal plumbing for its
+            # persist_import_terminal_outcome job-backed non-automation
+            # branch, and as fixture-only convenience for tests that seed
+            # a failed job through FakePipelineDB directly.
+            "mark_import_job_failed",
         }
         real = _public_methods(PipelineDB)
         fake = _public_methods(FakePipelineDB)

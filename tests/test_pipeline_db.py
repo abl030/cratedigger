@@ -99,6 +99,7 @@ from lib.quality import (
 from tests.dispatch_helpers import (
     claim_next_import_job,
     claim_next_import_preview_job,
+    fail_import_job_via_sql,
     handoff_automation_owner,
 )
 from tests.evidence_helpers import make_album_quality_evidence
@@ -1674,7 +1675,8 @@ class TestImportJobQueueAPI(unittest.TestCase):
         # Marker present, receipt entirely missing, ordinary code ->
         # included.
         failed_missing = _force_job("failed-missing")
-        self.db.mark_import_job_failed(
+        fail_import_job_via_sql(
+            self.db,
             failed_missing.id,
             error="beets rejected: audio_corrupt",
             result={
@@ -1688,7 +1690,8 @@ class TestImportJobQueueAPI(unittest.TestCase):
         # Marker present, receipt present but success=false -> included
         # (MAJOR-1, failure arm).
         failed_failed_receipt = _force_job("failed-failed-receipt")
-        self.db.mark_import_job_failed(
+        fail_import_job_via_sql(
+            self.db,
             failed_failed_receipt.id,
             error="beets rejected: audio_corrupt",
             result={
@@ -1705,7 +1708,8 @@ class TestImportJobQueueAPI(unittest.TestCase):
 
         # Marker present, receipt proven successful -> excluded.
         failed_successful_receipt = _force_job("failed-successful-receipt")
-        self.db.mark_import_job_failed(
+        fail_import_job_via_sql(
+            self.db,
             failed_successful_receipt.id,
             error="beets rejected",
             result={
@@ -1724,7 +1728,8 @@ class TestImportJobQueueAPI(unittest.TestCase):
         # live code never runs the wrong-match decision for this code ->
         # excluded.
         failed_requeue = _force_job("failed-requeue")
-        self.db.mark_import_job_failed(
+        fail_import_job_via_sql(
+            self.db,
             failed_requeue.id,
             error="requeue failed",
             result={
@@ -1738,7 +1743,8 @@ class TestImportJobQueueAPI(unittest.TestCase):
         # The terminal retry-budget bail removes only its private action
         # copy; it must never be replayed as a Wrong Matches decision.
         failed_requeue_exhausted = _force_job("failed-requeue-exhausted")
-        self.db.mark_import_job_failed(
+        fail_import_job_via_sql(
+            self.db,
             failed_requeue_exhausted.id,
             error="preview/import requeue budget exhausted",
             result={
@@ -1754,7 +1760,8 @@ class TestImportJobQueueAPI(unittest.TestCase):
         # its own first line skips the decision immediately, so no
         # receipt ever lands; replay must not manufacture one -> excluded.
         failed_deferred = _force_job("failed-deferred")
-        self.db.mark_import_job_failed(
+        fail_import_job_via_sql(
+            self.db,
             failed_deferred.id,
             error="Another import is already in progress",
             result={
@@ -1782,7 +1789,8 @@ class TestImportJobQueueAPI(unittest.TestCase):
         # ``{"success": false}`` written before ``_job_result`` is ever
         # computed, or any other historical/operator shape) -> excluded.
         historical_failed = _force_job("historical-failed-no-marker")
-        self.db.mark_import_job_failed(
+        fail_import_job_via_sql(
+            self.db,
             historical_failed.id,
             error="RuntimeError: boom",
             result={"success": False},
@@ -1842,7 +1850,12 @@ class TestImportJobQueueAPI(unittest.TestCase):
         assert isinstance(job.payload, YoutubeImportPayload)
         self.assertEqual(job.payload.browse_id, "MPREb_pg_constraint")
 
-    def test_claim_complete_and_fail_lifecycle(self):
+    def test_claim_and_complete_lifecycle(self):
+        """Was ``test_claim_complete_and_fail_lifecycle``: the trailing
+        "failing a nonexistent job returns None" assertion existed only to
+        exercise ``PipelineDB.mark_import_job_failed``, deleted as dead
+        production surface with zero callers (issue #1355 item A3). The
+        claim/complete coverage below is unaffected and stays."""
         from lib.import_queue import IMPORT_JOB_FORCE
 
         job = self.db.enqueue_import_job(
@@ -1871,13 +1884,6 @@ class TestImportJobQueueAPI(unittest.TestCase):
         assert completed is not None
         self.assertEqual(completed.status, "completed")
         self.assertEqual(completed.result, {"success": True})
-
-        missing = self.db.mark_import_job_failed(
-            999999,
-            error="missing",
-            message="missing",
-        )
-        self.assertIsNone(missing)
 
 
     def test_two_sessions_cannot_claim_same_job(self):
@@ -2493,12 +2499,14 @@ class TestImportJobQueueAPI(unittest.TestCase):
             dedupe_key="manual:timeline-new-terminal",
             payload={"download_log_id": 1, "failed_path": "/tmp/new"},
         )
-        self.db.mark_import_job_failed(
+        fail_import_job_via_sql(
+            self.db,
             older.id,
             error="old",
             message="old",
         )
-        self.db.mark_import_job_failed(
+        fail_import_job_via_sql(
+            self.db,
             newer.id,
             error="new",
             message="new",
@@ -3682,19 +3690,17 @@ class TestProcessingOwnerGenericWriterGuards(unittest.TestCase):
                 self.assertEqual(fake.get_request(fake_request_id), fake_before)
 
     def test_generic_job_terminal_writers_reject_all_automation_rows(self):
+        # ``PipelineDB.mark_import_job_failed`` had a "failed" case here
+        # until it was deleted as dead production surface with zero
+        # callers (issue #1355 item A3) — its own automation-row guard has
+        # no real writer left to protect. ``completed``/``preview-failed``
+        # cover the remaining two real writers, unaffected.
         cases = (
             (
                 "completed",
                 lambda db, job_id: db.mark_import_job_completed(
                     job_id,
                     result={"unexpected": True},
-                ),
-            ),
-            (
-                "failed",
-                lambda db, job_id: db.mark_import_job_failed(
-                    job_id,
-                    error="unexpected",
                 ),
             ),
             (
