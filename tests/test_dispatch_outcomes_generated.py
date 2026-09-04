@@ -634,6 +634,7 @@ def _reject_via_evidence_decision(
     *, decision: str, requeue_on_failure: bool, new_min_bitrate: int,
     source_username: str | None = "user1",
     distance: float | None = 0.0,
+    starting_status: str = "downloading",
 ) -> FakePipelineDB:
     """Established recipe (mirrors
     ``tests/test_import_dispatch.py::TestRejectImportFromEvidenceDecisionCallerLifecycle._reject``)
@@ -643,12 +644,16 @@ def _reject_via_evidence_decision(
     ``distance`` defaults to ``0.0`` for the pre-existing self-heal
     properties above (they don't care about the value); the #550 defect #4
     properties below pass a generated ``float | None`` to prove the helper
-    threads it through unchanged to both persisted sinks."""
+    threads it through unchanged to both persisted sinks. ``starting_status``
+    defaults to ``downloading`` for every pre-existing caller; the issue
+    #1355 item A4 property below draws it from ``{"downloading",
+    "unsearchable"}`` to prove the job-less rejection bundle preserves an
+    operator stop instead of clearing it unconditionally."""
     from lib.dispatch import _reject_import_from_evidence_decision
 
     db = FakePipelineDB()
     db.seed_request(make_request_row(
-        id=42, status="downloading", mb_release_id="test-mbid"))
+        id=42, status=starting_status, mb_release_id="test-mbid"))
     dl_info = DownloadInfo(filetype="mp3", username=source_username)
     ir = make_import_result(decision=decision, new_min_bitrate=new_min_bitrate)
     attempt_result = ImportAttemptResult(None)
@@ -1642,6 +1647,35 @@ class TestGeneratedDistanceNeverFabricated(unittest.TestCase):
             decision=decision, requeue_on_failure=requeue_on_failure,
             new_min_bitrate=new_min_bitrate, distance=distance)
         assert_beets_distance_round_trips(db, distance)
+
+
+class TestGeneratedJobLessRejectionPreservesOperatorStop(unittest.TestCase):
+    """Issue #1355 item A4: the job-less rejection bundle
+    (``persist_request_rejection_outcome``) must preserve an operator
+    ``unsearchable`` stop rather than clear it unconditionally when it
+    requeues to ``wanted``. Drives the REAL
+    ``_reject_import_from_evidence_decision`` over both the operator-stop
+    and the ordinary starting status, across the full preimport-fact
+    decision taxonomy."""
+
+    @given(
+        decision=st.sampled_from(sorted(_PREIMPORT_FACT_REJECT_DECISIONS)),
+        starting_status=st.sampled_from(("downloading", "unsearchable")),
+    )
+    def test_requeue_respects_the_starting_operator_stop(
+        self, decision, starting_status,
+    ):
+        db = _reject_via_evidence_decision(
+            decision=decision,
+            requeue_on_failure=True,
+            new_min_bitrate=320,
+            starting_status=starting_status,
+        )
+        row = db.request(42)
+        expected = (
+            "unsearchable" if starting_status == "unsearchable" else "wanted"
+        )
+        self.assertEqual(row["status"], expected)
 
 
 class TestGeneratedEveryRejectionWriterProjection(unittest.TestCase):

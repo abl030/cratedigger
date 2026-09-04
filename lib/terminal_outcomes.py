@@ -413,25 +413,35 @@ class RequestSuccessResult:
 
 @dataclass(frozen=True)
 class RequestPolicyOutcome:
-    """A job-less transition-plus-denylist/cooldown bundle, no audit, no
-    job (issue #1355 item A2).
+    """A job-less transition-plus-denylist bundle, no audit, no job
+    (issue #1355 item A2).
 
-    The third job-less terminal primitive: for accept-path post-import
-    policy writers that mutate the request and denylist/cooldown state
-    together but write no ``download_log`` row of their own — the
-    acceptance's own audit row was already committed earlier in the SAME
-    settlement, by ``persist_request_success_outcome`` (job-less) or the
-    job-backed bundle. ``lib/dispatch/quality_gate.py``'s ``apply=True``
-    branch and ``lib/dispatch/post_import.py::_apply_or_stage_denylists``'s
-    job-less (``pending is None``) branch are its production callers —
-    the same defect shape issue #1355 item 3 closed for job-less
-    rejections, on the accept-path quality gate instead.
+    The third job-less terminal primitive: for post-import policy writers
+    that mutate the request and denylist state together but write no
+    ``download_log`` row of their own — the settlement's own audit row was
+    already committed earlier in the SAME dispatch call, by
+    ``persist_request_success_outcome`` (job-less accept) or by
+    ``persist_request_rejection_outcome`` (job-less reject —
+    ``lib/dispatch/core.py::_settle_rejected_import`` attaches no
+    denylists to that bundle itself; a rejection's denylist write reaches
+    THIS bundle instead, through the shared post-settlement tail both
+    accept and reject share), or by the job-backed bundle.
+    ``lib/dispatch/quality_gate.py``'s ``apply=True`` branch and
+    ``lib/dispatch/post_import.py::_apply_or_stage_denylists``'s job-less
+    (``pending is None``) branch are its production callers — the same
+    defect shape issue #1355 item 3 closed for job-less rejections, on
+    the accept-path quality gate and the shared denylist tail instead.
+
+    No ``cooldowns`` field: unlike the rejection bundle's own standalone
+    cooldown lane (the installed-HAVE abort, which never denylists),
+    every current caller of this bundle only ever cools a peer down as
+    part of denylisting it (``TerminalDenylist.apply_cooldown``); add the
+    field back only alongside a caller that actually needs it.
     """
 
     request_id: int
     transition: RequestTransition | None = None
     denylists: tuple[TerminalDenylist, ...] = ()
-    cooldowns: tuple[TerminalCooldown, ...] = ()
     successful_terminal_acceptance: bool = False
 
 

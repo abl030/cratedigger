@@ -3870,6 +3870,66 @@ class TestRequestPolicyOutcomeAtomicity(unittest.TestCase):
             ("imported",),
         )
 
+    def test_bundle_holds_row_lock_for_the_exact_request(self) -> None:
+        """Mutant-runner finding (issue #1355 item A2): unlike its success
+        and rejection siblings, this bundle had no test proving
+        ``_lock_terminal_request_status`` actually locks the row before
+        the transition/denylist writes — a mutant swapping that call for
+        an unlocked read survived every other test in this module."""
+        assert TEST_DSN is not None
+        seed_db = make_db()
+        request_id = self._seed_imported_request(seed_db)
+        seed_db.close()
+
+        locked = threading.Event()
+        release = threading.Event()
+        terminal_db = PausingTerminalPipelineDB(
+            TEST_DSN, locked=locked, release=release,
+        )
+        self.addCleanup(terminal_db.close)
+        errors: list[BaseException] = []
+
+        def run_bundle() -> None:
+            try:
+                terminal_db.persist_request_policy_outcome(
+                    RequestPolicyOutcome(
+                        request_id=request_id,
+                        transition=transitions.RequestTransition.to_wanted(
+                            from_status="imported",
+                        ),
+                        denylists=(
+                            TerminalDenylist("lock-policy-peer", "test reason"),
+                        ),
+                    )
+                )
+            except BaseException as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
+                errors.append(exc)
+
+        thread = threading.Thread(target=run_bundle)
+        thread.start()
+        self.assertTrue(
+            locked.wait(timeout=10),
+            "terminal bundle never reached its row lock",
+        )
+
+        observer = PipelineDB(TEST_DSN)
+        try:
+            observer.conn.autocommit = False
+            with self.assertRaises(psycopg2.errors.LockNotAvailable):
+                observer._execute(
+                    "SELECT status FROM album_requests "
+                    "WHERE id = %s FOR UPDATE NOWAIT",
+                    (request_id,),
+                )
+        finally:
+            observer.conn.rollback()
+            observer.conn.autocommit = True
+            observer.close()
+
+        release.set()
+        thread.join(timeout=10)
+        self.assertEqual(errors, [])
+
     def test_bundle_rolls_back_completely_on_mid_write_injected_failure(
         self,
     ) -> None:

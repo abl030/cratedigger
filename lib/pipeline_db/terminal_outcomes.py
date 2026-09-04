@@ -1682,16 +1682,16 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
         self,
         command: RequestPolicyOutcome,
     ) -> RequestPolicyResult:
-        """Atomically commit a job-less transition/denylist/cooldown
-        bundle with no audit row and no import job (issue #1355 item A2).
+        """Atomically commit a job-less transition/denylist bundle with no
+        audit row and no import job (issue #1355 item A2).
 
         ``lib/dispatch/quality_gate.py``'s job-less branch and
         ``lib/dispatch/post_import.py::_apply_or_stage_denylists``'s
-        job-less branch used to write their transition and each denylist/
-        cooldown entry as separate autocommitted statements; a crash
-        mid-loop left some peers denylisted and others not, with no way to
-        tell the write was interrupted. This commits the whole bundle in
-        one PostgreSQL transaction under a row lock, routing any transition
+        job-less branch used to write their transition and each denylist
+        entry as separate autocommitted statements; a crash mid-loop left
+        some peers denylisted and others not, with no way to tell the
+        write was interrupted. This commits the whole bundle in one
+        PostgreSQL transaction under a row lock, routing any transition
         through ``_apply_terminal_request_transition`` with the caller's
         own ``successful_terminal_acceptance`` — the same arbitration the
         job-backed lane already applies to the identical plan.
@@ -1723,9 +1723,6 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                     entry,
                     boundary,
                 ):
-                    cooled.add(entry.username)
-            for entry in command.cooldowns:
-                if self._persist_terminal_cooldown(entry, boundary):
                     cooled.add(entry.username)
             self.conn.commit()
         return RequestPolicyResult(

@@ -331,6 +331,23 @@ class TestPostImportMutationPins(unittest.TestCase):
         self.assertEqual(db.cooldowns_applied, ["a", "z"])
         self.assertEqual(cooled, {"a", "z"})
 
+    def test_denylist_immediate_with_no_cooldown_tracking_never_checks_cooldown(
+        self,
+    ):
+        """Issue #1355 item A2 mutant-runner finding: ``cooled_down_users
+        is None`` (the force-import lane, which never tracks cooldowns)
+        must skip the cooldown check entirely — not just skip reporting
+        it. A caller that never asked to track cooldowns must not have
+        its peers cooled down as a side effect of denylisting them."""
+        db = FakePipelineDB()
+        db.set_cooldown_result(True)
+        _apply_or_stage_denylists(db, 7, None, {"z", "a"}, "bad", None)
+        self.assertEqual(
+            [(x.request_id, x.username, x.reason) for x in db.denylist],
+            [(7, "a", "bad"), (7, "z", "bad")],
+        )
+        self.assertEqual(db.cooldowns_applied, [])
+
     def test_denylist_staged_preserves_reason_and_cooldown_intent(self):
         pending = PendingImportTerminalOutcome(
             request_id=7,

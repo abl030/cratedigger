@@ -764,9 +764,9 @@ class _FakeTerminalOutcomesMixin(_FakePipelineDBBase):
         command: RequestPolicyOutcome,
     ) -> RequestPolicyResult:
         """Mirrors ``PipelineDB.persist_request_policy_outcome`` (issue
-        #1355 item A2): a job-less transition-plus-denylist/cooldown
-        bundle with no audit row and no job — snapshot/restore proves the
-        same all-or-nothing commit.
+        #1355 item A2): a job-less transition-plus-denylist bundle with
+        no audit row and no job — snapshot/restore proves the same
+        all-or-nothing commit.
         """
         snapshot = self._terminal_state_snapshot()
         boundary_index = 0
@@ -806,16 +806,6 @@ class _FakeTerminalOutcomesMixin(_FakePipelineDBBase):
                 if entry.apply_cooldown and self.check_and_apply_cooldown(
                     entry.username
                 ):
-                    cfg = CooldownConfig()
-                    self.add_cooldown(
-                        entry.username,
-                        _utcnow() + timedelta(days=cfg.cooldown_days),
-                        f"{cfg.failure_threshold} consecutive failures",
-                    )
-                    cooled.add(entry.username)
-                    boundary("cooldown")
-            for entry in command.cooldowns:
-                if self.check_and_apply_cooldown(entry.username):
                     cfg = CooldownConfig()
                     self.add_cooldown(
                         entry.username,

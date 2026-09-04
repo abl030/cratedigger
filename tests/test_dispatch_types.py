@@ -100,13 +100,11 @@ class TestDispatchTypeContracts(unittest.TestCase):
             typing.get_protocol_members(DispatchDB),
             frozenset({
                 "_probe_owner_session",
-                "add_denylist",
                 "add_jellyfin_date_created_pin",
                 "add_plex_added_at_pin",
                 "advisory_lock",
                 "authorize_import_job_launch",
                 "capture_automation_import_completion",
-                "check_and_apply_cooldown",
                 "compare_request_status",
                 "find_album_quality_evidence",
                 "get_download_log_candidate_evidence_id",

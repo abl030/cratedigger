@@ -10804,13 +10804,20 @@ _WRONG_MATCH_REPLAY_OUTCOMES: tuple[str, ...] = (
 # Issue #1122 review MAJOR-2/3: the review's live doc2 measurement found the
 # ORIGINAL predicate (presence-of-key, no era marker) selected 619 pre-feature
 # rows at first startup (477 completed, 142 failed) — zero of them actual
-# crash-window rows. These five classes are the non-adjudicating shapes that
+# crash-window rows. These four classes are the non-adjudicating shapes that
 # must NEVER be selected/replayed after the era-marker fix, built via the
-# REAL producers where one currently exists (test-fidelity.md Rule C).
+# REAL producers where one currently exists (test-fidelity.md Rule C). A
+# fifth class, ``historical_operator_cleanup`` (modeling
+# ``mark_import_job_failed`` called with no ``result`` kwarg), was deleted
+# in issue #1355 item A3's reader re-read: doc2 has zero ``import_jobs``
+# rows shaped ``status='failed' AND result = '{}'::jsonb`` (measured
+# 2026-09-04, same query pattern as the other rows here), so the world was
+# never producible even before that method's deletion — Rule C's
+# no-producer carve-out requires live-row evidence, not "used to be
+# possible in principle".
 _WRONG_MATCH_REPLAY_HISTORICAL_WORLDS: tuple[str, ...] = (
     "historical_completed_no_marker",
     "historical_executor_crash",
-    "historical_operator_cleanup",
     "historical_preview_shape",
     "historical_null_result",
 )
@@ -10888,7 +10895,7 @@ def wrong_match_replay_violations(
     - ``failed_other_scenario``: replay must never change the source or the
       row; the receipt records ``preserved_operator_force_source``.
     - Every name in ``_NEVER_ADJUDICATED_OUTCOMES`` (``failed_requeue_failed``,
-      ``failed_deferred``, and the five ``historical_*`` classes): replay
+      ``failed_deferred``, and the four ``historical_*`` classes): replay
       must never write ANY receipt and must never touch the source or the
       row. The live path never adjudicated the candidate for any of
       these — either it never reaches the wrong-match decision at all
@@ -10954,7 +10961,7 @@ class TestForceWrongMatchReceiptStartupReplayGenerated(unittest.TestCase):
     receipt can reach — the five adjudicating/no-op classes, crossed with
     whether the source folder was already removed before replay ever runs
     (the idempotent-retry sub-case the deterministic pins above don't
-    separately cover) — PLUS the five historical/non-adjudicating shapes
+    separately cover) — PLUS the four historical/non-adjudicating shapes
     the review round (MAJOR-2/3) proved a presence-only predicate would
     have selected and replayed against live production data.
     """
@@ -11035,13 +11042,6 @@ class TestForceWrongMatchReceiptStartupReplayGenerated(unittest.TestCase):
                     job.id, error="RuntimeError: generated executor crash",
                     result={"success": False},
                 )
-            elif outcome == "historical_operator_cleanup":
-                # Real producer: the actual ``mark_import_job_failed`` DB
-                # method, called directly with no ``result`` kwarg — mirrors
-                # ``tests/test_wrong_matches_cleanup.py``'s own "operator
-                # cancelled" pattern for an ad hoc administrative
-                # terminalization outside the adjudicating decision path.
-                db.mark_import_job_failed(job.id, error="operator cancelled")
             elif outcome == "historical_preview_shape":
                 # Real producer (review round 3, MEDIUM-1 corrected a false
                 # "no current producer" claim): TWO live paths write the
