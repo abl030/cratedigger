@@ -2,7 +2,7 @@
 
 Loads the linked installed-copy measurement for a just-imported album and runs
 ``quality_gate_decision`` to accept / requeue-for-upgrade / requeue-for-
-lossless. ``finalize_request`` is the module-local DI seam.
+lossless.
 """
 
 from __future__ import annotations
@@ -15,10 +15,6 @@ from typing import TYPE_CHECKING, Protocol
 import msgspec
 
 from lib import transitions
-
-# Module-level DI seam for ``transitions.finalize_request``.
-finalize_request = transitions.finalize_request
-
 from lib.dispatch.types import QualityGateState
 from lib.quality import (
     codec_context_from_measurement,
@@ -28,7 +24,7 @@ from lib.quality import (
     resolve_retained_search_override,
 )
 from lib.quality.decisions import post_import_search_action
-from lib.terminal_outcomes import TerminalDenylist
+from lib.terminal_outcomes import RequestPolicyOutcome, TerminalDenylist
 
 
 @dataclass(frozen=True)
@@ -347,11 +343,15 @@ def _check_quality_gate_core(
     # not an evidence failure and must propagate to dispatch instead of being
     # swallowed and leaving the request terminally imported.
     if apply:
-        transitions.require_transition_applied(finalize_request(
-            db,
-            request_id,
-            plan.transition,
+        # The transition and every denylist entry commit together in one
+        # PostgreSQL transaction (issue #1355 item A2) — this used to be a
+        # ``finalize_request`` call followed by a separate ``add_denylist``
+        # per username, each its own autocommit, so a crash mid-loop could
+        # leave some peers denylisted and others not.
+        db.persist_request_policy_outcome(RequestPolicyOutcome(
+            request_id=request_id,
+            transition=plan.transition,
+            denylists=plan.denylists,
+            successful_terminal_acceptance=plan.successful_terminal_acceptance,
         ))
-        for entry in plan.denylists:
-            db.add_denylist(request_id, entry.username, entry.reason)
     return plan

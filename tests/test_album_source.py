@@ -298,15 +298,16 @@ class TestDatabaseSourceRejectAndRequeueSeam(unittest.TestCase):
         """``reject_and_requeue`` lets the shared transition seam look up
         ``from_status`` from the DB instead of pinning it at the call site.
 
-        End-to-end: seed a row in ``unsearchable``, call ``reject_and_requeue``
-        without any ``from_status`` argument, observe the row land in
-        ``wanted``. If the source had hard-coded ``from_status="wanted"``
-        (or any other non-current value), the transition guard would have
-        refused the change. The user-visible behavior (status='wanted')
-        is therefore proof that the seam resolved from_status itself.
+        End-to-end: seed a row in ``downloading`` (a non-operator-stop
+        status), call ``reject_and_requeue`` without any ``from_status``
+        argument, observe the row land in ``wanted``. If the source had
+        hard-coded ``from_status="wanted"`` (or any other non-current
+        value), the transition guard would have refused the change. The
+        user-visible behavior (status='wanted') is therefore proof that
+        the seam resolved from_status itself.
         """
         fake_db = FakePipelineDB()
-        fake_db.seed_request(make_request_row(id=42, status="unsearchable"))
+        fake_db.seed_request(make_request_row(id=42, status="downloading"))
 
         source = DatabaseSource.__new__(DatabaseSource)
         source._db = fake_db  # type: ignore[assignment]
@@ -323,6 +324,39 @@ class TestDatabaseSourceRejectAndRequeueSeam(unittest.TestCase):
 
         row = fake_db.request(42)
         self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["validation_attempts"], 1)
+
+    def test_reject_and_requeue_preserves_operator_stop_on_an_unsearchable_row(
+        self,
+    ) -> None:
+        """Issue #1355 item A4: the same job-less rejection path, driven
+        against a row that starts ``unsearchable``, must stay
+        ``unsearchable`` rather than clear the operator's own stop.
+        Attempt accounting still applies. Authority: "it should stay
+        stopped. i've marked in unsearchable because slskd can't find it
+        for some reason." —
+        https://github.com/abl030/cratedigger/issues/1355#issuecomment-5521174387"""
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(make_request_row(id=42, status="unsearchable"))
+
+        source = make_database_source_with_fake_db(
+            fake_db,
+            musicbrainz_ws2_base=TEST_MB_WS2_BASE,
+            discogs_api_base=TEST_DISCOGS_BASE,
+        )
+
+        album_record = MagicMock()
+        album_record.db_request_id = 42
+        bv_result = ValidationResult(
+            valid=False,
+            distance=0.35,
+            scenario="high_distance",
+        )
+
+        source.reject_and_requeue(album_record, bv_result)
+
+        row = fake_db.request(42)
+        self.assertEqual(row["status"], "unsearchable")
         self.assertEqual(row["validation_attempts"], 1)
 
     def test_conflict_stops_attempt_and_audit_side_effects(self) -> None:
@@ -592,7 +626,7 @@ class TestDatabaseSource(unittest.TestCase):
             album_title="B",
             source="request",
         )
-        db.update_status(req_id, "unsearchable")
+        db.update_status(req_id, "downloading")
         record = _make_record(db_request_id=req_id, db_source="request")
         bv_result = ValidationResult(valid=False, distance=0.35, scenario="high_distance")
 
@@ -601,6 +635,31 @@ class TestDatabaseSource(unittest.TestCase):
         req = db.get_request(req_id)
         assert req is not None
         self.assertEqual(req["status"], "wanted")
+        self.assertEqual(req["validation_attempts"], 1)
+
+    def test_reject_and_requeue_preserves_operator_stop_on_real_db(self) -> None:
+        """Issue #1355 item A4, real-PostgreSQL companion to the fake-backed
+        pin above: a request already ``unsearchable`` stays ``unsearchable``
+        through the same job-less rejection path. Authority: "it should
+        stay stopped. i've marked in unsearchable because slskd can't find
+        it for some reason." —
+        https://github.com/abl030/cratedigger/issues/1355#issuecomment-5521174387"""
+        source, db = self._make_source()
+        req_id = db.add_request(
+            mb_release_id="fail-manual-stop-uuid",
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+        db.update_status(req_id, "unsearchable")
+        record = _make_record(db_request_id=req_id, db_source="request")
+        bv_result = ValidationResult(valid=False, distance=0.35, scenario="high_distance")
+
+        source.reject_and_requeue(record, bv_result)
+
+        req = db.get_request(req_id)
+        assert req is not None
+        self.assertEqual(req["status"], "unsearchable")
         self.assertEqual(req["validation_attempts"], 1)
 
     def test_mark_done_sets_on_disk_spectral(self):

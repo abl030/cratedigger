@@ -375,7 +375,9 @@ _LEAF_SEAM_PATTERNS = [
     # ``web.routes.pipeline_mutations.finalize_request`` above — route handlers
     # and CLI subcommands are dispatched without keyword args, so
     # module-attribute swap is the established DI shape in this codebase.
-    re.compile(r"^lib\.dispatch\.outcome_actions\.finalize_request$"),
+    # ``lib.dispatch.outcome_actions`` had one until issue #1355 item A1
+    # routed its sole caller through the atomic job-less success bundle
+    # instead, deleting the binding along with it.
     re.compile(r"^harness\.import_one\.finalize_request$"),
     # scripts/pipeline_cli.py split into a package (#495) — the single
     # module-level binding split into two independent copies, one per

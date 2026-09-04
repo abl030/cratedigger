@@ -52,8 +52,12 @@ if TYPE_CHECKING:
         ImportTerminalOutcome,
         PendingImportTerminalOutcome,
         PreviewTerminalOutcome,
+        RequestPolicyOutcome,
+        RequestPolicyResult,
         RequestRejectionOutcome,
         RequestRejectionResult,
+        RequestSuccessOutcome,
+        RequestSuccessResult,
         TerminalOutcomeResult,
     )
     from lib.validation_envelope import ValidationProjectionUnset
@@ -123,23 +127,19 @@ class DispatchDB(
     checkpoint, and the two media-server pin services — so this one port
     stays honest without restating their members.
 
-    ``lib/dispatch/`` calls 19 distinct DB methods. Five of them arrive
+    ``lib/dispatch/`` calls 21 distinct DB methods. Five of them arrive
     through those bases and are NOT declared below: ``get_request``,
     ``get_import_job``, ``get_request_current_evidence_id`` and
     ``load_album_quality_evidence_by_id`` (``QualityEvidenceDB``, via
     ``SidecarDB``), and ``_probe_owner_session``
     (``AutomationOwnerCheckpointDB``, which is also where its
     ``deadline_seconds`` parameter is deliberately omitted — that
-    narrowing is that port's, not this one's). The remaining fourteen are
-    declared in the body, plus three that dispatch never calls at all,
+    narrowing is that port's, not this one's). The remaining sixteen are
+    declared in the body, plus two that dispatch never calls at all,
     restated only to satisfy a different port's contract:
     ``merge_rekey_collision`` and ``update_request_release_for_merge``
     (``lib.download_validation.MergeRekeyDB``, which cannot be a base
-    class because that module imports ``lib.dispatch``), and
-    ``mark_import_job_failed`` (dead in production entirely as of issue
-    #1355 item 3, which deleted its last real caller — see the
-    ``tools/vulture/whitelist.py`` entries and the "Residuals from item 3"
-    comment on that issue).
+    class because that module imports ``lib.dispatch``).
 
     Where a declaration below narrows what the real ``PipelineDB`` offers,
     that is deliberate — the port declares what dispatch needs, not
@@ -187,15 +187,6 @@ class DispatchDB(
         expected_execution_lease: ExecutionLeaseSnapshot,
         beets_pid: int,
         beets_start_ticks: int,
-    ) -> ImportJob | None: ...
-
-    def mark_import_job_failed(
-        self,
-        job_id: int,
-        *,
-        error: str,
-        result: dict[str, object] | None = None,
-        message: str | None = None,
     ) -> ImportJob | None: ...
 
     def requeue_import_job_for_preview(
@@ -250,6 +241,14 @@ class DispatchDB(
     def persist_request_rejection_outcome(
         self, command: RequestRejectionOutcome,
     ) -> RequestRejectionResult: ...
+
+    def persist_request_success_outcome(
+        self, command: RequestSuccessOutcome,
+    ) -> RequestSuccessResult: ...
+
+    def persist_request_policy_outcome(
+        self, command: RequestPolicyOutcome,
+    ) -> RequestPolicyResult: ...
 
     def log_download(
         self,

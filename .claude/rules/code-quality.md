@@ -40,17 +40,24 @@ hair-splitting; the branches were folded into
   test taxonomy, not a production router. The dispatch caller owns requeue
   policy. Terminal persistence applies the common quality/search policy while
   preserving operator search state on every non-accepting outcome when that
-  state is current as the request row is locked. Every JOB-BACKED terminal
-  ``wanted`` transition uses that arbitration, including rejection and
-  local-completion bundles; policy fields and attempt/backoff accounting
-  still apply without clearing the stop. A successful exact-release terminal
-  acceptance instead records ``imported``. The job-less rejection bundle
-  (`PipelineDB.persist_request_rejection_outcome`, issue #1355 item 3) is a
-  deliberate exception: it applies its transition directly, without this
-  arbitration, so it does not preserve an operator-owned stop.
+  state is current as the request row is locked. Every terminal ``wanted``
+  transition, job-backed or job-less, uses that arbitration, including
+  rejection and local-completion bundles; policy fields and attempt/backoff
+  accounting still apply without clearing the stop. A successful
+  exact-release terminal acceptance instead records ``imported``, again
+  whether job-backed (`PipelineDB.persist_import_terminal_outcome`) or
+  job-less (`PipelineDB.persist_request_success_outcome`, issue #1355 item
+  A1). The job-less rejection bundle
+  (`PipelineDB.persist_request_rejection_outcome`) gained the same
+  arbitration in issue #1355 item A4, closing a gap where it applied its
+  transition directly and cleared an operator-owned ``unsearchable`` stop
+  unconditionally.
   Authority: "A successful exact-release terminal import acceptance supersedes
   an operator-owned `unsearchable` search stop and records the request as
   `imported`." — https://github.com/abl030/cratedigger/issues/737#issuecomment-5013436918
+  Authority for the job-less rejection fix: "it should stay stopped. i've
+  marked in unsearchable because slskd can't find it for some reason." —
+  https://github.com/abl030/cratedigger/issues/1355#issuecomment-5521174387
   CLI/API lifecycle actions retry a stale compare-and-set against the
   post-terminal status so an operator command queued behind the row lock is not
   lost.

@@ -39,8 +39,12 @@ from lib.terminal_outcomes import (
     AutomationTerminalAuthority,
     ImportTerminalOutcome,
     PreviewTerminalOutcome,
+    RequestPolicyOutcome,
+    RequestPolicyResult,
     RequestRejectionOutcome,
     RequestRejectionResult,
+    RequestSuccessOutcome,
+    RequestSuccessResult,
     TerminalCooldown,
     TerminalDenylist,
     TerminalDownloadAudit,
@@ -1567,27 +1571,36 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
         exactly where it was, for the existing processing-recovery machinery
         to re-derive, never partially transitioned with no audit trail.
 
-        Closes the atomicity gap only. Unlike the job-backed bundles, this
-        applies ``command.transition`` via a direct
-        ``transitions.finalize_request`` call rather than
-        ``_apply_terminal_request_transition``, so it does NOT preserve an
-        operator-owned ``unsearchable`` stop on a non-accepting outcome — a
-        job-less rejection against an ``unsearchable`` request still
-        transitions to ``wanted`` unconditionally, exactly as it did before
-        issue #1355 item 3.
+        ``command.transition`` is routed through
+        ``_apply_terminal_request_transition`` with
+        ``successful_terminal_acceptance=False`` — this command is always a
+        rejection, never a terminal acceptance — the same operator-stop
+        arbitration the job-backed rejection bundle already applies. A
+        job-less rejection against an ``unsearchable`` request now stays
+        ``unsearchable``, with its policy fields, attempt/backoff
+        accounting, audit row, and denylist/cooldown entries still applied
+        (issue #1355 item A4). Authority: "it should stay stopped. i've
+        marked in unsearchable because slskd can't find it for some
+        reason." —
+        https://github.com/abl030/cratedigger/issues/1355#issuecomment-5521174387
         """
         boundary = self._boundary_emitter()
         with self._atomic():
             transition_db = _TransactionalTransitionsDB(self, boundary)
-            self._lock_terminal_request_status(command.request_id)
-            applied: transitions.TransitionApplied | None = None
+            locked_status = self._lock_terminal_request_status(
+                command.request_id
+            )
+            operator_stop_was_current = operator_search_stop_is_current(
+                locked_status
+            )
+            applied: tuple[transitions.TransitionApplied, ...] = ()
             if command.transition is not None:
-                applied = transitions.require_transition_applied(
-                    transitions.finalize_request(
-                        transition_db,
-                        command.request_id,
-                        command.transition,
-                    )
+                applied = self._apply_terminal_request_transition(
+                    transition_db,
+                    command.request_id,
+                    command.transition,
+                    operator_stop_was_current=operator_stop_was_current,
+                    successful_terminal_acceptance=False,
                 )
             download_log_id = self._insert_nonjob_download_audit(
                 command.request_id,
@@ -1608,7 +1621,115 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
             self.conn.commit()
         return RequestRejectionResult(
             download_log_id=download_log_id,
-            transition=applied,
+            transition=applied[0] if applied else None,
+            cooled_down_users=frozenset(cooled),
+        )
+
+    def persist_request_success_outcome(
+        self,
+        command: RequestSuccessOutcome,
+    ) -> RequestSuccessResult:
+        """Atomically commit a job-less import success (issue #1355 item
+        A1, addendum to item 3:
+        https://github.com/abl030/cratedigger/issues/1355#issuecomment-5520032997).
+
+        The success counterpart of ``persist_request_rejection_outcome``:
+        ``_do_mark_done``'s job-less branch has no owning import job, so
+        there is no job-status write — only the ``imported`` transition
+        and its mandatory ``download_log`` audit row, committed together
+        in one PostgreSQL transaction under a row lock. The two writes
+        this replaces used to be separate autocommitted statements, so a
+        crash between them left a request already transitioned to
+        ``imported`` with no audit row explaining why.
+
+        Routes the transition through ``_apply_terminal_request_transition``
+        with ``successful_terminal_acceptance=True`` — the same
+        supersession the job-backed acceptance bundle applies — so a
+        successful exact-release import still clears an operator-owned
+        ``unsearchable`` stop. Authority: "A successful exact-release
+        terminal import acceptance supersedes an operator-owned
+        `unsearchable` search stop and records the request as `imported`."
+        — https://github.com/abl030/cratedigger/issues/737#issuecomment-5013436918
+        """
+        boundary = self._boundary_emitter()
+        with self._atomic():
+            transition_db = _TransactionalTransitionsDB(self, boundary)
+            locked_status = self._lock_terminal_request_status(
+                command.request_id
+            )
+            operator_stop_was_current = operator_search_stop_is_current(
+                locked_status
+            )
+            applied = self._apply_terminal_request_transition(
+                transition_db,
+                command.request_id,
+                command.transition,
+                operator_stop_was_current=operator_stop_was_current,
+                successful_terminal_acceptance=True,
+            )
+            download_log_id = self._insert_nonjob_download_audit(
+                command.request_id,
+                command.audit,
+            )
+            boundary("download_log")
+            self.conn.commit()
+        return RequestSuccessResult(
+            download_log_id=download_log_id,
+            transition=applied[0] if applied else None,
+        )
+
+    def persist_request_policy_outcome(
+        self,
+        command: RequestPolicyOutcome,
+    ) -> RequestPolicyResult:
+        """Atomically commit a job-less transition/denylist/cooldown
+        bundle with no audit row and no import job (issue #1355 item A2).
+
+        ``lib/dispatch/quality_gate.py``'s job-less branch and
+        ``lib/dispatch/post_import.py::_apply_or_stage_denylists``'s
+        job-less branch used to write their transition and each denylist/
+        cooldown entry as separate autocommitted statements; a crash
+        mid-loop left some peers denylisted and others not, with no way to
+        tell the write was interrupted. This commits the whole bundle in
+        one PostgreSQL transaction under a row lock, routing any transition
+        through ``_apply_terminal_request_transition`` with the caller's
+        own ``successful_terminal_acceptance`` — the same arbitration the
+        job-backed lane already applies to the identical plan.
+        """
+        boundary = self._boundary_emitter()
+        with self._atomic():
+            transition_db = _TransactionalTransitionsDB(self, boundary)
+            locked_status = self._lock_terminal_request_status(
+                command.request_id
+            )
+            operator_stop_was_current = operator_search_stop_is_current(
+                locked_status
+            )
+            applied: tuple[transitions.TransitionApplied, ...] = ()
+            if command.transition is not None:
+                applied = self._apply_terminal_request_transition(
+                    transition_db,
+                    command.request_id,
+                    command.transition,
+                    operator_stop_was_current=operator_stop_was_current,
+                    successful_terminal_acceptance=(
+                        command.successful_terminal_acceptance
+                    ),
+                )
+            cooled: set[str] = set()
+            for entry in command.denylists:
+                if self._persist_terminal_denylist(
+                    command.request_id,
+                    entry,
+                    boundary,
+                ):
+                    cooled.add(entry.username)
+            for entry in command.cooldowns:
+                if self._persist_terminal_cooldown(entry, boundary):
+                    cooled.add(entry.username)
+            self.conn.commit()
+        return RequestPolicyResult(
+            transitions=applied,
             cooled_down_users=frozenset(cooled),
         )
 
