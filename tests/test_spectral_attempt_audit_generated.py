@@ -2164,10 +2164,12 @@ class TestIronAndWineOuterEvidenceSlice(unittest.TestCase):
     """#1007's live witness through preview persistence and automation import."""
 
     def test_preserved_wrong_generation_reaches_real_dispatch_policy(self):
+        import datetime
+
         from lib.beets_db import AlbumInfo
         from lib.config import CratediggerConfig
         from lib.dispatch import dispatch_import_core
-        from lib.dispatch.types import DispatchOutcome, ImportOneRun
+        from lib.dispatch.types import DispatchOutcome, DispatchRequest, ImportOneRun
         from lib.download_processing import CompletionDispatched
         from lib.download_reconstruction import reconstruct_grab_list_entry
         from lib.import_execution import (
@@ -2513,6 +2515,26 @@ class TestIronAndWineOuterEvidenceSlice(unittest.TestCase):
                 execution_lease=importer_lease,
             )
             assert claimed_importer is not None and claimed_importer.id == job.id
+            heartbeat_before_dispatch = claimed_importer.heartbeat_at
+
+            # Batch F, F3 (issue #1355 residual triage round 2): the
+            # identity half of ``owner_proof`` reaches real production
+            # reverification and fails closed on a mismatch (a
+            # mismatched-but-present lease is caught too, by
+            # ``checkpoint_automation_owner``'s own
+            # ``automation_import_owner_changed`` cancellation), but a
+            # lease DROPPED to ``None`` had no reader at all --
+            # ``_validate_automation_dispatch_authority`` returns before
+            # that checkpoint ever runs (`lib/dispatch/core.py`), so a
+            # stub that dropped it (``execution_lease=None``) survived
+            # every assertion below. Capturing the built request and
+            # asserting its ``execution_lease`` constrains that case
+            # directly; asserting the real PG ``heartbeat_at`` advanced
+            # additionally proves the checkpoint itself ran against the
+            # exact owner job, not just that the value was threaded
+            # through a local variable.
+            dispatched_requests: list[DispatchRequest] = []
+            heartbeat_after_dispatch: list[datetime.datetime | None] = []
 
             def completed_processing(
                 _entry: object,
@@ -2524,23 +2546,29 @@ class TestIronAndWineOuterEvidenceSlice(unittest.TestCase):
                 owner_proof: ExecutionOwnerProof,
                 **_kwargs: object,
             ) -> CompletionDispatched:
-                return CompletionDispatched(dispatch_import_core(
-                    make_dispatch_request(
-                        path=candidate,
-                        mb_release_id=mbid,
-                        request_id=request_id,
-                        label='Iron & Wine - The Creek Drank the Cradle',
-                        beets_harness_path=cfg.beets_harness_path,
-                        dl_info=DownloadInfo(username='rexasaurus', filetype='flac'),
-                        distance=0.05,
-                        candidate_import_job_id=import_job_id,
-                        execution_lease=owner_proof.execution_lease,
-                        owner_session_identity=owner_proof.owner_session_identity,
-                    ),
+                dispatch_request = make_dispatch_request(
+                    path=candidate,
+                    mb_release_id=mbid,
+                    request_id=request_id,
+                    label='Iron & Wine - The Creek Drank the Cradle',
+                    beets_harness_path=cfg.beets_harness_path,
+                    dl_info=DownloadInfo(username='rexasaurus', filetype='flac'),
+                    distance=0.05,
+                    candidate_import_job_id=import_job_id,
+                    execution_lease=owner_proof.execution_lease,
+                    owner_session_identity=owner_proof.owner_session_identity,
+                )
+                dispatched_requests.append(dispatch_request)
+                outcome = dispatch_import_core(
+                    dispatch_request,
                     db,
                     cfg=cfg,
                     cancellation_token=cancellation_token,
-                ))
+                )
+                after_job = db.get_import_job(import_job_id)
+                assert after_job is not None
+                heartbeat_after_dispatch.append(after_job.heartbeat_at)
+                return CompletionDispatched(outcome)
 
             with (
                 patch("lib.beets_db.BeetsDB", lambda *_args, **_kwargs: beets),
@@ -2557,6 +2585,18 @@ class TestIronAndWineOuterEvidenceSlice(unittest.TestCase):
                     owner_session_identity=importer_owner_session,
                 )
             assert terminal_job is not None
+            self.assertEqual(len(dispatched_requests), 1)
+            self.assertEqual(dispatched_requests[0].execution_lease, importer_lease)
+            self.assertEqual(len(heartbeat_after_dispatch), 1)
+            heartbeat_after = heartbeat_after_dispatch[0]
+            self.assertIsNotNone(
+                heartbeat_after,
+                "checkpoint_automation_owner should have heartbeated the "
+                "exact owner job while dispatch held the real lease",
+            )
+            if heartbeat_before_dispatch is not None:
+                assert heartbeat_after is not None
+                self.assertGreater(heartbeat_after, heartbeat_before_dispatch)
             logs = db.get_log(limit=100)
             outcomes = [str(log["outcome"]) for log in logs]
             request = db.get_request(request_id)

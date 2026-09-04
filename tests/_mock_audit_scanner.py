@@ -131,8 +131,52 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^music_tag\."),
     re.compile(r"\.redis\.Redis$"),
     re.compile(r"^redis\."),
-    # MusicBrainz / Discogs client objects on the web side
-    re.compile(r"^web\.(mb|discogs)\."),
+    # MusicBrainz / Discogs client objects on the web side. Narrowed from
+    # a blanket ``web.(mb|discogs).`` pattern (issue #1355 F1): that
+    # pattern exempted 14 distinct patch targets, only two of which are
+    # our own owner binding. Each pattern below names exactly the
+    # external-boundary shape it covers instead of the whole module.
+    #
+    # The raw HTTP+JSON-decode call, plus the documented external
+    # functions test-fidelity.md Rule B names by identifier
+    # (``get_release``, ``get_release_group_releases``,
+    # ``get_master_releases``) and their same-shape sibling
+    # ``get_release_group_year``: each raises
+    # ``urllib.error.HTTPError`` on 404 / ``URLError`` on transport
+    # failure, and faking them at a caller's call site is Rule B's own
+    # sanctioned "documented stand-in", not a decision this codebase owns.
+    re.compile(r"^web\.mb\._get$"),
+    re.compile(r"^web\.discogs\._get$"),
+    re.compile(r"^web\.mb\.get_release$"),
+    re.compile(r"^web\.mb\.get_release_group_year$"),
+    re.compile(r"^web\.mb\.get_release_group_releases$"),
+    re.compile(r"^web\.discogs\.get_release$"),
+    re.compile(r"^web\.discogs\.get_master_releases$"),
+    # Discogs mirror origin constant. Tests point it at a local
+    # mirror-shaped test server, the same override production performs
+    # via config.ini at startup — not a code decision.
+    re.compile(r"^web\.discogs\.DISCOGS_API_BASE$"),
+    # 24h metadata cache layer (``web.cache.memoize_meta``, bound
+    # per-module as ``_cache``). Tests bypass the cache directly; the
+    # cache module's own key derivation and TTL policy have their own
+    # dedicated coverage.
+    re.compile(r"^web\.mb\._cache\.memoize_meta$"),
+    re.compile(r"^web\.discogs\._cache\.memoize_meta$"),
+    # Public-MusicBrainz pacing/concurrency bookkeeping — the same
+    # category as the generic time.sleep/threading.* leaf patterns above,
+    # scoped to this module's own per-mirror-origin semaphore and request
+    # spacing so a test can exercise concurrency without sleeping in real
+    # time.
+    re.compile(r"^web\.mb\._mirror_semaphore$"),
+    re.compile(r"^web\.mb\._wait_for_public_musicbrainz$"),
+    # Route-to-owner DI seam. ``web.mb`` / ``web.discogs`` each bind
+    # ``parallel_fanout.parallel_results`` at import time for their own
+    # browse fan-out — the same owner ``web.routes.browse.parallel_results``
+    # binds below. The owner's own lifecycle is pinned in
+    # ``tests/test_web_parallel_fanout.py``; these seam tests only prove
+    # each module reaches that owner rather than a private per-module copy.
+    re.compile(r"^web\.mb\.parallel_results$"),
+    re.compile(r"^web\.discogs\.parallel_results$"),
     re.compile(r"^web\.routes\.\w+\.(mb_api|discogs_api)"),
     re.compile(r"^web\.server\.(mb_api|discogs_api|mb)"),
     # The same overlay/handle family after #1313 moved it from module
