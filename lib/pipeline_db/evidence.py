@@ -14,6 +14,7 @@ from lib.evidence_media_identity import (
 from lib.import_execution import ExecutionLeaseSnapshot
 from lib.pipeline_db._core import _PipelineDBBase
 from lib.quality import (
+    EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_INSTALLED,
     EVIDENCE_SUBJECT_SOURCE,
     AacLatticeCapture,
@@ -753,6 +754,30 @@ class _EvidenceMixin(_PipelineDBBase):
             CROSS JOIN file_rows
             LEFT JOIN preserved_file_rows
               ON preserved_file_rows.relative_path = file_rows.relative_path
+            -- Issue #1355 Batch E (E1): a concurrent writer of the exact
+            -- same content address can lose the row-level race on
+            -- ``upserted`` (it blocks on the winner's uncommitted INSERT,
+            -- then resumes) while this DELETE ran against its own
+            -- pre-block snapshot and therefore never saw the winner's
+            -- already-committed file rows. Its own plain INSERT above
+            -- then collided with them. The two writers share a content
+            -- address, so relative_path/size_bytes/extension/container/
+            -- codec are identical by construction (they are exactly what
+            -- the fingerprint hashes). ordinal is not hashed but is still
+            -- identical: both writers sort by relative_path first
+            -- (``evidence.sorted_for_storage()``), so the same path set
+            -- enumerates to the same ordinal on both sides -- which is
+            -- what keeps the sibling ``UNIQUE (evidence_id, ordinal)``
+            -- constraint from ever firing independently of this one.
+            -- mtime_ns and decode_ok are excluded from that hash by
+            -- design and can legitimately differ, and whichever writer
+            -- won is already committed correctly. DO NOTHING keeps that
+            -- committed row exactly as it is rather than risking an
+            -- update computed from this writer's own stale
+            -- preserved_file_rows read -- see
+            -- test_concurrent_same_address_upsert_keeps_the_winners_decode_ok
+            -- for why a same-looking DO UPDATE would be wrong.
+            ON CONFLICT (evidence_id, relative_path) DO NOTHING
             """,
             (
                 spectral_write_intent == "replace",
@@ -966,8 +991,8 @@ class _EvidenceMixin(_PipelineDBBase):
             UPDATE album_quality_evidence AS evidence
             SET spectral_grade = %s,
                 spectral_bitrate_kbps = %s,
-                spectral_subject = 'installed',
-                spectral_provenance = 'measured',
+                spectral_subject = %s,
+                spectral_provenance = %s,
                 cliff_hz = %s,
                 codec_family = %s,
                 ultrasonic_deficit_db = %s,
@@ -983,6 +1008,8 @@ class _EvidenceMixin(_PipelineDBBase):
             (
                 grade,
                 bitrate_kbps,
+                EVIDENCE_SUBJECT_INSTALLED,
+                EVIDENCE_PROVENANCE_MEASURED,
                 cliff_hz,
                 codec_family,
                 ultrasonic_deficit_db,
