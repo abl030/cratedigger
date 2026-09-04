@@ -246,13 +246,19 @@ t.section('loadActiveRgs() — a caller arriving after a stale attempt settles s
  * correct value is genuinely true — so only there does hoisting produce
  * a visible difference.
  *
- * One section cannot catch the swap at all: "Confirmed absence renders
- * the confirmed-absence explanation" has hasActiveRg() and
- * activeRgsUnavailable() both false there by construction (a successful
- * load reporting a genuine absence), so swapping two equal values is
- * invisible; no fixture change closes this, since the section's own
- * definition forces both to false. It exists to pin its own tooltip
- * text, not to discriminate the mapping.
+ * Two sections cannot catch the swap at all, for two different reasons.
+ * "Confirmed absence renders the confirmed-absence explanation" has
+ * hasActiveRg() and activeRgsUnavailable() both false there by
+ * construction (a successful load reporting a genuine absence), so
+ * swapping two equal values is invisible; no fixture change closes
+ * this, since the section's own definition forces both to false. "A
+ * masterless Discogs release under the same failure keeps its current
+ * text" is also both false, but for a different mechanism: canReplace
+ * is false because rgForReplace is null (no master to fall back to),
+ * and rgLookupUnavailable is false because that same null fails the
+ * `rgForReplace !== null` gate regardless of whether the fetch failed.
+ * Both sections exist to pin their own tooltip text, not to
+ * discriminate the mapping.
  */
 
 /** One MB pressing row with no pipeline/library overlay — routes renderPressingRow into inverted-mode Replace, the only mode this cache affects. */

@@ -258,12 +258,14 @@ export function renderBadRipButton(state, opts = {}) {
  *   A disabled button carries one of two different explanations
  *   (issue #1355 item 6). The caller passes ``opts.unavailable: true``
  *   when the active-RG lookup failed AND its answer would have been
- *   meaningful for this row — i.e. the row's release-group id is one
- *   the cache could actually contain. Omitting it (or passing
- *   ``false``) claims the confirmed-absence explanation instead, which
- *   is what this surface has always claimed when the lookup simply
- *   doesn't apply to this row (e.g. a Discogs id, never a member of the
- *   MB-only cache) even if the fetch itself failed — a failed check on a
+ *   meaningful for this row — i.e. the row has a lookup key the cache
+ *   could actually contain, an MB release-group UUID or a Discogs
+ *   master id (Discogs requests persist their exact master in the same
+ *   column MB releases use, KTD-1). Omitting it (or passing ``false``)
+ *   claims the confirmed-absence explanation instead, which is what
+ *   this surface has always claimed when the lookup simply doesn't
+ *   apply to this row (a masterless Discogs release, with no master to
+ *   fall back to) even if the fetch itself failed — a failed check on a
  *   question that could never have been answered is not "unavailable",
  *   it's irrelevant. Distinguishing "irrelevant" from "confirmed absent"
  *   as its own third explanation is out of scope for issue #1355 item 6.

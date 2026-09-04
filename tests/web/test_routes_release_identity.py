@@ -400,6 +400,34 @@ class TestPipelineReplaceContract(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["requests"], [])
 
+    def test_requests_by_rg_accepts_a_numeric_discogs_master_id(self):
+        """A Discogs master id lives in the same mb_release_group_id
+        column an MB release-group UUID does (KTD-1) — the
+        Browse-search inverted-click picker's ``runInverted`` calls this
+        exact route with that numeric id when the clicked row is a
+        Discogs pressing under a master. Before this route's pattern
+        widened to match ``/api/release-group/<id>``'s own
+        ``[a-f0-9-]+`` shape, a numeric id 404'd here even though the
+        underlying ``list_requests_in_release_group`` query has no
+        shape assumption of its own.
+        """
+        self.db.seed_request(make_request_row(
+            id=42, mb_release_id="883018",
+            mb_release_group_id="14187",
+            status="imported",
+            artist_name="Lithops", album_title="Scrypt",
+        ))
+        status, data = self._get(
+            "/api/pipeline/requests-by-rg/14187",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(len(data["requests"]), 1)
+        _assert_required_fields(
+            self, data["requests"][0],
+            self.REQUESTS_BY_RG_FIELDS,
+            "requests-by-rg row",
+        )
+
     def test_active_rgs_returns_sorted_list(self):
         self.db.seed_request(make_request_row(
             id=1, status="wanted", mb_release_id="m-1",
