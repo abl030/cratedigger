@@ -321,6 +321,7 @@ class TestBadHashGateCheckerTripsOnViolations(unittest.TestCase):
 
 
 _REJECT_FACTS = ("audio_corrupt", "bad_audio_hash", "nested_layout")
+_MISROUTE_FACTS = (*_REJECT_FACTS, "empty_fileset")
 
 
 def preview_reject_precedence_violations(
@@ -331,9 +332,17 @@ def preview_reject_precedence_violations(
 
     ``preview_import_from_path``'s confident-reject ``decision`` must equal
     the real evidence decider's ``candidate_preimport_reject_fact`` whenever
-    the decider names one of the three facts this checker polices
-    (``empty_fileset`` is out of scope — it was never routed through the
-    early-check bug C1 fixes). Issue #1355 item 1's residual, "Batch C".
+    the decider names one of the three facts this property generates worlds
+    for (``empty_fileset`` isn't independently generated — it was never
+    routed through the early-check bug C1 fixes). The false-positive clause
+    additionally polices ``empty_fileset`` as a suspicious answer: this
+    property's own worlds always carry a nonzero file count, so a
+    ``preview_decision`` of ``empty_fileset`` can only mean a fall-through
+    misroute (a real gap: a mutant deleting the nested arm of the shared
+    ``preimport_corrupt_outranks_nested`` makes BOTH this surface and the
+    decider fall through to nothing, so the disagreement clause alone stays
+    quiet — the decider agrees with the wrong answer because it shares the
+    same broken function). Issue #1355 item 1's residual, "Batch C".
     """
     violations: list[str] = []
     if expected_fact in _REJECT_FACTS and preview_decision != expected_fact:
@@ -341,7 +350,7 @@ def preview_reject_precedence_violations(
             f"decider says {expected_fact!r}, preview_import_from_path said "
             f"{preview_decision!r}"
         )
-    if expected_fact is None and preview_decision in _REJECT_FACTS:
+    if expected_fact is None and preview_decision in _MISROUTE_FACTS:
         violations.append(
             "decider found no reject fact among audio_corrupt/bad_audio_hash/"
             f"nested_layout, but preview_import_from_path confident_reject'd "
@@ -360,6 +369,14 @@ class TestPreviewClassifyAgreesWithEvidenceDeciderGenerated(unittest.TestCase):
     measurement's own correctness is covered by ``tests/test_measurement.py``,
     not this property) and compares its ``decision`` against
     ``candidate_preimport_reject_fact`` fed the equivalent evidence row.
+
+    ``audio_corrupt`` and ``bad_audio_hash`` are not independent facts in
+    real measurement: ``measure_preimport_state`` returns as soon as
+    ``audio_corrupt`` is true, before the bad-hash gate ever runs
+    (``lib/measurement.py``), so a real ``PreimportMeasurement`` can never
+    carry both. ``bad_audio_hash`` is forced False whenever the generated
+    ``audio_corrupt`` is True so every world this property drives is one
+    production can actually produce (test-fidelity Rule C).
     """
 
     @given(
@@ -368,13 +385,13 @@ class TestPreviewClassifyAgreesWithEvidenceDeciderGenerated(unittest.TestCase):
         nested_layout=st.booleans(),
     )
     @example(audio_corrupt=True, bad_audio_hash=False, nested_layout=True)
-    @example(audio_corrupt=True, bad_audio_hash=True, nested_layout=True)
     @example(audio_corrupt=False, bad_audio_hash=True, nested_layout=True)
     @example(audio_corrupt=False, bad_audio_hash=False, nested_layout=True)
     @example(audio_corrupt=False, bad_audio_hash=False, nested_layout=False)
     def test_classify_surface_agrees_with_the_evidence_decider(
         self, audio_corrupt: bool, bad_audio_hash: bool, nested_layout: bool,
     ) -> None:
+        bad_audio_hash = bad_audio_hash and not audio_corrupt
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42, mb_release_id="mbid-42", artist_name="Artist",
@@ -387,15 +404,15 @@ class TestPreviewClassifyAgreesWithEvidenceDeciderGenerated(unittest.TestCase):
         source = tempfile.mkdtemp(dir=_PREVIEW_SOURCE_ROOT)
         try:
             if audio_corrupt:
+                # bad_audio_hash is already normalised to False here — the
+                # bad-hash gate never runs once measurement finds corrupt
+                # audio, so matched_bad_hash_id has no producible non-None
+                # value in this branch.
                 measurement = PreimportMeasurement(
                     audio_corrupt=True,
                     corrupt_files=["01.mp3"],
                     audio_validation=make_audio_corrupt_validation_report(
                         "01.mp3",
-                    ),
-                    matched_bad_hash_id=(7 if bad_audio_hash else None),
-                    matched_bad_track_path=(
-                        "01.mp3" if bad_audio_hash else None
                     ),
                     folder_layout=("nested" if nested_layout else "flat"),
                     audio_file_count=1,
@@ -468,6 +485,21 @@ class TestPreviewRejectPrecedenceCheckerTripsOnViolations(unittest.TestCase):
     def test_false_positive_clause_trips(self):
         violations = preview_reject_precedence_violations(
             expected_fact=None, preview_decision="nested_layout",
+        )
+        self.assertEqual(len(violations), 1)
+        self.assertIn("decider found no reject fact", violations[0])
+
+    def test_false_positive_clause_trips_on_empty_fileset_misroute(self):
+        """A fall-through misroute to ``empty_fileset`` is also a violation,
+        even though it isn't one of the three facts the disagreement clause
+        polices — this is what catches a mutant that breaks the shared
+        precedence function on BOTH sides identically (mutant runner
+        finding, PR #1375: deleting the nested arm of
+        ``preimport_corrupt_outranks_nested`` makes the decider and the
+        surface agree on nothing, silently, unless this clause watches
+        ``empty_fileset`` too)."""
+        violations = preview_reject_precedence_violations(
+            expected_fact=None, preview_decision="empty_fileset",
         )
         self.assertEqual(len(violations), 1)
         self.assertIn("decider found no reject fact", violations[0])

@@ -1481,13 +1481,21 @@ def _measurement_decision_hint(measurement: Any) -> str:
     Used purely for log/decision-string display — the importer's
     ``full_pipeline_decision_from_evidence`` (U11) makes the actual reject
     call from the persisted evidence via its four-fact early-exit branches.
-    Order mirrors that decider's evaluation order.
+    The audio_corrupt vs. nested_layout choice routes through the one
+    shared precedence function (``preimport_corrupt_outranks_nested``,
+    issue #1355 item 1) rather than an independently-authored order over
+    the same keys — the exact shape that let ``preview_import_from_path``
+    drift from the real decider before this PR's C1 fix.
     """
-    if measurement.audio_corrupt:
+    corrupt_or_nested = preimport_corrupt_outranks_nested(
+        audio_corrupt=measurement.audio_corrupt,
+        nested_layout=measurement.folder_layout == "nested",
+    )
+    if corrupt_or_nested == "audio_corrupt":
         return "audio_corrupt"
     if measurement.matched_bad_hash_id is not None:
         return "bad_audio_hash"
-    if measurement.folder_layout == "nested":
+    if corrupt_or_nested == "nested_layout":
         return "nested_layout"
     if measurement.audio_file_count == 0:
         return "empty_fileset"
