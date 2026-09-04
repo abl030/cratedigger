@@ -126,3 +126,4 @@
 - [#1313 register CLOSED](project_1313_register_closed.md) — 2026-09-02: 22 PRs + leftovers #1346-#1348 + rulings, all live-verified (5740cc90); triage-then-fan-out sweep pattern; ratchet+log-pin rulings encoded
 - [mutmut ADOPTED](project_mutmut_evaluation.md) — PRs #1318+#1320 merged 2026-09-01; #1317 closed; whole-repo convergence register OPEN at #1321
 - [Git measurement hazards](feedback_git_measurement_hazards.md) — reset --soft vs advanced origin/main stages reverts; git log --all counts abandoned branches
+- [#1355 register CLOSED](project_1355_partial_run.md) — 2026-09-04: 20 PRs live-verified (f2b62801/4ecd9b98); WE7 declined; #1366 feature, #1378 reflection; nightly rolling bot deploys main; three-at-a-time OK
