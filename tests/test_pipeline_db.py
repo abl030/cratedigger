@@ -9399,7 +9399,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         self,
         winner_evidence: AlbumQualityEvidence,
         loser_evidence: AlbumQualityEvidence,
-    ) -> tuple[AlbumQualityEvidence, BaseException | None]:
+    ) -> AlbumQualityEvidence:
         """Force two sessions to race ``upsert_album_quality_evidence`` on
         the same content address, deterministically rather than hopefully.
 
@@ -9409,9 +9409,10 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         the contender's own exact ``pg_backend_pid()``, never a fixed sleep
         and never an unscoped cluster-wide read that a shared, developer-
         supplied ``TEST_DB_DSN`` with unrelated activity could
-        false-positive on), then releases it. Returns the evidence
-        persisted at that content address afterward, plus whatever the
-        contender's upsert raised (``None`` on success). Both connections
+        false-positive on), then releases it. Asserts neither session
+        raised and both racing threads actually finished before returning
+        the evidence persisted at that content address afterward -- there
+        is nothing left for a caller to check, by design. Both connections
         are always closed, even if an assertion here fails.
         """
         from lib.pipeline_db import PipelineDB
@@ -9499,7 +9500,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
                 snapshot_fingerprint=winner_evidence.snapshot_fingerprint,
             )
             assert stored is not None
-            return stored, contender_exc
+            return stored
         finally:
             holder.close()
             contender.close()
@@ -9518,9 +9519,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         its own plain INSERT collides with them.
         """
         evidence = self._seed(mb_release_id="race-mbid")
-        # _race_two_upserts asserts the contender raised nothing and both
-        # racing threads actually finished before it ever returns.
-        stored, _ = self._race_two_upserts(evidence, evidence)
+        stored = self._race_two_upserts(evidence, evidence)
 
         self.assertEqual(
             {f.relative_path for f in stored.files},
@@ -9542,6 +9541,12 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         distinguish ``DO NOTHING`` from ``DO UPDATE SET decode_ok =
         EXCLUDED.decode_ok`` -- this test forces the two writers to
         disagree so that distinction is actually exercised.
+
+        Both sides inherit ``_seed``'s default (weak/``legacy_unrecorded``)
+        ``audio_validation``, so this exercises the discrimination on the
+        ``preserve_existing_audio_validation`` branch specifically. The
+        strong-writer branch is covered separately, on the non-racing path,
+        by ``test_strong_writer_replaces_decode_ok_on_the_same_address``.
         """
         winner_file = AlbumQualityEvidenceFile(
             relative_path="01 - Track.mp3",
@@ -9566,9 +9571,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
             loser_evidence.snapshot_fingerprint,
         )
 
-        # _race_two_upserts asserts the contender raised nothing and both
-        # racing threads actually finished before it ever returns.
-        stored, _ = self._race_two_upserts(winner_evidence, loser_evidence)
+        stored = self._race_two_upserts(winner_evidence, loser_evidence)
 
         self.assertEqual(len(stored.files), 1)
         self.assertTrue(
