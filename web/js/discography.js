@@ -338,14 +338,16 @@ export function renderPressingRow(rel, ctx) {
   //     A disabled button carries one of two explanations
   //     (issue #1355 item 6), chosen by ``ctx.rgLookupUnavailable``
   //     without changing the disabled state itself: confirmed absence,
-  //     or the active-RG lookup itself failed. That second explanation
-  //     is claimed only on the MB path (``rgLookupUnavailable`` is
-  //     forced false for Discogs below) — a Discogs row's
-  //     ``release_group_id`` is either a Discogs master id (a release
-  //     under a master) or ``null`` (a masterless release), never an MB
-  //     release-group UUID, so the cache could never have answered the
-  //     question for either shape, regardless of whether the fetch
-  //     itself succeeded.
+  //     or the active-RG lookup itself failed. The second explanation
+  //     is claimed for any row that has a lookup key at all — an MB
+  //     release-group UUID, or a Discogs master id, since Discogs
+  //     requests persist their exact master in the same
+  //     ``mb_release_group_id`` column MB releases use (KTD-1). Only a
+  //     masterless Discogs release has no master to fall back to
+  //     (``rgForReplace`` below is null) and keeps the confirmed-absence
+  //     wording regardless of the fetch outcome — corrected from the
+  //     #1361 premise that no Discogs row could ever match the cache
+  //     (issue #1355 residual sweep, Batch D).
   //
   // ``releaseGroupId`` may be null for legacy rows; the picker
   // lazy-resolves it via ``POST /api/pipeline/<id>/resolve-rg``
@@ -443,10 +445,10 @@ export async function loadReleaseGroup(id, el, opts = {}) {
     const masterless = isDiscogs && identityKind === 'release';
     const url = `${API}${releaseGroupRequestPath(id, source, identityKind)}`;
     // Warm the active-rg cache in parallel — the Browse-search inverted
-    // Replace button per release row consults it. MB releases carry the
-    // release-group id in the parent ``id`` here; Discogs masters don't
-    // map to MB release-group IDs, so the button stays disabled on the
-    // Discogs path (hasActiveRg(rel.release_group_id) — undefined → false).
+    // Replace button per release row consults it. MB releases and
+    // Discogs releases under a master both carry their lookup key in
+    // the parent ``id`` here (see ``parentRgId`` below); only a
+    // masterless Discogs release has none.
     const [r] = await Promise.all([fetch(url), loadActiveRgs()]);
     if (isStale()) return;
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -460,27 +462,33 @@ export async function loadReleaseGroup(id, el, opts = {}) {
     const all = releaseRows.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
     const { visible, hidden } = splitPressings(all);
 
-    // For MB release-group endpoints the parent ``id`` IS the
-    // release_group_id. For Discogs masters it is the master id, which
-    // doesn't map to an MB release-group — the button is disabled on
-    // that path because ``hasActiveRg`` will look up a non-MB id.
-    const parentRgId = isDiscogs ? null : id;
+    // For an MB release-group endpoint the parent ``id`` IS the
+    // release_group_id; for a Discogs master it is the master id, which
+    // lives in the same lookup namespace (KTD-1). Neither
+    // /api/release-group/<id> nor /api/discogs/master/<id> puts a
+    // release_group_id field on their own child rows, so this fallback
+    // is the only source of the key for either source. Only a
+    // masterless Discogs release (``identityKind === 'release'``, no
+    // master to browse) has no parent release group to fall back to.
+    const parentRgId = masterless ? null : id;
 
     const artistName = state.browseArtist?.name || '';
-    // Only an MB release-group id is ever a member of the active-RG
-    // cache, so "the lookup failed" is a meaningful explanation only on
-    // the MB path — a Discogs row's id is never in that namespace, so
-    // the button there is always disabled for the ordinary
-    // confirmed-absence reason, never "unavailable" (issue #1355 item 6
-    // review finding 1).
-    const rgLookupUnavailable = !isDiscogs && activeRgsUnavailable();
+    const lookupFailed = activeRgsUnavailable();
     const renderRelease = (rel) => {
       const rgForReplace = rel.release_group_id || parentRgId || null;
       return renderPressingRow(rel, {
         artistName,
         parentRgId,
         canReplace: hasActiveRg(rgForReplace),
-        rgLookupUnavailable,
+        // "Could not check" is honest only for a row that has a lookup
+        // key to check in the first place. A masterless Discogs release
+        // has none (rgForReplace is null) and keeps the
+        // confirmed-absence wording on a failed lookup; every other row
+        // — MB, or a Discogs release under a master — has one and gets
+        // the "could not check" explanation instead (issue #1355
+        // residual sweep, Batch D — corrects the #1361 premise that no
+        // Discogs row could ever match the cache).
+        rgLookupUnavailable: rgForReplace !== null && lookupFailed,
       });
     };
 

@@ -432,7 +432,10 @@ def get_pipeline_requests_by_rg(h: RouteHandler, params: dict[str, list[str]], r
     Returns the non-replaced ``album_requests`` rows sharing the given
     release group, in id-descending order. Used by the Browse-search
     inverted-click picker (R7) to ask the operator which existing
-    request should be replaced.
+    request should be replaced. ``rg_id`` is an MB release-group UUID or
+    a Discogs numeric master id (KTD-1) — ``mb_release_group_id`` holds
+    both shapes in the same column, and ``list_requests_in_release_group``
+    below is a plain equality match with no shape assumption of its own.
     """
     db = runtime().db()
     rows = db.list_requests_in_release_group(rg_id, exclude_replaced=True)
@@ -618,10 +621,12 @@ ROUTES: list[RouteRegistration] = [
         classified=True,
     ),
     pattern_route(
-        "GET", r"^/api/pipeline/requests-by-rg/([a-f0-9-]{36})$",
+        "GET", r"^/api/pipeline/requests-by-rg/([a-f0-9-]+)$",
         get_pipeline_requests_by_rg,
         "Non-replaced album_requests rows sharing the given release "
-        "group, id-descending.",
+        "group, id-descending. Accepts an MB release-group UUID or a "
+        "Discogs numeric master id, same pattern as "
+        "/api/release-group/<id> (KTD-1).",
         classified=True,
     ),
     pattern_route(
