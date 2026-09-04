@@ -953,14 +953,16 @@ def measure_preimport_state(
     # ``precomputed_inspection`` lets a caller that already ran
     # ``inspect_local_files`` (both preview lanes, via
     # ``lib.import_preview._measure_lane_world``) avoid a second mutagen
-    # walk. Only the read-only classify lane
-    # (``lib.import_preview.preview_import_from_path``) uses its own
-    # inspection to reject on ``has_nested_audio`` before ever calling this
-    # function; the measure-and-persist lane passes one along for the
-    # bitrate/VBR hints AND as a second nested-layout witness OR'd into
-    # ``folder_layout`` below (issue #1355 item 1) — it never rejects on
-    # that witness before measuring, unlike the classify lane. Auto path
-    # passes None and does the walk here.
+    # walk. Neither preview lane rejects on ``has_nested_audio`` before
+    # calling this function: the read-only classify lane
+    # (``lib.import_preview.preview_import_from_path``) used to, but that
+    # let a candidate that was both corrupt and nested display
+    # ``nested_layout`` while production's real decision twins denylisted it
+    # as ``audio_corrupt`` (issue #1355 item 1's residual). Both lanes now
+    # pass their inspection along purely as a bitrate/VBR hint and a
+    # nested-layout witness OR'd into ``folder_layout`` below (issue #1355
+    # item 1); the four-fact precedence choice is made once measurement
+    # returns. Auto path passes None and does the walk here.
     inspection: LocalFileInspection | None = None
     if "mp3" in filetype_band and "flac" not in filetype_band:
         inspection = (precomputed_inspection if precomputed_inspection is not None

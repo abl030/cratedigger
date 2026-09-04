@@ -42,6 +42,7 @@ from lib.quality import (
     SpectralDetail,
     TargetQualityContract,
     V0ProbeEvidence,
+    candidate_preimport_reject_fact,
     full_pipeline_decision,
 )
 from lib.quality_evidence import (
@@ -55,6 +56,7 @@ from tests.dispatch_helpers import (
     handoff_automation_owner,
 )
 from tests.evidence_helpers import (
+    build_parity_candidate_evidence,
     make_album_quality_evidence,
     make_audio_corrupt_validation_report,
 )
@@ -2902,6 +2904,132 @@ class TestImportPreviewPath(unittest.TestCase):
             self.assertEqual(preview.decision, "bad_audio_hash")
             self.assertEqual(db.denylist, [])
             mock_run.assert_not_called()
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_corrupt_and_nested_agrees_with_the_evidence_decider_on_audio_corrupt(
+        self,
+    ):
+        """C1 (issue #1355 item 1 residual): a candidate that is both
+        corrupt and nested must agree with the real evidence decider
+        (``candidate_preimport_reject_fact``, which both quality-decision
+        twins call). Before this fix, ``preview_import_from_path`` rejected
+        on ``inspection.has_nested_audio`` before measurement ever ran, so
+        this exact world displayed ``nested_layout`` here while
+        ``full_pipeline_decision_from_evidence`` denylisted it as
+        ``audio_corrupt``.
+
+        Also carries a matched bad-audio-hash fact (a third true fact,
+        lower priority than both corrupt and nested) to prove the
+        audio_corrupt detail composition isn't overwritten by the
+        lower-priority branches beneath it.
+        """
+        db = self._db()
+        source = self._source_dir()
+        try:
+            with patch("lib.config.read_runtime_config",
+                       return_value=_preview_runtime_config(
+                           beets_harness_path="/fake/harness/run_beets_harness.sh",
+                           pipeline_db_enabled=True,
+                       )), \
+                 patch("lib.import_preview.inspect_local_files",
+                       return_value=LocalFileInspection(
+                           filetype="mp3",
+                           min_bitrate_bps=128000,
+                           is_vbr=False,
+                           has_nested_audio=True,
+                       )), \
+                 patch("lib.import_preview.measure_preimport_state",
+                       return_value=PreimportMeasurement(
+                           audio_corrupt=True,
+                           corrupt_files=["sub/01.mp3"],
+                           audio_validation=(
+                               make_audio_corrupt_validation_report("sub/01.mp3")
+                           ),
+                           matched_bad_hash_id=99,
+                           matched_bad_track_path="decoy.mp3",
+                           folder_layout="nested",
+                           audio_file_count=1,
+                       )), \
+                 patch("lib.import_preview.run_import_one") as mock_run:
+                preview = preview_import_from_path(
+                    db,
+                    request_id=42,
+                    path=source,
+                )
+
+            self.assertEqual(preview.verdict, "confident_reject")
+            self.assertTrue(preview.cleanup_eligible)
+            self.assertEqual(preview.decision, "audio_corrupt")
+            self.assertEqual(preview.detail, "1 files failed ffmpeg decode")
+            self.assertEqual(db.denylist, [])
+            mock_run.assert_not_called()
+
+            evidence = build_parity_candidate_evidence(
+                is_flac=False, min_bitrate=128, is_cbr=False,
+                audio_corrupt=True, folder_layout="nested",
+                matched_bad_audio_hash_id=99,
+                matched_bad_audio_hash_path="decoy.mp3",
+            )
+            self.assertEqual(
+                candidate_preimport_reject_fact(evidence), preview.decision,
+            )
+        finally:
+            import shutil
+            shutil.rmtree(source, ignore_errors=True)
+
+    def test_nested_only_still_reports_nested_layout_with_flatten_detail(self):
+        """Must-still-work guard: a nested-but-not-corrupt candidate keeps
+        reporting ``nested_layout`` (with the operator-facing "flatten the
+        folder" detail) once nested rejection moved from an early
+        ``inspection``-only check into the post-measurement four-fact block.
+        """
+        db = self._db()
+        source = self._source_dir()
+        try:
+            with patch("lib.config.read_runtime_config",
+                       return_value=_preview_runtime_config(
+                           beets_harness_path="/fake/harness/run_beets_harness.sh",
+                           pipeline_db_enabled=True,
+                       )), \
+                 patch("lib.import_preview.inspect_local_files",
+                       return_value=LocalFileInspection(
+                           filetype="mp3",
+                           min_bitrate_bps=128000,
+                           is_vbr=False,
+                           has_nested_audio=True,
+                       )), \
+                 patch("lib.import_preview.measure_preimport_state",
+                       return_value=PreimportMeasurement(
+                           folder_layout="nested",
+                           audio_file_count=1,
+                       )), \
+                 patch("lib.import_preview.run_import_one") as mock_run:
+                preview = preview_import_from_path(
+                    db,
+                    request_id=42,
+                    path=source,
+                )
+
+            self.assertEqual(preview.verdict, "confident_reject")
+            self.assertTrue(preview.cleanup_eligible)
+            self.assertEqual(preview.decision, "nested_layout")
+            self.assertEqual(
+                preview.detail,
+                "Audio files are in subdirectories — flatten the folder "
+                "before import.",
+            )
+            self.assertEqual(db.denylist, [])
+            mock_run.assert_not_called()
+
+            evidence = build_parity_candidate_evidence(
+                is_flac=False, min_bitrate=128, is_cbr=False,
+                audio_corrupt=False, folder_layout="nested",
+            )
+            self.assertEqual(
+                candidate_preimport_reject_fact(evidence), preview.decision,
+            )
         finally:
             import shutil
             shutil.rmtree(source, ignore_errors=True)

@@ -103,6 +103,7 @@ from lib.quality import (
     interpret_spectral_evidence,
     quality_gate_decision,
 )
+from lib.quality.gates import preimport_corrupt_outranks_nested
 from lib.quality_evidence import (
     CandidateEvidencePersistenceReceipt,
     EvidenceBuildResult,
@@ -1687,23 +1688,6 @@ def preview_import_from_path(
                     source_path=path,
                 )
         inspection = inspect_local_files(preview_path)
-        if inspection.has_nested_audio:
-            detail = (
-                "Audio files are in subdirectories — flatten the folder "
-                "before import."
-            )
-            return _preview_result(
-                mode="path",
-                verdict=PREVIEW_VERDICT_CONFIDENT_REJECT,
-                decision="nested_layout",
-                reason="nested_layout",
-                detail=detail,
-                stage_chain=["preimport_nested:reject_nested"],
-                request_id=request_id,
-                download_log_id=download_log_id,
-                source_path=path,
-                cleanup_eligible=True,
-            )
 
         # Preview measures; never decides. Shared skeleton stage: collect
         # facts via ``measure_preimport_state`` (no denylist writes, no
@@ -1711,6 +1695,14 @@ def preview_import_from_path(
         # facts as a confident reject for the CLI/triage UI. The classify
         # lane supplies none of the expensive capture fns — see
         # ``_measure_lane_world``'s docstring for the lane policy split.
+        # ``inspection.has_nested_audio`` used to short-circuit here, before
+        # measurement ever ran, which could disagree with production's real
+        # decision twins on a candidate that was both corrupt and nested
+        # (issue #1355 item 1's residual): this surface showed
+        # ``nested_layout`` while ``full_pipeline_decision_from_evidence``
+        # denylisted the same candidate as ``audio_corrupt``. Measurement now
+        # always runs first, matching the measure-and-persist lane's own
+        # order; the four-fact block below decides which reject reason wins.
         measured = _measure_lane_world(
             db,
             request_id=request_id,
@@ -1732,35 +1724,44 @@ def preview_import_from_path(
         current_evidence = measured.current_evidence
 
         # Four-fact reject (mirror of the measure-and-persist lane's
-        # ``measurement_rejecting`` derivation). ``nested_layout``
-        # is already handled by the ``inspection.has_nested_audio`` branch
-        # above; ``empty_fileset`` is handled by the ``not source_snapshot``
-        # branch on the persist path. At this site only ``audio_corrupt`` and
-        # ``bad_audio_hash`` can fire — but we check ``folder_layout``/
-        # ``audio_file_count`` defensively so the measurement-derived facts
-        # stay the single source of truth.
+        # ``measurement_rejecting`` derivation). ``empty_fileset`` is also
+        # handled by the ``not source_snapshot`` branch on the persist path;
+        # this defensive check keeps the measurement-derived fact the single
+        # source of truth when persistence is skipped. The audio_corrupt vs.
+        # nested_layout choice routes through the one shared precedence
+        # function (``preimport_corrupt_outranks_nested``, issue #1355 item
+        # 1) so this display surface cannot independently drift from the
+        # real decision twins again.
         audio_corrupt = measurement.audio_corrupt
         bad_audio_hash = measurement.matched_bad_hash_id is not None
         nested_layout = measurement.folder_layout == "nested"
         empty_fileset = measurement.audio_file_count == 0
+        corrupt_or_nested = preimport_corrupt_outranks_nested(
+            audio_corrupt=audio_corrupt, nested_layout=nested_layout,
+        )
         if audio_corrupt or bad_audio_hash or nested_layout or empty_fileset:
             scenario = (
-                "audio_corrupt" if audio_corrupt
+                "audio_corrupt" if corrupt_or_nested == "audio_corrupt"
                 else "bad_audio_hash" if bad_audio_hash
-                else "nested_layout" if nested_layout
+                else "nested_layout" if corrupt_or_nested == "nested_layout"
                 else "empty_fileset"
             )
             detail: str | None = None
-            if audio_corrupt:
+            if scenario == "audio_corrupt":
                 detail = measurement.audio_error
                 if detail is None and measurement.corrupt_files:
                     detail = (
                         f"{len(measurement.corrupt_files)} files failed ffmpeg decode"
                     )
-            elif bad_audio_hash and measurement.matched_bad_track_path:
+            elif scenario == "bad_audio_hash" and measurement.matched_bad_track_path:
                 detail = (
                     f"matched bad_audio_hash id={measurement.matched_bad_hash_id} "
                     f"on track {measurement.matched_bad_track_path}"
+                )
+            elif scenario == "nested_layout":
+                detail = (
+                    "Audio files are in subdirectories — flatten the folder "
+                    "before import."
                 )
             return _preview_result(
                 mode="path",
