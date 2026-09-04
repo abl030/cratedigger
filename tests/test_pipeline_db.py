@@ -9632,13 +9632,18 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         assert loaded is not None
         self.assertEqual(loaded.measurement.spectral_grade, "likely_transcode")
         self.assertEqual(loaded.measurement.spectral_bitrate_kbps, 160)
-        # Issue #1355 Batch E (E2): pinned against the shared constants, not
-        # the literal strings, so persist_current_spectral_measurement's SQL
-        # is proven bound to EVIDENCE_SUBJECT_INSTALLED /
-        # EVIDENCE_PROVENANCE_MEASURED rather than a third hardcoded copy.
-        self.assertEqual(
-            loaded.measurement.spectral_subject, EVIDENCE_SUBJECT_INSTALLED
-        )
+        # Issue #1355 Batch E (E2): persist_current_spectral_measurement's
+        # SQL is proven bound to EVIDENCE_SUBJECT_INSTALLED /
+        # EVIDENCE_PROVENANCE_MEASURED rather than a third hardcoded copy
+        # by asserting the persisted value equals the imported constant.
+        # That alone is agree-by-construction against a wrong constant
+        # VALUE (production and this assertion import the same symbol, so
+        # a rename of the constant's string would round-trip undetected
+        # here — a mutant-runner finding) -- the literal assertions below
+        # are what actually pin the current, correct behavior.
+        self.assertEqual(loaded.measurement.spectral_subject, "installed")
+        self.assertEqual(loaded.measurement.spectral_subject, EVIDENCE_SUBJECT_INSTALLED)
+        self.assertEqual(loaded.measurement.spectral_provenance, "measured")
         self.assertEqual(
             loaded.measurement.spectral_provenance, EVIDENCE_PROVENANCE_MEASURED
         )
