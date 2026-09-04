@@ -90,6 +90,7 @@ from lib.quality import (
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_INSTALLED,
     ActiveDownloadState,
+    AlbumQualityEvidence,
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
@@ -9394,6 +9395,115 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         self.assertTrue(claimed.on_disk_v0_research_attempted)
         self.assertIsNone(claimed.v0_metric)
 
+    def _race_two_upserts(
+        self,
+        winner_evidence: AlbumQualityEvidence,
+        loser_evidence: AlbumQualityEvidence,
+    ) -> tuple[AlbumQualityEvidence, BaseException | None]:
+        """Force two sessions to race ``upsert_album_quality_evidence`` on
+        the same content address, deterministically rather than hopefully.
+
+        The holder session upserts ``winner_evidence`` first but keeps its
+        INSERT uncommitted (``autocommit`` off) until the contender's own
+        conflicting INSERT is PROVEN blocked (polling ``pg_locks`` scoped to
+        the contender's own exact ``pg_backend_pid()``, never a fixed sleep
+        and never an unscoped cluster-wide read that a shared, developer-
+        supplied ``TEST_DB_DSN`` with unrelated activity could
+        false-positive on), then releases it. Returns the evidence
+        persisted at that content address afterward, plus whatever the
+        contender's upsert raised (``None`` on success). Both connections
+        are always closed, even if an assertion here fails.
+        """
+        from lib.pipeline_db import PipelineDB
+
+        holder = PipelineDB(TEST_DSN)
+        holder.conn.autocommit = False
+        contender = PipelineDB(TEST_DSN)
+        try:
+            holder_started = threading.Event()
+            release_holder = threading.Event()
+            holder_exc: BaseException | None = None
+
+            def run_holder() -> None:
+                nonlocal holder_exc
+                try:
+                    holder.upsert_album_quality_evidence(winner_evidence)
+                except BaseException as exc:  # noqa: BLE001 - captured for assertion below
+                    holder_exc = exc
+                    holder_started.set()
+                    return
+                holder_started.set()
+                release_holder.wait(timeout=10)
+                holder.conn.commit()
+
+            holder_thread = threading.Thread(target=run_holder)
+            holder_thread.start()
+            self.assertTrue(
+                holder_started.wait(timeout=5),
+                "holder never completed its uncommitted INSERT",
+            )
+            self.assertIsNone(
+                holder_exc, f"holder's own upsert raised: {holder_exc!r}"
+            )
+
+            contender_pid = contender._execute(
+                "SELECT pg_backend_pid() AS pid"
+            ).fetchone()["pid"]
+            contender_exc: BaseException | None = None
+
+            def run_contender() -> None:
+                nonlocal contender_exc
+                try:
+                    contender.upsert_album_quality_evidence(loser_evidence)
+                except BaseException as exc:  # noqa: BLE001 - captured for assertion below
+                    contender_exc = exc
+
+            contender_thread = threading.Thread(target=run_contender)
+            contender_thread.start()
+
+            deadline = time.monotonic() + 5.0
+            blocked = False
+            while time.monotonic() < deadline:
+                cur = self.db._execute(
+                    "SELECT 1 FROM pg_locks WHERE NOT granted AND pid = %s",
+                    (contender_pid,),
+                )
+                if cur.fetchone() is not None:
+                    blocked = True
+                    break
+                time.sleep(0.02)
+            self.assertTrue(
+                blocked, "contender never blocked on the holder's row lock"
+            )
+
+            release_holder.set()
+            holder_thread.join(timeout=5)
+            contender_thread.join(timeout=5)
+            self.assertFalse(
+                holder_thread.is_alive(),
+                "holder thread never finished within the join timeout",
+            )
+            self.assertFalse(
+                contender_thread.is_alive(),
+                "contender thread never finished within the join timeout "
+                "-- its exception (if any) would be lost",
+            )
+
+            self.assertIsNone(
+                contender_exc,
+                f"concurrent same-address upsert raised: {contender_exc!r}",
+            )
+
+            stored = self.db.find_album_quality_evidence(
+                mb_release_id=winner_evidence.mb_release_id,
+                snapshot_fingerprint=winner_evidence.snapshot_fingerprint,
+            )
+            assert stored is not None
+            return stored, contender_exc
+        finally:
+            holder.close()
+            contender.close()
+
     def test_concurrent_same_address_upsert_does_not_raise_unique_violation(self):
         """Issue #1355 Batch E (E1, WE1 residual): two sessions upserting the
         SAME content address at once used to raise
@@ -9406,80 +9516,65 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         ``album_quality_evidence`` itself re-checks against the fresh row),
         so the loser never sees the winner's already-committed file rows and
         its own plain INSERT collides with them.
-
-        This is a deterministic real-PostgreSQL two-session repro (Rule A),
-        not a hopeful race: the holder session keeps its INSERT uncommitted
-        with ``autocommit`` off, and the test polls ``pg_locks`` to prove the
-        contender has genuinely blocked on the holder's row before releasing
-        it -- a fixed sleep would be a flaky stand-in for that proof.
         """
-        from lib.pipeline_db import PipelineDB
-
         evidence = self._seed(mb_release_id="race-mbid")
+        # _race_two_upserts asserts the contender raised nothing and both
+        # racing threads actually finished before it ever returns.
+        stored, _ = self._race_two_upserts(evidence, evidence)
 
-        holder = PipelineDB(TEST_DSN)
-        holder.conn.autocommit = False
-        holder_started = threading.Event()
-        release_holder = threading.Event()
-
-        def run_holder() -> None:
-            holder.upsert_album_quality_evidence(evidence)
-            holder_started.set()
-            release_holder.wait(timeout=10)
-            holder.conn.commit()
-
-        holder_thread = threading.Thread(target=run_holder)
-        holder_thread.start()
-        self.assertTrue(
-            holder_started.wait(timeout=5),
-            "holder never completed its uncommitted INSERT",
-        )
-
-        contender = PipelineDB(TEST_DSN)
-        contender_exc: BaseException | None = None
-
-        def run_contender() -> None:
-            nonlocal contender_exc
-            try:
-                contender.upsert_album_quality_evidence(evidence)
-            except BaseException as exc:  # noqa: BLE001 - captured for assertion below
-                contender_exc = exc
-
-        contender_thread = threading.Thread(target=run_contender)
-        contender_thread.start()
-
-        # Prove the contender is genuinely blocked on the holder's
-        # uncommitted row before releasing it -- both are the only two
-        # writers in this test, so any ungranted lock is theirs.
-        deadline = time.monotonic() + 5.0
-        blocked = False
-        while time.monotonic() < deadline:
-            cur = self.db._execute("SELECT 1 FROM pg_locks WHERE NOT granted")
-            if cur.fetchone() is not None:
-                blocked = True
-                break
-            time.sleep(0.02)
-        self.assertTrue(blocked, "contender never blocked on the holder's row lock")
-
-        release_holder.set()
-        holder_thread.join(timeout=5)
-        contender_thread.join(timeout=5)
-        holder.close()
-        contender.close()
-
-        self.assertIsNone(
-            contender_exc,
-            f"concurrent same-address upsert raised: {contender_exc!r}",
-        )
-
-        stored = self.db.find_album_quality_evidence(
-            mb_release_id=evidence.mb_release_id,
-            snapshot_fingerprint=evidence.snapshot_fingerprint,
-        )
-        assert stored is not None
         self.assertEqual(
             {f.relative_path for f in stored.files},
             {f.relative_path for f in evidence.files},
+        )
+
+    def test_concurrent_same_address_upsert_keeps_the_winners_decode_ok(self):
+        """Issue #1355 Batch E (E1, mutant-runner finding): ``DO NOTHING``,
+        not a ``DO UPDATE`` that copies the loser's own ``decode_ok``, is
+        the correct conflict resolution.
+
+        ``decode_ok`` is deliberately excluded from ``snapshot_fingerprint``
+        (see that function's docstring), so two writers of the exact same
+        content address can legitimately disagree on it -- and the loser's
+        own computed value came from its own pre-race snapshot that never
+        saw the winner, so it is not more authoritative than whatever
+        already committed. The sibling test above uses one shared evidence
+        object with only one possible ``decode_ok``, so it cannot
+        distinguish ``DO NOTHING`` from ``DO UPDATE SET decode_ok =
+        EXCLUDED.decode_ok`` -- this test forces the two writers to
+        disagree so that distinction is actually exercised.
+        """
+        winner_file = AlbumQualityEvidenceFile(
+            relative_path="01 - Track.mp3",
+            size_bytes=123456,
+            mtime_ns=1_700_000_000_000_000_000,
+            extension="mp3",
+            container="mp3",
+            codec="mp3",
+            decode_ok=True,
+        )
+        loser_file = msgspec.structs.replace(winner_file, decode_ok=False)
+        winner_evidence = self._seed(
+            mb_release_id="race-decode-ok", files=[winner_file]
+        )
+        loser_evidence = msgspec.structs.replace(
+            winner_evidence, files=[loser_file]
+        )
+        # Same fingerprint despite the differing decode_ok -- it is
+        # excluded from the hash by design (a per-scan fact, not identity).
+        self.assertEqual(
+            winner_evidence.snapshot_fingerprint,
+            loser_evidence.snapshot_fingerprint,
+        )
+
+        # _race_two_upserts asserts the contender raised nothing and both
+        # racing threads actually finished before it ever returns.
+        stored, _ = self._race_two_upserts(winner_evidence, loser_evidence)
+
+        self.assertEqual(len(stored.files), 1)
+        self.assertTrue(
+            stored.files[0].decode_ok,
+            "the winner's already-committed decode_ok must survive the "
+            "loser's conflicting insert",
         )
 
     def test_current_spectral_write_overwrites_with_fresh_measured_audit(self):
@@ -10268,6 +10363,72 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         self.assertTrue(preserved.audio_corrupt)
         self.assertEqual(preserved.audio_error, evidence.audio_error)
         self.assertFalse(preserved.files[0].decode_ok)
+
+    def test_strong_writer_replaces_decode_ok_on_the_same_address(self):
+        """Issue #1355 Batch E (E1, reader finding): the sibling test above
+        only proves a WEAK (``legacy_unrecorded``/``skipped``) re-audit
+        preserves an existing ``decode_ok=False``. Nothing in this class
+        proved the opposite direction -- that an ordinary, non-racing
+        STRONG re-audit of the same content address can legitimately flip
+        ``decode_ok``. That gap matters for E1's ``ON CONFLICT (evidence_id,
+        relative_path) DO NOTHING`` clause: if the preceding DELETE ever
+        failed to clear the row on this ordinary, non-racing path, DO
+        NOTHING would silently swallow the intended update, and a preserved
+        ``False`` would look identical to a correctly-applied ``False`` --
+        the weak-writer test above cannot distinguish the two. This test
+        can, because it asserts the value actually CHANGES.
+        """
+        from tests.evidence_helpers import make_audio_corrupt_validation_report
+
+        files = [
+            AlbumQualityEvidenceFile(
+                relative_path="disc-1/01.flac",
+                size_bytes=123,
+                mtime_ns=456,
+                extension="flac",
+                container="flac",
+                codec="flac",
+                decode_ok=False,
+            ),
+        ]
+        # A "passed" outcome cannot carry a decode_ok=False file (storage
+        # validation rejects that shape), so the initial strong write uses
+        # audio_corrupt -- still a non-preserving outcome, same as the
+        # weak-writer test's own initial seed.
+        evidence = self._seed(
+            mb_release_id="mbid-strong-writer-decode-ok",
+            files=files,
+            audio_corrupt=True,
+            audio_error="disc-1/01.flac: synthetic decode failure",
+            audio_validation=make_audio_corrupt_validation_report(
+                files[0].relative_path,
+            ),
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        loaded = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert loaded is not None
+        self.assertFalse(loaded.files[0].decode_ok)
+
+        # An ordinary strong re-audit -- the file now decodes cleanly and
+        # the whole album passes -- legitimately flips decode_ok to True.
+        self.db.upsert_album_quality_evidence(msgspec.structs.replace(
+            evidence,
+            audio_corrupt=False,
+            audio_error=None,
+            audio_validation=AudioValidationReport(
+                outcome="passed", files_checked=1,
+            ),
+            files=[msgspec.structs.replace(files[0], decode_ok=True)],
+        ))
+        replaced = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert replaced is not None
+        self.assertTrue(replaced.files[0].decode_ok)
 
     def test_audio_validation_database_constraint_rejects_bad_shape(self):
         """Migration 064 enforces the complete typed bounded audit contract."""

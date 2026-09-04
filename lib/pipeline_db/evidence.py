@@ -762,13 +762,21 @@ class _EvidenceMixin(_PipelineDBBase):
             -- already-committed file rows. Its own plain INSERT above
             -- then collided with them. The two writers share a content
             -- address, so relative_path/size_bytes/extension/container/
-            -- codec and ordinal are identical by construction (they are
-            -- exactly what the fingerprint hashes, sorted the same way);
-            -- only decode_ok can legitimately differ, and it is already
-            -- committed correctly by whichever writer won. DO NOTHING
-            -- keeps that committed row exactly as it is rather than
-            -- risking an update computed from this writer's own stale
-            -- preserved_file_rows read.
+            -- codec are identical by construction (they are exactly what
+            -- the fingerprint hashes). ordinal is not hashed but is still
+            -- identical: both writers sort by relative_path first
+            -- (``evidence.sorted_for_storage()``), so the same path set
+            -- enumerates to the same ordinal on both sides -- which is
+            -- what keeps the sibling ``UNIQUE (evidence_id, ordinal)``
+            -- constraint from ever firing independently of this one.
+            -- mtime_ns and decode_ok are excluded from that hash by
+            -- design and can legitimately differ, and whichever writer
+            -- won is already committed correctly. DO NOTHING keeps that
+            -- committed row exactly as it is rather than risking an
+            -- update computed from this writer's own stale
+            -- preserved_file_rows read -- see
+            -- test_concurrent_same_address_upsert_keeps_the_winners_decode_ok
+            -- for why a same-looking DO UPDATE would be wrong.
             ON CONFLICT (evidence_id, relative_path) DO NOTHING
             """,
             (
