@@ -1327,13 +1327,14 @@ class TestRecordRejectionAndRequeueSeam(unittest.TestCase):
         hardcodes ``from_status`` — the transition command it builds carries
         none, so the real transition engine derives it from the live row.
         Proven two ways: the committed command's own ``from_status`` field,
-        and the actually-applied effect (a live row starting in
-        ``unsearchable`` really lands in ``wanted`` with its attempt bumped
-        — hardcoding a stale ``from_status`` here would have refused it)."""
+        and the actually-applied effect on a live row starting in
+        ``downloading`` (a non-operator-stop status), which really lands in
+        ``wanted`` with its attempt bumped — hardcoding a stale
+        ``from_status`` here would have refused it."""
         from lib.dispatch import _record_rejection_and_maybe_requeue
 
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="unsearchable"))
+        db.seed_request(make_request_row(id=42, status="downloading"))
 
         _record_rejection_and_maybe_requeue(
             db,
@@ -1357,6 +1358,40 @@ class TestRecordRejectionAndRequeueSeam(unittest.TestCase):
         self.assertEqual(command.transition.attempt_type, "validation")
         row = db.request(42)
         self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["validation_attempts"], 1)
+
+    def test_requeue_preserves_operator_stop_on_an_unsearchable_row(
+        self,
+    ) -> None:
+        """Issue #1355 item A4: the SAME job-less rejection bundle, driven
+        against a row that starts ``unsearchable``, must stay
+        ``unsearchable`` — the operator's own stop, not the bundle's
+        ``from_status``-free transition, decides the outcome. Attempt
+        accounting still applies. Authority: "it should stay stopped. i've
+        marked in unsearchable because slskd can't find it for some
+        reason." —
+        https://github.com/abl030/cratedigger/issues/1355#issuecomment-5521174387"""
+        from lib.dispatch import _record_rejection_and_maybe_requeue
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="unsearchable"))
+
+        _record_rejection_and_maybe_requeue(
+            db,
+            42,
+            DownloadInfo(username="user1"),
+            detail="too low",
+            error=None,
+            validation_result=ValidationResult(
+                distance=0.5,
+                scenario="quality_downgrade",
+                detail="too low",
+            ).to_json(),
+            requeue=True,
+        )
+
+        row = db.request(42)
+        self.assertEqual(row["status"], "unsearchable")
         self.assertEqual(row["validation_attempts"], 1)
 
     def test_requeue_only_forwards_fields_persisted_by_wanted_transition(self) -> None:

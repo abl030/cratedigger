@@ -349,17 +349,17 @@ class DatabaseSource:
         ``import_job_id`` is attached (issue #1355 item 3): the job-backed
         branch returns an uncommitted ``PendingImportTerminalOutcome`` for
         its owning import job to finish atomically later; the job-less
-        branch now commits the request transition, the ``download_log``
-        audit row, and every denylist/cooldown entry together in one
-        PostgreSQL transaction (``PipelineDB.persist_request_rejection_outcome``),
+        branch commits the request transition, the ``download_log`` audit
+        row, and every denylist/cooldown entry together in one PostgreSQL
+        transaction (``PipelineDB.persist_request_rejection_outcome``),
         instead of three separate autocommitted writes — never a
         transitioned-but-unaudited or denylisted-but-still-searchable
-        request left behind by a mid-sequence crash. This closes the
-        atomicity gap only; it does not add the job-backed path's
-        operator-stop preservation arbitration
-        (``_apply_terminal_request_transition``) — an ``unsearchable``
-        request rejected through this job-less path still transitions to
-        ``wanted`` unconditionally, exactly as it did before this change.
+        request left behind by a mid-sequence crash. Since issue #1355
+        item A4, the job-less branch also routes its transition through
+        ``_apply_terminal_request_transition`` — the same arbitration the
+        job-backed path already had — so a job-less rejection against an
+        ``unsearchable`` request stays ``unsearchable`` instead of
+        clearing the operator's stop.
         """
         from lib.dispatch import _record_rejection_and_maybe_requeue
         from lib.quality import DownloadInfo

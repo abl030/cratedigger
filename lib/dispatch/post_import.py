@@ -5,8 +5,11 @@ decision->(status, override, denylist) resolution, peer attribution, and gate
 staging. Quality/search policy is mode-blind; terminal persistence arbitrates
 operator-owned search state against the request row current at commit time.
 
-``finalize_request`` is the module-local DI seam, same shape as its
-siblings (``lib.dispatch.outcome_actions``, ``harness.import_one``).
+``finalize_request`` is the module-local DI seam for the transition-only
+writer below, same shape as its sibling ``harness.import_one``. The
+denylist-batch writer commits through
+``PipelineDB.persist_request_policy_outcome`` instead (issue #1355 item
+A2), which needs no such seam.
 """
 
 from __future__ import annotations
@@ -27,7 +30,11 @@ from lib.quality.decisions import (
     post_import_search_action_if_known,
 )
 from lib.quality.dispatch_actions import decision_denylists
-from lib.terminal_outcomes import PendingImportTerminalOutcome, TerminalDenylist
+from lib.terminal_outcomes import (
+    PendingImportTerminalOutcome,
+    RequestPolicyOutcome,
+    TerminalDenylist,
+)
 
 if TYPE_CHECKING:
     from lib.dispatch.types import DispatchDB
@@ -60,10 +67,26 @@ def _apply_or_stage_denylists(
             TerminalDenylist(username, reason, apply_cooldown=True)
             for username in sorted(usernames)
         ))
-    for username in usernames:
-        db.add_denylist(request_id, username, reason)
-        if cooled_down_users is not None and db.check_and_apply_cooldown(username):
-            cooled_down_users.add(username)
+    # Every denylist entry (and its cooldown check, when the caller wants
+    # one tracked) commits together in one PostgreSQL transaction (issue
+    # #1355 item A2) — this used to be a separate ``add_denylist`` plus
+    # ``check_and_apply_cooldown`` autocommit per username, so a crash
+    # mid-loop could leave some peers denylisted and others not.
+    # ``cooled_down_users is None`` means the caller never wants a cooldown
+    # write for this batch, exactly as the prior loop skipped the check
+    # entirely in that case.
+    result = db.persist_request_policy_outcome(RequestPolicyOutcome(
+        request_id=request_id,
+        denylists=tuple(
+            TerminalDenylist(
+                username, reason,
+                apply_cooldown=cooled_down_users is not None,
+            )
+            for username in sorted(usernames)
+        ),
+    ))
+    if cooled_down_users is not None:
+        cooled_down_users.update(result.cooled_down_users)
     return None
 
 

@@ -2,8 +2,7 @@
 
 The download_log-writing side of dispatch: mark an import done, record a
 rejection (with optional self-heal requeue), and the unified persisted-
-evidence reject helper. ``finalize_request`` is the module-local DI seam
-(tests patch it here).
+evidence reject helper.
 """
 
 from __future__ import annotations
@@ -14,16 +13,6 @@ from typing import TYPE_CHECKING
 import msgspec
 
 from lib import transitions
-from lib.import_evidence import (
-    HaveAnalysisFailure,
-    classify_have_analysis_failure,
-)
-
-# Module-level DI seam for ``transitions.finalize_request`` (see the leaf-seam
-# allowlist in ``tests/_mock_audit_scanner.py``). Tests patch
-# ``lib.dispatch.outcome_actions.finalize_request``.
-finalize_request = transitions.finalize_request
-
 from lib.dispatch.helpers import (
     _cleanup_staged_dir,
     _populate_dl_info_from_import_result,
@@ -35,6 +24,10 @@ from lib.dispatch.types import (
     DispatchOutcome,
     ImportAttemptResult,
     PostCommitCleanup,
+)
+from lib.import_evidence import (
+    HaveAnalysisFailure,
+    classify_have_analysis_failure,
 )
 from lib.quality import (
     DownloadInfo,
@@ -50,6 +43,7 @@ from lib.terminal_outcomes import (
     PendingImportTerminalOutcome,
     PreviewTerminalOutcome,
     RequestRejectionOutcome,
+    RequestSuccessOutcome,
     TerminalCooldown,
     TerminalDenylist,
     TerminalDownloadAudit,
@@ -372,55 +366,18 @@ def _do_mark_done(
             initial_transition=transition,
             audit=audit,
         )
-    transitions.require_transition_applied(finalize_request(
-        db,
-        request_id,
-        transition,
-    ))
-    # Explicit field-by-field bridge: pyright verifies every audit field
-    # against ``log_download``'s signature (names AND types), which a
-    # dynamic dict spread could not express — the same reasoning that
-    # retired ``TerminalDownloadAudit.as_log_kwargs()`` entirely (issue
-    # #1355 item 3).
-    return db.log_download(
+    # The transition and the mandatory ``download_log`` audit row commit
+    # together in one PostgreSQL transaction (issue #1355 item A1) —
+    # this used to be two separate autocommitted statements
+    # (``finalize_request`` then ``db.log_download``), so a crash between
+    # them left a request already transitioned to ``imported`` with no
+    # audit row explaining why.
+    result = db.persist_request_success_outcome(RequestSuccessOutcome(
         request_id=request_id,
-        outcome=audit.outcome,
-        soulseek_username=audit.soulseek_username,
-        contributor_usernames=audit.contributor_usernames,
-        filetype=audit.filetype,
-        download_path=audit.download_path,
-        beets_distance=audit.beets_distance,
-        beets_scenario=audit.beets_scenario,
-        beets_detail=audit.beets_detail,
-        valid=audit.valid,
-        staged_path=audit.staged_path,
-        error_message=audit.error_message,
-        bitrate=audit.bitrate,
-        sample_rate=audit.sample_rate,
-        bit_depth=audit.bit_depth,
-        is_vbr=audit.is_vbr,
-        was_converted=audit.was_converted,
-        original_filetype=audit.original_filetype,
-        slskd_filetype=audit.slskd_filetype,
-        actual_filetype=audit.actual_filetype,
-        actual_min_bitrate=audit.actual_min_bitrate,
-        spectral_grade=audit.spectral_grade,
-        spectral_bitrate=audit.spectral_bitrate,
-        existing_min_bitrate=audit.existing_min_bitrate,
-        existing_spectral_bitrate=audit.existing_spectral_bitrate,
-        import_result=audit.import_result,
-        validation_result=audit.validation_result,
-        final_format=audit.final_format,
-        v0_probe_kind=audit.v0_probe_kind,
-        v0_probe_min_bitrate=audit.v0_probe_min_bitrate,
-        v0_probe_avg_bitrate=audit.v0_probe_avg_bitrate,
-        v0_probe_median_bitrate=audit.v0_probe_median_bitrate,
-        existing_v0_probe_kind=audit.existing_v0_probe_kind,
-        existing_v0_probe_min_bitrate=audit.existing_v0_probe_min_bitrate,
-        existing_v0_probe_avg_bitrate=audit.existing_v0_probe_avg_bitrate,
-        existing_v0_probe_median_bitrate=audit.existing_v0_probe_median_bitrate,
-        source_download_log_id=audit.source_download_log_id,
-    )
+        transition=transition,
+        audit=audit,
+    ))
+    return result.download_log_id
 
 
 def _finalize_request_and_log_rejection(
@@ -615,8 +572,10 @@ def _record_preview_measurement_failed(
       * Parent request → ``wanted`` for automation, otherwise unchanged.
       * No denylist write: this is a measurement-world failure, not evidence
         that the source audio itself is bad.
-      * ``import_jobs.status='failed'`` via ``mark_import_job_failed`` so
-        the poll loop's active-import-job guard releases on the next tick.
+      * ``import_jobs.status='failed'`` via ``persist_preview_terminal_
+        outcome``'s own inline ``UPDATE`` (``lib/pipeline_db/terminal_
+        outcomes.py``) so the poll loop's active-import-job guard releases
+        on the next tick.
 
     Returns the committed ``download_log`` row id. A missing request owner
     raises before any write because ``download_log.request_id`` is mandatory.

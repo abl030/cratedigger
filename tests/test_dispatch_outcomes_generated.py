@@ -91,6 +91,7 @@ from lib.quality import (
     DownloadInfo,
     dispatch_action,
 )
+from lib.quality.decisions import QualityGateDecision
 from lib.quality_evidence import snapshot_audio_files
 from tests.beets_world import BeetsWorld
 from tests.dispatch_helpers import (
@@ -633,6 +634,7 @@ def _reject_via_evidence_decision(
     *, decision: str, requeue_on_failure: bool, new_min_bitrate: int,
     source_username: str | None = "user1",
     distance: float | None = 0.0,
+    starting_status: str = "downloading",
 ) -> FakePipelineDB:
     """Established recipe (mirrors
     ``tests/test_import_dispatch.py::TestRejectImportFromEvidenceDecisionCallerLifecycle._reject``)
@@ -642,12 +644,16 @@ def _reject_via_evidence_decision(
     ``distance`` defaults to ``0.0`` for the pre-existing self-heal
     properties above (they don't care about the value); the #550 defect #4
     properties below pass a generated ``float | None`` to prove the helper
-    threads it through unchanged to both persisted sinks."""
+    threads it through unchanged to both persisted sinks. ``starting_status``
+    defaults to ``downloading`` for every pre-existing caller; the issue
+    #1355 item A4 property below draws it from ``{"downloading",
+    "unsearchable"}`` to prove the job-less rejection bundle preserves an
+    operator stop instead of clearing it unconditionally."""
     from lib.dispatch import _reject_import_from_evidence_decision
 
     db = FakePipelineDB()
     db.seed_request(make_request_row(
-        id=42, status="downloading", mb_release_id="test-mbid"))
+        id=42, status=starting_status, mb_release_id="test-mbid"))
     dl_info = DownloadInfo(filetype="mp3", username=source_username)
     ir = make_import_result(decision=decision, new_min_bitrate=new_min_bitrate)
     attempt_result = ImportAttemptResult(None)
@@ -1331,11 +1337,13 @@ def assert_validation_projection_matches_payload(db: FakePipelineDB) -> None:
 def assert_denylist_writes_are_bundled(
     db: FakePipelineDB, request_id: int,
 ) -> None:
-    """Issue #1355 item 3: every ``source_denylist`` row for ``request_id``
-    must be traceable to a ``denylists`` entry on ONE of the two terminal-
-    outcome commits (job-backed ``persist_import_terminal_outcome`` or
-    job-less ``persist_request_rejection_outcome``) — never a separate
-    ``db.add_denylist`` call outside either bundle. A writer that reverts to
+    """Issue #1355 item 3 (widened by item A2): every ``source_denylist``
+    row for ``request_id`` must be traceable to a ``denylists`` entry on
+    ONE of the three terminal-outcome commits (job-backed
+    ``persist_import_terminal_outcome``, job-less
+    ``persist_request_rejection_outcome``, or job-less
+    ``persist_request_policy_outcome``) — never a separate
+    ``db.add_denylist`` call outside any of them. A writer that reverts to
     denylisting a peer in its own loop, after already committing the
     rejection's transition and audit row, reintroduces the exact
     partial-write window this issue exists to close.
@@ -1348,6 +1356,11 @@ def assert_denylist_writes_are_bundled(
     } | {
         entry.username
         for command in db.persist_import_terminal_outcome_calls
+        if command.request_id == request_id
+        for entry in command.denylists
+    } | {
+        entry.username
+        for command in db.persist_request_policy_outcome_calls
         if command.request_id == request_id
         for entry in command.denylists
     }
@@ -1636,6 +1649,35 @@ class TestGeneratedDistanceNeverFabricated(unittest.TestCase):
         assert_beets_distance_round_trips(db, distance)
 
 
+class TestGeneratedJobLessRejectionPreservesOperatorStop(unittest.TestCase):
+    """Issue #1355 item A4: the job-less rejection bundle
+    (``persist_request_rejection_outcome``) must preserve an operator
+    ``unsearchable`` stop rather than clear it unconditionally when it
+    requeues to ``wanted``. Drives the REAL
+    ``_reject_import_from_evidence_decision`` over both the operator-stop
+    and the ordinary starting status, across the full preimport-fact
+    decision taxonomy."""
+
+    @given(
+        decision=st.sampled_from(sorted(_PREIMPORT_FACT_REJECT_DECISIONS)),
+        starting_status=st.sampled_from(("downloading", "unsearchable")),
+    )
+    def test_requeue_respects_the_starting_operator_stop(
+        self, decision, starting_status,
+    ):
+        db = _reject_via_evidence_decision(
+            decision=decision,
+            requeue_on_failure=True,
+            new_min_bitrate=320,
+            starting_status=starting_status,
+        )
+        row = db.request(42)
+        expected = (
+            "unsearchable" if starting_status == "unsearchable" else "wanted"
+        )
+        self.assertEqual(row["status"], expected)
+
+
 class TestGeneratedEveryRejectionWriterProjection(unittest.TestCase):
     """One property patrols every rejection writer through the shared sink."""
 
@@ -1720,6 +1762,141 @@ class TestGeneratedEveryRejectionWriterProjection(unittest.TestCase):
         # excluded rather than asserted empty.
         if writer in ("evidence_decision", "request_auto_import"):
             assert_writer_denylisted_username(db, 42, "generated-user")
+
+
+# ===========================================================================
+# World + harness — the two job-less accept-path writers (issue #1355
+# items A1/A2). Both drive the REAL writer directly, mirroring how
+# ``_reject_via_evidence_decision`` above drives ``_reject_import_from_
+# evidence_decision`` directly rather than through the full
+# ``dispatch_import_core`` funnel (every existing harness in this module
+# attaches a real job — force or automation — before dispatching, so none
+# of them ever reaches ``import_job_id is None``/``pending is None``).
+# ===========================================================================
+
+def _run_mark_done_job_less(
+    *, distance: float | None, scenario: str | None,
+    source_username: str | None = "user1",
+) -> FakePipelineDB:
+    """Drive the REAL job-less ``_do_mark_done`` branch directly (issue
+    #1355 item A1): no owning import job, so the transition and the
+    mandatory ``download_log`` audit row must commit through
+    ``persist_request_success_outcome`` rather than as two separate
+    writes."""
+    from lib.dispatch.outcome_actions import _do_mark_done
+
+    db = FakePipelineDB()
+    db.seed_request(make_request_row(id=42, status="downloading"))
+    dl_info = DownloadInfo(filetype="mp3", username=source_username)
+    _do_mark_done(
+        db, 42, dl_info,
+        distance=distance, scenario=scenario,
+        dest_path="/tmp/cratedigger-generated-mark-done",
+        import_job_id=None,
+    )
+    return db
+
+
+def _run_quality_gate_job_less(
+    *, decision: QualityGateDecision, usernames: tuple[str, ...],
+) -> FakePipelineDB:
+    """Drive the REAL job-less ``_check_quality_gate_core`` ``apply=True``
+    branch directly (issue #1355 item A2): no ``PendingImportTerminalOutcome``
+    to stage onto, so its transition and every denylist entry must commit
+    through ``persist_request_policy_outcome``."""
+    from lib.dispatch.quality_gate import _check_quality_gate_core
+    from lib.dispatch.types import QualityGateState
+    from lib.quality import AudioQualityMeasurement
+
+    db = FakePipelineDB()
+    db.seed_request(make_request_row(id=42, status="imported"))
+
+    def state_loader(**_kwargs: object) -> QualityGateState:
+        return QualityGateState(
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                format="MP3",
+                is_cbr=True,
+                spectral_grade="genuine",
+                spectral_subject="installed",
+                spectral_provenance="measured",
+            ),
+            verified_lossless_proof=(decision == "accept"),
+        )
+
+    def decision_fn(current: object, cfg: object = None, *,
+                     target_contract: object = None,
+                     verified_lossless_proof: bool = False,
+                     ) -> QualityGateDecision:
+        del current, cfg, target_contract, verified_lossless_proof
+        return decision
+
+    _check_quality_gate_core(
+        mb_id="mbid-generated-policy",
+        label="Generated Artist - Generated Album",
+        request_id=42,
+        files=[
+            make_download_file(username=u, filename=f"{u}.mp3")
+            for u in usernames
+        ],
+        db=db,
+        state_loader=state_loader,
+        quality_decision_fn=decision_fn,
+    )
+    return db
+
+
+class TestGeneratedMarkDoneJobLessBundle(unittest.TestCase):
+    """Issue #1355 item A1: the job-less success bundle."""
+
+    @given(
+        distance=st.one_of(
+            st.none(),
+            st.floats(min_value=0.0, max_value=1.0, allow_nan=False),
+        ),
+        scenario=st.one_of(
+            st.none(),
+            st.text(min_size=0, max_size=20),
+        ),
+    )
+    def test_download_log_row_created_and_status_imported(
+        self, distance, scenario,
+    ):
+        db = _run_mark_done_job_less(distance=distance, scenario=scenario)
+        assert_download_log_row_created(db)
+        self.assertEqual(db.request(42)["status"], "imported")
+        self.assertEqual(len(db.persist_request_success_outcome_calls), 1)
+        # No orphan write: the job-less success path never reaches
+        # ``log_download`` directly any more (issue #1355 item A1).
+        self.assertEqual(len(db.download_logs), 1)
+
+
+class TestGeneratedQualityGateJobLessPolicyBundle(unittest.TestCase):
+    """Issue #1355 item A2: the job-less quality-gate policy bundle."""
+
+    @given(
+        usernames=st.lists(
+            st.sampled_from(("peer-a", "peer-b", "peer-c")),
+            min_size=1, max_size=3, unique=True,
+        ),
+    )
+    def test_denylist_writes_are_bundled(self, usernames):
+        db = _run_quality_gate_job_less(
+            decision="requeue_upgrade", usernames=tuple(usernames),
+        )
+        assert_denylist_writes_are_bundled(db, 42)
+        self.assertEqual(len(db.persist_request_policy_outcome_calls), 1)
+        self.assertEqual(
+            {d.username for d in db.denylist}, set(usernames),
+        )
+
+    def test_accept_decision_writes_no_denylist(self):
+        db = _run_quality_gate_job_less(decision="accept", usernames=())
+        assert_denylist_writes_are_bundled(db, 42)
+        self.assertEqual(db.request(42)["status"], "imported")
+        self.assertEqual(db.denylist, [])
 
 
 class TestGeneratedHaveAnalysisAbortLifecycle(unittest.TestCase):

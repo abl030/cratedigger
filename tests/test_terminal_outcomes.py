@@ -50,7 +50,9 @@ from lib.terminal_outcomes import (
     ImportJobTerminal,
     ImportTerminalOutcome,
     PreviewTerminalOutcome,
+    RequestPolicyOutcome,
     RequestRejectionOutcome,
+    RequestSuccessOutcome,
     TerminalCooldown,
     TerminalDenylist,
     TerminalDownloadAudit,
@@ -3166,6 +3168,60 @@ class TestRequestRejectionOutcomeAtomicity(unittest.TestCase):
         self.assertIsNone(result.transition)
         self.assertEqual(len(db.get_download_history(request_id)), 1)
 
+    def test_bundle_preserves_operator_stop_and_policy_effects(self) -> None:
+        """Issue #1355 item A4: a job-less rejection against an
+        ``unsearchable`` request stays ``unsearchable`` — the same
+        arbitration ``persist_import_terminal_outcome`` already applies to
+        the job-backed lane (mirrors
+        ``TestTerminalOutcomeAtomicity.test_import_rejection_preserves_
+        operator_stop_and_policy_effects``). Policy fields, the attempt
+        counter, the audit row, and the denylist entry all still land;
+        only the status stays put. Authority: "it should stay stopped.
+        i've marked in unsearchable because slskd can't find it for some
+        reason." —
+        https://github.com/abl030/cratedigger/issues/1355#issuecomment-5521174387
+        """
+        db = make_db()
+        self.addCleanup(db.close)
+        request_id = self._seed_wanted_request(db)
+        db._execute(
+            "UPDATE album_requests SET status = 'unsearchable', "
+            "min_bitrate = 320 WHERE id = %s",
+            (request_id,),
+        )
+        db.conn.commit()
+
+        result = db.persist_request_rejection_outcome(RequestRejectionOutcome(
+            request_id=request_id,
+            audit=TerminalDownloadAudit(
+                outcome="rejected", soulseek_username="stopped-peer",
+            ),
+            transition=transitions.RequestTransition.to_wanted_fields(
+                attempt_type="validation", fields={},
+            ),
+            denylists=(
+                TerminalDenylist(
+                    "stopped-peer", "beets validation rejected",
+                    apply_cooldown=True,
+                ),
+            ),
+        ))
+
+        request = db.get_request(request_id)
+        assert request is not None
+        self.assertEqual(request["status"], "unsearchable")
+        self.assertEqual(request["validation_attempts"], 1)
+        self.assertEqual(request["min_bitrate"], 320)
+        history = db.get_download_history(request_id)
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["outcome"], "rejected")
+        self.assertEqual(
+            {d["username"] for d in db.get_denylisted_users(request_id)},
+            {"stopped-peer"},
+        )
+        assert result.transition is not None
+        self.assertEqual(result.transition.target_status, "unsearchable")
+
     def test_bundle_rolls_back_completely_when_row_is_processing_locked(
         self,
     ) -> None:
@@ -3355,6 +3411,625 @@ class TestRequestRejectionOutcomeAtomicity(unittest.TestCase):
         )
         self.assertIn("parity-peer", real.get_cooled_down_users())
         self.assertIn("parity-peer", fake.user_cooldowns)
+
+
+class TestRequestSuccessOutcomeAtomicity(unittest.TestCase):
+    """Real-PostgreSQL contract for the job-less success bundle (issue
+    #1355 item A1): a job-less acceptance's request transition and audit
+    row commit together or not at all — the success counterpart of
+    ``TestRequestRejectionOutcomeAtomicity`` above.
+    """
+
+    def _seed_wanted_request(self, db: PipelineDB) -> int:
+        return db.add_request(
+            mb_release_id="success-atomicity-mbid",
+            artist_name="Success Atomicity Artist",
+            album_title="Success Atomicity Album",
+            source="request",
+        )
+
+    def test_bundle_commits_transition_and_audit_together(self) -> None:
+        db = make_db()
+        self.addCleanup(db.close)
+        request_id = self._seed_wanted_request(db)
+
+        result = db.persist_request_success_outcome(RequestSuccessOutcome(
+            request_id=request_id,
+            transition=transitions.RequestTransition.to_imported_fields(
+                fields={
+                    "beets_distance": 0.02,
+                    "beets_scenario": "strong_match",
+                },
+            ),
+            audit=TerminalDownloadAudit(
+                outcome="success",
+                soulseek_username="success-peer",
+                validation_result=json.dumps(
+                    {"valid": True, "distance": 0.02, "scenario": "strong_match"},
+                ),
+            ),
+        ))
+
+        request = db.get_request(request_id)
+        assert request is not None
+        self.assertEqual(request["status"], "imported")
+        self.assertEqual(request["beets_distance"], 0.02)
+        history = db.get_download_history(request_id)
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["id"], result.download_log_id)
+        self.assertEqual(history[0]["outcome"], "success")
+        assert result.transition is not None
+        self.assertEqual(result.transition.target_status, "imported")
+
+    def test_bundle_round_trips_every_audit_field(self) -> None:
+        """Rule A (test-fidelity.md): every ``TerminalDownloadAudit`` field
+        must be readable back through the real PostgreSQL boundary, not
+        only the handful the pin above happens to set."""
+        db = make_db()
+        self.addCleanup(db.close)
+        request_id = self._seed_wanted_request(db)
+
+        prior = db.persist_request_success_outcome(RequestSuccessOutcome(
+            request_id=request_id,
+            transition=transitions.RequestTransition.to_imported_fields(
+                fields={},
+            ),
+            audit=TerminalDownloadAudit(outcome="success"),
+        ))
+
+        audit = TerminalDownloadAudit(
+            outcome="success",
+            soulseek_username="every-field-peer",
+            contributor_usernames=("every-field-peer", "second-peer"),
+            filetype="flac",
+            download_path="/tmp/every-field-success/download",
+            beets_distance=0.03,
+            beets_scenario="every_field_scenario",
+            beets_detail="every-field detail",
+            valid=True,
+            staged_path="/tmp/every-field-success/staged",
+            error_message=None,
+            bitrate=999,
+            sample_rate=44100,
+            bit_depth=16,
+            is_vbr=True,
+            was_converted=True,
+            original_filetype="mp3",
+            slskd_filetype="MP3",
+            actual_filetype="flac",
+            actual_min_bitrate=990,
+            spectral_grade="cd",
+            spectral_bitrate=980,
+            existing_min_bitrate=320,
+            existing_spectral_bitrate=970,
+            import_result=json.dumps({"every": "field"}),
+            validation_result=json.dumps({"valid": True}),
+            final_format="flac",
+            v0_probe_kind="lossless_source_v0",
+            v0_probe_min_bitrate=190,
+            v0_probe_avg_bitrate=195,
+            v0_probe_median_bitrate=192,
+            existing_v0_probe_kind="on_disk_research_v0",
+            existing_v0_probe_min_bitrate=180,
+            existing_v0_probe_avg_bitrate=185,
+            existing_v0_probe_median_bitrate=182,
+            source_download_log_id=prior.download_log_id,
+        )
+        result = db.persist_request_success_outcome(RequestSuccessOutcome(
+            request_id=request_id,
+            transition=transitions.RequestTransition.to_imported_fields(
+                fields={},
+            ),
+            audit=audit,
+        ))
+
+        history = db.get_download_history(request_id)
+        row = next(r for r in history if r["id"] == result.download_log_id)
+
+        list_fields = {
+            "contributor_usernames": "candidate_contributor_usernames",
+        }
+        json_fields = {"import_result", "validation_result"}
+        for field in dataclasses.fields(audit):
+            expected = getattr(audit, field.name)
+            if field.name in list_fields:
+                self.assertEqual(
+                    sorted(row[list_fields[field.name]] or []),
+                    sorted(expected),
+                    f"field {field.name} was dropped or altered at the "
+                    "PG boundary",
+                )
+                continue
+            if field.name in json_fields:
+                self.assertEqual(
+                    row[field.name], json.loads(expected),
+                    f"field {field.name} was dropped or altered at the "
+                    "PG boundary",
+                )
+                continue
+            self.assertEqual(
+                row[field.name], expected,
+                f"field {field.name} was dropped at the PG boundary",
+            )
+
+    def test_bundle_supersedes_operator_stop(self) -> None:
+        """Authority: "A successful exact-release terminal import
+        acceptance supersedes an operator-owned `unsearchable` search
+        stop and records the request as `imported`." —
+        https://github.com/abl030/cratedigger/issues/737#issuecomment-5013436918
+        — the job-less lane gets the same supersession the job-backed
+        one already has (mirrors ``TestTerminalOutcomeAtomicity.
+        test_import_terminal_acceptance_supersedes_operator_stop``)."""
+        db = make_db()
+        self.addCleanup(db.close)
+        request_id = self._seed_wanted_request(db)
+        db._execute(
+            "UPDATE album_requests SET status = 'unsearchable' WHERE id = %s",
+            (request_id,),
+        )
+        db.conn.commit()
+
+        result = db.persist_request_success_outcome(RequestSuccessOutcome(
+            request_id=request_id,
+            transition=transitions.RequestTransition.to_imported_fields(
+                fields={"min_bitrate": 320},
+            ),
+            audit=TerminalDownloadAudit(outcome="success"),
+        ))
+
+        request = db.get_request(request_id)
+        assert request is not None
+        self.assertEqual(request["status"], "imported")
+        self.assertEqual(request["min_bitrate"], 320)
+        assert result.transition is not None
+        self.assertEqual(result.transition.target_status, "imported")
+
+    def test_bundle_holds_row_lock_for_the_exact_request(self) -> None:
+        """Mirrors ``TestRequestRejectionOutcomeAtomicity``'s lock proof
+        for the success counterpart."""
+        assert TEST_DSN is not None
+        seed_db = make_db()
+        request_id = self._seed_wanted_request(seed_db)
+        seed_db.close()
+
+        locked = threading.Event()
+        release = threading.Event()
+        terminal_db = PausingTerminalPipelineDB(
+            TEST_DSN, locked=locked, release=release,
+        )
+        self.addCleanup(terminal_db.close)
+        errors: list[BaseException] = []
+
+        def run_bundle() -> None:
+            try:
+                terminal_db.persist_request_success_outcome(
+                    RequestSuccessOutcome(
+                        request_id=request_id,
+                        transition=(
+                            transitions.RequestTransition.to_imported_fields(
+                                fields={},
+                            )
+                        ),
+                        audit=TerminalDownloadAudit(
+                            outcome="success", soulseek_username="peer-lock",
+                        ),
+                    )
+                )
+            except BaseException as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
+                errors.append(exc)
+
+        thread = threading.Thread(target=run_bundle)
+        thread.start()
+        self.assertTrue(
+            locked.wait(timeout=10),
+            "terminal bundle never reached its row lock",
+        )
+
+        observer = PipelineDB(TEST_DSN)
+        try:
+            observer.conn.autocommit = False
+            with self.assertRaises(psycopg2.errors.LockNotAvailable):
+                observer._execute(
+                    "SELECT status FROM album_requests "
+                    "WHERE id = %s FOR UPDATE NOWAIT",
+                    (request_id,),
+                )
+        finally:
+            observer.conn.rollback()
+            observer.conn.autocommit = True
+            observer.close()
+
+        release.set()
+        thread.join(timeout=10)
+        self.assertEqual(errors, [])
+
+    def test_bundle_rolls_back_completely_on_mid_write_injected_failure(
+        self,
+    ) -> None:
+        """Fault-inject a failure after each real write boundary and prove
+        a fresh observer sees NOTHING — the crash-between-writes world
+        that used to leave a request already transitioned to ``imported``
+        with no audit row explaining why (addendum to issue #1355 item 3,
+        https://github.com/abl030/cratedigger/issues/1355#issuecomment-5520032997)."""
+        assert TEST_DSN is not None
+        expected_boundaries = (
+            "request.imported",
+            "request.metadata",
+            "download_log",
+        )
+        for fail_after, expected_label in enumerate(
+            expected_boundaries, start=1,
+        ):
+            with self.subTest(boundary=expected_label):
+                seed_db = make_db()
+                request_id = self._seed_wanted_request(seed_db)
+                seed_db.close()
+
+                before_observer = PipelineDB(TEST_DSN)
+                before = before_observer.get_request(request_id)
+                assert before is not None
+                before_observer.close()
+
+                command = RequestSuccessOutcome(
+                    request_id=request_id,
+                    transition=transitions.RequestTransition.to_imported_fields(
+                        fields={"beets_distance": 0.04},
+                    ),
+                    audit=TerminalDownloadAudit(
+                        outcome="success", soulseek_username="peer-fault",
+                    ),
+                )
+                writer = FaultInjectingPipelineDB(
+                    TEST_DSN, fail_after_write=fail_after,
+                )
+                try:
+                    with self.assertRaises(InjectedTerminalWriteFailure):
+                        writer.persist_request_success_outcome(command)
+                    self.assertEqual(writer.write_boundaries[-1], expected_label)
+                finally:
+                    writer.close()
+
+                observer = PipelineDB(TEST_DSN)
+                try:
+                    after = observer.get_request(request_id)
+                    assert after is not None
+                    self.assertEqual(dict(after), dict(before))
+                    self.assertEqual(observer.get_download_history(request_id), [])
+                finally:
+                    observer.close()
+
+    def test_fake_write_boundaries_match_real(self) -> None:
+        """``FakePipelineDB.persist_request_success_outcome`` self-test:
+        the same write-boundary sequence the real transaction produces,
+        over the same world."""
+        assert TEST_DSN is not None
+        seed_db = make_db()
+        request_id = self._seed_wanted_request(seed_db)
+        seed_db.close()
+        real = FaultInjectingPipelineDB(TEST_DSN, fail_after_write=999)
+        self.addCleanup(real.close)
+
+        class RecordingFakePipelineDB(FakePipelineDB):
+            def __init__(self) -> None:
+                super().__init__()
+                self.write_boundaries: list[str] = []
+
+            def _terminal_outcome_write_boundary(
+                self, index: int, label: str,
+            ) -> None:
+                del index
+                self.write_boundaries.append(label)
+
+        fake = RecordingFakePipelineDB()
+        fake.seed_request(make_request_row(id=42, status="wanted"))
+
+        def command(owner: int) -> RequestSuccessOutcome:
+            return RequestSuccessOutcome(
+                request_id=owner,
+                transition=transitions.RequestTransition.to_imported_fields(
+                    fields={"beets_distance": 0.05},
+                ),
+                audit=TerminalDownloadAudit(
+                    outcome="success", soulseek_username="parity-peer",
+                ),
+            )
+
+        real_result = real.persist_request_success_outcome(command(request_id))
+        fake_result = fake.persist_request_success_outcome(command(42))
+
+        expected = ["request.imported", "request.metadata", "download_log"]
+        self.assertEqual(real.write_boundaries, expected)
+        self.assertEqual(fake.write_boundaries, expected)
+        self.assertIsNotNone(real_result.transition)
+        self.assertIsNotNone(fake_result.transition)
+
+
+class TestRequestPolicyOutcomeAtomicity(unittest.TestCase):
+    """Real-PostgreSQL contract for the job-less transition-plus-denylist
+    bundle (issue #1355 item A2): ``lib/dispatch/quality_gate.py`` and
+    ``lib/dispatch/post_import.py``'s job-less writers commit their
+    transition and every denylist/cooldown entry together or not at all.
+    """
+
+    def _seed_imported_request(self, db: PipelineDB) -> int:
+        request_id = db.add_request(
+            mb_release_id="policy-atomicity-mbid",
+            artist_name="Policy Atomicity Artist",
+            album_title="Policy Atomicity Album",
+            source="request",
+        )
+        db._execute(
+            "UPDATE album_requests SET status = 'imported' WHERE id = %s",
+            (request_id,),
+        )
+        db.conn.commit()
+        return request_id
+
+    def test_bundle_commits_transition_and_denylists_together(self) -> None:
+        db = make_db()
+        self.addCleanup(db.close)
+        request_id = self._seed_imported_request(db)
+
+        result = db.persist_request_policy_outcome(RequestPolicyOutcome(
+            request_id=request_id,
+            transition=transitions.RequestTransition.to_wanted(
+                from_status="imported",
+                search_filetype_override="lossless",
+                min_bitrate=245,
+            ),
+            denylists=(
+                TerminalDenylist("policy-peer", "quality gate: no proof"),
+            ),
+        ))
+
+        request = db.get_request(request_id)
+        assert request is not None
+        self.assertEqual(request["status"], "wanted")
+        self.assertEqual(request["min_bitrate"], 245)
+        self.assertEqual(request["search_filetype_override"], "lossless")
+        denied = db.get_denylisted_users(request_id)
+        self.assertEqual({d["username"] for d in denied}, {"policy-peer"})
+        self.assertEqual(
+            tuple(item.target_status for item in result.transitions),
+            ("wanted",),
+        )
+
+    def test_bundle_preserves_operator_stop_for_non_accepting_plan(
+        self,
+    ) -> None:
+        """The job-less quality-gate requeue plan must not clear an
+        operator's ``unsearchable`` stop — the same arbitration the
+        job-backed plan already gets via ``persist_import_terminal_
+        outcome``'s ``post_audit_transitions``."""
+        db = make_db()
+        self.addCleanup(db.close)
+        request_id = self._seed_imported_request(db)
+        db._execute(
+            "UPDATE album_requests SET status = 'unsearchable', "
+            "min_bitrate = 320 WHERE id = %s",
+            (request_id,),
+        )
+        db.conn.commit()
+
+        result = db.persist_request_policy_outcome(RequestPolicyOutcome(
+            request_id=request_id,
+            transition=transitions.RequestTransition.to_wanted(
+                from_status="imported",
+                search_filetype_override="lossless",
+                min_bitrate=245,
+            ),
+            denylists=(
+                TerminalDenylist("stopped-policy-peer", "quality gate: no proof"),
+            ),
+            successful_terminal_acceptance=False,
+        ))
+
+        request = db.get_request(request_id)
+        assert request is not None
+        self.assertEqual(request["status"], "unsearchable")
+        self.assertEqual(request["min_bitrate"], 245)
+        self.assertEqual(request["search_filetype_override"], "lossless")
+        self.assertEqual(
+            {d["username"] for d in db.get_denylisted_users(request_id)},
+            {"stopped-policy-peer"},
+        )
+        self.assertEqual(
+            tuple(item.target_status for item in result.transitions),
+            ("unsearchable",),
+        )
+
+    def test_bundle_supersedes_operator_stop_for_accepting_plan(self) -> None:
+        """A ``successful_terminal_acceptance=True`` policy plan clears an
+        operator stop exactly as the job-backed bundle does — proven with
+        a transition that carries no ``from_status`` fence, matching how
+        ``_apply_terminal_request_transition`` itself decides (never how
+        one specific caller happens to spell its own transition)."""
+        db = make_db()
+        self.addCleanup(db.close)
+        request_id = self._seed_imported_request(db)
+        db._execute(
+            "UPDATE album_requests SET status = 'unsearchable' WHERE id = %s",
+            (request_id,),
+        )
+        db.conn.commit()
+
+        result = db.persist_request_policy_outcome(RequestPolicyOutcome(
+            request_id=request_id,
+            transition=transitions.RequestTransition.to_imported(
+                min_bitrate=320,
+            ),
+            successful_terminal_acceptance=True,
+        ))
+
+        request = db.get_request(request_id)
+        assert request is not None
+        self.assertEqual(request["status"], "imported")
+        self.assertEqual(request["min_bitrate"], 320)
+        self.assertEqual(
+            tuple(item.target_status for item in result.transitions),
+            ("imported",),
+        )
+
+    def test_bundle_holds_row_lock_for_the_exact_request(self) -> None:
+        """Mutant-runner finding (issue #1355 item A2): unlike its success
+        and rejection siblings, this bundle had no test proving
+        ``_lock_terminal_request_status`` actually locks the row before
+        the transition/denylist writes — a mutant swapping that call for
+        an unlocked read survived every other test in this module."""
+        assert TEST_DSN is not None
+        seed_db = make_db()
+        request_id = self._seed_imported_request(seed_db)
+        seed_db.close()
+
+        locked = threading.Event()
+        release = threading.Event()
+        terminal_db = PausingTerminalPipelineDB(
+            TEST_DSN, locked=locked, release=release,
+        )
+        self.addCleanup(terminal_db.close)
+        errors: list[BaseException] = []
+
+        def run_bundle() -> None:
+            try:
+                terminal_db.persist_request_policy_outcome(
+                    RequestPolicyOutcome(
+                        request_id=request_id,
+                        transition=transitions.RequestTransition.to_wanted(
+                            from_status="imported",
+                        ),
+                        denylists=(
+                            TerminalDenylist("lock-policy-peer", "test reason"),
+                        ),
+                    )
+                )
+            except BaseException as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
+                errors.append(exc)
+
+        thread = threading.Thread(target=run_bundle)
+        thread.start()
+        self.assertTrue(
+            locked.wait(timeout=10),
+            "terminal bundle never reached its row lock",
+        )
+
+        observer = PipelineDB(TEST_DSN)
+        try:
+            observer.conn.autocommit = False
+            with self.assertRaises(psycopg2.errors.LockNotAvailable):
+                observer._execute(
+                    "SELECT status FROM album_requests "
+                    "WHERE id = %s FOR UPDATE NOWAIT",
+                    (request_id,),
+                )
+        finally:
+            observer.conn.rollback()
+            observer.conn.autocommit = True
+            observer.close()
+
+        release.set()
+        thread.join(timeout=10)
+        self.assertEqual(errors, [])
+
+    def test_bundle_rolls_back_completely_on_mid_write_injected_failure(
+        self,
+    ) -> None:
+        assert TEST_DSN is not None
+        expected_boundaries = ("request.wanted", "denylist")
+        for fail_after, expected_label in enumerate(
+            expected_boundaries, start=1,
+        ):
+            with self.subTest(boundary=expected_label):
+                seed_db = make_db()
+                request_id = seed_db.add_request(
+                    mb_release_id="policy-fault-mbid",
+                    artist_name="Policy Fault Artist",
+                    album_title="Policy Fault Album",
+                    source="request",
+                )
+                seed_db.close()
+
+                before_observer = PipelineDB(TEST_DSN)
+                before = before_observer.get_request(request_id)
+                assert before is not None
+                before_observer.close()
+
+                command = RequestPolicyOutcome(
+                    request_id=request_id,
+                    transition=transitions.RequestTransition.to_wanted_fields(
+                        attempt_type=None, fields={"min_bitrate": 200},
+                    ),
+                    denylists=(
+                        TerminalDenylist("policy-fault-peer", "fault test"),
+                    ),
+                )
+                writer = FaultInjectingPipelineDB(
+                    TEST_DSN, fail_after_write=fail_after,
+                )
+                try:
+                    with self.assertRaises(InjectedTerminalWriteFailure):
+                        writer.persist_request_policy_outcome(command)
+                    self.assertEqual(writer.write_boundaries[-1], expected_label)
+                finally:
+                    writer.close()
+
+                observer = PipelineDB(TEST_DSN)
+                try:
+                    after = observer.get_request(request_id)
+                    assert after is not None
+                    self.assertEqual(dict(after), dict(before))
+                    self.assertEqual(observer.get_denylisted_users(request_id), [])
+                finally:
+                    observer.close()
+
+    def test_fake_write_boundaries_match_real(self) -> None:
+        """``FakePipelineDB.persist_request_policy_outcome`` self-test."""
+        assert TEST_DSN is not None
+        seed_db = make_db()
+        request_id = seed_db.add_request(
+            mb_release_id="policy-parity-mbid",
+            artist_name="Policy Parity Artist",
+            album_title="Policy Parity Album",
+            source="request",
+        )
+        seed_db.close()
+        real = FaultInjectingPipelineDB(TEST_DSN, fail_after_write=999)
+        self.addCleanup(real.close)
+
+        class RecordingFakePipelineDB(FakePipelineDB):
+            def __init__(self) -> None:
+                super().__init__()
+                self.write_boundaries: list[str] = []
+
+            def _terminal_outcome_write_boundary(
+                self, index: int, label: str,
+            ) -> None:
+                del index
+                self.write_boundaries.append(label)
+
+        fake = RecordingFakePipelineDB()
+        fake.seed_request(make_request_row(id=42, status="wanted"))
+
+        def command(owner: int) -> RequestPolicyOutcome:
+            return RequestPolicyOutcome(
+                request_id=owner,
+                transition=transitions.RequestTransition.to_wanted_fields(
+                    attempt_type=None, fields={"min_bitrate": 200},
+                ),
+                denylists=(
+                    TerminalDenylist("policy-parity-peer", "parity test"),
+                ),
+            )
+
+        real_result = real.persist_request_policy_outcome(command(request_id))
+        fake_result = fake.persist_request_policy_outcome(command(42))
+
+        expected = ["request.wanted", "denylist"]
+        self.assertEqual(real.write_boundaries, expected)
+        self.assertEqual(fake.write_boundaries, expected)
+        self.assertEqual(
+            tuple(item.target_status for item in real_result.transitions),
+            tuple(item.target_status for item in fake_result.transitions),
+        )
 
 
 if __name__ == "__main__":

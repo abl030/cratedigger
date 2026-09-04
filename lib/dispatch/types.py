@@ -52,8 +52,12 @@ if TYPE_CHECKING:
         ImportTerminalOutcome,
         PendingImportTerminalOutcome,
         PreviewTerminalOutcome,
+        RequestPolicyOutcome,
+        RequestPolicyResult,
         RequestRejectionOutcome,
         RequestRejectionResult,
+        RequestSuccessOutcome,
+        RequestSuccessResult,
         TerminalOutcomeResult,
     )
     from lib.validation_envelope import ValidationProjectionUnset
@@ -123,28 +127,33 @@ class DispatchDB(
     checkpoint, and the two media-server pin services — so this one port
     stays honest without restating their members.
 
-    ``lib/dispatch/`` calls 19 distinct DB methods. Five of them arrive
+    ``lib/dispatch/`` calls 18 distinct DB methods. Five of them arrive
     through those bases and are NOT declared below: ``get_request``,
     ``get_import_job``, ``get_request_current_evidence_id`` and
     ``load_album_quality_evidence_by_id`` (``QualityEvidenceDB``, via
     ``SidecarDB``), and ``_probe_owner_session``
     (``AutomationOwnerCheckpointDB``, which is also where its
     ``deadline_seconds`` parameter is deliberately omitted — that
-    narrowing is that port's, not this one's). The remaining fourteen are
+    narrowing is that port's, not this one's). The remaining thirteen are
     declared in the body, plus three that dispatch never calls at all,
     restated only to satisfy a different port's contract:
-    ``merge_rekey_collision`` and ``update_request_release_for_merge``
-    (``lib.download_validation.MergeRekeyDB``, which cannot be a base
-    class because that module imports ``lib.dispatch``), and
-    ``mark_import_job_failed`` (dead in production entirely as of issue
-    #1355 item 3, which deleted its last real caller — see the
-    ``tools/vulture/whitelist.py`` entries and the "Residuals from item 3"
-    comment on that issue).
+    ``merge_rekey_collision``, ``update_request_release_for_merge``, and
+    ``log_download`` (``lib.download_validation.MergeRekeyDB``, which
+    cannot be a base class because that module imports ``lib.dispatch``,
+    and which declares its own narrower ``log_download`` — so this port
+    must still offer a structurally compatible one even though dispatch
+    itself has not called it directly since issue #1355 items A1/A2
+    consolidated every job-less write onto
+    ``persist_request_success_outcome``/``persist_request_policy_outcome``/
+    ``persist_request_rejection_outcome``). Those same two items retired
+    dispatch's last direct calls to ``add_denylist`` and
+    ``check_and_apply_cooldown`` outright — with no other port needing
+    them restated, both are deleted from this port entirely rather than
+    kept as declared-but-uncalled surface (scope.md).
 
     Where a declaration below narrows what the real ``PipelineDB`` offers,
     that is deliberate — the port declares what dispatch needs, not
-    everything an implementation may provide. ``check_and_apply_cooldown``
-    omits ``config`` for exactly that reason.
+    everything an implementation may provide.
 
     ``_probe_owner_session`` reaches this port underscore-and-all because
     cross-module private use is the house convention (PR #775); re-spelling
@@ -155,12 +164,6 @@ class DispatchDB(
     def advisory_lock(
         self, namespace: int, key: int,
     ) -> AbstractContextManager[bool]: ...
-
-    def add_denylist(
-        self, request_id: int, username: str, reason: str | None = None,
-    ) -> None: ...
-
-    def check_and_apply_cooldown(self, username: str) -> bool: ...
 
     def get_tracks(self, request_id: int) -> list[dict[str, object]]: ...
 
@@ -189,15 +192,6 @@ class DispatchDB(
         beets_start_ticks: int,
     ) -> ImportJob | None: ...
 
-    def mark_import_job_failed(
-        self,
-        job_id: int,
-        *,
-        error: str,
-        result: dict[str, object] | None = None,
-        message: str | None = None,
-    ) -> ImportJob | None: ...
-
     def requeue_import_job_for_preview(
         self,
         job_id: int,
@@ -220,8 +214,11 @@ class DispatchDB(
     # one mechanical reason: ``lib.download_validation`` imports
     # ``lib.dispatch``, so importing it back would be a cycle. Everything
     # else that port needs (``get_request``, ``get_import_job``,
-    # ``advisory_lock``, ``log_download``) is already declared above or
-    # inherited, so only these two are restated.
+    # ``advisory_lock``) is already declared above or inherited, so only
+    # these three are restated — including ``log_download`` below, whose
+    # OWN narrower signature on ``MergeRekeyDB`` still requires it be
+    # declared here even though dispatch itself has not called it directly
+    # since issue #1355 items A1/A2 (see the class docstring).
     def merge_rekey_collision(
         self,
         request_id: int,
@@ -238,18 +235,6 @@ class DispatchDB(
         new_release_id: str,
         expected_import_job_id: int,
     ) -> bool: ...
-
-    def persist_import_terminal_outcome(
-        self, command: ImportTerminalOutcome,
-    ) -> TerminalOutcomeResult: ...
-
-    def persist_preview_terminal_outcome(
-        self, command: PreviewTerminalOutcome,
-    ) -> TerminalOutcomeResult: ...
-
-    def persist_request_rejection_outcome(
-        self, command: RequestRejectionOutcome,
-    ) -> RequestRejectionResult: ...
 
     def log_download(
         self,
@@ -293,6 +278,26 @@ class DispatchDB(
         source_download_log_id: int | None = None,
         source: str = "slskd",
     ) -> int: ...
+
+    def persist_import_terminal_outcome(
+        self, command: ImportTerminalOutcome,
+    ) -> TerminalOutcomeResult: ...
+
+    def persist_preview_terminal_outcome(
+        self, command: PreviewTerminalOutcome,
+    ) -> TerminalOutcomeResult: ...
+
+    def persist_request_rejection_outcome(
+        self, command: RequestRejectionOutcome,
+    ) -> RequestRejectionResult: ...
+
+    def persist_request_success_outcome(
+        self, command: RequestSuccessOutcome,
+    ) -> RequestSuccessResult: ...
+
+    def persist_request_policy_outcome(
+        self, command: RequestPolicyOutcome,
+    ) -> RequestPolicyResult: ...
 
 
 @dataclass(frozen=True)

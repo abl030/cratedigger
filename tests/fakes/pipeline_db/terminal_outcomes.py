@@ -50,8 +50,12 @@ from lib.terminal_outcomes import (
     AutomationTerminalAuthority,
     ImportTerminalOutcome,
     PreviewTerminalOutcome,
+    RequestPolicyOutcome,
+    RequestPolicyResult,
     RequestRejectionOutcome,
     RequestRejectionResult,
+    RequestSuccessOutcome,
+    RequestSuccessResult,
     TerminalOutcomeResult,
     automation_world_failure_self_heal,
     cleanup_journal_refusal_matches,
@@ -556,9 +560,10 @@ class _FakeTerminalOutcomesMixin(_FakePipelineDBBase):
         command: RequestRejectionOutcome,
     ) -> RequestRejectionResult:
         """Mirrors ``PipelineDB.persist_request_rejection_outcome`` (#1355
-        item 3): the job-less sibling of ``persist_import_terminal_outcome``
-        — snapshot/restore proves the same all-or-nothing commit the real
-        transaction gives, with no job-status write to fence.
+        item 3, operator-stop arbitration added by item A4): the job-less
+        sibling of ``persist_import_terminal_outcome`` — snapshot/restore
+        proves the same all-or-nothing commit the real transaction gives,
+        with no job-status write to fence.
         """
         snapshot = self._terminal_state_snapshot()
         boundary_index = 0
@@ -570,14 +575,22 @@ class _FakeTerminalOutcomesMixin(_FakePipelineDBBase):
 
         try:
             transition_db = _FakeTerminalTransitionsDB(self, boundary)
-            applied: transitions.TransitionApplied | None = None
+            locked_status = (
+                str(self._requests[command.request_id]["status"])
+                if command.request_id in self._requests
+                else None
+            )
+            operator_stop_was_current = operator_search_stop_is_current(
+                locked_status
+            )
+            applied: tuple[transitions.TransitionApplied, ...] = ()
             if command.transition is not None:
-                applied = transitions.require_transition_applied(
-                    transitions.finalize_request(
-                        transition_db,
-                        command.request_id,
-                        command.transition,
-                    )
+                applied = self._apply_terminal_request_transition(
+                    transition_db,
+                    command.request_id,
+                    command.transition,
+                    operator_stop_was_current=operator_stop_was_current,
+                    successful_terminal_acceptance=False,
                 )
             audit = command.audit
             download_log_id = self.log_download(
@@ -655,7 +668,158 @@ class _FakeTerminalOutcomesMixin(_FakePipelineDBBase):
         self.persist_request_rejection_outcome_calls.append(command)
         return RequestRejectionResult(
             download_log_id=download_log_id,
-            transition=applied,
+            transition=applied[0] if applied else None,
+            cooled_down_users=frozenset(cooled),
+        )
+
+    def persist_request_success_outcome(
+        self,
+        command: RequestSuccessOutcome,
+    ) -> RequestSuccessResult:
+        """Mirrors ``PipelineDB.persist_request_success_outcome`` (issue
+        #1355 item A1): the job-less success sibling of
+        ``persist_request_rejection_outcome`` — snapshot/restore proves
+        the same all-or-nothing commit, with no job-status write and no
+        denylist/cooldown to fence.
+        """
+        snapshot = self._terminal_state_snapshot()
+        boundary_index = 0
+
+        def boundary(label: str) -> None:
+            nonlocal boundary_index
+            boundary_index += 1
+            self._terminal_outcome_write_boundary(boundary_index, label)
+
+        try:
+            transition_db = _FakeTerminalTransitionsDB(self, boundary)
+            locked_status = (
+                str(self._requests[command.request_id]["status"])
+                if command.request_id in self._requests
+                else None
+            )
+            operator_stop_was_current = operator_search_stop_is_current(
+                locked_status
+            )
+            applied = self._apply_terminal_request_transition(
+                transition_db,
+                command.request_id,
+                command.transition,
+                operator_stop_was_current=operator_stop_was_current,
+                successful_terminal_acceptance=True,
+            )
+            audit = command.audit
+            download_log_id = self.log_download(
+                request_id=command.request_id,
+                soulseek_username=audit.soulseek_username,
+                contributor_usernames=audit.contributor_usernames,
+                filetype=audit.filetype,
+                download_path=audit.download_path,
+                beets_distance=audit.beets_distance,
+                beets_scenario=audit.beets_scenario,
+                beets_detail=audit.beets_detail,
+                valid=audit.valid,
+                outcome=audit.outcome,
+                staged_path=audit.staged_path,
+                error_message=audit.error_message,
+                bitrate=audit.bitrate,
+                sample_rate=audit.sample_rate,
+                bit_depth=audit.bit_depth,
+                is_vbr=audit.is_vbr,
+                was_converted=audit.was_converted,
+                original_filetype=audit.original_filetype,
+                slskd_filetype=audit.slskd_filetype,
+                actual_filetype=audit.actual_filetype,
+                actual_min_bitrate=audit.actual_min_bitrate,
+                spectral_grade=audit.spectral_grade,
+                spectral_bitrate=audit.spectral_bitrate,
+                existing_min_bitrate=audit.existing_min_bitrate,
+                existing_spectral_bitrate=audit.existing_spectral_bitrate,
+                import_result=audit.import_result,
+                validation_result=audit.validation_result,
+                final_format=audit.final_format,
+                v0_probe_kind=audit.v0_probe_kind,
+                v0_probe_min_bitrate=audit.v0_probe_min_bitrate,
+                v0_probe_avg_bitrate=audit.v0_probe_avg_bitrate,
+                v0_probe_median_bitrate=audit.v0_probe_median_bitrate,
+                existing_v0_probe_kind=audit.existing_v0_probe_kind,
+                existing_v0_probe_min_bitrate=audit.existing_v0_probe_min_bitrate,
+                existing_v0_probe_avg_bitrate=audit.existing_v0_probe_avg_bitrate,
+                existing_v0_probe_median_bitrate=(
+                    audit.existing_v0_probe_median_bitrate
+                ),
+                source_download_log_id=audit.source_download_log_id,
+            )
+            boundary("download_log")
+        except Exception:
+            self._restore_terminal_state(snapshot)
+            raise
+        self.persist_request_success_outcome_calls.append(command)
+        return RequestSuccessResult(
+            download_log_id=download_log_id,
+            transition=applied[0] if applied else None,
+        )
+
+    def persist_request_policy_outcome(
+        self,
+        command: RequestPolicyOutcome,
+    ) -> RequestPolicyResult:
+        """Mirrors ``PipelineDB.persist_request_policy_outcome`` (issue
+        #1355 item A2): a job-less transition-plus-denylist bundle with
+        no audit row and no job — snapshot/restore proves the same
+        all-or-nothing commit.
+        """
+        snapshot = self._terminal_state_snapshot()
+        boundary_index = 0
+
+        def boundary(label: str) -> None:
+            nonlocal boundary_index
+            boundary_index += 1
+            self._terminal_outcome_write_boundary(boundary_index, label)
+
+        try:
+            transition_db = _FakeTerminalTransitionsDB(self, boundary)
+            locked_status = (
+                str(self._requests[command.request_id]["status"])
+                if command.request_id in self._requests
+                else None
+            )
+            operator_stop_was_current = operator_search_stop_is_current(
+                locked_status
+            )
+            applied: tuple[transitions.TransitionApplied, ...] = ()
+            if command.transition is not None:
+                applied = self._apply_terminal_request_transition(
+                    transition_db,
+                    command.request_id,
+                    command.transition,
+                    operator_stop_was_current=operator_stop_was_current,
+                    successful_terminal_acceptance=(
+                        command.successful_terminal_acceptance
+                    ),
+                )
+            cooled: set[str] = set()
+            for entry in command.denylists:
+                denied_before = len(self.denylist)
+                self.add_denylist(command.request_id, entry.username, entry.reason)
+                if len(self.denylist) > denied_before:
+                    boundary("denylist")
+                if entry.apply_cooldown and self.check_and_apply_cooldown(
+                    entry.username
+                ):
+                    cfg = CooldownConfig()
+                    self.add_cooldown(
+                        entry.username,
+                        _utcnow() + timedelta(days=cfg.cooldown_days),
+                        f"{cfg.failure_threshold} consecutive failures",
+                    )
+                    cooled.add(entry.username)
+                    boundary("cooldown")
+        except Exception:
+            self._restore_terminal_state(snapshot)
+            raise
+        self.persist_request_policy_outcome_calls.append(command)
+        return RequestPolicyResult(
+            transitions=applied,
             cooled_down_users=frozenset(cooled),
         )
 

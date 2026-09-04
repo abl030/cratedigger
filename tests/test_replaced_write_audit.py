@@ -234,22 +234,31 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "above each shifted this line only)"
         ),
     ),
-    ("lib/pipeline_db/import_jobs.py", "ecf3d1844c67f653"): (
+    ("lib/pipeline_db/import_jobs.py", "99cc6ddc91450488"): (
         (
             "optional job filter is a fixed literal WHERE clause "
             "(issue #1089's automation_recovery_debris import, review round 2's "
             "_default_force_action_copy_path helper, and review round 3's "
             "RecoveryDebrisReport import, above each shifted this line only — "
-            "fingerprint unchanged, confirming the SQL itself is untouched)"
+            "fingerprint unchanged, confirming the SQL itself is untouched; "
+            "issue #1355 item A3 narrowed list_import_jobs's local ``params`` "
+            "from ``list[Any]`` to ``list[object]``, which DOES change this "
+            "scope's normalized AST and so its fingerprint — was "
+            "ecf3d1844c67f653, SQL itself still untouched)"
         ),
     ),
-    ("lib/pipeline_db/import_jobs.py", "d020bd0235c95c4a"): (
+    ("lib/pipeline_db/import_jobs.py", "4f829dcc98a780f0"): (
         (
             "claim exclusion predicate is assembled from fixed literal clauses "
             "(issue #1089's automation_recovery_debris import, review round 2's "
             "_default_force_action_copy_path helper, and review round 3's "
             "RecoveryDebrisReport import, above each shifted this line only — "
-            "fingerprint unchanged, confirming the SQL itself is untouched)"
+            "fingerprint unchanged, confirming the SQL itself is untouched; "
+            "issue #1355 item A3 narrowed list_active_import_jobs_for_wrong_"
+            "match's local ``match_params``/``ignore_params`` from "
+            "``list[Any]`` to ``list[object]``, which DOES change this "
+            "scope's normalized AST and so its fingerprint — was "
+            "d020bd0235c95c4a, SQL itself still untouched)"
         ),
     ),
     # Issue #1313 candidate 1 collapsed the eight hand-written claim

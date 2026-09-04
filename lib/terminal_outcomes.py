@@ -381,6 +381,78 @@ class RequestRejectionResult:
     cooled_down_users: frozenset[str] = field(default_factory=lambda: frozenset())
 
 
+@dataclass(frozen=True)
+class RequestSuccessOutcome:
+    """The job-less success sibling of ``RequestRejectionOutcome`` (issue
+    #1355 item A1, addendum to item 3:
+    https://github.com/abl030/cratedigger/issues/1355#issuecomment-5520032997).
+
+    ``_do_mark_done``'s job-less branch (``import_job_id is None``) is the
+    only production caller: a force/local/manual acceptance with no owning
+    import job. It used to call ``finalize_request`` and ``log_download`` as
+    two separate autocommitted statements, so a crash between them left a
+    request already transitioned to ``imported`` with no audit row
+    explaining why. ``PipelineDB.persist_request_success_outcome`` commits
+    the transition and the mandatory ``download_log`` audit row together in
+    one PostgreSQL transaction, the success counterpart of the rejection
+    bundle above.
+    """
+
+    request_id: int
+    transition: RequestTransition
+    audit: TerminalDownloadAudit
+
+
+@dataclass(frozen=True)
+class RequestSuccessResult:
+    """Rows and side effects produced by a committed job-less acceptance."""
+
+    download_log_id: int
+    transition: TransitionApplied | None = None
+
+
+@dataclass(frozen=True)
+class RequestPolicyOutcome:
+    """A job-less transition-plus-denylist bundle, no audit, no job
+    (issue #1355 item A2).
+
+    The third job-less terminal primitive: for post-import policy writers
+    that mutate the request and denylist state together but write no
+    ``download_log`` row of their own — the settlement's own audit row was
+    already committed earlier in the SAME dispatch call, by
+    ``persist_request_success_outcome`` (job-less accept) or by
+    ``persist_request_rejection_outcome`` (job-less reject —
+    ``lib/dispatch/core.py::_settle_rejected_import`` attaches no
+    denylists to that bundle itself; a rejection's denylist write reaches
+    THIS bundle instead, through the shared post-settlement tail both
+    accept and reject share), or by the job-backed bundle.
+    ``lib/dispatch/quality_gate.py``'s ``apply=True`` branch and
+    ``lib/dispatch/post_import.py::_apply_or_stage_denylists``'s job-less
+    (``pending is None``) branch are its production callers — the same
+    defect shape issue #1355 item 3 closed for job-less rejections, on
+    the accept-path quality gate and the shared denylist tail instead.
+
+    No ``cooldowns`` field: unlike the rejection bundle's own standalone
+    cooldown lane (the installed-HAVE abort, which never denylists),
+    every current caller of this bundle only ever cools a peer down as
+    part of denylisting it (``TerminalDenylist.apply_cooldown``); add the
+    field back only alongside a caller that actually needs it.
+    """
+
+    request_id: int
+    transition: RequestTransition | None = None
+    denylists: tuple[TerminalDenylist, ...] = ()
+    successful_terminal_acceptance: bool = False
+
+
+@dataclass(frozen=True)
+class RequestPolicyResult:
+    """Rows and side effects produced by a committed job-less policy bundle."""
+
+    transitions: tuple[TransitionApplied, ...] = ()
+    cooled_down_users: frozenset[str] = field(default_factory=lambda: frozenset())
+
+
 def non_automation_failure_terminal_outcome(
     job: ImportJob,
     *,

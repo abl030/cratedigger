@@ -4,7 +4,7 @@ import os
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal
 
 import msgspec
 import psycopg2
@@ -378,7 +378,7 @@ class _ImportJobsMixin(
         *,
         request_id: int | None = None,
         dedupe_key: str | None = None,
-        payload: dict[str, Any] | None = None,
+        payload: dict[str, object] | None = None,
         message: str | None = None,
     ) -> ImportJob:
         """Create an import job or return the active job with the same key."""
@@ -648,7 +648,7 @@ class _ImportJobsMixin(
         request_id: int | None = None,
         limit: int = 50,
     ) -> list[ImportJob]:
-        params: list[Any] = []
+        params: list[object] = []
         clauses: list[str] = []
         if status is not None:
             validate_status(status)
@@ -674,7 +674,7 @@ class _ImportJobsMixin(
         request_id: int | None = None,
         limit: int = 50,
     ) -> list[ImportJob]:
-        params: list[Any] = []
+        params: list[object] = []
         request_filter = ""
         if request_id is not None:
             request_filter = "AND request_id = %s"
@@ -705,7 +705,7 @@ class _ImportJobsMixin(
         paths = [str(path) for path in dict.fromkeys(failed_paths) if path]
         dirs = [str(path) for path in dict.fromkeys(source_dirs) if path]
         match_clauses: list[str] = ["payload->>'download_log_id' = %s::text"]
-        match_params: list[Any] = [str(int(download_log_id))]
+        match_params: list[object] = [str(int(download_log_id))]
         if paths:
             match_clauses.append("payload->>'failed_path' = ANY(%s::text[])")
             match_params.append(paths)
@@ -714,7 +714,7 @@ class _ImportJobsMixin(
             match_params.append(dirs)
 
         ignore_clause = ""
-        ignore_params: list[Any] = []
+        ignore_params: list[object] = []
         if ignore_import_job_id is not None:
             ignore_clause = "AND id <> %s"
             ignore_params.append(int(ignore_import_job_id))
@@ -1227,7 +1227,7 @@ class _ImportJobsMixin(
         self,
         job_id: int,
         *,
-        result: dict[str, Any] | None = None,
+        result: dict[str, object] | None = None,
         message: str | None = None,
     ) -> ImportJob | None:
         cur = self._execute("""
@@ -1448,31 +1448,6 @@ class _ImportJobsMixin(
             raise AutomationRecoveryEvidenceChanged(
                 "automation recovery owner evidence changed"
             )
-    def mark_import_job_failed(
-        self,
-        job_id: int,
-        *,
-        error: str,
-        result: dict[str, Any] | None = None,
-        message: str | None = None,
-    ) -> ImportJob | None:
-        cur = self._execute("""
-            UPDATE import_jobs
-            SET status = 'failed',
-                result = %s,
-                message = %s,
-                error = %s,
-                completed_at = NOW(),
-                updated_at = NOW()
-            WHERE id = %s
-              AND job_type <> 'automation_import'
-              AND status IN ('queued', 'running')
-            RETURNING *
-        """, (psycopg2.extras.Json(result or {}), message, error, job_id))
-        row = cur.fetchone()
-        return ImportJob.from_row(dict(row)) if row else None
-
-
     def merge_import_job_result(
         self,
         job_id: int,
@@ -2316,7 +2291,7 @@ class _ImportJobsMixin(
         self,
         job_id: int,
         *,
-        preview_result: dict[str, Any] | None = None,
+        preview_result: dict[str, object] | None = None,
         message: str | None = None,
         expected_execution_lease: ExecutionLeaseSnapshot | None = None,
     ) -> ImportJob | None:
@@ -2403,7 +2378,7 @@ class _ImportJobsMixin(
         *,
         preview_status: str,
         error: str,
-        preview_result: dict[str, Any] | None = None,
+        preview_result: dict[str, object] | None = None,
         message: str | None = None,
     ) -> ImportJob | None:
         validate_preview_failure_status(preview_status)

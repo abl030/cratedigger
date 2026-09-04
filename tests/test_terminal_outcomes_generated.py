@@ -23,7 +23,7 @@ from lib.terminal_outcomes import (
     TerminalDenylist,
     TerminalDownloadAudit,
 )
-from tests.dispatch_helpers import claim_next_import_job
+from tests.dispatch_helpers import claim_next_import_job, fail_import_job_via_sql
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 from tests.test_pipeline_db import TEST_DSN, requires_postgres
@@ -252,7 +252,12 @@ def _persist_known_bad_split_outcome(
     db.add_denylist(request_id, "generated-peer", "known bad")
     if fail_after_write == 3:
         raise InjectedTerminalWriteFailure("known_bad.denylist")
-    db.mark_import_job_failed(
+    # ``PipelineDB.mark_import_job_failed`` had zero production callers and
+    # was deleted (issue #1355 item A3); this fault-injection scenario
+    # models the OLD separate-autocommit path, so it reproduces the exact
+    # SQL that writer used rather than a still-live production writer.
+    fail_import_job_via_sql(
+        db,
         job_id,
         error="known_bad",
         result={"success": False},

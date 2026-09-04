@@ -71,8 +71,6 @@ ALLOWLIST: dict[str, str] = {
         "scalar args, single-column writes",
     "mark_import_job_completed":
         "status transition only",
-    "mark_import_job_failed":
-        "status transition only",
     "mark_import_job_preview_failed":
         "status transition only",
     "mark_import_job_preview_importable":

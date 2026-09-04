@@ -192,15 +192,17 @@ class TestDispatchDBPort(unittest.TestCase):
 
     def test_port_declares_the_methods_dispatch_calls_directly(self) -> None:
         """A spot-check across the port's own declarations: the advisory
-        lock it serialises on, the denylist and audit writers, the launch
-        authority handshake, and the exact-completion capture. Dropping any
-        of them from the port would let a DB stand-in that cannot serve
-        dispatch pass as one."""
+        lock it serialises on, the job-less terminal-outcome bundles (the
+        denylist and audit writers as of issue #1355 items A1/A2 — dispatch
+        no longer calls ``add_denylist``/``log_download`` directly, only
+        through these), the launch authority handshake, and the
+        exact-completion capture. Dropping any of them from the port would
+        let a DB stand-in that cannot serve dispatch pass as one."""
         members = typing.get_protocol_members(DispatchDB)
         for name in (
             "advisory_lock",
-            "add_denylist",
-            "log_download",
+            "persist_request_success_outcome",
+            "persist_request_policy_outcome",
             "authorize_import_job_launch",
             "capture_automation_import_completion",
             "persist_import_terminal_outcome",
