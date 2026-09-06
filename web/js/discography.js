@@ -70,8 +70,13 @@ export function renderRgRow(rg, ctx) {
   // 2): the pressing rows' Replace offer consults the paired group's key
   // on the other pathway. Free text (id, label) goes through jsArg; the
   // two vocabularies are validated, never interpolated raw.
+  // An artist-page row's pairing is 'pending' until the compare lands
+  // and 'checked' after; the same state rides on the row as
+  // `data-pairing` (with the pair as `data-paired-*`) so a later reload
+  // (`expansionOptsFromRow`) sees exactly what the click would.
   const paired = pairedGroupOf(rg);
-  optParts.push(`pairingChecked:${ctx.pairingChecked ? 'true' : 'false'}`);
+  const pairing = ctx.pairingChecked ? 'checked' : 'pending';
+  optParts.push(`pairing:'${pairing}'`);
   let pairedAttrs = '';
   if (paired) {
     optParts.push(
@@ -81,7 +86,7 @@ export function renderRgRow(rg, ctx) {
   }
   const opts = `{${optParts.join(',')}}`;
   return `
-    <div class="rg" data-rg-id="${esc(rg.id)}" data-catalogue-source="${esc(source)}" data-identity-kind="${identityKind}" data-catalogue-id="${esc(rg.id)}" data-pairing-checked="${ctx.pairingChecked ? '1' : '0'}"${pairedAttrs}${leafAttr}>
+    <div class="rg" data-rg-id="${esc(rg.id)}" data-catalogue-source="${esc(source)}" data-identity-kind="${identityKind}" data-catalogue-id="${esc(rg.id)}" data-pairing="${pairing}"${pairedAttrs}${leafAttr}>
       <div onclick="event.stopPropagation(); window.loadReleaseGroup(${jsArg(rg.id)}, this, ${opts})">
         <span class="rg-year">${year}</span> <span class="rg-title">${esc(rg.title)}</span>${creditNote}${badges}${spBtn}
       </div>
@@ -163,6 +168,48 @@ export function pairedGroupOf(rg) {
 }
 
 /**
+ * Read the pairing state out of `loadReleaseGroup` opts. Absent means the
+ * surface never ran the artist compare (Browse search results, the
+ * Various Artists card): 'none', never 'pending' — nothing is coming.
+ *
+ * @param {unknown} raw
+ * @returns {import('./replace_offer.js').ReplacePairingState}
+ */
+function normalizePairing(raw) {
+  return raw === 'checked' || raw === 'pending' ? raw : 'none';
+}
+
+/**
+ * The `loadReleaseGroup` opts an artist-page row would pass from its own
+ * onclick, read back off the rendered row: source, identity kind, the
+ * pairing state, and the pair. Used when an expansion is (re)loaded
+ * programmatically — after the late compare render, and for a
+ * search-by-ID target — so it sees exactly what a click would.
+ *
+ * @param {HTMLElement} row  // a `.rg` element
+ * @returns {{source:'mb'|'discogs', identityKind:'work'|'release', masterless:boolean,
+ *   pairing:import('./replace_offer.js').ReplacePairingState,
+ *   paired:import('./replace_offer.js').ReplacePair|null}}
+ */
+export function expansionOptsFromRow(row) {
+  const source = row.dataset.catalogueSource === 'discogs' ? 'discogs' : 'mb';
+  const identityKind = row.dataset.identityKind === 'release' ? 'release' : 'work';
+  const pairedId = row.dataset.pairedId;
+  return {
+    source,
+    identityKind,
+    masterless: identityKind === 'release',
+    pairing: normalizePairing(row.dataset.pairing),
+    paired: pairedId ? {
+      id: pairedId,
+      kind: row.dataset.pairedKind === 'release' ? 'release' : 'work',
+      source: row.dataset.pairedSource === 'discogs' ? 'discogs' : 'mb',
+      label: row.dataset.pairedLabel || '',
+    } : null,
+  };
+}
+
+/**
  * Read a pair back out of `loadReleaseGroup` opts (from the onclick or
  * a programmatic caller), validating the two vocabularies.
  *
@@ -235,10 +282,11 @@ export function applySearchTargetAfterDiscography(rgEl) {
   if (!inner) return;
   openCollapsedAncestors(inner, rgEl);
   if (inner.innerHTML) return;  // already expanded (cache re-render); ring will re-apply on next loadReleaseGroup
+  // The row is on the artist page, so its pairing state and pair ride
+  // along exactly as a click on it would carry them.
   loadReleaseGroup(expandId, inner, {
     targetEl: inner,
-    source,
-    identityKind,
+    ...expansionOptsFromRow(targetRow),
   });
 }
 
@@ -534,9 +582,12 @@ export async function loadReleaseGroup(id, el, opts = {}) {
     // The compare pairing for this group on the other pathway (issue
     // #1366 part 2). A paired master or release group is looked up in
     // the group key set; a paired MASTERLESS Discogs release has no
-    // group, so it is looked up by its exact release id instead.
+    // group, so it is looked up by its exact release id instead. A
+    // caller that says nothing about pairing is a surface with no
+    // compare at all, and its offer never mentions one. Whether a pair
+    // may be believed at all is the offer's own rule (only when checked).
+    const pairing = normalizePairing(opts.pairing);
     const paired = normalizePaired(opts.paired);
-    const pairingChecked = Boolean(opts.pairingChecked);
     const pairActive = paired === null
       ? false
       : (paired.kind === 'release'
@@ -548,7 +599,7 @@ export async function loadReleaseGroup(id, el, opts = {}) {
         ownKey: rgForReplace,
         ownActive: hasActiveRg(rgForReplace),
         lookupFailed,
-        pairingChecked,
+        pairing,
         pair: paired,
         pairActive,
         rowSource: isDiscogs ? 'discogs' : 'mb',

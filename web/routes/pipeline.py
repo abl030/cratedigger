@@ -488,10 +488,11 @@ def get_pipeline_active_rgs(h: RouteHandler, params: dict[str, list[str]]) -> No
     distinct set of ``mb_release_group_id`` values held by any
     non-replaced ``album_requests`` row (MB release-group UUIDs and
     Discogs master ids share the column, KTD-1). ``groupless_release_ids``
-    is the exact release ids of non-replaced rows that have NO group —
-    what a masterless Discogs request or a legacy unresolved row can be
-    found by when the artist compare pairs it with an MB release group
-    (issue #1366 part 2). The frontend caches both as Sets.
+    is the exact release ids of non-replaced MASTERLESS Discogs requests —
+    what such a request can be found by when the artist compare pairs it
+    with an MB release group (issue #1366 part 2); a legacy MB row with no
+    group is not a key, since the compare never pairs an MB release. The
+    frontend caches both as Sets.
     """
     db = runtime().db()
     h._json({

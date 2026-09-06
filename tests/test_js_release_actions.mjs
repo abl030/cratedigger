@@ -868,6 +868,14 @@ t.section('renderReplaceButton() inverted — the decided offer drives enable st
   }, {});
   t.contains(undecided, 'disabled title="No existing request in this release group"',
     'a caller that never decided gets a disabled button, never a speculative enable');
+
+  const viaRelease = renderReplaceButton({
+    mode: 'inverted', targetMbid: '19016167-1ba2-41ab-9bec-bf9ed2ac995c',
+    releaseGroupId: '1c9e2970-b221-30ab-93c6-7896b52a240b', targetLabel: 'Deloris — Fraulein',
+    paired: { id: '3938744', kind: 'release', source: 'discogs', label: 'Fraulein' },
+  }, { offer: { enabled: true, reason: 'paired', title: 'Replaces the request held on the other pathway: Discogs release "Fraulein"' } });
+  t.contains(viaRelease, "pairedGroupId: &quot;3938744&quot;, pairedGroupKind: 'release', pairedLabel: &quot;Fraulein&quot;",
+    'a masterless Discogs pair is handed to the picker as a release, so it is looked up by exact id');
 }
 
 t.section('Processing conflict handler — closed Replace modal cannot lock document.body');

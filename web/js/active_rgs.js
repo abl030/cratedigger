@@ -10,11 +10,12 @@
  * the group the artist compare PAIRED the row with on the other pathway.
  * ``GET /api/pipeline/active-rgs`` returns two key sets: the distinct
  * release-group / master ids held by any non-replaced row, and the exact
- * release ids of non-replaced rows that have NO group (a masterless
- * Discogs request, a legacy unresolved row), which is the only key such
- * a request can be found by when the pairing names a masterless Discogs
- * release. The frontend caches both and consults them per rendered
- * pressing row (``hasActiveRg`` / ``hasActiveGrouplessRelease``).
+ * release ids of non-replaced MASTERLESS Discogs requests, which is the
+ * only key such a request can be found by when the pairing names a
+ * masterless Discogs release (the compare never pairs an MB release, so
+ * a group-less MB row is not a key). The frontend caches both and
+ * consults them per rendered pressing row (``hasActiveRg`` /
+ * ``hasActiveGrouplessRelease``).
  *
  * Cache lifecycle:
  *   - Loaded by an explicit ``loadActiveRgs()`` call — the Browse view

@@ -14,12 +14,19 @@
  * offer; the picker then asks the operator which request to replace and
  * shows the pair explicitly.
  *
+ * Not every surface runs the compare. The artist page does (its rows say
+ * whether the pairing is still pending or has been checked); the Browse
+ * search results, the Various Artists fallback card, and other
+ * expansions outside an artist page never do, and their offers say
+ * nothing about pairing at all — they keep the plain own-group copy.
+ *
  * This module is the pure decision: the same inputs always give the same
  * enabled flag, reason code and tooltip, and the tooltip is honest about
- * WHAT was checked. It never describes an unchecked pairing or a failed
- * lookup as confirmed absence. `tests/test_js_replace_offer.mjs` pins each
- * reason; `tests/test_replace_offer_generated.py` patrols the invariants
- * over the whole input space through a Node worker.
+ * WHAT was checked. It never describes a pending pairing or a failed
+ * lookup as confirmed absence, and never mentions a pairing on a surface
+ * that has none. `tests/test_js_replace_offer.mjs` pins each reason;
+ * `tests/test_replace_offer_generated.py` patrols the invariants over
+ * the whole input space through a Node worker.
  */
 
 /**
@@ -31,18 +38,25 @@
  */
 
 /**
+ * Whether this row's surface consulted the artist compare: 'none' — the
+ * surface has no compare (search results, the VA fallback card); 'pending'
+ * — the artist page's compare has not landed yet; 'checked' — it has.
+ * @typedef {'none'|'pending'|'checked'} ReplacePairingState
+ */
+
+/**
  * @typedef {Object} ReplaceOfferInput
  * @property {string|null} ownKey        // the row's own lookup key; null for a masterless Discogs release row
  * @property {boolean} ownActive         // an active request holds ownKey (ignored when ownKey is null)
  * @property {boolean} lookupFailed      // the active-key fetch failed, so neither set could be consulted
- * @property {boolean} pairingChecked    // the artist compare payload was available for this page
- * @property {ReplacePair|null} pair     // the compare's counterpart for this row's group, if any
+ * @property {ReplacePairingState} pairing
+ * @property {ReplacePair|null} pair     // the compare's counterpart for this row's group, if any (only when pairing is 'checked')
  * @property {boolean} pairActive        // an active request holds the pair's key (ignored when pair is null)
  * @property {'mb'|'discogs'} rowSource  // the row's own pathway
  */
 
 /**
- * @typedef {'own'|'paired'|'lookup_unavailable'|'pairing_unchecked'|'no_pair'|'pair_inactive'|'masterless_no_pair'} ReplaceOfferReason
+ * @typedef {'own'|'paired'|'lookup_unavailable'|'no_request'|'masterless'|'pairing_unchecked'|'no_pair'|'pair_inactive'|'masterless_no_pair'} ReplaceOfferReason
  */
 
 /**
@@ -52,11 +66,18 @@
  * @property {string} title  // tooltip; empty only for an enabled own-key offer
  */
 
-/** Every reason the decision can return, for tests and the generated patrol. */
+/**
+ * Every reason the decision can return. The mjs suite pins this list; the
+ * generated patrol re-derives its own copy and would report an addition
+ * here as an unknown reason until it is taught the new one.
+ */
 export const REPLACE_OFFER_REASONS = Object.freeze([
-  'own', 'paired', 'lookup_unavailable', 'pairing_unchecked', 'no_pair',
-  'pair_inactive', 'masterless_no_pair',
+  'own', 'paired', 'lookup_unavailable', 'no_request', 'masterless',
+  'pairing_unchecked', 'no_pair', 'pair_inactive', 'masterless_no_pair',
 ]);
+
+/** The pre-#1366 own-group copy, kept verbatim on surfaces with no compare. */
+export const NO_REQUEST_TITLE = 'No existing request in this release group';
 
 /**
  * Human noun for the paired group, by what it is.
@@ -84,15 +105,16 @@ function otherPathwayNoun(rowSource) {
  * Order: an active request on the row's own key wins, then one on the
  * paired key. Otherwise the explanation names the FIRST thing that
  * could not be answered: a failed lookup (only when there was a key to
- * look up), then an unchecked pairing, then the absence of a pair, then
- * a pair with no request on either side.
+ * look up), then — on a surface without a compare — plain own-group
+ * absence; on an artist page, a pairing still pending, then the absence
+ * of a pair, then a pair with no request on either side.
  *
  * @param {ReplaceOfferInput} input
  * @returns {ReplaceOffer}
  */
 export function replaceOfferState(input) {
   const ownKey = input.ownKey || null;
-  const pair = input.pair || null;
+  const pair = input.pairing === 'checked' ? (input.pair || null) : null;
   if (ownKey !== null && input.ownActive) {
     return { enabled: true, reason: 'own', title: '' };
   }
@@ -114,7 +136,14 @@ export function replaceOfferState(input) {
       title: `Could not check for an existing request in ${scope}. Collapse and re-expand to retry.`,
     };
   }
-  if (!input.pairingChecked) {
+  if (input.pairing === 'none') {
+    return {
+      enabled: false,
+      reason: ownKey !== null ? 'no_request' : 'masterless',
+      title: NO_REQUEST_TITLE,
+    };
+  }
+  if (input.pairing !== 'checked') {
     return {
       enabled: false,
       reason: 'pairing_unchecked',
@@ -128,7 +157,7 @@ export function replaceOfferState(input) {
       return {
         enabled: false,
         reason: 'masterless_no_pair',
-        title: 'This release has no master and no paired MusicBrainz release group.',
+        title: `This release has no master and no paired ${otherPathwayNoun(input.rowSource)}.`,
       };
     }
     return {

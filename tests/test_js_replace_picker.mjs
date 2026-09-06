@@ -41,10 +41,48 @@ function fakeModal() {
       }
       return null;
     },
-    querySelectorAll() { return []; },
+    // Standard mode's pressing list: one row object per rendered
+    // `<li class="replace-picker-row">`, with just the children
+    // `wireRows` looks up. The confirm button exists only where the
+    // markup rendered one (never on the current pressing).
+    querySelectorAll(selector) {
+      if (selector !== '.replace-picker-row') return [];
+      const blocks = this._html.matchAll(/<li class="replace-picker-row" data-mbid-row="([^"]+)">([\s\S]*?)<\/li>/g);
+      return Array.from(blocks, ([, mbid, inner]) => {
+        const pick = {
+          disabled: /class="replace-picker-pick" disabled/.test(inner),
+          textContent: `pressing ${mbid}`,
+          getAttribute: (name) => (name === 'data-expand-mbid' ? mbid : name === 'aria-expanded' ? 'false' : null),
+          setAttribute() {},
+          addEventListener(type, fn) { handlers.set(`row:${mbid}:pick:${type}`, fn); },
+        };
+        const confirm = inner.includes('class="replace-picker-confirm"') ? {
+          getAttribute: () => null,
+          addEventListener(type, fn) { handlers.set(`row:${mbid}:confirm:${type}`, fn); },
+        } : null;
+        const panel = { innerHTML: '', dataset: {} };
+        const slot = { hidden: true };
+        return {
+          classList: { add() {}, remove() {} },
+          querySelector(sel) {
+            if (sel.startsWith('button.replace-picker-pick')) return pick;
+            if (sel.startsWith('.replace-picker-detail[')) return panel;
+            if (sel.startsWith('.replace-picker-detail-actions-slot[')) return slot;
+            if (sel === 'button.replace-picker-confirm') return confirm;
+            return null;
+          },
+        };
+      });
+    },
     async click(id) {
       const fn = handlers.get(`${id}:click`);
       if (!fn) throw new Error(`no click handler bound for #${id}`);
+      await fn({ stopPropagation() {} });
+    },
+    hasRowConfirm(mbid) { return handlers.has(`row:${mbid}:confirm:click`); },
+    async clickRowConfirm(mbid) {
+      const fn = handlers.get(`row:${mbid}:confirm:click`);
+      if (!fn) throw new Error(`no confirm handler bound for pressing ${mbid}`);
       await fn({ stopPropagation() {} });
     },
   };
@@ -223,6 +261,63 @@ t.section('inverted — no request on either side says so');
   await flush(); await flush(); await flush();
   t.contains(modal.innerHTML, 'No active requests for this album on either pathway to replace.',
     'the empty state names both pathways when a pair was searched');
+}
+
+t.section('inverted with a group and NO pair — own-group candidates only, no note, explicit false');
+{
+  const { modal, calls } = drive({
+    targetMbid: 'fdd45566-5c8b-4beb-8ec3-1b5f93a01319',
+    releaseGroupId: '6f151223-f3a3-3e57-810f-598f7897006c',
+    targetLabel: 'Muse — Absolution (JP)',
+  }, [
+    ['/api/pipeline/requests-by-rg/6f151223', () => okJson({ requests: [MB_REQUEST] })],
+    ['/api/pipeline/2839/replace', () => okJson({ outcome: 'replaced', request_id: 2839, new_request_id: 9031 })],
+  ]);
+  await flush(); await flush(); await flush();
+  t.ok(!calls.some((c) => c.url.startsWith('/api/release/')), 'nothing is resolved: the row\'s own group is the only key');
+  t.ok(!calls.some((c) => c.url.includes('requests-by-release')), 'and no pair is fetched');
+  t.contains(modal.innerHTML, 'Replace request #2839?', 'the own-group request is the candidate');
+  t.excludes(modal.innerHTML, 'Cross-pathway:', 'with no cross-pathway note');
+  await modal.click('replace-picker-confirm');
+  await flush();
+  const post = calls.find((c) => c.url === '/api/pipeline/2839/replace');
+  t.deepEqual(JSON.parse(post.init.body), { target_mb_release_id: 'fdd45566-5c8b-4beb-8ec3-1b5f93a01319', cross_pathway: false },
+    'the POST carries an explicit false when no pair was ever involved');
+}
+
+t.section('standard mode (Pipeline tab, Wrong Matches) — the pressing switcher posts cross_pathway: false, never the opt-in');
+{
+  const CURRENT = 'a0a2b395-7989-4ec7-99f9-9bc9425c53b7';
+  const OTHER = 'fdd45566-5c8b-4beb-8ec3-1b5f93a01319';
+  const pressing = (id, country) => ({ id, title: 'Absolution', status: 'Official', country, date: '2003-09-15', format: 'CD', track_count: 14 });
+  const { modal, calls, done } = drive({
+    sourceRequestId: 2839,
+    releaseGroupId: '6f151223-f3a3-3e57-810f-598f7897006c',
+    sourceLabel: 'Muse — Absolution',
+  }, [
+    ['/api/release-group/6f151223', () => okJson({ releases: [pressing(CURRENT, 'GB'), pressing(OTHER, 'JP')] })],
+    ['/api/pipeline/2839/replace', () => okJson({ outcome: 'replaced', request_id: 2839, new_request_id: 9032 })],
+    ['/api/pipeline/2839', () => okJson({ request: { mb_release_id: CURRENT } })],
+    ['/api/release/', () => okJson({ tracks: [] })],
+    ['/api/wrong-matches', () => okJson([])],
+  ]);
+  for (let i = 0; i < 6; i++) await flush();
+  t.contains(modal.innerHTML, 'data-mbid-row="' + OTHER + '"', 'the sibling pressing is listed');
+  t.ok(!modal.hasRowConfirm(CURRENT), 'the current pressing has no "Use this pressing" action');
+  t.ok(modal.hasRowConfirm(OTHER), 'the sibling does');
+  await modal.clickRowConfirm(OTHER);
+  await flush();
+  t.contains(modal.innerHTML, 'Replace request #2839?', 'picking the sibling reaches the confirm dialog');
+  t.excludes(modal.innerHTML, 'Cross-pathway:', 'a same-group switch carries no cross-pathway note');
+  await modal.click('replace-picker-confirm');
+  await flush();
+  const post = calls.find((c) => c.url === '/api/pipeline/2839/replace');
+  t.ok(post !== undefined, 'the confirm posted to the source request\'s replace route');
+  t.deepEqual(JSON.parse(post.init.body), { target_mb_release_id: OTHER, cross_pathway: false },
+    'standard mode never asserts a cross-pathway identity: the opt-in is an explicit false');
+  const result = await done;
+  t.equal(result.outcome, 'confirmed', 'the picker resolves confirmed');
+  t.equal(result.targetMbid, OTHER, 'with the picked sibling as the target');
 }
 
 t.section('pure renderers — confirm note and header copy');

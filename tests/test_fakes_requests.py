@@ -287,9 +287,9 @@ class TestFakeSupersedeRequestMbid(unittest.TestCase):
         self.assertEqual(db.list_active_release_group_ids(), set())
 
     def test_list_active_groupless_release_ids(self):
-        """Exact release ids of non-replaced rows with NO group: both the
-        dual-written Discogs id and a legacy MB row's UUID count; rows
-        with a group and replaced rows do not (issue #1366 part 2)."""
+        """Exact release ids of non-replaced MASTERLESS DISCOGS rows: the
+        dual-written Discogs id counts; a legacy MB row with no group,
+        rows with a group, and replaced rows do not (issue #1366 part 2)."""
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=1, mb_release_id="a", mb_release_group_id="rg-1", status="wanted",
@@ -308,7 +308,7 @@ class TestFakeSupersedeRequestMbid(unittest.TestCase):
         ))
         self.assertEqual(
             db.list_active_groupless_release_ids(),
-            {"3938744", "legacy-uuid"},
+            {"3938744"},
         )
         self.assertEqual(FakePipelineDB().list_active_groupless_release_ids(), set())
 

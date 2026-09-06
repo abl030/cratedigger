@@ -550,28 +550,26 @@ class _RequestsMixin(_PipelineDBBase):
 
 
     def list_active_groupless_release_ids(self) -> set[str]:
-        """Exact release ids of non-replaced rows that have NO group.
+        """Exact release ids of non-replaced MASTERLESS DISCOGS requests.
 
         The Browse Replace button's second key set (issue #1366 part 2):
-        a masterless Discogs request, or a legacy row whose group was
-        never resolved, has no ``mb_release_group_id`` for the group set
-        above to carry, so the artist compare pairing (which pairs an MB
-        release group with a masterless Discogs RELEASE by its exact id)
-        can only light such a request up through its release id. Both
-        identity columns contribute — a Discogs row is dual-written, an
-        MB row carries only its UUID.
+        a masterless Discogs request has no ``mb_release_group_id`` for
+        the group set above to carry, and the artist compare pairs an MB
+        release group with such a release by its exact id, so its release
+        id is the only key the pairing can light it up through. Only the
+        Discogs pathway contributes: the compare never pairs anything with
+        an MB RELEASE (``lib/artist_compare.py`` requires MB rows to be
+        work identities), so a legacy MB row with no group is unreachable
+        by release id and is deliberately not a key here — measured live
+        at 20 such rows on 2026-09-06, all noise to every client path.
         """
         cur = self._execute(
-            "SELECT mb_release_id, discogs_release_id FROM album_requests "
+            "SELECT discogs_release_id FROM album_requests "
             "WHERE status != 'replaced' "
-            "AND mb_release_group_id IS NULL"
+            "AND mb_release_group_id IS NULL "
+            "AND discogs_release_id IS NOT NULL"
         )
-        ids: set[str] = set()
-        for row in cur.fetchall():
-            for value in (row["mb_release_id"], row["discogs_release_id"]):
-                if value:
-                    ids.add(str(value))
-        return ids
+        return {str(row["discogs_release_id"]) for row in cur.fetchall()}
 
 
     def list_non_replaced_requests(self) -> list[AlbumRequestRow]:

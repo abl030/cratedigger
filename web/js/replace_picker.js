@@ -67,7 +67,7 @@ import { handleProcessingLockedConflict } from './release_action_state.js';
 /**
  * @typedef {Object} ReplacePickerOptionsInverted
  * @property {string} targetMbid
- * @property {string|null} [releaseGroupId]  // null → lazy-resolve via /api/release/<mbid>
+ * @property {string|null} [releaseGroupId]  // null only for a masterless Discogs release, which reaches the picker through its pair
  * @property {string} [targetLabel]  // "Pet Grief — New Pressing (2025, JP)"
  * @property {string} [source]
  * @property {string|null} [pairedGroupId]   // the compare counterpart's key on the other pathway (issue #1366)
@@ -1060,39 +1060,11 @@ async function runInverted(options, showOverlay, close) {
   const pairedGroupId = options.pairedGroupId || null;
   const pairedKind = options.pairedGroupKind === 'release' ? 'release' : 'work';
   const pairedLabel = options.pairedLabel || '';
-  // Lazy-resolve release group id for legacy null-RG rows by hitting
-  // the existing /api/release/<mbid> route (the response carries
-  // ``release_group_id``). We don't persist the result anywhere — the
-  // active-requests fetch below is the only consumer. A masterless
-  // Discogs row that reached the picker through its PAIR has no group
-  // to resolve and nothing to resolve it for: skip straight to the pair.
-  let releaseGroupId = options.releaseGroupId || null;
-  if (!releaseGroupId && !pairedGroupId) {
-    showOverlay(`${renderInvertedHeader(options.targetLabel || options.targetMbid)}
-      <p>Resolving release group…</p>`);
-    try {
-      const res = await fetch(`/api/release/${encodeURIComponent(options.targetMbid)}`);
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-      const body = await res.json();
-      const rg = body.release_group_id;
-      if (!rg) {
-        showOverlay(`${renderInvertedHeader(options.targetLabel || '')}
-          <p style="color:#f66;">Target MBID has no release group on the MB mirror.</p>
-          <div class="actions"><button class="btn" id="replace-picker-cancel">Close</button></div>`);
-        bindCancel(close);
-        return;
-      }
-      releaseGroupId = rg;
-    } catch (err) {
-      showOverlay(`${renderInvertedHeader(options.targetLabel || '')}
-        <p style="color:#f66;">Failed to resolve release group: ${esc(String(err))}</p>
-        <div class="actions"><button class="btn" id="replace-picker-cancel">Close</button></div>`);
-      bindCancel(close);
-      return;
-    }
-  }
+  // The row's own key: its MB release group or Discogs master. Null only
+  // for a masterless Discogs release, whose button is enabled only
+  // through a pair — so at least one of the two keys is always here, and
+  // there is nothing to resolve.
+  const releaseGroupId = options.releaseGroupId || null;
 
   showOverlay(`${renderInvertedHeader(options.targetLabel || options.targetMbid, pairedLabel)}
     <p>Loading active requests…</p>`);
@@ -1106,10 +1078,10 @@ async function runInverted(options, showOverlay, close) {
     if (pairedGroupId) {
       // The other pathway's request(s) under the paired group. Choosing
       // one is a cross-pathway Replace, so each is tagged for the list
-      // copy, the confirm note, and the POST's opt-in.
-      const seen = new Set(requests.map((r) => r.id));
+      // copy, the confirm note, and the POST's opt-in. The two lists
+      // cannot overlap: a request holds one pathway's identity, and the
+      // two keys are on different pathways.
       for (const r of await fetchCandidates(pairedGroupId, pairedKind)) {
-        if (seen.has(r.id)) continue;
         requests.push({ ...r, viaPairing: true, pairingLabel: pairedLabel });
       }
     }

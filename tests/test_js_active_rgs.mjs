@@ -303,7 +303,7 @@ function unclaimedPressing(id, releaseGroupId) {
 }
 
 async function expandReleaseGroup({
-  rgId, sourceId, activeRgsBody, activeRgsFails, pairingChecked = true, paired = null,
+  rgId, sourceId, activeRgsBody, activeRgsFails, pairing = 'checked', paired = null, source = 'mb',
 }) {
   pipelineStore.clear();
   invalidateActiveRgs();
@@ -318,7 +318,7 @@ async function expandReleaseGroup({
     },
   });
   await loadReleaseGroup(rgId, null, {
-    targetEl: relEl, source: 'mb', identityKind: 'work', pairingChecked, paired,
+    targetEl: relEl, source, identityKind: 'work', pairing, paired,
   });
   return relEl.innerHTML;
 }
@@ -345,7 +345,7 @@ t.section('loadReleaseGroup() composed path — an unchecked pairing is said, no
     rgId: 'rg-composed-1b',
     sourceId: '129bebd8-a7b9-4099-b0bc-545b704e7a95',
     activeRgsBody: { release_group_ids: [], groupless_release_ids: [] },
-    pairingChecked: false,
+    pairing: 'pending',
   });
   t.contains(html, 'the other pathway&#39;s pairing could not be checked',
     'a page whose compare never arrived says the pairing was not checked');
@@ -400,6 +400,33 @@ t.section('loadReleaseGroup() composed path — pair found, no request on either
   });
   t.contains(html, 'disabled title="No existing request for this album on either pathway (paired with Discogs master &quot;Absolution&quot;)."',
     'the tooltip names the pair and says both sides were checked');
+}
+
+t.section('loadReleaseGroup() composed path — a Discogs row with no pair names the MB side it looked for (rowSource wiring)');
+{
+  const html = await expandReleaseGroup({
+    rgId: '11052',
+    sourceId: '793320',
+    activeRgsBody: { release_group_ids: [], groupless_release_ids: [] },
+    source: 'discogs',
+  });
+  t.contains(html, 'no paired MusicBrainz release group was found for this album',
+    'a Discogs row is told what was looked for on MusicBrainz, not on its own pathway');
+  t.excludes(html, 'no paired Discogs', 'never names its own pathway as the missing pair');
+}
+
+t.section('loadReleaseGroup() composed path — a surface with no compare keeps the pre-#1366 copy and never mentions pairing');
+{
+  const html = await expandReleaseGroup({
+    rgId: 'rg-no-compare',
+    sourceId: '129bebd8-a7b9-4099-b0bc-545b704e7a95',
+    activeRgsBody: { release_group_ids: [], groupless_release_ids: [] },
+    pairing: 'none',
+  });
+  t.contains(html, 'disabled title="No existing request in this release group"',
+    'a caller that says nothing about pairing (search results, the VA card) gets the plain own-group copy');
+  t.excludes(html, 'pairing', 'and no claim that a pairing was checked or pending');
+  t.excludes(html, 'no paired', 'nor that no pair was found');
 }
 
 t.section('loadReleaseGroup() composed path — a failed active-RG lookup renders the unavailable explanation, button still disabled');
@@ -536,14 +563,16 @@ t.section('loadReleaseGroup() composed path — a masterless Discogs release und
     identityKind: 'release',
     activeRgsFails: true,
   });
-  // Issue #1366 part 2: a masterless row's honest explanation names its
-  // own state (no master) and — with no pair and the pairing unchecked
-  // in this harness — that the other pathway was not checked, never a
-  // confirmed absence.
-  t.contains(html, 'disabled title="This release has no master; the other pathway&#39;s pairing could not be checked."',
-    'a masterless Discogs release has no lookup key at all, so a failed fetch is irrelevant to it and the text explains its own state');
+  // This caller says nothing about pairing, so it is a surface with no
+  // compare (issue #1366 part 2 kept such surfaces on their pre-#1366
+  // copy): the row's text is the plain own-group wording, exactly as
+  // before, and never the unavailable explanation.
+  t.contains(html, 'disabled title="No existing request in this release group"',
+    'a masterless Discogs release has no lookup key at all, so a failed fetch is irrelevant to it and the text stays the pre-#1366 wording');
   t.excludes(html, 'Could not check',
     'the unavailable explanation is never claimed for a row with no lookup key to check');
+  t.excludes(html, 'pairing',
+    'and a surface that never ran the compare says nothing about one');
 }
 
 t.section('loadReleaseGroup() composed path — a Discogs master row with an active Discogs request for that master still enables Replace (must-still-work, proves the premise correction)');

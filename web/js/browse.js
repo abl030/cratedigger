@@ -4,6 +4,7 @@ import { esc, jsArg, parsePastedId } from './util.js';
 import {
   applySearchTargetAfterDiscography,
   catalogueDomId,
+  expansionOptsFromRow,
   loadReleaseGroup,
   renderReleaseDetail,
 } from './discography.js';
@@ -586,38 +587,25 @@ function renderUnified(
 
 /**
  * After the late compare render, expansions restored from the fast
- * (pre-compare) render were built without the pairing, so their Replace
- * offers could not consult the other pathway. Re-load every restored
- * expansion whose row now carries a pair (issue #1366 part 2). The
- * pre-compare rows never had `data-paired-*`, so this is exactly the set
- * whose buttons can change; unpaired rows keep their restored HTML.
+ * (pre-compare) render were built while the pairing was still pending,
+ * so every one of their Replace offers said so. Re-load every restored
+ * expansion with what its row now carries (issue #1366 part 2): a pair,
+ * or the confirmed absence of one — both change the offer, so both are
+ * reloaded rather than left claiming the pairing "could not be checked".
  * @param {HTMLElement} el
  * @param {() => boolean} isStale
  * @returns {number} how many expansions were reloaded
  */
-export function reloadPairedExpansions(el, isStale) {
+export function reloadExpansionsAfterCompare(el, isStale) {
   let reloaded = 0;
   for (const row of Array.from(el.querySelectorAll('.rg'))) {
     const detail = /** @type {HTMLElement|null} */ (row.querySelector('.releases'));
     if (!detail || !detail.innerHTML) continue;
-    const pairedId = row.dataset.pairedId;
-    if (!pairedId) continue;
-    const source = row.dataset.catalogueSource === 'discogs' ? 'discogs' : 'mb';
-    const identityKind = row.dataset.identityKind === 'release' ? 'release' : 'work';
     detail.innerHTML = '';
     loadReleaseGroup(row.dataset.catalogueId || '', null, {
       targetEl: detail,
-      source,
-      identityKind,
-      masterless: identityKind === 'release',
       isStale,
-      pairingChecked: true,
-      paired: {
-        id: pairedId,
-        kind: row.dataset.pairedKind === 'release' ? 'release' : 'work',
-        source: row.dataset.pairedSource === 'discogs' ? 'discogs' : 'mb',
-        label: row.dataset.pairedLabel || '',
-      },
+      ...expansionOptsFromRow(row),
     }).catch(() => {});
     reloaded += 1;
   }
@@ -686,7 +674,7 @@ async function fireCompareComplement(el, aid, name, token) {
     renderUnified(
       el, aid, name, cached.fast.rgRes, cached.fast.libRes, data, true,
     );
-    reloadPairedExpansions(el, () => token !== artistPageToken);
+    reloadExpansionsAfterCompare(el, () => token !== artistPageToken);
     if (cached.disamb) {
       state.disambData = cached.disamb;
       applyAnalysisChips(el, cached.disamb);

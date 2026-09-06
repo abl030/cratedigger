@@ -767,8 +767,11 @@ class TestSupersedeRequestMbidRoundTrip(unittest.TestCase):
 class TestActiveReplaceKeys(unittest.TestCase):
     """The two key sets the Browse Replace button consults (issue #1366
     part 2): group ids of non-replaced rows, and the exact release ids of
-    non-replaced rows that have no group at all (masterless Discogs
-    releases, legacy rows). Both read the live SQL, not a fake."""
+    non-replaced MASTERLESS DISCOGS rows — the only group-less rows the
+    artist compare can pair (it pairs MB release groups with Discogs
+    masters or releases; an MB row is always a work identity). A legacy
+    MB row with no group is deliberately NOT a key: nothing can look it
+    up by release id. Both read the live SQL, not a fake."""
 
     def _seed(self, db) -> dict[str, int]:
         ids: dict[str, int] = {}
@@ -821,10 +824,11 @@ class TestActiveReplaceKeys(unittest.TestCase):
             {"6f151223-f3a3-3e57-810f-598f7897006c", "11052"},
         )
         # The frozen replaced row's "461206" must not count; its
-        # descendant "461207" (born wanted, no group) must.
+        # descendant "461207" (born wanted, no group) must. The legacy MB
+        # row with no group is not a key on this pathway.
         self.assertEqual(
             db.list_active_groupless_release_ids(),
-            {"3938744", "19016167-1ba2-41ab-9bec-bf9ed2ac995c", "461207"},
+            {"3938744", "461207"},
         )
 
     def test_empty_database_yields_empty_sets(self):

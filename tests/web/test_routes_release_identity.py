@@ -487,10 +487,10 @@ class TestPipelineReplaceContract(_FakeDbWebServerCase):
             id=3, status="replaced", mb_release_id="m-3",
             mb_release_group_id="rg-cccc",
         ))
-        # Group-less rows contribute their exact release ids instead
-        # (issue #1366 part 2): a masterless Discogs request is dual
-        # written, a legacy MB row carries only its UUID; a replaced
-        # group-less row contributes nothing.
+        # Group-less MASTERLESS DISCOGS rows contribute their exact release
+        # ids instead (issue #1366 part 2); a legacy MB row with no group
+        # is not a key (the compare never pairs an MB release), and a
+        # replaced group-less row contributes nothing.
         self.db.seed_request(make_request_row(
             id=4, status="wanted", mb_release_id="3938744",
             discogs_release_id="3938744", mb_release_group_id=None,
@@ -509,9 +509,7 @@ class TestPipelineReplaceContract(_FakeDbWebServerCase):
             self, data, self.ACTIVE_KEYS_FIELDS, "active-rgs response",
         )
         self.assertEqual(data["release_group_ids"], ["rg-aaaa", "rg-bbbb"])
-        self.assertEqual(
-            data["groupless_release_ids"], ["3938744", "legacy-uuid"],
-        )
+        self.assertEqual(data["groupless_release_ids"], ["3938744"])
 
     def test_active_rgs_empty(self):
         status, data = self._get("/api/pipeline/active-rgs")

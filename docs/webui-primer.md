@@ -754,22 +754,27 @@ depends on.
   album through `GET /api/artist/compare`; the inverted Replace button on a
   pressing row now consults that pairing too. Two key sets come from
   `GET /api/pipeline/active-rgs`: the release-group / master ids held by
-  non-replaced requests, and the exact release ids of non-replaced requests
-  that have no group at all (a masterless Discogs request, a legacy
-  unresolved row). The button is enabled iff either the row's own key or the
-  paired key holds a request (`replaceOfferState` in `web/js/replace_offer.js`
-  is the pure decision). A disabled button's tooltip says what was checked:
-  a failed key lookup ("could not check"), a compare that never arrived
-  ("the other pathway's pairing could not be checked"), no pair found, or a
-  pair with no request on either side. The picker fetches candidates from
+  non-replaced requests, and the exact release ids of non-replaced
+  MASTERLESS Discogs requests (the only group-less rows the compare can
+  pair; a legacy MB row with no group is not a key). The button is enabled
+  iff either the row's own key or the paired key holds a request
+  (`replaceOfferState` in `web/js/replace_offer.js` is the pure decision).
+  A disabled button's tooltip says what was checked: a failed key lookup
+  ("could not check"), a compare still pending ("the other pathway's
+  pairing could not be checked"), no pair found, or a pair with no request
+  on either side. Surfaces that never run the compare — Browse search
+  results, the Various Artists card — keep the plain pre-#1366 copy and say
+  nothing about pairing. The picker fetches candidates from
   both sides (`requests-by-rg` for a group, `requests-by-release` for a
   paired masterless Discogs release), lists paired ones as "on the other
   pathway — paired with …", and a cross-pathway confirm carries an explicit
   note; only that pick posts `cross_pathway: true` to `POST
   /api/pipeline/<id>/replace`, the operator's assertion that the two are the
-  same album. Expansions opened before the late compare render are reloaded
-  once the pairing is known. The standard-mode picker (Pipeline tab, Wrong
-  Matches, long-tail accept-sibling) still lists the source's own group only.
+  same album. Every expansion opened before the late compare render is
+  reloaded once the pairing is known, paired or not, so no "pending"
+  tooltip outlives the compare. The standard-mode picker (Pipeline tab,
+  Wrong Matches, long-tail accept-sibling) still lists the source's own
+  group only and posts `cross_pathway: false`.
 - **Replace picker distance badge** — each pressing row carries the best
   beets-distance against the request's Wrong Matches folders. When the service
   was refused part of a folder, the response's `partial_read` is set and the
