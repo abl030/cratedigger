@@ -1790,9 +1790,10 @@ class TestPathwayDispatchOnStoredRows(unittest.TestCase):
     Discogs row may carry it only in ``mb_release_id``. Before this,
     the Discogs branch required ``mb_release_id`` to be empty — a shape
     production never writes — and request creation masked the column to
-    reach it; live, 63 dual-written rows re-resolved on 2026-05-25/26 went
-    to the MB mirror with a numeric id and recorded ``http_400`` on every
-    field."""
+    reach it; live, 64 dual-written rows re-resolved on 2026-05-25/26 went
+    to the MB mirror with a numeric id and recorded ``http_400`` on the
+    three release-reading fields. The numeric-only shape has zero live
+    rows (census 2026-09-06); its pin is fail-closed legislation."""
 
     DISCOGS_PAYLOAD: ClassVar[dict[str, object]] = {
         "id": "555",
@@ -1860,7 +1861,19 @@ class TestPathwayDispatchOnStoredRows(unittest.TestCase):
             mb_release_group_id=None,
         ))
 
-    def test_mb_uuid_row_still_dispatches_to_mb(self):
+    def test_padded_numeric_columns_resolve_to_the_canonical_id(self):
+        # Fail-closed legislation: no writer pads today, but the predicate
+        # hands the resolvers the canonical id, never the stored text.
+        self._assert_discogs_branch(_request(
+            id=905, mb_release_id="0555", discogs_release_id=" 555 ",
+            mb_release_group_id=None,
+        ))
+
+    MB_UUID: ClassVar[str] = "a0a2b395-7989-4ec7-99f9-9bc9425c53b7"
+
+    def _assert_mb_branch(
+        self, req: dict[str, object], *, asked_for: str | None = None,
+    ) -> None:
         db = FakePipelineDB()
         mb_seen: list[str] = []
 
@@ -1873,13 +1886,63 @@ class TestPathwayDispatchOnStoredRows(unittest.TestCase):
             raise AssertionError("Discogs mirror reached for an MB row")
 
         rg = resolve_release_group_id(
-            _request(id=904, mb_release_id="a0a2b395-7989-4ec7-99f9-9bc9425c53b7",
-                     discogs_release_id=None, mb_release_group_id=None),
-            db, mb_get_release=mb_fetch,
+            req, db, mb_get_release=mb_fetch,
             discogs_get_release=discogs_must_not_be_called,
         )
         self.assertEqual((rg.status, rg.value), ("resolved", "rg-uuid"))
-        self.assertEqual(mb_seen, ["a0a2b395-7989-4ec7-99f9-9bc9425c53b7"])
+        self.assertEqual(mb_seen, [asked_for or self.MB_UUID])
+
+    def test_mb_uuid_row_still_dispatches_to_mb(self):
+        self._assert_mb_branch(_request(
+            id=904, mb_release_id=self.MB_UUID, discogs_release_id=None,
+            mb_release_group_id=None,
+        ))
+
+    def test_conflicting_columns_fail_closed_to_the_mb_branch(self):
+        # An MB UUID beside a Discogs id is no single identity
+        # (``from_strict_fields`` returns None), so the row takes the MB
+        # branch on ``mb_release_id`` exactly as it did before #1382 —
+        # neither column silently wins.
+        self._assert_mb_branch(_request(
+            id=906, mb_release_id=self.MB_UUID, discogs_release_id="555",
+            mb_release_group_id=None,
+        ))
+
+    def test_two_different_discogs_ids_fail_closed_to_the_mb_branch(self):
+        # Strict, not first-wins: ``from_fields`` would hand the second
+        # column to Discogs and hide the corruption; the strict authority
+        # resolves no identity, the MB mirror is asked for the numeric id
+        # and its ``http_400`` surfaces the broken row.
+        self._assert_mb_branch(_request(
+            id=907, mb_release_id="555", discogs_release_id="666",
+            mb_release_group_id=None,
+        ), asked_for="555")
+
+    def test_va_rule_one_dispatches_on_the_same_predicate(self):
+        # ``detect_va_compilation`` reads the same two columns; it must
+        # agree with the resolvers on every shape, including the legacy
+        # numeric-only row its own hand-rolled test used to miss.
+        payload = {"artist_id": DISCOGS_VA_ARTIST_ID}
+        for desc, req, expected in (
+            ("dual-written", _request(
+                mb_release_id="555", discogs_release_id="555", mb_artist_id=None,
+            ), True),
+            ("legacy numeric-only", _request(
+                mb_release_id="555", discogs_release_id=None, mb_artist_id=None,
+            ), True),
+            ("discogs-only", _request(
+                mb_release_id=None, discogs_release_id="555", mb_artist_id=None,
+            ), True),
+            ("conflicting columns", _request(
+                mb_release_id=self.MB_UUID, discogs_release_id="555",
+                mb_artist_id=None,
+            ), False),
+        ):
+            with self.subTest(desc=desc):
+                self.assertIs(
+                    detect_va_compilation(req, discogs_release_payload=payload),
+                    expected,
+                )
 
 
 if __name__ == "__main__":

@@ -843,6 +843,10 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         mb_lookup.assert_not_called()
 
     def test_uppercase_own_id_is_the_same_as_current(self):
+        """Both pathways: a padded (and, for MB, uppercased) spelling of
+        the source's own id is the same pressing, refused before any
+        mirror is asked. Before this, a padded Discogs spelling missed the
+        same-as-current compare and came back as a collision."""
         db = FakePipelineDB()
         self._seed_old(db)
         mb_lookup = MagicMock(side_effect=AssertionError("MB lookup reached"))
@@ -853,6 +857,36 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         self.assertEqual(result.outcome, RESULT_TARGET_SAME_AS_CURRENT)
         mb_lookup.assert_not_called()
 
+        discogs_db = FakePipelineDB()
+        self._seed_discogs(discogs_db)
+        discogs_lookup = MagicMock(side_effect=AssertionError("Discogs lookup reached"))
+        svc = self._make_service(discogs_db, discogs_lookup=discogs_lookup)
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=f" 00{OLD_DISCOGS_ID} ",
+        )
+        self.assertEqual(result.outcome, RESULT_TARGET_SAME_AS_CURRENT)
+        discogs_lookup.assert_not_called()
+
+    def test_mirror_canonical_case_is_normalised_too(self):
+        """The mirror's own ``id`` is normalised like the typed target: an
+        uppercase canonical must neither read as a redirect (which would
+        run the collision re-check on a spelling nothing holds) nor be
+        written as a second identity."""
+        db = FakePipelineDB()
+        self._seed_old(db)
+        lookups: list[str] = []
+
+        def mb_lookup(mbid, *, fresh=False):
+            lookups.append(str(mbid))
+            return _fake_target_payload(mbid=NEW_MBID.upper())
+
+        svc = self._make_service(db, mb_lookup=mb_lookup)
+        result = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        assert result.new_request_id is not None
+        self.assertEqual(db.request(result.new_request_id)["mb_release_id"], NEW_MBID)
+        self.assertEqual(lookups, [NEW_MBID], "one lookup, by the typed id, no redirect re-check")
+
     def test_unparseable_target_is_refused_with_its_own_text(self):
         """The refusal message is the operator's evidence: it must quote
         the target as typed. ``normalize_release_id`` passes an unknown
@@ -862,7 +896,7 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         self._seed_old(db)
         mb_lookup = MagicMock(side_effect=AssertionError("MB lookup reached"))
         svc = self._make_service(db, mb_lookup=mb_lookup)
-        for typed in ("not-a-release-id", "0", " 000 "):
+        for typed in ("not-a-release-id", "  not-a-release-id  ", "0", " 000 "):
             with self.subTest(typed=typed):
                 result = svc.replace_request_mbid(42, target_mb_release_id=typed)
                 self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
@@ -875,13 +909,20 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         mb_lookup.assert_not_called()
 
     def test_uppercase_mb_target_writes_the_lowercase_id(self):
+        """The written id is the mirror's canonical when the payload carries
+        one; when it does not, the service falls back to the id it was
+        asked for — which must already be the canonical form, or an
+        uppercase paste would be written verbatim. The payload here has
+        no ``id`` so that fallback is the path under test."""
         db = FakePipelineDB()
         self._seed_old(db)
         seen: list[str] = []
 
         def mb_lookup(mbid, *, fresh=False):
             seen.append(str(mbid))
-            return _fake_target_payload()
+            payload = _fake_target_payload()
+            del payload["id"]
+            return payload
 
         svc = self._make_service(db, mb_lookup=mb_lookup)
         result = svc.replace_request_mbid(

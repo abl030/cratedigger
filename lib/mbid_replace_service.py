@@ -390,8 +390,9 @@ class MbidReplaceService:
         # The target's letter case is not identity (issue #1382 item 3):
         # canonicalise once here so the same-as-current check, the
         # collision pre-check, the mirror lookup and the supersede write
-        # all see one id. An unparseable target keeps its raw text for the
-        # shape refusal below.
+        # all see one id. The shape refusal below quotes the target as the
+        # operator typed it, padding and all.
+        typed_target = target_mb_release_id
         target_mb_release_id = (
             normalize_release_id(target_mb_release_id) or target_mb_release_id
         )
@@ -458,7 +459,7 @@ class MbidReplaceService:
                 outcome=RESULT_TARGET_INVALID,
                 request_id=request_id,
                 error_message=(
-                    f"target {target_mb_release_id!r} is neither an MB "
+                    f"target {typed_target!r} is neither an MB "
                     "release UUID nor a Discogs release id"
                 ),
                 reason=REPLACE_REASON_CROSS_PATHWAY_TARGET,
@@ -607,7 +608,12 @@ class MbidReplaceService:
                 reason=REPLACE_REASON_UNRESOLVABLE_TARGET,
             )
 
-        canonical_mbid = release_str_or_none(target_data, "id") or target_mbid
+        # The mirror's canonical is normalised exactly as the typed target
+        # was (issue #1382 item 3): an uppercase ``id`` from the mirror
+        # must neither read as a redirect nor be written as a second
+        # identity.
+        raw_canonical = release_str_or_none(target_data, "id") or target_mbid
+        canonical_mbid = normalize_release_id(raw_canonical) or raw_canonical
         if detect_release_source(canonical_mbid) != "musicbrainz":
             # The mirror canonicalised the picked id onto something that is
             # not an MB release UUID. Nothing downstream can trust that
@@ -954,7 +960,8 @@ class MbidReplaceService:
                 reason=REPLACE_REASON_UNRESOLVABLE_TARGET,
             )
 
-        canonical_id = release_str_or_none(target_data, "id") or target_id
+        raw_canonical = release_str_or_none(target_data, "id") or target_id
+        canonical_id = normalize_release_id(raw_canonical) or raw_canonical
         if detect_release_source(canonical_id) != "discogs":
             # Same guard as the MB resolver. This also refuses the mirror
             # Struct's ``id`` default of ``0`` (``"0"`` normalizes to no

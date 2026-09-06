@@ -149,6 +149,12 @@ db = PipelineDB(dsn)
 
 # Walk every wanted request via raw SQL — the side-table writes
 # coming out of resolve_all are the durable record.
+# HISTORICAL HAZARD (issue #1382 item 2): the payload preamble below keys
+# the MB fetch on mb_release_id and skips the Discogs fetch whenever an
+# MB payload exists — on a dual-written Discogs row that sent a numeric
+# id to the MB mirror, which is how 64 rows recorded http_400 on
+# 2026-05-25/26. The resolvers now dispatch on the id's shape and take
+# the stored row as-is; do not copy this preamble.
 cur = db._execute(
     "SELECT id, mb_release_id, mb_release_group_id, mb_artist_id, "
     "discogs_release_id, artist_name, year, source "
