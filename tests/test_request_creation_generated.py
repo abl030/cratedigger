@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import unittest
+import uuid
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -175,9 +177,22 @@ class _FaultDB(FakePipelineDB):
         return super().update_status(request_id, status, expected_status=expected_status, **extra)
 
 
-def _creation(release_id: str, *, discogs: bool, tracks: list[dict[str, object]],
+def _release_id_for(label: str, *, discogs: bool) -> str:
+    """A shape-correct release id for ``label``'s world. KTD-2: the id's
+    shape decides the pathway (the resolvers dispatch on it since #1382
+    item 2), so a Discogs world carries a numeric id and an MB world a
+    UUID — a label-shaped id would be routed by its shape, not by the
+    ``discogs`` flag, which is a world production cannot write."""
+    digest = hashlib.sha1(label.encode()).hexdigest()
+    if discogs:
+        return str(int(digest[:9], 16) + 1)
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, label))
+
+
+def _creation(label: str, *, discogs: bool, tracks: list[dict[str, object]],
               upgrade: bool, resolved: bool, artist_name: str = "A",
               album_title: str = "B") -> RequestCreationInput:
+    release_id = _release_id_for(label, discogs=discogs)
     payload_tracks = [
         {"title": str(track.get("title", ""))}
         for track in tracks
