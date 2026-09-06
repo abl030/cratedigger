@@ -189,6 +189,29 @@ export function renderMasterlessNote() {
 }
 
 /**
+ * Explanatory note for a release group whose only pressing on file is the
+ * request's own (issue #1382 item 1): the list below shows just the
+ * current pressing, disabled, and without this line the picker is a
+ * dead end the operator learns nothing from.
+ *
+ * @returns {string}
+ */
+export function renderSolePressingNote() {
+  return '<p style="color:#888;">This release group has no other pressing on file — there is nothing to switch to.</p>';
+}
+
+/**
+ * Whether every pressing in the group is the request's current one.
+ *
+ * @param {ReleaseGroupSibling[]} releases
+ * @param {string} sourceMbid
+ * @returns {boolean}
+ */
+export function onlyCurrentPressing(releases, sourceMbid) {
+  return releases.length > 0 && releases.every((r) => r.id === sourceMbid);
+}
+
+/**
  * Format seconds → "m:ss". Returns empty string for null/undefined/NaN.
  *
  * @param {number|null|undefined} secs
@@ -588,6 +611,7 @@ async function runStandard(options, showOverlay, close) {
   });
   showOverlay(`${renderStandardHeader(sourceLabel)}
     ${sourcePanel}
+    ${onlyCurrentPressing(releases, sourceMbid) ? renderSolePressingNote() : ''}
     ${renderPressingsList(releases, sourceMbid)}
     <div class="replace-picker-cancel-bar">
       <button class="btn" id="replace-picker-cancel">Cancel</button>

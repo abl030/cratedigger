@@ -18,11 +18,24 @@ function displayProvenance(row) {
  * MB work is genuinely unclassified. The counterpart still contributes an
  * honest presence hint, but never overwrites the selected row's exact
  * ownership, request, source, identity kind, or id.
+ *
+ * Invariant (issue #1382 item 5): the selected row and its counterpart
+ * are always on DIFFERENT pathways — the compare pairs one MB row with
+ * one Discogs row, never two of a kind. Two consumers rest on it: the
+ * Replace picker merges the row's own-group candidates with the paired
+ * group's without de-duplicating (`web/js/replace_picker.js`, inverted
+ * mode), and the Replace offer treats the paired key as the OTHER
+ * pathway's (`web/js/discography.js::loadReleaseGroup`). A pair that
+ * breaks it is dropped here, fail closed, so those consumers never see
+ * a same-pathway counterpart.
  * @param {Object} selected
  * @param {Object} counterpart
  * @returns {Object}
  */
 function projectPair(selected, counterpart) {
+  if (counterpart.source === selected.source) {
+    return { ...selected };
+  }
   const union = field => Array.from(new Set([
     ...(selected[field] || []),
     ...(counterpart[field] || []),

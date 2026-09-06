@@ -14,10 +14,12 @@
  */
 
 import {
+  onlyCurrentPressing,
   openReplacePicker,
   renderConfirmDialog,
   renderInvertedHeader,
   renderRequestsList,
+  renderSolePressingNote,
 } from '../web/js/replace_picker.js';
 
 import { stubGlobals, suite } from './js_harness.mjs';
@@ -303,6 +305,7 @@ t.section('standard mode (Pipeline tab, Wrong Matches) — the pressing switcher
   ]);
   for (let i = 0; i < 6; i++) await flush();
   t.contains(modal.innerHTML, 'data-mbid-row="' + OTHER + '"', 'the sibling pressing is listed');
+  t.excludes(modal.innerHTML, 'no other pressing on file', 'a group with a sibling carries no sole-pressing note');
   t.ok(!modal.hasRowConfirm(CURRENT), 'the current pressing has no "Use this pressing" action');
   t.ok(modal.hasRowConfirm(OTHER), 'the sibling does');
   await modal.clickRowConfirm(OTHER);
@@ -318,6 +321,31 @@ t.section('standard mode (Pipeline tab, Wrong Matches) — the pressing switcher
   const result = await done;
   t.equal(result.outcome, 'confirmed', 'the picker resolves confirmed');
   t.equal(result.targetMbid, OTHER, 'with the picked sibling as the target');
+}
+
+t.section('standard mode — a release group whose only pressing on file is the current one says so instead of dead-ending (issue #1382 item 1)');
+{
+  const CURRENT = 'a0a2b395-7989-4ec7-99f9-9bc9425c53b7';
+  const { modal } = drive({
+    sourceRequestId: 425,
+    releaseGroupId: '1c9e2970-b221-30ab-93c6-7896b52a240b',
+    sourceLabel: 'Deloris — Fraulein',
+  }, [
+    ['/api/release-group/1c9e2970', () => okJson({ releases: [{ id: CURRENT, title: 'Fraulein', status: 'Official', country: 'AU', date: '1998', format: 'CD', track_count: 12 }] })],
+    ['/api/pipeline/425', () => okJson({ request: { mb_release_id: CURRENT } })],
+    ['/api/release/', () => okJson({ tracks: [] })],
+    ['/api/wrong-matches', () => okJson([])],
+  ]);
+  for (let i = 0; i < 6; i++) await flush();
+  t.contains(modal.innerHTML, 'This release group has no other pressing on file — there is nothing to switch to.',
+    'the picker explains why there is nothing to pick');
+  t.contains(modal.innerHTML, 'data-mbid-row="' + CURRENT + '"', 'the current pressing is still listed, disabled');
+  t.ok(!modal.hasRowConfirm(CURRENT), 'and it has no "Use this pressing" action');
+  t.equal(onlyCurrentPressing([{ id: 'x' }], 'x'), true, 'a lone current pressing is the sole-pressing case');
+  t.equal(onlyCurrentPressing([{ id: 'x' }, { id: 'x' }], 'x'), true, 'so is a group listing the current pressing twice');
+  t.equal(onlyCurrentPressing([{ id: 'x' }, { id: 'y' }], 'x'), false, 'a sibling is not');
+  t.equal(onlyCurrentPressing([], 'x'), false, 'and an empty group is its own message, not this one');
+  t.contains(renderSolePressingNote(), 'no other pressing on file', 'the note names the situation');
 }
 
 t.section('pure renderers — confirm note and header copy');

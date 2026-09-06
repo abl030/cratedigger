@@ -4,7 +4,7 @@ import {
   composeCompareCatalogue,
   renderArtistSections,
 } from '../web/js/artist_page.js';
-import { renderRgRow } from '../web/js/discography.js';
+import { pairedGroupOf, renderRgRow } from '../web/js/discography.js';
 import { classify as classifyType } from '../web/js/grouping.js';
 
 import { suite } from './js_harness.mjs';
@@ -123,6 +123,31 @@ t.section('unmatched masterless rows stay reachable inside Other releases');
     'the completed compare marks the row checked in its onclick');
   t.contains(checked, 'data-pairing="checked"', 'and on the row');
   t.excludes(checked, "pairing:'pending'", 'no row is left pending after the compare');
+}
+
+t.section('a compare pair whose two sides share a pathway is dropped, fail closed (issue #1382 item 5)');
+{
+  const healthy = composeCompareCatalogue({
+    both: [{ mb: work('mb-ok'), discogs: release('dg-ok') }],
+    mb_unpaired: [], discogs_unpaired: [], discogs_ungrouped_releases: [],
+  }, 'mb');
+  t.equal(healthy[0].counterpart.source, 'discogs', 'a well-formed pair keeps its Discogs counterpart');
+  t.equal(pairedGroupOf(healthy[0]).id, 'dg-ok', 'and the Replace offer sees the pair');
+
+  const [mbSelected] = composeCompareCatalogue({
+    both: [{ mb: work('mb-a'), discogs: work('mb-b') }],
+    mb_unpaired: [], discogs_unpaired: [], discogs_ungrouped_releases: [],
+  }, 'mb');
+  t.equal(mbSelected.id, 'mb-a', 'the selected row still renders');
+  t.equal(mbSelected.counterpart, undefined, 'but a same-pathway counterpart is not attached');
+  t.equal(pairedGroupOf(mbSelected), null, 'so the Replace offer and picker never see a same-pathway pair');
+
+  const [dgSelected] = composeCompareCatalogue({
+    both: [{ mb: release('dg-a'), discogs: release('dg-b') }],
+    mb_unpaired: [], discogs_unpaired: [], discogs_ungrouped_releases: [],
+  }, 'discogs');
+  t.equal(dgSelected.id, 'dg-b', 'the Discogs-selected row still renders');
+  t.equal(dgSelected.counterpart, undefined, 'and its same-pathway counterpart is dropped too');
 }
 
 t.section('paired display classification follows MB work precedence');
