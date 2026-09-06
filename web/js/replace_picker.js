@@ -197,7 +197,7 @@ export function renderMasterlessNote() {
  * @returns {string}
  */
 export function renderSolePressingNote() {
-  return '<p style="color:#888;">No other pressing of this release is on file — there is nothing to switch to.</p>';
+  return '<p style="color:#888;">No other pressing of this album is on file — there is nothing to switch to.</p>';
 }
 
 /**
