@@ -149,12 +149,17 @@ db = PipelineDB(dsn)
 
 # Walk every wanted request via raw SQL — the side-table writes
 # coming out of resolve_all are the durable record.
-# HISTORICAL HAZARD (issue #1382 item 2): the payload preamble below keys
-# the MB fetch on mb_release_id and skips the Discogs fetch whenever an
-# MB payload exists — on a dual-written Discogs row that sent a numeric
-# id to the MB mirror, which is how 64 rows recorded http_400 on
-# 2026-05-25/26. The resolvers now dispatch on the id's shape and take
-# the stored row as-is; do not copy this preamble.
+# HISTORICAL HAZARD (issue #1382 item 2). The 64 http_400 field
+# resolutions of 2026-05-25/26 were written by the payload-less shape
+# this heredoc had before commit 6d0da070 (a bare
+# ``resolve_all(row, db, ...)``): the resolvers themselves then sent a
+# dual-written Discogs row's numeric id to the MB mirror. They now
+# dispatch on the id's shape and take the stored row as-is. The payload
+# preamble below carries its own hazard: ``get_release_raw`` on a
+# dual-written row's numeric mb_release_id raises HTTP 400 outside the
+# inner try, so the outer except prints FAILED and the row is skipped
+# with no audit row at all. Key the fetch on the row's identity source
+# (``ReleaseIdentity.from_strict_fields``), not on mb_release_id.
 cur = db._execute(
     "SELECT id, mb_release_id, mb_release_group_id, mb_artist_id, "
     "discogs_release_id, artist_name, year, source "

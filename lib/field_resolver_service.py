@@ -172,9 +172,13 @@ def _discogs_release_input(request: Mapping[str, object]) -> str | None:
 
     The shape question is ``ReleaseIdentity.from_strict_fields``'s, the
     same authority the delete and Replace lanes use: one identity across
-    both columns, or none. A row whose columns conflict, or whose only
-    id is Beets' ``0``, resolves to no identity and takes the MB branch
-    on whatever ``mb_release_id`` holds, exactly as before.
+    both columns, or none. A no-identity row takes the MB branch on
+    whatever ``mb_release_id`` holds. For conflicting columns (an MB
+    UUID or a different number beside a Discogs id) that is the branch
+    the old dispatch took too; for a row whose ONLY id is an unparseable
+    ``discogs_release_id`` (Beets' ``0``, garbage, a UUID) the old
+    dispatch asked Discogs and this fails closed as ``empty_mb_release_id``
+    instead. Every such shape has zero live rows (census 2026-09-06).
     """
     identity = ReleaseIdentity.from_strict_fields(
         request.get("mb_release_id"), request.get("discogs_release_id"),
@@ -1207,9 +1211,11 @@ def detect_va_compilation(
     # what VA-flags the dual-written rows from the 2026-05-25 backfill
     # (Rule 1 used to compare the canonical Discogs id ``"194"`` against
     # an MB UUID and never matched) and the numeric-only legacy shape
-    # alike; a hand-rolled test here required a truthy
-    # ``discogs_release_id`` and disagreed with the resolvers on that
-    # legacy row.
+    # alike. The hand-rolled test this replaces keyed on a truthy
+    # ``discogs_release_id``: it said MB for the numeric-only row and
+    # Discogs for several no-identity shapes (two different numbers, a
+    # lone ``0``, garbage or a UUID in the Discogs column) that now read
+    # the MB artist credit instead — all zero live rows.
     is_discogs = _discogs_release_input(request) is not None
 
     # Rule 1.

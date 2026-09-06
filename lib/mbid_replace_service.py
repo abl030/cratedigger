@@ -470,7 +470,7 @@ class MbidReplaceService:
                     outcome=RESULT_TARGET_INVALID,
                     request_id=request_id,
                     error_message=(
-                        f"target {target_mb_release_id!r} ({target_source}) "
+                        f"target {typed_target!r} ({target_source}) "
                         f"is on the other pathway from source "
                         f"({source_source}); pass cross_pathway to supersede "
                         "across pathways when the two are the same album"
@@ -609,9 +609,10 @@ class MbidReplaceService:
             )
 
         # The mirror's canonical is normalised exactly as the typed target
-        # was (issue #1382 item 3): an uppercase ``id`` from the mirror
-        # must neither read as a redirect nor be written as a second
-        # identity.
+        # was (issue #1382 item 3). MusicBrainz serves lowercase UUIDs, so
+        # this is fail-closed legislation for the external boundary: were
+        # an uppercase ``id`` ever to arrive, it must neither read as a
+        # redirect nor be written as a second identity.
         raw_canonical = release_str_or_none(target_data, "id") or target_mbid
         canonical_mbid = normalize_release_id(raw_canonical) or raw_canonical
         if detect_release_source(canonical_mbid) != "musicbrainz":

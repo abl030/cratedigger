@@ -1875,10 +1875,12 @@ class TestPathwayDispatchOnStoredRows(unittest.TestCase):
         self, req: dict[str, object], *, asked_for: str | None = None,
     ) -> None:
         db = FakePipelineDB()
-        mb_seen: list[str] = []
+        mb_seen: list[tuple[str, bool]] = []
 
-        def mb_fetch(mbid: str, *, fresh: bool = True) -> dict[str, object]:
-            mb_seen.append(mbid)
+        # Records the id AND the freshness, as the Discogs helper does:
+        # the MB half of the add-time contract is `fresh=True` too.
+        def mb_fetch(mbid: str, *, fresh: bool = False) -> dict[str, object]:
+            mb_seen.append((mbid, fresh))
             return {"id": mbid, "release_group_id": "rg-uuid",
                     "label-info": [], "media": []}
 
@@ -1890,7 +1892,7 @@ class TestPathwayDispatchOnStoredRows(unittest.TestCase):
             discogs_get_release=discogs_must_not_be_called,
         )
         self.assertEqual((rg.status, rg.value), ("resolved", "rg-uuid"))
-        self.assertEqual(mb_seen, [asked_for or self.MB_UUID])
+        self.assertEqual(mb_seen, [(asked_for or self.MB_UUID, True)])
 
     def test_mb_uuid_row_still_dispatches_to_mb(self):
         self._assert_mb_branch(_request(
@@ -1936,6 +1938,15 @@ class TestPathwayDispatchOnStoredRows(unittest.TestCase):
             ("conflicting columns", _request(
                 mb_release_id=self.MB_UUID, discogs_release_id="555",
                 mb_artist_id=None,
+            ), False),
+            # The two shapes the old truthy-column test called Discogs and
+            # the strict predicate does not: no identity, so the Discogs
+            # payload is never consulted.
+            ("two different Discogs ids", _request(
+                mb_release_id="555", discogs_release_id="666", mb_artist_id=None,
+            ), False),
+            ("Beets zero alone", _request(
+                mb_release_id=None, discogs_release_id="0", mb_artist_id=None,
             ), False),
         ):
             with self.subTest(desc=desc):

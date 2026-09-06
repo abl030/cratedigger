@@ -59,7 +59,7 @@ from typing import Literal
 from unittest.mock import MagicMock
 
 import msgspec
-from hypothesis import assume, example, given
+from hypothesis import assume, example, find, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers suite/fuzz
@@ -135,9 +135,10 @@ class World:
     canonical_id: str
     collision: Collision
     canonical_shape: CanonicalShape = "target"
-    # The mirror answered without an ``id`` key, so the service falls back
-    # to the id it asked for as the canonical (only meaningful when the
-    # mirror is not redirecting: the answer IS the typed target).
+    # The mirror answered with an empty ``id`` (the mirror Struct's default,
+    # the shape web/mb.py really emits for a missing one), so the service
+    # falls back to the id it asked for as the canonical (only meaningful
+    # when the mirror is not redirecting: the answer IS the typed target).
     mirror_omits_id: bool = False
 
     @property
@@ -175,6 +176,9 @@ class Run:
     mb_ids: tuple[str, ...]
     discogs_ids: tuple[str, ...]
     target_sent: str
+    # Whether the target lookup's payload carried a nonempty ``id``: the
+    # driver's own witness that ``world.mirror_omits_id`` took effect.
+    mirror_sent_id: bool
 
     @property
     def mb_lookups(self) -> int:
@@ -462,14 +466,24 @@ def case_inert_violations(plain: Run, upper: Run) -> list[str]:
     out: list[str] = []
     if plain.world.target_pathway != "musicbrainz":
         return out
+    # The pair is only evidence if the plain run really sent the world's
+    # canonical id and the upper run its uppercased spelling; a driver
+    # that quietly sends the same target twice (or uppercases both arms)
+    # would make every clause below vacuously quiet.
+    if plain.target_sent != plain.world.target_id:
+        out.append(
+            "plain run did not send the canonical target: "
+            f"{plain.world.target_id!r} (world) vs {plain.target_sent!r} (sent)"
+        )
     if upper.target_sent != plain.target_sent.upper():
-        # The pair is only evidence if the upper run really sent the
-        # uppercased id; a driver that quietly sends the same target
-        # twice would make every clause below vacuously quiet.
         out.append(
             "upper run did not send the uppercased target: "
             f"{plain.target_sent!r} (lower) vs {upper.target_sent!r} (upper)"
         )
+    if plain.world.mirror_omits_id and plain.mirror_sent_id:
+        # Same shape for the mirror dimension: a differential pair cannot
+        # see a driver that never omits the id, so the run witnesses it.
+        out.append("driver did not omit the mirror's id for a mirror_omits_id world")
     if plain.result.outcome != upper.result.outcome:
         out.append(
             "target case changed the outcome: "
@@ -566,6 +580,7 @@ class _Driver(_ServiceCase):
 
         mb_ids: list[str] = []
         discogs_ids: list[str] = []
+        mirror_sent_ids: list[bool] = []
 
         def mb_lookup(mbid, *, fresh=False):
             mb_ids.append(str(mbid))
@@ -575,7 +590,8 @@ class _Driver(_ServiceCase):
                 mbid=world.resolved_id, rg_id=world.target_group,
             )
             if world.mirror_omits_id:
-                del payload["id"]
+                payload["id"] = ""
+            mirror_sent_ids.append(bool(payload["id"]))
             return payload
 
         def discogs_lookup(rid, *, fresh=False):
@@ -621,6 +637,7 @@ class _Driver(_ServiceCase):
             mb_ids=tuple(mb_ids),
             discogs_ids=tuple(discogs_ids),
             target_sent=target_sent,
+            mirror_sent_id=any(mirror_sent_ids),
         )
 
 
@@ -762,6 +779,17 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                     cross_pathway_violations(self._correct(world)), [],
                 )
 
+    def test_strategy_reaches_a_mirror_that_omits_its_id(self) -> None:
+        """Q2 for the ``mirror_omits_id`` dimension: the strategy itself
+        draws it for an MB target, so the two explicit examples are not the
+        only route to that world (runner M20)."""
+        world = find(
+            worlds(),
+            lambda w: w.mirror_omits_id and w.target_pathway == "musicbrainz",
+        )
+        self.assertTrue(world.mirror_omits_id)
+        self.assertFalse(world.canonical_redirect)
+
     def test_case_inert_clauses_trip(self) -> None:
         """Each clause of ``case_inert_violations`` on a planted upper run;
         quiet on the real one and on a Discogs-target world."""
@@ -769,6 +797,16 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         plain = self.driver.drive(world, cross_pathway=False)
         upper = self.driver.drive(world, cross_pathway=False, target_case="upper")
         self.assertEqual(case_inert_violations(plain, upper), [])
+        with self.subTest(clause="plain run sent the canonical target"):
+            # A driver that uppercases both arms is refused here (reader
+            # F5): the upper clause alone cannot see it, since ``.upper()``
+            # is idempotent.
+            self.assertRegex(
+                "\n".join(case_inert_violations(
+                    replace(plain, target_sent=plain.target_sent.upper()), upper,
+                )),
+                r"^plain run did not send the canonical target",
+            )
         with self.subTest(clause="upper run sent the uppercased target"):
             # A driver whose upper arm is a no-op is refused: this is the
             # clause that makes the other five falsifiable (runner M16).
@@ -777,6 +815,22 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                     plain, replace(upper, target_sent=plain.target_sent),
                 )),
                 r"^upper run did not send the uppercased target",
+            )
+        with self.subTest(clause="driver omitted the mirror's id"):
+            # Runner M21: a driver that always sends an id moves both arms
+            # identically, invisible to a differential pair.
+            omit_world = replace(world, mirror_omits_id=True)
+            omit_plain = self.driver.drive(omit_world, cross_pathway=False)
+            omit_upper = self.driver.drive(
+                omit_world, cross_pathway=False, target_case="upper",
+            )
+            self.assertFalse(omit_plain.mirror_sent_id)
+            self.assertEqual(case_inert_violations(omit_plain, omit_upper), [])
+            self.assertRegex(
+                "\n".join(case_inert_violations(
+                    replace(omit_plain, mirror_sent_id=True), omit_upper,
+                )),
+                r"driver did not omit the mirror's id",
             )
         with self.subTest(clause="outcome"):
             self.assertRegex(

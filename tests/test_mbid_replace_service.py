@@ -868,10 +868,12 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         discogs_lookup.assert_not_called()
 
     def test_mirror_canonical_case_is_normalised_too(self):
-        """The mirror's own ``id`` is normalised like the typed target: an
-        uppercase canonical must neither read as a redirect (which would
-        run the collision re-check on a spelling nothing holds) nor be
-        written as a second identity."""
+        """The mirror's own ``id`` is normalised like the typed target.
+        Fail-closed legislation: ``web/mb.py::get_release`` passes the MB
+        API's id through and MusicBrainz serves lowercase, so no producer
+        emits this today; were one to, an uppercase canonical must neither
+        read as a redirect (which would run the collision re-check on a
+        spelling nothing holds) nor be written as a second identity."""
         db = FakePipelineDB()
         self._seed_old(db)
         lookups: list[str] = []
@@ -889,9 +891,11 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
 
     def test_unparseable_target_is_refused_with_its_own_text(self):
         """The refusal message is the operator's evidence: it must quote
-        the target as typed. ``normalize_release_id`` passes an unknown
-        shape through but blanks a zero numeric (Beets' "no Discogs id"),
-        so the zero case is where the raw-text fallback earns its keep."""
+        the target as typed. The padded case is the one that constrains
+        this — ``normalize_release_id`` strips it, so only the captured
+        typed text can put the padding back. The zero cases pin that a
+        target normalisation blanks (Beets' "no Discogs id") is still
+        quoted as typed rather than as an empty string."""
         db = FakePipelineDB()
         self._seed_old(db)
         mb_lookup = MagicMock(side_effect=AssertionError("MB lookup reached"))
@@ -912,8 +916,10 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         """The written id is the mirror's canonical when the payload carries
         one; when it does not, the service falls back to the id it was
         asked for — which must already be the canonical form, or an
-        uppercase paste would be written verbatim. The payload here has
-        no ``id`` so that fallback is the path under test."""
+        uppercase paste would be written verbatim. The payload here
+        carries an empty ``id`` (the mirror Struct's default, the shape
+        ``web/mb.py`` really emits for a missing one) so that fallback is
+        the path under test."""
         db = FakePipelineDB()
         self._seed_old(db)
         seen: list[str] = []
@@ -921,7 +927,7 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         def mb_lookup(mbid, *, fresh=False):
             seen.append(str(mbid))
             payload = _fake_target_payload()
-            del payload["id"]
+            payload["id"] = ""
             return payload
 
         svc = self._make_service(db, mb_lookup=mb_lookup)
@@ -1333,11 +1339,15 @@ class TestReplaceDiscogsArm(_ServiceCase):
         db = FakePipelineDB()
         self._seed_old(db)
         svc = self._make_service(db)
-        result = svc.replace_request_mbid(
-            42, target_mb_release_id=NEW_DISCOGS_ID,
-        )
-        self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
-        self.assertEqual(result.reason, REPLACE_REASON_CROSS_PATHWAY_TARGET)
+        # The refusal quotes the target as typed, padding and all, like
+        # the shape refusal does (issue #1382 item 3).
+        for typed in (NEW_DISCOGS_ID, f" 00{NEW_DISCOGS_ID} "):
+            with self.subTest(typed=typed):
+                result = svc.replace_request_mbid(42, target_mb_release_id=typed)
+                self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+                self.assertEqual(result.reason, REPLACE_REASON_CROSS_PATHWAY_TARGET)
+                assert result.error_message is not None
+                self.assertIn(f"target {typed!r} (discogs)", result.error_message)
 
     def test_masterless_source_other_target_rejected(self):
         """AE1 / R10: a masterless Discogs source rejects any target that
