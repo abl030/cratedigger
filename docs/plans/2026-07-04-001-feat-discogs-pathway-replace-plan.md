@@ -88,7 +88,7 @@ The operator job this serves is simple: "we keep downloading the wrong release f
 ### Scope Boundaries
 
 - Cross-pathway replace (Discogs↔MB, scenario (c) in #282) — out. Delete-and-re-add via browse covers the rare pathway jump, at the acknowledged cost of the `replaces_request_id` audit link. *Superseded by issue #1366, which delivers exactly this with the audit link intact.*
-- Mixed-pathway picker (showing MB and Discogs candidates together) — out; lists are never merged.
+- Mixed-pathway picker (showing MB and Discogs candidates together) — out; lists are never merged. *Superseded by issue #1366: the inverted (Browse) picker lists the row's own group's requests and the paired other-pathway group's requests together, the paired ones labelled; the standard-mode picker is unchanged.*
 - Refactoring or simplifying the existing MB Replace machinery — out; this issue only recreates the action for the second pathway.
 - Special handling for upstream Discogs rename/merge in dump rebuilds (scenario (b)) — no dedicated machinery; Replace itself is the remedy when it happens.
 - The picker's inverted mode (`requests-by-rg`) for Discogs — deferred to follow-up; standard mode covers the operator job.

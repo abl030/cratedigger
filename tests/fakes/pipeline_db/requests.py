@@ -1238,6 +1238,21 @@ class _FakeRequestsMixin(_FakePipelineDBBase):
             and row.get("mb_release_group_id") is not None
         }
 
+    def list_active_groupless_release_ids(self) -> set[str]:
+        """Exact release ids of non-replaced rows with no group — mirror of
+        ``PipelineDB.list_active_groupless_release_ids``."""
+        ids: set[str] = set()
+        for row in self._requests.values():
+            if row.get("status") == "replaced":
+                continue
+            if row.get("mb_release_group_id") is not None:
+                continue
+            for key in ("mb_release_id", "discogs_release_id"):
+                value = row.get(key)
+                if value:
+                    ids.add(str(value))
+        return ids
+
     def list_non_replaced_requests(self) -> list[AlbumRequestRow]:
         """Return active request rows ordered like PipelineDB."""
         rows = [

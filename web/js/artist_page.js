@@ -170,11 +170,16 @@ function sectionWrap(title, count, bodyHtml, opts = {}) {
 
 
 /** Render the simple four-area artist page. @param {Object} sections
- * @param {{artistId:string,artistName:string}} ctx @returns {string} */
+ * @param {{artistId:string,artistName:string,pairingChecked?:boolean}} ctx -
+ *   pairingChecked: the rows came from the completed cross-source
+ *   compare, so a row without a counterpart is confirmed unpaired
+ *   (issue #1366 part 2).
+ * @returns {string} */
 export function renderArtistSections(sections, ctx) {
   const nameLC = (ctx.artistName || '').toLowerCase();
+  const pairingChecked = Boolean(ctx.pairingChecked);
   const rowRenderer = row => renderRgRow(row, {
-    artistName: ctx.artistName, nameLC,
+    artistName: ctx.artistName, nameLC, pairingChecked,
   });
   const typed = (rows, defaultOpen) => renderTypedSections(
     rows, rowRenderer, { defaultOpen },

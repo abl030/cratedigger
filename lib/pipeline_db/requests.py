@@ -549,6 +549,31 @@ class _RequestsMixin(_PipelineDBBase):
         return {row["mb_release_group_id"] for row in cur.fetchall()}
 
 
+    def list_active_groupless_release_ids(self) -> set[str]:
+        """Exact release ids of non-replaced rows that have NO group.
+
+        The Browse Replace button's second key set (issue #1366 part 2):
+        a masterless Discogs request, or a legacy row whose group was
+        never resolved, has no ``mb_release_group_id`` for the group set
+        above to carry, so the artist compare pairing (which pairs an MB
+        release group with a masterless Discogs RELEASE by its exact id)
+        can only light such a request up through its release id. Both
+        identity columns contribute — a Discogs row is dual-written, an
+        MB row carries only its UUID.
+        """
+        cur = self._execute(
+            "SELECT mb_release_id, discogs_release_id FROM album_requests "
+            "WHERE status != 'replaced' "
+            "AND mb_release_group_id IS NULL"
+        )
+        ids: set[str] = set()
+        for row in cur.fetchall():
+            for value in (row["mb_release_id"], row["discogs_release_id"]):
+                if value:
+                    ids.add(str(value))
+        return ids
+
+
     def list_non_replaced_requests(self) -> list[AlbumRequestRow]:
         """Return active pipeline rows for disk-coverage reconciliation."""
         cur = self._execute(f"""

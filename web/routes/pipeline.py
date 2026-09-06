@@ -34,6 +34,7 @@ from lib.current_library_display import (
     resolve_request_current_library,
 )
 from lib.import_queue import ImportJob
+from lib.pipeline_db.rows import AlbumRequestRow
 
 if TYPE_CHECKING:
     from lib.pipeline_db import LatestDownloadSummary
@@ -426,6 +427,20 @@ def get_pipeline_detail(h: RouteHandler, params: dict[str, list[str]], req_id_st
     h._json(result)
 
 
+def _replace_candidate_row(r: AlbumRequestRow) -> dict[str, object]:
+    """The one row shape the Replace picker's candidate lists consume,
+    whether the candidates were found by group or by exact release."""
+    return {
+        "id": int(r["id"]),
+        "mb_release_id": r.get("mb_release_id"),
+        "mb_release_group_id": r.get("mb_release_group_id"),
+        "status": r.get("status"),
+        "artist_name": r.get("artist_name"),
+        "album_title": r.get("album_title"),
+        "processing_owner": serialize_row(r).get("processing_owner"),
+    }
+
+
 def get_pipeline_requests_by_rg(h: RouteHandler, params: dict[str, list[str]], rg_id: str) -> None:
     """``GET /api/pipeline/requests-by-rg/<rg_id>``.
 
@@ -439,32 +454,52 @@ def get_pipeline_requests_by_rg(h: RouteHandler, params: dict[str, list[str]], r
     """
     db = runtime().db()
     rows = db.list_requests_in_release_group(rg_id, exclude_replaced=True)
-    requests = [
-        {
-            "id": int(r["id"]),
-            "mb_release_id": r.get("mb_release_id"),
-            "mb_release_group_id": r.get("mb_release_group_id"),
-            "status": r.get("status"),
-            "artist_name": r.get("artist_name"),
-            "album_title": r.get("album_title"),
-            "processing_owner": serialize_row(r).get("processing_owner"),
-        }
-        for r in rows
-    ]
+    h._json({"requests": [_replace_candidate_row(r) for r in rows]})
+
+
+def get_pipeline_requests_by_release(
+    h: RouteHandler, params: dict[str, list[str]], release_id: str,
+) -> None:
+    """``GET /api/pipeline/requests-by-release/<release_id>``.
+
+    The picker's lookup for a paired MASTERLESS Discogs release (issue
+    #1366 part 2): the artist compare pairs an MB release group with a
+    masterless Discogs release by its exact id, and such a request has no
+    group for ``requests-by-rg`` to find it under. Resolves through the
+    identity-aware ``get_request_by_release_id`` (a dual-written Discogs
+    row by its numeric id, an MB row by its UUID) and answers in the same
+    row shape as ``requests-by-rg``; a frozen ``replaced`` holder is not a
+    candidate, so it answers the empty list like an unknown id does.
+    """
+    db = runtime().db()
+    row = db.get_request_by_release_id(release_id)
+    requests = (
+        [_replace_candidate_row(row)]
+        if row is not None and row.get("status") != "replaced"
+        else []
+    )
     h._json({"requests": requests})
 
 
 def get_pipeline_active_rgs(h: RouteHandler, params: dict[str, list[str]]) -> None:
     """``GET /api/pipeline/active-rgs``.
 
-    Returns the distinct set of ``mb_release_group_id`` values held by
-    any non-replaced ``album_requests`` row. The frontend builds a Set
-    from this list and uses ``set.has(row.release_group_id)`` per
-    Browse-search row to compute the Replace button enable state.
+    The Browse Replace button's enable keys. ``release_group_ids`` is the
+    distinct set of ``mb_release_group_id`` values held by any
+    non-replaced ``album_requests`` row (MB release-group UUIDs and
+    Discogs master ids share the column, KTD-1). ``groupless_release_ids``
+    is the exact release ids of non-replaced rows that have NO group —
+    what a masterless Discogs request or a legacy unresolved row can be
+    found by when the artist compare pairs it with an MB release group
+    (issue #1366 part 2). The frontend caches both as Sets.
     """
     db = runtime().db()
-    ids = sorted(db.list_active_release_group_ids())
-    h._json({"release_group_ids": ids})
+    h._json({
+        "release_group_ids": sorted(db.list_active_release_group_ids()),
+        "groupless_release_ids": sorted(
+            db.list_active_groupless_release_ids()
+        ),
+    })
 
 
 def _serialize_import_job(job: ImportJob) -> dict[str, object]:
@@ -627,6 +662,15 @@ ROUTES: list[RouteRegistration] = [
         "group, id-descending. Accepts an MB release-group UUID or a "
         "Discogs numeric master id, same pattern as "
         "/api/release-group/<id> (KTD-1).",
+        classified=True,
+    ),
+    pattern_route(
+        "GET", r"^/api/pipeline/requests-by-release/([a-f0-9-]+)$",
+        get_pipeline_requests_by_release,
+        "The non-replaced album_requests row holding exactly this release "
+        "id (MB UUID or Discogs numeric id), in the requests-by-rg row "
+        "shape; the Replace picker's lookup for a paired masterless "
+        "Discogs release (#1366).",
         classified=True,
     ),
     pattern_route(

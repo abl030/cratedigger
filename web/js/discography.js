@@ -14,8 +14,10 @@ import { renderSearchPlanButton } from './search_plan.js';
 import { renderYoutubeRescueControl } from './youtube_rescue_control.js';
 import { convergenceBadge } from './convergence.js';
 import {
-  loadActiveRgs, hasActiveRg, activeRgsUnavailable, invalidateActiveRgs,
+  loadActiveRgs, hasActiveRg, hasActiveGrouplessRelease, activeRgsUnavailable,
+  invalidateActiveRgs,
 } from './active_rgs.js';
+import { replaceOfferState } from './replace_offer.js';
 import {
   renderReleaseRow, renderBeetsTrackRow, renderExpectedTrackRow, toggleExpand,
 } from './render_primitives.js';
@@ -28,10 +30,13 @@ import {
  *
  * @param {Object} rg - Release-group row from /api/artist or /api/discogs/artist
  *   (or a compare-bucket row for complement sections).
- * @param {{artistName: string, nameLC: string, source?: string}} ctx -
+ * @param {{artistName: string, nameLC: string, source?: string, pairingChecked?: boolean}} ctx -
  *   nameLC is the lowercased artist name (credit-note suppression);
  *   source forces loadReleaseGroup onto 'mb'/'discogs' for rows that do
- *   not belong to state.browseSource (compare complement rows).
+ *   not belong to state.browseSource (compare complement rows);
+ *   pairingChecked says whether the artist compare produced this
+ *   catalogue, so the pressing rows' Replace offer can distinguish "no
+ *   pair found" from "pairing not checked" (issue #1366 part 2).
  * @returns {string}
  */
 export function renderRgRow(rg, ctx) {
@@ -61,9 +66,22 @@ export function renderRgRow(rg, ctx) {
   if (isReleaseUnit) optParts.push('masterless:true');
   optParts.push(`source:'${source}'`);
   optParts.push(`identityKind:'${identityKind}'`);
+  // The compare pairing rides along to the expansion (issue #1366 part
+  // 2): the pressing rows' Replace offer consults the paired group's key
+  // on the other pathway. Free text (id, label) goes through jsArg; the
+  // two vocabularies are validated, never interpolated raw.
+  const paired = pairedGroupOf(rg);
+  optParts.push(`pairingChecked:${ctx.pairingChecked ? 'true' : 'false'}`);
+  let pairedAttrs = '';
+  if (paired) {
+    optParts.push(
+      `paired:{id:${jsArg(paired.id)},kind:'${paired.kind}',source:'${paired.source}',label:${jsArg(paired.label)}}`,
+    );
+    pairedAttrs = ` data-paired-id="${esc(paired.id)}" data-paired-kind="${paired.kind}" data-paired-source="${paired.source}" data-paired-label="${esc(paired.label)}"`;
+  }
   const opts = `{${optParts.join(',')}}`;
   return `
-    <div class="rg" data-rg-id="${esc(rg.id)}" data-catalogue-source="${esc(source)}" data-identity-kind="${identityKind}" data-catalogue-id="${esc(rg.id)}"${leafAttr}>
+    <div class="rg" data-rg-id="${esc(rg.id)}" data-catalogue-source="${esc(source)}" data-identity-kind="${identityKind}" data-catalogue-id="${esc(rg.id)}" data-pairing-checked="${ctx.pairingChecked ? '1' : '0'}"${pairedAttrs}${leafAttr}>
       <div onclick="event.stopPropagation(); window.loadReleaseGroup(${jsArg(rg.id)}, this, ${opts})">
         <span class="rg-year">${year}</span> <span class="rg-title">${esc(rg.title)}</span>${creditNote}${badges}${spBtn}
       </div>
@@ -123,6 +141,46 @@ function catalogueProvenanceBadges(row) {
  * @param {Object} row
  * @returns {string}
  */
+/**
+ * The compare counterpart of a catalogue row as the Replace offer's pair:
+ * the other pathway's group (an MB release group, a Discogs master) or,
+ * for a masterless Discogs release, that exact release.
+ *
+ * @param {Object} rg - Catalogue row (possibly carrying `counterpart`).
+ * @returns {import('./replace_offer.js').ReplacePair|null}
+ */
+export function pairedGroupOf(rg) {
+  const counterpart = rg && rg.counterpart;
+  if (!counterpart || counterpart.id === undefined || counterpart.id === null) return null;
+  const source = counterpart.source === 'discogs' ? 'discogs' : 'mb';
+  const kind = counterpart.identity_kind === 'release' ? 'release' : 'work';
+  return {
+    id: String(counterpart.id),
+    kind,
+    source,
+    label: String(counterpart.title || ''),
+  };
+}
+
+/**
+ * Read a pair back out of `loadReleaseGroup` opts (from the onclick or
+ * a programmatic caller), validating the two vocabularies.
+ *
+ * @param {unknown} raw
+ * @returns {import('./replace_offer.js').ReplacePair|null}
+ */
+function normalizePaired(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const candidate = /** @type {{id?: unknown, kind?: unknown, source?: unknown, label?: unknown}} */ (raw);
+  if (candidate.id === undefined || candidate.id === null || candidate.id === '') return null;
+  return {
+    id: String(candidate.id),
+    kind: candidate.kind === 'release' ? 'release' : 'work',
+    source: candidate.source === 'discogs' ? 'discogs' : 'mb',
+    label: String(candidate.label || ''),
+  };
+}
+
 function catalogueCounterpartBadges(row) {
   const counterpart = row.counterpart;
   if (!counterpart || counterpart.in_library !== true) return '';
@@ -306,7 +364,10 @@ export function statusChipHtml(status) {
  * other browse surface; an enabled beets removal remains visible.
  *
  * @param {Object} rel - Pressing row with pipeline/library overlay fields.
- * @param {{artistName: string, parentRgId: string|null, canReplace: boolean, rgLookupUnavailable?: boolean}} ctx
+ * @param {{artistName: string, parentRgId: string|null, offer: import('./replace_offer.js').ReplaceOffer, paired: import('./replace_offer.js').ReplacePair|null}} ctx -
+ *   offer is the inverted Replace button's decision for this row
+ *   (``replace_offer.js``), paired the compare counterpart it may replace
+ *   a request under (issue #1366 part 2).
  * @returns {string}
  */
 export function renderPressingRow(rel, ctx) {
@@ -332,22 +393,14 @@ export function renderPressingRow(rel, ctx) {
   //     operator can switch to a sibling pressing.
   //
   //   - Otherwise: inverted mode. Clicking asks the operator which
-  //     active request in this RG should be replaced with the
-  //     clicked row's MBID. Enabled only when an existing
-  //     non-replaced row already targets a sibling MBID in the same RG.
-  //     A disabled button carries one of two explanations
-  //     (issue #1355 item 6), chosen by ``ctx.rgLookupUnavailable``
-  //     without changing the disabled state itself: confirmed absence,
-  //     or the active-RG lookup itself failed. The second explanation
-  //     is claimed for any row that has a lookup key at all — an MB
-  //     release-group UUID, or a Discogs master id, since Discogs
-  //     requests persist their exact master in the same
-  //     ``mb_release_group_id`` column MB releases use (KTD-1). Only a
-  //     masterless Discogs release has no master to fall back to
-  //     (``rgForReplace`` below is null) and keeps the confirmed-absence
-  //     wording regardless of the fetch outcome — corrected from the
-  //     #1361 premise that no Discogs row could ever match the cache
-  //     (issue #1355 residual sweep, Batch D).
+  //     active request should be replaced with the clicked row's id —
+  //     one in this row's own release group / master, or one the
+  //     artist compare paired this group with on the other pathway
+  //     (issue #1366 part 2). ``ctx.offer`` (``replace_offer.js``)
+  //     already decided enabled/disabled and the honest explanation:
+  //     confirmed absence on both sides, a failed key lookup, an
+  //     unchecked pairing, or no pair at all — never an unchecked
+  //     pairing described as absence.
   //
   // ``releaseGroupId`` may be null for legacy rows; the picker
   // lazy-resolves it via ``POST /api/pipeline/<id>/resolve-rg``
@@ -387,11 +440,11 @@ export function renderPressingRow(rel, ctx) {
       targetMbid: rel.id,
       releaseGroupId: rgForReplace,
       targetLabel: `${ctx.artistName} — ${rel.title || ''}`,
+      paired: ctx.paired,
     }, {
       className: 'btn',
       style: 'padding:2px 8px;font-size:0.7em;white-space:nowrap;',
-      enabled: ctx.canReplace,
-      unavailable: ctx.rgLookupUnavailable,
+      offer: ctx.offer,
       stopPropagation: true,
     });
   }
@@ -425,6 +478,10 @@ export function renderPressingRow(rel, ctx) {
  *   element is a stable, never-replaced node so a stale write is visible)
  *   to thread the parent flow's in-flight token down. Artist-view callers
  *   omit it because their namespaced expansion target is detached on re-render.
+ * @param {boolean} [opts.pairingChecked] - Whether the artist compare
+ *   produced the catalogue this row came from (issue #1366 part 2).
+ * @param {{id: string, kind: 'work'|'release', source: 'mb'|'discogs', label: string}|null} [opts.paired] -
+ *   The compare counterpart of this group on the other pathway, if any.
  */
 export async function loadReleaseGroup(id, el, opts = {}) {
   const source = opts.source || state.browseSource;
@@ -474,21 +531,33 @@ export async function loadReleaseGroup(id, el, opts = {}) {
 
     const artistName = state.browseArtist?.name || '';
     const lookupFailed = activeRgsUnavailable();
+    // The compare pairing for this group on the other pathway (issue
+    // #1366 part 2). A paired master or release group is looked up in
+    // the group key set; a paired MASTERLESS Discogs release has no
+    // group, so it is looked up by its exact release id instead.
+    const paired = normalizePaired(opts.paired);
+    const pairingChecked = Boolean(opts.pairingChecked);
+    const pairActive = paired === null
+      ? false
+      : (paired.kind === 'release'
+        ? hasActiveGrouplessRelease(paired.id)
+        : hasActiveRg(paired.id));
     const renderRelease = (rel) => {
       const rgForReplace = rel.release_group_id || parentRgId || null;
+      const offer = replaceOfferState({
+        ownKey: rgForReplace,
+        ownActive: hasActiveRg(rgForReplace),
+        lookupFailed,
+        pairingChecked,
+        pair: paired,
+        pairActive,
+        rowSource: isDiscogs ? 'discogs' : 'mb',
+      });
       return renderPressingRow(rel, {
         artistName,
         parentRgId,
-        canReplace: hasActiveRg(rgForReplace),
-        // "Could not check" is honest only for a row that has a lookup
-        // key to check in the first place. A masterless Discogs release
-        // has none (rgForReplace is null) and keeps the
-        // confirmed-absence wording on a failed lookup; every other row
-        // — MB, or a Discogs release under a master — has one and gets
-        // the "could not check" explanation instead (issue #1355
-        // residual sweep, Batch D — corrects the #1361 premise that no
-        // Discogs row could ever match the cache).
-        rgLookupUnavailable: rgForReplace !== null && lookupFailed,
+        offer,
+        paired,
       });
     };
 

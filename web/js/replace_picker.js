@@ -13,9 +13,17 @@
  *       `/api/pipeline/<sourceRequestId>/replace`.
  *
  *   Inverted mode (Browse-search, row IS the new MBID):
- *     - Caller passes `{ targetMbid, releaseGroupId, targetLabel }`.
- *     - Picker fetches `GET /api/pipeline/requests-by-rg/<rg_id>` to
- *       discover which existing non-replaced request to supersede.
+ *     - Caller passes `{ targetMbid, releaseGroupId, targetLabel }` and,
+ *       when the artist compare paired the row's group with one on the
+ *       other pathway, `{ pairedGroupId, pairedGroupKind, pairedLabel }`
+ *       (issue #1366 part 2).
+ *     - Picker fetches `GET /api/pipeline/requests-by-rg/<rg_id>` for the
+ *       row's own group and, for the pair, the same route for a paired
+ *       release group / master or `GET /api/pipeline/requests-by-release/
+ *       <id>` for a paired masterless Discogs release. Paired candidates
+ *       are listed WITH the pair named, since choosing one is a
+ *       cross-pathway Replace: the POST then carries `cross_pathway: true`,
+ *       the operator's assertion that the two are the same album.
  *     - 0 results → error toast; the calling button should not have been
  *       enabled in this case (R7).
  *     - 1 result → skip request-picker, go straight to confirm.
@@ -62,6 +70,9 @@ import { handleProcessingLockedConflict } from './release_action_state.js';
  * @property {string|null} [releaseGroupId]  // null → lazy-resolve via /api/release/<mbid>
  * @property {string} [targetLabel]  // "Pet Grief — New Pressing (2025, JP)"
  * @property {string} [source]
+ * @property {string|null} [pairedGroupId]   // the compare counterpart's key on the other pathway (issue #1366)
+ * @property {'work'|'release'} [pairedGroupKind]  // 'release' → a masterless Discogs release, looked up by exact id
+ * @property {string} [pairedLabel]  // the counterpart's title, for copy
  */
 
 /**
@@ -86,6 +97,8 @@ import { handleProcessingLockedConflict } from './release_action_state.js';
  * @property {string} status
  * @property {string} artist_name
  * @property {string} album_title
+ * @property {boolean} [viaPairing]     // found under the PAIRED group on the other pathway
+ * @property {string} [pairingLabel]    // that pair's title, for copy
  */
 
 /** @typedef {{ outcome: 'cancelled' } | { outcome: 'confirmed', sourceRequestId: number, targetMbid: string, response: any }} ReplacePickerResult */
@@ -306,7 +319,7 @@ export function renderRequestsList(requests) {
     <li class="replace-picker-row" data-mbid-row="${esc(r.mb_release_id)}">
       <button class="replace-picker-pick" data-expand-mbid="${esc(r.mb_release_id)}" aria-expanded="false">
         <strong>#${r.id}</strong> · ${esc(r.artist_name)} — ${esc(r.album_title)}<br>
-        <small>status: ${esc(r.status)}</small>
+        <small>status: ${esc(r.status)}</small>${r.viaPairing ? `<br><small class="replace-picker-pairing">on the other pathway — paired with &quot;${esc(r.pairingLabel || '')}&quot;</small>` : ''}
       </button>
       <div class="replace-picker-detail" data-tracks-for="${esc(r.mb_release_id)}"></div>
       <div class="replace-picker-detail-actions-slot" data-actions-for="${esc(r.mb_release_id)}" hidden>
@@ -321,16 +334,25 @@ export function renderRequestsList(requests) {
 /**
  * Confirmation-dialog HTML. Reflects R23 — in-flight transfers orphan;
  * cleanup deferred to #278. Generic copy, not a service-computed
- * dry-run.
+ * dry-run. A cross-pathway confirm (issue #1366) names the pair
+ * explicitly, so the operator sees which request on the other pathway is
+ * being replaced and what confirming asserts.
  *
  * @param {Object} args
  * @param {number} args.sourceRequestId
  * @param {string} args.targetMbid
  * @param {string} [args.targetLabel]
+ * @param {boolean} [args.crossPathway]  // the chosen request sits on the other pathway
+ * @param {string} [args.pairingLabel]   // the pair's title, for copy
  * @returns {string}
  */
 export function renderConfirmDialog(args) {
   const targetLabel = args.targetLabel || args.targetMbid;
+  const crossNote = args.crossPathway
+    ? `<p class="replace-picker-cross-note"><strong>Cross-pathway:</strong> request #${args.sourceRequestId} is on the other pathway
+      (paired with &quot;${esc(args.pairingLabel || '')}&quot;). Replacing it asserts the two are the same album;
+      the new request anchors on exactly the pressing above.</p>`
+    : '';
   return `
     <div class="confirm-box" role="dialog" aria-modal="true">
       <h3>Replace request #${args.sourceRequestId}?</h3>
@@ -340,7 +362,7 @@ export function renderConfirmDialog(args) {
       <p>A new request will be created targeting:<br>
         <strong>${esc(targetLabel)}</strong><br>
         <code>${esc(args.targetMbid)}</code>
-      </p>
+      </p>${crossNote}
       <p style="font-size:0.85em;color:#999;">In-flight Soulseek transfers for the old
       request are left running; their landed files become orphans cleaned up by
       future convergence work (issue #278).</p>
@@ -371,15 +393,38 @@ export function renderStandardHeader(sourceLabel) {
  * Header copy for inverted mode.
  *
  * @param {string} targetLabel
+ * @param {string} [pairedLabel]  // the compare counterpart's title, when the picker also searched it
  * @returns {string}
  */
-export function renderInvertedHeader(targetLabel) {
+export function renderInvertedHeader(targetLabel, pairedLabel) {
   const safe = esc(targetLabel);
+  const scope = pairedLabel
+    ? `in this release group or its paired &quot;${esc(pairedLabel)}&quot; on the other pathway`
+    : 'in this release group';
   return `
     <h2 style="margin-top:0;">Use this pressing to replace an existing request</h2>
-    <p style="color:#888;">Pick which request in this release group should be
+    <p style="color:#888;">Pick which request ${scope} should be
     replaced with <strong>${safe}</strong>.</p>
   `;
+}
+
+/**
+ * Fetch the Replace picker's candidate requests for one key: a release
+ * group / master (``requests-by-rg``) or a masterless Discogs release
+ * (``requests-by-release``). Both routes answer the same row shape.
+ *
+ * @param {string} key
+ * @param {'work'|'release'} kind
+ * @returns {Promise<ExistingRequest[]>}
+ */
+async function fetchCandidates(key, kind) {
+  const route = kind === 'release' ? 'requests-by-release' : 'requests-by-rg';
+  const res = await fetch(`/api/pipeline/${route}/${encodeURIComponent(key)}`);
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
+  }
+  const body = await res.json();
+  return body.requests || [];
 }
 
 /* --------------------------------------------------------------------------
@@ -1012,10 +1057,15 @@ async function loadSourceTracklist(modal, sourceMbid, sourceLabel) {
  * @param {(r: ReplacePickerResult) => void} close
  */
 async function runInverted(options, showOverlay, close) {
+  const pairedGroupId = options.pairedGroupId || null;
+  const pairedKind = options.pairedGroupKind === 'release' ? 'release' : 'work';
+  const pairedLabel = options.pairedLabel || '';
   // Lazy-resolve release group id for legacy null-RG rows by hitting
   // the existing /api/release/<mbid> route (the response carries
   // ``release_group_id``). We don't persist the result anywhere — the
-  // active-requests fetch below is the only consumer.
+  // active-requests fetch below is the only consumer. A masterless
+  // Discogs row that reached the picker through its PAIR has no group
+  // to resolve and nothing to resolve it for: skip straight to the pair.
   let releaseGroupId = options.releaseGroupId || null;
   if (!releaseGroupId) {
     showOverlay(`${renderInvertedHeader(options.targetLabel || options.targetMbid)}
@@ -1044,20 +1094,27 @@ async function runInverted(options, showOverlay, close) {
     }
   }
 
-  showOverlay(`${renderInvertedHeader(options.targetLabel || options.targetMbid)}
+  showOverlay(`${renderInvertedHeader(options.targetLabel || options.targetMbid, pairedLabel)}
     <p>Loading active requests…</p>`);
 
+  /** @type {ExistingRequest[]} */
   let requests = [];
   try {
-    const res = await fetch(
-      `/api/pipeline/requests-by-rg/${encodeURIComponent(releaseGroupId)}`);
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
+    if (releaseGroupId) {
+      requests.push(...await fetchCandidates(releaseGroupId, 'work'));
     }
-    const body = await res.json();
-    requests = body.requests || [];
+    if (pairedGroupId) {
+      // The other pathway's request(s) under the paired group. Choosing
+      // one is a cross-pathway Replace, so each is tagged for the list
+      // copy, the confirm note, and the POST's opt-in.
+      const seen = new Set(requests.map((r) => r.id));
+      for (const r of await fetchCandidates(pairedGroupId, pairedKind)) {
+        if (seen.has(r.id)) continue;
+        requests.push({ ...r, viaPairing: true, pairingLabel: pairedLabel });
+      }
+    }
   } catch (err) {
-    showOverlay(`${renderInvertedHeader(options.targetLabel || '')}
+    showOverlay(`${renderInvertedHeader(options.targetLabel || '', pairedLabel)}
       <p style="color:#f66;">Failed to load active requests: ${esc(String(err))}</p>
       <div class="actions"><button class="btn" id="replace-picker-cancel">Close</button></div>`);
     bindCancel(close);
@@ -1065,19 +1122,26 @@ async function runInverted(options, showOverlay, close) {
   }
 
   if (requests.length === 0) {
-    showOverlay(`${renderInvertedHeader(options.targetLabel || '')}
-      <p style="color:#888;">No active requests in this release group to replace.</p>
+    const scope = pairedGroupId
+      ? 'for this album on either pathway'
+      : 'in this release group';
+    showOverlay(`${renderInvertedHeader(options.targetLabel || '', pairedLabel)}
+      <p style="color:#888;">No active requests ${scope} to replace.</p>
       <div class="actions"><button class="btn" id="replace-picker-cancel">Close</button></div>`);
     bindCancel(close);
     return;
   }
 
+  const confirmArgsFor = (/** @type {ExistingRequest} */ r) => ({
+    sourceRequestId: r.id,
+    targetMbid: options.targetMbid,
+    targetLabel: options.targetLabel || options.targetMbid,
+    crossPathway: r.viaPairing === true,
+    pairingLabel: r.viaPairing ? (r.pairingLabel || '') : '',
+  });
+
   if (requests.length === 1) {
-    await runConfirm({
-      sourceRequestId: requests[0].id,
-      targetMbid: options.targetMbid,
-      targetLabel: options.targetLabel || options.targetMbid,
-    }, showOverlay, close);
+    await runConfirm(confirmArgsFor(requests[0]), showOverlay, close);
     return;
   }
 
@@ -1088,7 +1152,7 @@ async function runInverted(options, showOverlay, close) {
     tracks: null,
     loading: true,
   });
-  showOverlay(`${renderInvertedHeader(targetLabel)}
+  showOverlay(`${renderInvertedHeader(targetLabel, pairedLabel)}
     ${sourcePanel}
     ${renderRequestsList(requests)}
     <div class="replace-picker-cancel-bar">
@@ -1100,17 +1164,15 @@ async function runInverted(options, showOverlay, close) {
   wireRows(modal, async (_rowMbid, _rowLabel, ridAttr) => {
     const rid = Number(ridAttr);
     if (!Number.isFinite(rid)) return;
-    await runConfirm({
-      sourceRequestId: rid,
-      targetMbid: options.targetMbid,
-      targetLabel: options.targetLabel || options.targetMbid,
-    }, showOverlay, close);
+    const chosen = requests.find((r) => r.id === rid);
+    if (!chosen) return;
+    await runConfirm(confirmArgsFor(chosen), showOverlay, close);
   });
   loadSourceTracklist(modal, options.targetMbid, targetLabel).catch(() => {});
 }
 
 /**
- * @param {{ sourceRequestId: number, targetMbid: string, targetLabel?: string }} args
+ * @param {{ sourceRequestId: number, targetMbid: string, targetLabel?: string, crossPathway?: boolean, pairingLabel?: string }} args
  * @param {(html: string) => void} showOverlay
  * @param {(r: ReplacePickerResult) => void} close
  */
@@ -1134,7 +1196,13 @@ async function runConfirm(args, showOverlay, close) {
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ target_mb_release_id: args.targetMbid }),
+          // The opt-in is the operator's confirm click on a candidate the
+          // picker found through the pairing; a same-pathway candidate
+          // sends an explicit false (the route's field is strict).
+          body: JSON.stringify({
+            target_mb_release_id: args.targetMbid,
+            cross_pathway: args.crossPathway === true,
+          }),
         });
       const body = await res.json();
       close({

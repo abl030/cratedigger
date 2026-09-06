@@ -764,6 +764,76 @@ class TestSupersedeRequestMbidRoundTrip(unittest.TestCase):
 
 
 @requires_postgres
+class TestActiveReplaceKeys(unittest.TestCase):
+    """The two key sets the Browse Replace button consults (issue #1366
+    part 2): group ids of non-replaced rows, and the exact release ids of
+    non-replaced rows that have no group at all (masterless Discogs
+    releases, legacy rows). Both read the live SQL, not a fake."""
+
+    def _seed(self, db) -> dict[str, int]:
+        ids: dict[str, int] = {}
+        ids["mb_grouped"] = db.add_request(
+            artist_name="Muse", album_title="Absolution", source="request",
+            mb_release_id="a0a2b395-7989-4ec7-99f9-9bc9425c53b7",
+            mb_release_group_id="6f151223-f3a3-3e57-810f-598f7897006c",
+            status="imported",
+        )
+        ids["discogs_mastered"] = db.add_request(
+            artist_name="Muse", album_title="Absolution", source="request",
+            mb_release_id="793320", discogs_release_id="793320",
+            mb_release_group_id="11052", status="wanted",
+        )
+        ids["discogs_masterless"] = db.add_request(
+            artist_name="Deloris", album_title="Fraulein", source="request",
+            mb_release_id="3938744", discogs_release_id="3938744",
+            status="wanted",
+        )
+        ids["mb_legacy_no_group"] = db.add_request(
+            artist_name="Legacy", album_title="No Group", source="request",
+            mb_release_id="19016167-1ba2-41ab-9bec-bf9ed2ac995c",
+            status="imported",
+        )
+        replaced = db.add_request(
+            artist_name="Gone", album_title="Replaced", source="request",
+            mb_release_id="461206", discogs_release_id="461206",
+            status="wanted",
+        )
+        db.supersede_request_mbid(
+            replaced,
+            new_mb_release_id="461207",
+            new_mb_release_group_id=None,
+            new_mb_artist_id=None,
+            new_artist_name="Gone",
+            new_album_title="Replaced",
+            new_year=None,
+            new_country=None,
+            new_discogs_release_id="461207",
+            new_tracks=[],
+        )
+        ids["replaced"] = replaced
+        return ids
+
+    def test_group_ids_and_groupless_release_ids(self):
+        db = make_db()
+        self._seed(db)
+        self.assertEqual(
+            db.list_active_release_group_ids(),
+            {"6f151223-f3a3-3e57-810f-598f7897006c", "11052"},
+        )
+        # The frozen replaced row's "461206" must not count; its
+        # descendant "461207" (born wanted, no group) must.
+        self.assertEqual(
+            db.list_active_groupless_release_ids(),
+            {"3938744", "19016167-1ba2-41ab-9bec-bf9ed2ac995c", "461207"},
+        )
+
+    def test_empty_database_yields_empty_sets(self):
+        db = make_db()
+        self.assertEqual(db.list_active_release_group_ids(), set())
+        self.assertEqual(db.list_active_groupless_release_ids(), set())
+
+
+@requires_postgres
 class TestPlexAddedAtPinsRoundTrip(unittest.TestCase):
     """Rule A round-trip for the Plex addedAt pin store (migration 040).
     Every field the writer persists must read back unchanged through real PG —

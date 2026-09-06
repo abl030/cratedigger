@@ -1,15 +1,20 @@
 // @ts-check
 
 /**
- * Active release-group ID cache for the Browse-search inverted Replace
- * button.
+ * Active replace-key cache for the Browse-search inverted Replace button.
  *
  * The Replace button on a Browse-search row is enabled only when an
- * existing non-replaced ``album_requests`` row already targets a
- * sibling MBID in the same release group — otherwise there's nothing
- * to replace. ``GET /api/pipeline/active-rgs`` returns the distinct
- * set of release-group IDs held by any non-replaced row; the frontend
- * caches that set and consults it per rendered pressing row.
+ * existing non-replaced ``album_requests`` row could be replaced by that
+ * pressing: one holding a sibling in the row's own release group (or
+ * Discogs master, KTD-1), or — since issue #1366 part 2 — one holding
+ * the group the artist compare PAIRED the row with on the other pathway.
+ * ``GET /api/pipeline/active-rgs`` returns two key sets: the distinct
+ * release-group / master ids held by any non-replaced row, and the exact
+ * release ids of non-replaced rows that have NO group (a masterless
+ * Discogs request, a legacy unresolved row), which is the only key such
+ * a request can be found by when the pairing names a masterless Discogs
+ * release. The frontend caches both and consults them per rendered
+ * pressing row (``hasActiveRg`` / ``hasActiveGrouplessRelease``).
  *
  * Cache lifecycle:
  *   - Loaded by an explicit ``loadActiveRgs()`` call — the Browse view
@@ -35,8 +40,10 @@
 
 import { API } from './state.js';
 
-/** @type {Set<string>|null} */
-let activeRgSet = null;
+/** @typedef {{groups: Set<string>, releases: Set<string>}} ActiveKeys */
+
+/** @type {ActiveKeys|null} */
+let activeKeys = null;
 
 /** @type {Promise<Set<string>>|null} */
 let inflight = null;
@@ -74,7 +81,7 @@ let generation = 0;
  * @returns {Promise<Set<string>>}
  */
 export async function loadActiveRgs() {
-  if (activeRgSet) return activeRgSet;
+  if (activeKeys) return activeKeys.groups;
   if (inflight) return inflight;
   const myGeneration = generation;
   inflight = (async () => {
@@ -82,11 +89,12 @@ export async function loadActiveRgs() {
       const r = await fetch(`${API}/api/pipeline/active-rgs`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const data = await r.json();
-      if (!Array.isArray(data.release_group_ids)) {
+      if (!Array.isArray(data.release_group_ids)
+          || !Array.isArray(data.groupless_release_ids)) {
         // The API contract broke, not the collection. Route through the
         // same catch as a transport failure rather than caching an
         // empty set that would read as "confirmed no active requests".
-        throw new Error('malformed release_group_ids');
+        throw new Error('malformed active-rgs payload');
       }
       if (myGeneration !== generation) {
         // Superseded by invalidateActiveRgs while this fetch was in
@@ -98,9 +106,12 @@ export async function loadActiveRgs() {
         // confirmed empty collection.
         return loadActiveRgs();
       }
-      activeRgSet = new Set(data.release_group_ids.map(String));
+      activeKeys = {
+        groups: new Set(data.release_group_ids.map(String)),
+        releases: new Set(data.groupless_release_ids.map(String)),
+      };
       lastLoadUnavailable = false;
-      return activeRgSet;
+      return activeKeys.groups;
     } catch (_e) {
       if (myGeneration !== generation) {
         return loadActiveRgs();
@@ -110,7 +121,7 @@ export async function loadActiveRgs() {
       // disabled — a safer default than enabling it speculatively —
       // but ``activeRgsUnavailable`` now records that this call
       // couldn't answer the question.
-      activeRgSet = null;
+      activeKeys = null;
       lastLoadUnavailable = true;
       return new Set();
     } finally {
@@ -136,8 +147,24 @@ export async function loadActiveRgs() {
  */
 export function hasActiveRg(releaseGroupId) {
   if (!releaseGroupId) return false;
-  if (!activeRgSet) return false;
-  return activeRgSet.has(String(releaseGroupId));
+  if (!activeKeys) return false;
+  return activeKeys.groups.has(String(releaseGroupId));
+}
+
+/**
+ * Synchronous predicate for the second key set: whether a non-replaced
+ * request with NO group holds exactly this release id. The artist
+ * compare pairs an MB release group with a masterless Discogs RELEASE,
+ * and such a request has no group for ``hasActiveRg`` to find it by
+ * (issue #1366 part 2). Same cache lifecycle as ``hasActiveRg``.
+ *
+ * @param {string|null|undefined} releaseId
+ * @returns {boolean}
+ */
+export function hasActiveGrouplessRelease(releaseId) {
+  if (!releaseId) return false;
+  if (!activeKeys) return false;
+  return activeKeys.releases.has(String(releaseId));
 }
 
 /**
@@ -161,7 +188,7 @@ export function activeRgsUnavailable() {
  * re-fetches.
  */
 export function invalidateActiveRgs() {
-  activeRgSet = null;
+  activeKeys = null;
   inflight = null;
   lastLoadUnavailable = false;
   generation += 1;

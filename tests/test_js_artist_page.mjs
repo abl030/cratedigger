@@ -107,7 +107,7 @@ t.section('unmatched masterless rows stay reachable inside Other releases');
     artistId: ARTIST_ID, artistName: ARTIST_NAME,
   });
   t.excludes(html, 'Ungrouped', 'storage topology is not a heading');
-  t.contains(html, "{masterless:true,source:'discogs',identityKind:'release'}",
+  t.contains(html, "{masterless:true,source:'discogs',identityKind:'release',pairingChecked:false}",
     'masterless row keeps exact release expansion');
   t.contains(html, 'data-release-id="3938744"',
     'masterless row remains ringable by exact release id');

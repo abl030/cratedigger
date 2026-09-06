@@ -19,6 +19,7 @@ import {
   renderPressingRow,
   renderReleaseDetail,
   renderRgRow,
+  pairedGroupOf,
   synthesizeMasterlessRow,
   splitPressings,
   statusChipHtml,
@@ -315,6 +316,43 @@ t.section('synthesizeMasterlessRow() — in-library payload keeps quality fields
   t.contains(html, '>F</span>', 'masterless row renders quality independently');
   t.contains(html, '>captured<', 'masterless row renders captured history');
   t.contains(html, '>verified<', 'masterless row renders carried proof');
+}
+
+t.section('renderRgRow() — the compare counterpart rides along to loadReleaseGroup as the pair (issue #1366 part 2)');
+{
+  const row = {
+    id: '6f151223-f3a3-3e57-810f-598f7897006c', title: 'Absolution', source: 'mb',
+    identity_kind: 'work', first_release_date: '2003-09-15', provenance: ['ordinary'],
+    counterpart: {
+      id: 11052, title: 'Absolution "Deluxe" <b>', source: 'discogs', identity_kind: 'work',
+    },
+  };
+  const html = renderRgRow(row, { artistName: 'Muse', nameLC: 'muse', pairingChecked: true });
+  t.contains(html,
+    "window.loadReleaseGroup(&quot;6f151223-f3a3-3e57-810f-598f7897006c&quot;, this, {source:'mb',identityKind:'work',pairingChecked:true,paired:{id:&quot;11052&quot;,kind:'work',source:'discogs',label:&quot;Absolution &#92;&quot;Deluxe&#92;&quot; &lt;b&gt;&quot;}})",
+    'the onclick carries pairingChecked and the pair, free text as escaped JS strings, vocabularies as literals');
+  t.contains(html, 'data-paired-id="11052" data-paired-kind="work" data-paired-source="discogs" data-paired-label="Absolution &quot;Deluxe&quot; &lt;b&gt;"',
+    'the row also carries the pair as data attributes for the late-compare reload');
+  t.contains(html, 'data-pairing-checked="1"', 'and whether the pairing was checked');
+
+  const masterlessPair = renderRgRow({
+    ...row, counterpart: { id: '3938744', title: 'Fraulein', source: 'discogs', identity_kind: 'release' },
+  }, { artistName: 'Deloris', nameLC: 'deloris', pairingChecked: true });
+  t.contains(masterlessPair, "paired:{id:&quot;3938744&quot;,kind:'release',source:'discogs',label:&quot;Fraulein&quot;}",
+    'a masterless Discogs counterpart is passed as a release, so the expansion looks it up by exact id');
+
+  const unpaired = renderRgRow({ ...row, counterpart: undefined }, { artistName: 'Muse', nameLC: 'muse' });
+  t.contains(unpaired, "{source:'mb',identityKind:'work',pairingChecked:false}",
+    'no counterpart and no pairingChecked: the expansion is told the pairing was not checked');
+  t.excludes(unpaired, 'data-paired-id', 'no pair, no paired attributes');
+
+  t.deepEqual(pairedGroupOf(row), { id: '11052', kind: 'work', source: 'discogs', label: 'Absolution "Deluxe" <b>' },
+    'pairedGroupOf normalises the counterpart: string id, validated kind and source, raw label');
+  t.equal(pairedGroupOf({ counterpart: { source: 'bogus', identity_kind: 'bogus', id: 1, title: 't' } }).kind, 'work',
+    'an unknown identity kind is treated as a work');
+  t.equal(pairedGroupOf({ counterpart: { source: 'bogus', identity_kind: 'bogus', id: 1, title: 't' } }).source, 'mb',
+    'an unknown source falls back to mb, never interpolated raw');
+  t.equal(pairedGroupOf({}), null, 'no counterpart, no pair');
 }
 
 t.section('splitPressings() — owned/in-flight pressings are never hidden (The Meadowlands pin)');

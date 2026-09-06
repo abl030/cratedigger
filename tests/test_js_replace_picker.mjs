@@ -1,0 +1,239 @@
+/**
+ * Unit tests for web/js/replace_picker.js's inverted mode with a compare
+ * pair (issue #1366 part 2): the picker searches the row's own group AND
+ * the paired group on the other pathway, lists paired candidates with
+ * the pair named, confirms a cross-pathway pick with an explicit note,
+ * and posts the operator's opt-in only for that pick.
+ *
+ * The DOM is a small fake modal: `innerHTML` is captured as a string,
+ * `querySelector('#id')` answers only ids present in that string with an
+ * element whose click handler the test can fire, and everything else is
+ * absent — enough to drive the real `openReplacePicker` end to end.
+ *
+ * Run with: node tests/test_js_replace_picker.mjs
+ */
+
+import {
+  openReplacePicker,
+  renderConfirmDialog,
+  renderInvertedHeader,
+  renderRequestsList,
+} from '../web/js/replace_picker.js';
+
+import { stubGlobals, suite } from './js_harness.mjs';
+
+const t = suite(import.meta.url);
+
+function fakeModal() {
+  const handlers = new Map();
+  const modal = {
+    style: {},
+    _html: '',
+    set innerHTML(value) { this._html = value; handlers.clear(); },
+    get innerHTML() { return this._html; },
+    querySelector(selector) {
+      if (selector === '.confirm-overlay') return null;
+      const id = selector.startsWith('#') ? selector.slice(1) : null;
+      if (id && this._html.includes(`id="${id}"`)) {
+        return {
+          addEventListener(type, fn) { handlers.set(`${id}:${type}`, fn); },
+        };
+      }
+      return null;
+    },
+    querySelectorAll() { return []; },
+    async click(id) {
+      const fn = handlers.get(`${id}:click`);
+      if (!fn) throw new Error(`no click handler bound for #${id}`);
+      await fn({ stopPropagation() {} });
+    },
+  };
+  return modal;
+}
+
+function okJson(body) {
+  return { ok: true, status: 200, json: async () => body };
+}
+
+/** Drive the inverted picker with routed fetch answers; returns the modal, the calls and the promise. */
+function drive(options, routes) {
+  const modal = fakeModal();
+  const calls = [];
+  stubGlobals({
+    document: { getElementById: (id) => (id === 'replace-picker-modal' ? modal : null) },
+    fetch: async (url, init) => {
+      calls.push({ url: String(url), init: init || null });
+      for (const [prefix, answer] of routes) {
+        if (String(url).startsWith(prefix)) return answer(String(url), init);
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    },
+  });
+  const done = openReplacePicker(options);
+  return { modal, calls, done };
+}
+
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+const MB_REQUEST = {
+  id: 2839, mb_release_id: 'a0a2b395-7989-4ec7-99f9-9bc9425c53b7',
+  mb_release_group_id: '6f151223-f3a3-3e57-810f-598f7897006c',
+  status: 'imported', artist_name: 'Muse', album_title: 'Absolution',
+  processing_owner: null,
+};
+
+t.section('inverted with a paired master — the other pathway\'s request is the single candidate; confirm carries the cross-pathway note and opt-in');
+{
+  const { modal, calls, done } = drive({
+    targetMbid: '793320',
+    releaseGroupId: '11052',
+    targetLabel: 'Muse — Absolution',
+    pairedGroupId: '6f151223-f3a3-3e57-810f-598f7897006c',
+    pairedGroupKind: 'work',
+    pairedLabel: 'Absolution',
+  }, [
+    ['/api/pipeline/requests-by-rg/11052', () => okJson({ requests: [] })],
+    ['/api/pipeline/requests-by-rg/6f151223', () => okJson({ requests: [MB_REQUEST] })],
+    ['/api/pipeline/2839/replace', () => okJson({ outcome: 'replaced', request_id: 2839, new_request_id: 9029 })],
+  ]);
+  await flush(); await flush(); await flush();
+  t.contains(modal.innerHTML, 'Replace request #2839?', 'a single paired candidate goes straight to confirm');
+  t.contains(modal.innerHTML, 'Cross-pathway:', 'the confirm dialog carries the cross-pathway note');
+  t.contains(modal.innerHTML, 'paired with &quot;Absolution&quot;', 'and names the pair');
+  t.contains(modal.innerHTML, 'asserts the two are the same album', 'and says what confirming asserts');
+  await modal.click('replace-picker-confirm');
+  await flush();
+  const post = calls.find((c) => c.url === '/api/pipeline/2839/replace');
+  t.ok(post !== undefined, 'the confirm posted to the chosen request\'s replace route');
+  t.deepEqual(JSON.parse(post.init.body), { target_mb_release_id: '793320', cross_pathway: true },
+    'the POST carries the operator\'s cross-pathway opt-in for a candidate found through the pair');
+  const result = await done;
+  t.equal(result.outcome, 'confirmed', 'the picker resolves confirmed');
+  t.equal(result.sourceRequestId, 2839, 'with the paired request as the source');
+  t.equal(result.targetMbid, '793320', 'and the clicked pressing as the target');
+}
+
+t.section('inverted with a same-pathway candidate only — no note, opt-in explicitly false');
+{
+  const { modal, calls } = drive({
+    targetMbid: 'fdd45566-5c8b-4beb-8ec3-1b5f93a01319',
+    releaseGroupId: '6f151223-f3a3-3e57-810f-598f7897006c',
+    targetLabel: 'Muse — Absolution (JP)',
+    pairedGroupId: '11052',
+    pairedGroupKind: 'work',
+    pairedLabel: 'Absolution',
+  }, [
+    ['/api/pipeline/requests-by-rg/6f151223', () => okJson({ requests: [MB_REQUEST] })],
+    ['/api/pipeline/requests-by-rg/11052', () => okJson({ requests: [] })],
+    ['/api/pipeline/2839/replace', () => okJson({ outcome: 'replaced', request_id: 2839, new_request_id: 9030 })],
+  ]);
+  await flush(); await flush(); await flush();
+  t.excludes(modal.innerHTML, 'Cross-pathway:', 'a same-pathway candidate gets no cross-pathway note');
+  await modal.click('replace-picker-confirm');
+  await flush();
+  const post = calls.find((c) => c.url === '/api/pipeline/2839/replace');
+  t.deepEqual(JSON.parse(post.init.body), { target_mb_release_id: 'fdd45566-5c8b-4beb-8ec3-1b5f93a01319', cross_pathway: false },
+    'the POST sends an explicit false for a same-pathway candidate (the route field is strict)');
+}
+
+t.section('inverted with a paired MASTERLESS release — looked up by exact release, not by group');
+{
+  const masterless = {
+    id: 8840, mb_release_id: '3938744', mb_release_group_id: null,
+    status: 'wanted', artist_name: 'Deloris', album_title: 'Fraulein', processing_owner: null,
+  };
+  const { modal, calls } = drive({
+    targetMbid: '19016167-1ba2-41ab-9bec-bf9ed2ac995c',
+    releaseGroupId: '1c9e2970-b221-30ab-93c6-7896b52a240b',
+    targetLabel: 'Deloris — Fraulein',
+    pairedGroupId: '3938744',
+    pairedGroupKind: 'release',
+    pairedLabel: 'Fraulein',
+  }, [
+    ['/api/pipeline/requests-by-rg/1c9e2970', () => okJson({ requests: [] })],
+    ['/api/pipeline/requests-by-release/3938744', () => okJson({ requests: [masterless] })],
+  ]);
+  await flush(); await flush(); await flush();
+  t.ok(calls.some((c) => c.url === '/api/pipeline/requests-by-release/3938744'),
+    'a release-kind pair is fetched through requests-by-release');
+  t.ok(!calls.some((c) => c.url.includes('requests-by-rg/3938744')),
+    'and never through requests-by-rg');
+  t.contains(modal.innerHTML, 'Replace request #8840?', 'the masterless Discogs request is the candidate');
+  t.contains(modal.innerHTML, 'Cross-pathway:', 'and replacing it is cross-pathway');
+}
+
+t.section('inverted from a masterless Discogs row with a pair — no own group, no lazy resolve, straight to the pair');
+{
+  const { modal, calls } = drive({
+    targetMbid: '3938744',
+    releaseGroupId: null,
+    targetLabel: 'Deloris — Fraulein (Discogs)',
+    pairedGroupId: '1c9e2970-b221-30ab-93c6-7896b52a240b',
+    pairedGroupKind: 'work',
+    pairedLabel: 'Fraulein',
+  }, [
+    ['/api/pipeline/requests-by-rg/1c9e2970', () => okJson({ requests: [{
+      id: 425, mb_release_id: '19016167-1ba2-41ab-9bec-bf9ed2ac995c',
+      mb_release_group_id: '1c9e2970-b221-30ab-93c6-7896b52a240b',
+      status: 'wanted', artist_name: 'Deloris', album_title: 'Fraulein', processing_owner: null,
+    }] })],
+  ]);
+  await flush(); await flush(); await flush();
+  t.ok(!calls.some((c) => c.url.startsWith('/api/release/')),
+    'no lazy release-group resolve is attempted for a masterless row that has a pair');
+  t.contains(modal.innerHTML, 'Replace request #425?', 'the MB request under the paired release group is the candidate');
+}
+
+t.section('inverted — both sides hold requests: the list names the paired one and the pick decides the opt-in');
+{
+  const discogsReq = {
+    id: 9028, mb_release_id: '793320', mb_release_group_id: '11052',
+    status: 'wanted', artist_name: 'Muse', album_title: 'Absolution', processing_owner: null,
+  };
+  const { modal } = drive({
+    targetMbid: '1502048',
+    releaseGroupId: '11052',
+    targetLabel: 'Muse — Absolution (AU CDr)',
+    pairedGroupId: '6f151223-f3a3-3e57-810f-598f7897006c',
+    pairedGroupKind: 'work',
+    pairedLabel: 'Absolution',
+  }, [
+    ['/api/pipeline/requests-by-rg/11052', () => okJson({ requests: [discogsReq] })],
+    ['/api/pipeline/requests-by-rg/6f151223', () => okJson({ requests: [MB_REQUEST] })],
+    ['/api/release/', () => okJson({ tracks: [] })],
+  ]);
+  await flush(); await flush(); await flush();
+  t.contains(modal.innerHTML, '<strong>#9028</strong>', 'the own-group request is listed');
+  t.contains(modal.innerHTML, '<strong>#2839</strong>', 'the paired request is listed too');
+  t.contains(modal.innerHTML, 'on the other pathway — paired with &quot;Absolution&quot;', 'the paired candidate says so');
+  t.contains(modal.innerHTML, 'or its paired &quot;Absolution&quot; on the other pathway', 'the list header says the pair was searched too');
+  const html = renderRequestsList([discogsReq, { ...MB_REQUEST, viaPairing: true, pairingLabel: 'A "quoted" <b>' }]);
+  t.equal((html.match(/on the other pathway/g) || []).length, 1, 'only the paired candidate carries the pairing line');
+  t.contains(html, 'paired with &quot;A &quot;quoted&quot; &lt;b&gt;&quot;', 'the pairing label is HTML-escaped');
+}
+
+t.section('inverted — no request on either side says so');
+{
+  const { modal } = drive({
+    targetMbid: '793320', releaseGroupId: '11052', targetLabel: 'Muse — Absolution',
+    pairedGroupId: '6f151223-f3a3-3e57-810f-598f7897006c', pairedGroupKind: 'work', pairedLabel: 'Absolution',
+  }, [
+    ['/api/pipeline/requests-by-rg/', () => okJson({ requests: [] })],
+  ]);
+  await flush(); await flush(); await flush();
+  t.contains(modal.innerHTML, 'No active requests for this album on either pathway to replace.',
+    'the empty state names both pathways when a pair was searched');
+}
+
+t.section('pure renderers — confirm note and header copy');
+{
+  const plain = renderConfirmDialog({ sourceRequestId: 1, targetMbid: 'x' });
+  t.excludes(plain, 'Cross-pathway', 'no note without the flag');
+  const cross = renderConfirmDialog({ sourceRequestId: 1, targetMbid: 'x', crossPathway: true, pairingLabel: 'L <i>' });
+  t.contains(cross, 'request #1 is on the other pathway', 'the note names the request');
+  t.contains(cross, 'paired with &quot;L &lt;i&gt;&quot;', 'the pairing label is escaped');
+  t.contains(renderInvertedHeader('T', 'P <b>'), 'or its paired &quot;P &lt;b&gt;&quot; on the other pathway', 'header names the pair, escaped');
+  t.excludes(renderInvertedHeader('T'), 'other pathway', 'header without a pair is unchanged');
+}
+
+t.done();
