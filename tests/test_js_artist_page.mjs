@@ -127,12 +127,24 @@ t.section('unmatched masterless rows stay reachable inside Other releases');
 
 t.section('a compare pair whose two sides share a pathway is dropped, fail closed (issue #1382 item 5)');
 {
-  const healthy = composeCompareCatalogue({
+  // The dominant production pair is an MB work with a Discogs MASTER —
+  // both `identity_kind: 'work'` — so a guard that compared identity
+  // kinds instead of pathways would drop it; the masterless-release pair
+  // is the minority shape and is kept as well.
+  const [withMaster] = composeCompareCatalogue({
+    both: [{ mb: work('mb-ok'), discogs: work('dg-master', { source: 'discogs' }) }],
+    mb_unpaired: [], discogs_unpaired: [], discogs_ungrouped_releases: [],
+  }, 'mb');
+  t.ok(withMaster.counterpart, 'a well-formed work/master pair keeps its counterpart');
+  t.equal(withMaster.counterpart && withMaster.counterpart.source, 'discogs', 'which is the Discogs master');
+  t.equal(pairedGroupOf(withMaster) && pairedGroupOf(withMaster).id, 'dg-master', 'and the Replace offer sees it');
+  const [withRelease] = composeCompareCatalogue({
     both: [{ mb: work('mb-ok'), discogs: release('dg-ok') }],
     mb_unpaired: [], discogs_unpaired: [], discogs_ungrouped_releases: [],
   }, 'mb');
-  t.equal(healthy[0].counterpart.source, 'discogs', 'a well-formed pair keeps its Discogs counterpart');
-  t.equal(pairedGroupOf(healthy[0]).id, 'dg-ok', 'and the Replace offer sees the pair');
+  t.ok(withRelease.counterpart, 'a well-formed work/release pair keeps its counterpart too');
+  t.equal(withRelease.counterpart && withRelease.counterpart.source, 'discogs', 'which is the Discogs release');
+  t.equal(pairedGroupOf(withRelease) && pairedGroupOf(withRelease).id, 'dg-ok', 'and the Replace offer sees the pair');
 
   const [mbSelected] = composeCompareCatalogue({
     both: [{ mb: work('mb-a'), discogs: work('mb-b') }],

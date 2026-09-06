@@ -154,6 +154,17 @@ def merge_discographies(
     ):
         raise ValueError("unknown Discogs artist identity kind")
 
+    # A pair is always one MB row and one Discogs row (issue #1382 item
+    # 5): the Browse Replace picker merges a row's own-group candidates
+    # with its pair's without de-duplicating, and the Replace offer calls
+    # the paired key the other pathway's. Both rest on the buckets here
+    # carrying rows of their own pathway, so a mislabelled row is refused
+    # loudly rather than paired.
+    if any(row.source != "mb" for row in mb_groups):
+        raise ValueError("MusicBrainz artist rows must carry source 'mb'")
+    if any(row.source != "discogs" for row in discogs_groups):
+        raise ValueError("Discogs artist rows must carry source 'discogs'")
+
     by_norm: dict[str, list[int]] = defaultdict(list)
     for index, row in enumerate(discogs_groups):
         norm = normalize_title(row.title)

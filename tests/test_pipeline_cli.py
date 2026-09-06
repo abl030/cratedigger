@@ -5643,6 +5643,11 @@ class TestCmdReplace(_FakeDbWebServerCase):
         )
         self.assertEqual(rc, 3)
         self.assertIn("API refused (400)", out)
+        # The refusal REASON is the operator's only evidence, so it is
+        # asserted verbatim, and the replace payload block never follows it.
+        self.assertIn("target_mb_release_id must be a non-empty string", out)
+        self.assertNotIn("Outcome:", out)
+        self.assertNotIn("Request ID:", out)
         self.assertIsNone(self._service_call, "the service is never reached")
 
     def test_help_text_names_the_cross_pathway_opt_in(self):
@@ -5656,7 +5661,10 @@ class TestCmdReplace(_FakeDbWebServerCase):
         with redirect_stdout(stdout), self.assertRaises(SystemExit) as exit_info:
             parser.parse_args(["replace", "--help"])
         self.assertEqual(exit_info.exception.code, 0)
-        text = stdout.getvalue()
+        # argparse wraps to the terminal width; compare phrases on the
+        # whitespace-normalised text (the idiom this file's list-help pin
+        # already uses), never on the raw wrapped output.
+        text = " ".join(stdout.getvalue().split())
         self.assertIn("--to", text)
         self.assertIn("--cross-pathway", text)
         self.assertIn("other pathway", text)

@@ -153,7 +153,7 @@ export function renderPressingsList(releases, sourceMbid) {
     return '<p style="color:#888;">No pressings found in this release group.</p>';
   }
   const rows = releases.map((r) => {
-    const isCurrent = r.id === sourceMbid;
+    const isCurrent = isCurrentPressing(r, sourceMbid);
     const disabledAttr = isCurrent ? ' disabled' : '';
     const labelSuffix = isCurrent ? ' (current pressing)' : '';
     const meta = pressingMeta(r);
@@ -197,7 +197,20 @@ export function renderMasterlessNote() {
  * @returns {string}
  */
 export function renderSolePressingNote() {
-  return '<p style="color:#888;">This release group has no other pressing on file — there is nothing to switch to.</p>';
+  return '<p style="color:#888;">No other pressing of this release is on file — there is nothing to switch to.</p>';
+}
+
+/**
+ * Whether a listed pressing is the request's current one — the ONE
+ * comparison both the list's disabled row and the sole-pressing note
+ * rest on, so the two can never disagree.
+ *
+ * @param {ReleaseGroupSibling} r
+ * @param {string} sourceMbid
+ * @returns {boolean}
+ */
+export function isCurrentPressing(r, sourceMbid) {
+  return r.id === sourceMbid;
 }
 
 /**
@@ -208,7 +221,7 @@ export function renderSolePressingNote() {
  * @returns {boolean}
  */
 export function onlyCurrentPressing(releases, sourceMbid) {
-  return releases.length > 0 && releases.every((r) => r.id === sourceMbid);
+  return releases.length > 0 && releases.every((r) => isCurrentPressing(r, sourceMbid));
 }
 
 /**

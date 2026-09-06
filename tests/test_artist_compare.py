@@ -109,6 +109,26 @@ class TestExtractYear(unittest.TestCase):
 
 
 class TestMergeDiscographies(unittest.TestCase):
+    def test_rows_on_the_wrong_pathway_are_refused_before_pairing(self):
+        """The compare pairs one MB row with one Discogs row, never two of a
+        kind (issue #1382 item 5). The two adapters hardcode ``source``, so
+        this is legislation for a future producer: a row whose ``source``
+        disagrees with the bucket it arrived in is refused loudly here,
+        like a malformed ``identity_kind``, rather than paired and later
+        dropped silently by the browser's own guard."""
+        mb = _mb("Shared Title", "2000", id="mb-work")
+        dg = _dg("Shared Title", "2000", id="1")
+        mislabelled_mb = _mb("Shared Title", "2000", id="mb-2")
+        mislabelled_mb.source = "discogs"
+        with self.assertRaisesRegex(ValueError, "MusicBrainz artist rows must carry source 'mb'"):
+            merge_discographies([mb, mislabelled_mb], [dg])
+        mislabelled_dg = _dg("Shared Title", "2000", id="2")
+        mislabelled_dg.source = "mb"
+        with self.assertRaisesRegex(ValueError, "Discogs artist rows must carry source 'discogs'"):
+            merge_discographies([mb], [dg, mislabelled_dg])
+        # Well-formed rows still pair.
+        self.assertEqual(len(merge_discographies([mb], [dg]).both), 1)
+
     def test_masterless_release_can_associate_without_losing_release_identity(self):
         mb = _mb("Shared Title", "2000", id="mb-work")
         release = _dg("Shared Title", "2000", id="discogs-release")

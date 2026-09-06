@@ -305,7 +305,7 @@ t.section('standard mode (Pipeline tab, Wrong Matches) — the pressing switcher
   ]);
   for (let i = 0; i < 6; i++) await flush();
   t.contains(modal.innerHTML, 'data-mbid-row="' + OTHER + '"', 'the sibling pressing is listed');
-  t.excludes(modal.innerHTML, 'no other pressing on file', 'a group with a sibling carries no sole-pressing note');
+  t.excludes(modal.innerHTML, 'No other pressing of this release', 'a group with a sibling carries no sole-pressing note');
   t.ok(!modal.hasRowConfirm(CURRENT), 'the current pressing has no "Use this pressing" action');
   t.ok(modal.hasRowConfirm(OTHER), 'the sibling does');
   await modal.clickRowConfirm(OTHER);
@@ -337,7 +337,7 @@ t.section('standard mode — a release group whose only pressing on file is the 
     ['/api/wrong-matches', () => okJson([])],
   ]);
   for (let i = 0; i < 6; i++) await flush();
-  t.contains(modal.innerHTML, 'This release group has no other pressing on file — there is nothing to switch to.',
+  t.contains(modal.innerHTML, 'No other pressing of this release is on file — there is nothing to switch to.',
     'the picker explains why there is nothing to pick');
   t.contains(modal.innerHTML, 'data-mbid-row="' + CURRENT + '"', 'the current pressing is still listed, disabled');
   t.ok(!modal.hasRowConfirm(CURRENT), 'and it has no "Use this pressing" action');
@@ -345,7 +345,7 @@ t.section('standard mode — a release group whose only pressing on file is the 
   t.equal(onlyCurrentPressing([{ id: 'x' }, { id: 'x' }], 'x'), true, 'so is a group listing the current pressing twice');
   t.equal(onlyCurrentPressing([{ id: 'x' }, { id: 'y' }], 'x'), false, 'a sibling is not');
   t.equal(onlyCurrentPressing([], 'x'), false, 'and an empty group is its own message, not this one');
-  t.contains(renderSolePressingNote(), 'no other pressing on file', 'the note names the situation');
+  t.contains(renderSolePressingNote(), 'No other pressing of this release', 'the note names the situation');
 }
 
 t.section('pure renderers — confirm note and header copy');
