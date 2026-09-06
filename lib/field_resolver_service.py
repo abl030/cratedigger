@@ -33,13 +33,14 @@ import socket
 import threading
 import time
 import urllib.error
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, Literal, Protocol
 
 import msgspec
 
 from lib.json_narrow import json_dict as _json_dict
 from lib.json_narrow import json_list as _json_list
+from lib.release_identity import ReleaseIdentity
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +150,46 @@ release_group_id resolver and the track-artist resolver."""
 DiscogsReleaseFn = Callable[..., dict[str, Any]]
 """``discogs_get_release(release_id, *, fresh: bool=False) -> dict``.
 Used by the release_group_id resolver and the track-artist resolver."""
+
+
+def _discogs_release_input(request: Mapping[str, object]) -> str | None:
+    """The Discogs release id this row resolves from, or ``None`` for an
+    MB row.
+
+    KTD-2: the id's SHAPE decides the pathway, so the row shape the DB
+    actually stores is valid input. Live (2026-09-06 census) there are
+    exactly two shapes: an MB UUID with no Discogs id, and a Discogs row
+    dual-written with the same numeric id in both identity columns. A
+    numeric id carried only in ``mb_release_id`` has zero live rows and
+    is handled as fail-closed legislation. Before this, the Discogs
+    branch required ``mb_release_id`` to be empty, a shape production
+    never writes, and request creation masked the column to reach it;
+    64 dual-written rows re-resolved on 2026-05-25/26 went to the MB
+    mirror with a numeric id and recorded ``http_400`` on the three
+    fields that read the release (``release_group_id``,
+    ``track_artist``, ``catalog_number``; ``release_group_year`` keys on
+    the group column and never asked) — issue #1382 item 2.
+
+    The shape question is ``ReleaseIdentity.from_strict_fields``'s, the
+    same authority the delete and Replace lanes use: one identity across
+    both columns, or none. Anything but a Discogs identity takes the MB
+    branch on whatever ``mb_release_id`` holds: a no-identity row
+    (conflicting columns, or an unparseable ``discogs_release_id`` such
+    as Beets' ``0`` or garbage) and an MB identity alike, including a
+    UUID carried only in ``discogs_release_id``, which parses as MB.
+    For conflicting columns (an MB UUID or a different number beside a
+    Discogs id) that is the branch the old dispatch took too; for a row
+    whose ONLY id sits in ``discogs_release_id`` and is not a Discogs
+    number the old dispatch asked Discogs and this fails closed as
+    ``empty_mb_release_id`` instead. Every such shape has zero live rows
+    (census 2026-09-06).
+    """
+    identity = ReleaseIdentity.from_strict_fields(
+        request.get("mb_release_id"), request.get("discogs_release_id"),
+    )
+    if identity is not None and identity.source == "discogs":
+        return identity.release_id
+    return None
 
 
 def _looks_numeric(value: Any) -> bool:
@@ -483,13 +524,14 @@ def resolve_release_group_id(
         return result
 
     # Discogs branch.
-    if discogs_release_id and not mb_release_id:
+    discogs_id = _discogs_release_input(request)
+    if discogs_id is not None:
         if discogs_release_payload is not None:
             data = discogs_release_payload
         else:
             fetch = discogs_get_release or _default_discogs_get_release
             try:
-                data = fetch(str(discogs_release_id), fresh=True)
+                data = fetch(discogs_id, fresh=True)
             except BaseException as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 status, reason = _classify_lookup_exception(exc)
                 result = ResolverResult(
@@ -611,13 +653,14 @@ def resolve_track_artists(
         return [result]
 
     # Pick branch.
-    if discogs_release_id and not mb_release_id:
+    discogs_id = _discogs_release_input(request)
+    if discogs_id is not None:
         if discogs_release_payload is not None:
             data = discogs_release_payload
         else:
             fetch_d = discogs_get_release or _default_discogs_get_release
             try:
-                data = fetch_d(str(discogs_release_id), fresh=True)
+                data = fetch_d(discogs_id, fresh=True)
             except BaseException as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 status, reason = _classify_lookup_exception(exc)
                 per_track = [ResolverResult(
@@ -909,13 +952,14 @@ def resolve_catalog_number(
         _record(pdb, request_id, FIELD_CATALOG_NUMBER, result)
         return result
 
-    if discogs_release_id and not mb_release_id:
+    discogs_id = _discogs_release_input(request)
+    if discogs_id is not None:
         if discogs_release_payload is not None:
             data = discogs_release_payload
         else:
             fetch = discogs_get_release or _default_discogs_get_release
             try:
-                data = fetch(str(discogs_release_id), fresh=True)
+                data = fetch(discogs_id, fresh=True)
             except BaseException as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 status, reason = _classify_lookup_exception(exc)
                 result = ResolverResult(
@@ -1165,19 +1209,20 @@ def detect_va_compilation(
     is NOT a positive -- that's the regression guard the plan calls
     out.
     """
-    discogs_release_id = request.get("discogs_release_id")
-    mb_release_id = request.get("mb_release_id")
-    # Discogs-sourced rows store the discogs id in BOTH columns for
-    # pipeline-compat (the web/CLI Discogs add path stuffs the discogs
-    # id into ``mb_release_id`` so existing pipeline code that keys on
-    # ``mb_release_id`` keeps working). A numeric ``mb_release_id`` is
-    # therefore a Discogs signal — MB MBIDs are always hyphenated UUIDs.
-    # Without this, the 18 wanted Discogs-VA rows from the 2026-05-25
-    # backfill weren't VA-flagged because Rule 1 compared the canonical
-    # Discogs id ``"194"`` against the MB UUID and never matched.
-    is_discogs = bool(discogs_release_id) and (
-        not mb_release_id or _looks_numeric(mb_release_id)
-    )
+    # Rule 1 reads the same two identity columns the resolvers do, so it
+    # asks the same question the same way (issue #1382 item 2): one
+    # identity across both columns, Discogs by the id's shape. That is
+    # what VA-flags the dual-written rows from the 2026-05-25 backfill
+    # (Rule 1 used to compare the canonical Discogs id ``"194"`` against
+    # an MB UUID and never matched) and the numeric-only legacy shape
+    # alike. The hand-rolled test this replaces was
+    # ``bool(discogs_release_id) and (not mb_release_id or
+    # _looks_numeric(mb_release_id))``: it said MB for the
+    # numeric-only row and Discogs for several shapes that are not a
+    # Discogs identity (two different numbers, a lone ``0``, garbage or
+    # a UUID in the Discogs column) and now read the MB artist credit
+    # instead — all zero live rows.
+    is_discogs = _discogs_release_input(request) is not None
 
     # Rule 1.
     artist_id = request.get("mb_artist_id")

@@ -187,15 +187,10 @@ class RequestCreationService:
                 resolved = resolve_all(
                     {
                         "id": request_id,
-                        # Modern Discogs rows dual-write the numeric ID into
-                        # mb_release_id for DB identity compatibility. That
-                        # is not MusicBrainz resolver input: keep source
-                        # dispatch unambiguous while preserving the stored
-                        # dual-write above.
-                        "mb_release_id": (
-                            None if creation.discogs_release_id is not None
-                            else creation.mb_release_id
-                        ),
+                        # The stored row shape is valid resolver input: the
+                        # resolvers dispatch on the id's shape (KTD-2), so a
+                        # dual-written Discogs row goes to Discogs (#1382).
+                        "mb_release_id": creation.mb_release_id,
                         "discogs_release_id": creation.discogs_release_id,
                         "mb_release_group_id": creation.mb_release_group_id,
                         "mb_artist_id": creation.mb_artist_id,

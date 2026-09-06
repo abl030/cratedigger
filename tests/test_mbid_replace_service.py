@@ -820,6 +820,127 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         )
         self.assertEqual(result.current_status, "replaced")
 
+    # -- target normalisation (issue #1382 item 3) -------------------------
+
+    def test_uppercase_mb_target_is_normalised_before_the_precheck(self):
+        """An MB UUID pasted in uppercase names the same release as its
+        canonical lowercase form. The pre-check must find the lowercase
+        holder without any mirror lookup, and never let the case
+        difference slip past the UNIQUE net as a second identity."""
+        db = FakePipelineDB()
+        self._seed_old(db)
+        db.seed_request(make_request_row(
+            id=43, mb_release_id=NEW_MBID, mb_release_group_id=RG_ID,
+            status="wanted",
+        ))
+        mb_lookup = MagicMock(side_effect=AssertionError("MB lookup reached"))
+        svc = self._make_service(db, mb_lookup=mb_lookup)
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_MBID.upper(),
+        )
+        self.assertEqual(result.outcome, RESULT_TARGET_COLLISION_REQUEST)
+        self.assertEqual(result.current_status, "wanted")
+        mb_lookup.assert_not_called()
+
+    def test_uppercase_own_id_is_the_same_as_current(self):
+        """Both pathways: a padded (and, for MB, uppercased) spelling of
+        the source's own id is the same pressing, refused before any
+        mirror is asked. Before this, a padded Discogs spelling missed the
+        same-as-current compare and came back as a collision."""
+        db = FakePipelineDB()
+        self._seed_old(db)
+        mb_lookup = MagicMock(side_effect=AssertionError("MB lookup reached"))
+        svc = self._make_service(db, mb_lookup=mb_lookup)
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=f"  {OLD_MBID.upper()} ",
+        )
+        self.assertEqual(result.outcome, RESULT_TARGET_SAME_AS_CURRENT)
+        mb_lookup.assert_not_called()
+
+        discogs_db = FakePipelineDB()
+        self._seed_discogs(discogs_db)
+        discogs_lookup = MagicMock(side_effect=AssertionError("Discogs lookup reached"))
+        svc = self._make_service(discogs_db, discogs_lookup=discogs_lookup)
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=f" 00{OLD_DISCOGS_ID} ",
+        )
+        self.assertEqual(result.outcome, RESULT_TARGET_SAME_AS_CURRENT)
+        discogs_lookup.assert_not_called()
+
+    def test_mirror_canonical_case_is_normalised_too(self):
+        """The mirror's own ``id`` is normalised like the typed target.
+        Fail-closed legislation: ``web/mb.py::get_release`` passes the MB
+        API's id through and MusicBrainz serves lowercase, so no producer
+        emits this today; were one to, an uppercase canonical must neither
+        read as a redirect (which would run the collision re-check on a
+        spelling nothing holds) nor be written as a second identity."""
+        db = FakePipelineDB()
+        self._seed_old(db)
+        lookups: list[str] = []
+
+        def mb_lookup(mbid, *, fresh=False):
+            lookups.append(str(mbid))
+            return _fake_target_payload(mbid=NEW_MBID.upper())
+
+        svc = self._make_service(db, mb_lookup=mb_lookup)
+        result = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        assert result.new_request_id is not None
+        self.assertEqual(db.request(result.new_request_id)["mb_release_id"], NEW_MBID)
+        self.assertEqual(lookups, [NEW_MBID], "one lookup, by the typed id, no redirect re-check")
+
+    def test_unparseable_target_is_refused_with_its_own_text(self):
+        """The refusal message is the operator's evidence: it must quote
+        the target as typed. The padded non-zero case is the one that
+        constrains this — ``normalize_release_id`` strips it, so only the
+        captured typed text can put the padding back. The zero cases
+        (padded or not) pin that a target normalisation blanks (Beets'
+        "no Discogs id") is still quoted as typed rather than as an
+        empty string."""
+        db = FakePipelineDB()
+        self._seed_old(db)
+        mb_lookup = MagicMock(side_effect=AssertionError("MB lookup reached"))
+        svc = self._make_service(db, mb_lookup=mb_lookup)
+        for typed in ("not-a-release-id", "  not-a-release-id  ", "0", " 000 "):
+            with self.subTest(typed=typed):
+                result = svc.replace_request_mbid(42, target_mb_release_id=typed)
+                self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+                assert result.error_message is not None
+                self.assertIn(f"{typed!r}", result.error_message)
+                self.assertIn(
+                    "neither an MB release UUID nor a Discogs release id",
+                    result.error_message,
+                )
+        mb_lookup.assert_not_called()
+
+    def test_uppercase_mb_target_writes_the_lowercase_id(self):
+        """The written id is the mirror's canonical when the payload carries
+        one; when it does not, the service falls back to the id it was
+        asked for — which must already be the canonical form, or an
+        uppercase paste would be written verbatim. The payload here
+        carries an empty ``id`` (the mirror Struct's default, the shape
+        ``web/mb.py`` really emits for a missing one) so that fallback is
+        the path under test."""
+        db = FakePipelineDB()
+        self._seed_old(db)
+        seen: list[str] = []
+
+        def mb_lookup(mbid, *, fresh=False):
+            seen.append(str(mbid))
+            payload = _fake_target_payload()
+            payload["id"] = ""
+            return payload
+
+        svc = self._make_service(db, mb_lookup=mb_lookup)
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_MBID.upper(),
+        )
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        assert result.new_request_id is not None
+        new_row = db.request(result.new_request_id)
+        self.assertEqual(new_row["mb_release_id"], NEW_MBID)
+        self.assertEqual(seen, [NEW_MBID], "the mirror is asked with the canonical id")
+
     def test_collision_defensive_unique_violation(self):
         db = FakePipelineDB()
         self._seed_old(db)
@@ -1219,11 +1340,15 @@ class TestReplaceDiscogsArm(_ServiceCase):
         db = FakePipelineDB()
         self._seed_old(db)
         svc = self._make_service(db)
-        result = svc.replace_request_mbid(
-            42, target_mb_release_id=NEW_DISCOGS_ID,
-        )
-        self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
-        self.assertEqual(result.reason, REPLACE_REASON_CROSS_PATHWAY_TARGET)
+        # The refusal quotes the target as typed, padding and all, like
+        # the shape refusal does (issue #1382 item 3).
+        for typed in (NEW_DISCOGS_ID, f" 00{NEW_DISCOGS_ID} "):
+            with self.subTest(typed=typed):
+                result = svc.replace_request_mbid(42, target_mb_release_id=typed)
+                self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+                self.assertEqual(result.reason, REPLACE_REASON_CROSS_PATHWAY_TARGET)
+                assert result.error_message is not None
+                self.assertIn(f"target {typed!r} (discogs)", result.error_message)
 
     def test_masterless_source_other_target_rejected(self):
         """AE1 / R10: a masterless Discogs source rejects any target that
