@@ -584,10 +584,12 @@ export async function loadReleaseGroup(id, el, opts = {}) {
     // the group key set; a paired MASTERLESS Discogs release has no
     // group, so it is looked up by its exact release id instead. A
     // caller that says nothing about pairing is a surface with no
-    // compare at all, and its offer never mentions one. Whether a pair
-    // may be believed at all is the offer's own rule (only when checked).
+    // compare at all, and its offer never mentions one. A pair is only
+    // believed once checked — the offer enforces that for the decision,
+    // and this gate enforces it for the picker arguments the button
+    // carries, so a pending page can never hand the picker a pair.
     const pairing = normalizePairing(opts.pairing);
-    const paired = normalizePaired(opts.paired);
+    const paired = pairing === 'checked' ? normalizePaired(opts.paired) : null;
     const pairActive = paired === null
       ? false
       : (paired.kind === 'release'

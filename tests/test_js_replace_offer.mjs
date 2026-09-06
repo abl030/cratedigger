@@ -84,6 +84,8 @@ t.section('disabled — the lookup failed and there was something to look up');
   t.contains(paired.title, 'or its paired Discogs master', 'with a pair, the tooltip names the paired group as also unchecked');
   const masterlessPaired = replaceOfferState(input({ rowSource: 'discogs', ownKey: null, lookupFailed: true, pair: RG }));
   t.equal(masterlessPaired.reason, 'lookup_unavailable', 'a masterless row WITH a pair had a key to check, so a failed lookup is unavailable');
+  t.equal(masterlessPaired.title, 'Could not check for an existing request in the paired MusicBrainz release group. Collapse and re-expand to retry.',
+    'and its scope names only the pair: a masterless row has no release group of its own to have checked');
 }
 
 t.section('disabled — the lookup failed but nothing could have been looked up');

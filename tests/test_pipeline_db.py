@@ -796,6 +796,14 @@ class TestActiveReplaceKeys(unittest.TestCase):
             mb_release_id="19016167-1ba2-41ab-9bec-bf9ed2ac995c",
             status="imported",
         )
+        # The dual write is a caller convention, not a schema invariant:
+        # a Discogs row whose two identity columns differ proves which
+        # column the key is read from.
+        ids["discogs_split_columns"] = db.add_request(
+            artist_name="Split", album_title="Columns", source="request",
+            mb_release_id="split-columns-mb", discogs_release_id="777777",
+            status="wanted",
+        )
         replaced = db.add_request(
             artist_name="Gone", album_title="Replaced", source="request",
             mb_release_id="461206", discogs_release_id="461206",
@@ -825,10 +833,11 @@ class TestActiveReplaceKeys(unittest.TestCase):
         )
         # The frozen replaced row's "461206" must not count; its
         # descendant "461207" (born wanted, no group) must. The legacy MB
-        # row with no group is not a key on this pathway.
+        # row with no group is not a key on this pathway, and the
+        # split-column row contributes its DISCOGS id, never its MB one.
         self.assertEqual(
             db.list_active_groupless_release_ids(),
-            {"3938744", "461207"},
+            {"3938744", "461207", "777777"},
         )
 
     def test_empty_database_yields_empty_sets(self):

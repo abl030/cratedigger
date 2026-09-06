@@ -127,9 +127,13 @@ export function replaceOfferState(input) {
   }
   const hasAnyKey = ownKey !== null || pair !== null;
   if (input.lookupFailed && hasAnyKey) {
-    const scope = pair !== null
-      ? `this release group or its paired ${pairNoun(pair)}`
-      : 'this release group';
+    // Name only the keys this row actually had to check: a masterless
+    // row has no release group of its own, only its pair.
+    const scope = pair === null
+      ? 'this release group'
+      : (ownKey === null
+        ? `the paired ${pairNoun(pair)}`
+        : `this release group or its paired ${pairNoun(pair)}`);
     return {
       enabled: false,
       reason: 'lookup_unavailable',

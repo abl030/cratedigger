@@ -6,6 +6,7 @@
  */
 
 import { esc, jsArg } from './util.js';
+import { NO_REQUEST_TITLE } from './replace_offer.js';
 import {
   processingDescriptionId,
   suppressProcessingAction,
@@ -316,7 +317,7 @@ export function renderReplaceButton(args, opts = {}) {
   // No offer means the caller never decided; fail closed with the plain
   // own-group explanation rather than enabling speculatively.
   const offer = opts.offer || {
-    enabled: false, reason: 'no_pair', title: 'No existing request in this release group',
+    enabled: false, reason: 'no_request', title: NO_REQUEST_TITLE,
   };
   const mbidArg = jsArg(args.targetMbid);
   const rgArg = args.releaseGroupId ? jsArg(args.releaseGroupId) : 'null';

@@ -19,6 +19,7 @@ import {
   suppressProcessingAction,
 } from '../web/js/release_actions.js';
 import { openReplacePicker } from '../web/js/replace_picker.js';
+import { NO_REQUEST_TITLE } from '../web/js/replace_offer.js';
 
 import { element, stubGlobals, suite } from './js_harness.mjs';
 
@@ -868,6 +869,8 @@ t.section('renderReplaceButton() inverted — the decided offer drives enable st
   }, {});
   t.contains(undecided, 'disabled title="No existing request in this release group"',
     'a caller that never decided gets a disabled button, never a speculative enable');
+  t.contains(undecided, `disabled title="${NO_REQUEST_TITLE}"`,
+    'and its copy is the offer module\'s own no-request string, not a second spelling of it');
 
   const viaRelease = renderReplaceButton({
     mode: 'inverted', targetMbid: '19016167-1ba2-41ab-9bec-bf9ed2ac995c',

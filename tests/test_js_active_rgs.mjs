@@ -402,6 +402,20 @@ t.section('loadReleaseGroup() composed path — pair found, no request on either
     'the tooltip names the pair and says both sides were checked');
 }
 
+t.section('loadReleaseGroup() composed path — a pair handed to a PENDING page is neither believed nor carried to the picker');
+{
+  const html = await expandReleaseGroup({
+    rgId: '6f151223-f3a3-3e57-810f-598f7897006c',
+    sourceId: 'fdd45566-5c8b-4beb-8ec3-1b5f93a01319',
+    activeRgsBody: { release_group_ids: ['6f151223-f3a3-3e57-810f-598f7897006c', '11052'], groupless_release_ids: [] },
+    pairing: 'pending',
+    paired: { id: '11052', kind: 'work', source: 'discogs', label: 'Absolution' },
+  });
+  t.excludes(html, 'disabled', 'the own group holds a request, so the button is enabled through it');
+  t.excludes(html, 'pairedGroupId', 'but the picker is not handed a pair the compare has not confirmed');
+  t.excludes(html, 'title="Replaces the request held on the other pathway', 'and the tooltip does not claim one');
+}
+
 t.section('loadReleaseGroup() composed path — a Discogs row with no pair names the MB side it looked for (rowSource wiring)');
 {
   const html = await expandReleaseGroup({

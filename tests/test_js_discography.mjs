@@ -373,6 +373,11 @@ t.section('renderRgRow() — the compare counterpart rides along to loadReleaseG
   }, 'a row without a pairing attribute is a surface with no compare');
   t.equal(expansionOptsFromRow({ dataset: { pairing: 'bogus', catalogueSource: 'mb' } }).pairing, 'none',
     'an unknown pairing value is never believed to be pending or checked');
+  t.deepEqual(expansionOptsFromRow({ dataset: {
+    catalogueSource: 'bogus', identityKind: 'bogus', catalogueId: 'x', pairing: 'checked',
+    pairedId: '11052', pairedKind: 'bogus', pairedSource: 'bogus', pairedLabel: 'L',
+  } }).paired, { id: '11052', kind: 'work', source: 'mb', label: 'L' },
+    'unknown pair kind and source fall back to their safe vocabulary values, never interpolated raw');
   t.equal(pairedGroupOf({ counterpart: { source: 'bogus', identity_kind: 'bogus', id: 1, title: 't' } }).kind, 'work',
     'an unknown identity kind is treated as a work');
   t.equal(pairedGroupOf({ counterpart: { source: 'bogus', identity_kind: 'bogus', id: 1, title: 't' } }).source, 'mb',
