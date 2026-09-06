@@ -1877,12 +1877,19 @@ class TestPathwayDispatchOnStoredRows(unittest.TestCase):
         db = FakePipelineDB()
         mb_seen: list[tuple[str, bool]] = []
 
-        # Records the id AND the freshness, as the Discogs helper does:
-        # the MB half of the add-time contract is `fresh=True` too.
+        # Records the id AND the freshness at all three release-reading
+        # resolvers, as the Discogs helper does: the MB half of the
+        # add-time contract is `fresh=True` too.
         def mb_fetch(mbid: str, *, fresh: bool = False) -> dict[str, object]:
             mb_seen.append((mbid, fresh))
-            return {"id": mbid, "release_group_id": "rg-uuid",
-                    "label-info": [], "media": []}
+            return {
+                "id": mbid, "release_group_id": "rg-uuid",
+                "label-info": [{"catalog-number": "CAT-MB", "label": {"name": "L"}}],
+                "media": [{"tracks": [{
+                    "title": "T1",
+                    "artist-credit": [{"name": "MB Artist", "joinphrase": ""}],
+                }]}],
+            }
 
         def discogs_must_not_be_called(*_a: object, **_k: object) -> dict[str, object]:
             raise AssertionError("Discogs mirror reached for an MB row")
@@ -1892,7 +1899,20 @@ class TestPathwayDispatchOnStoredRows(unittest.TestCase):
             discogs_get_release=discogs_must_not_be_called,
         )
         self.assertEqual((rg.status, rg.value), ("resolved", "rg-uuid"))
-        self.assertEqual(mb_seen, [(asked_for or self.MB_UUID, True)])
+        catno = resolve_catalog_number(
+            req, db, mb_get_release=mb_fetch,
+            discogs_get_release=discogs_must_not_be_called,
+        )
+        self.assertEqual((catno.status, catno.value), ("resolved", "CAT-MB"))
+        artists = resolve_track_artists(
+            req, db, mb_get_release=mb_fetch,
+            discogs_get_release=discogs_must_not_be_called,
+        )
+        self.assertEqual([r.status for r in artists], ["resolved"])
+        self.assertEqual(
+            mb_seen, [(asked_for or self.MB_UUID, True)] * 3,
+            "every fetch asked MB for the release, fresh",
+        )
 
     def test_mb_uuid_row_still_dispatches_to_mb(self):
         self._assert_mb_branch(_request(

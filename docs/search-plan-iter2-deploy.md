@@ -141,6 +141,7 @@ the canonical resolver service's surface; it doesn't live in
 import os
 from lib.pipeline_db import PipelineDB
 from lib.field_resolver_service import apply_resolve_all_result, resolve_all
+from lib.release_identity import ReleaseIdentity
 from web.mb import get_release_raw, get_release_group
 from web.discogs import get_release as discogs_get_release
 
@@ -149,17 +150,18 @@ db = PipelineDB(dsn)
 
 # Walk every wanted request via raw SQL — the side-table writes
 # coming out of resolve_all are the durable record.
-# HISTORICAL HAZARD (issue #1382 item 2). The 64 http_400 field
-# resolutions of 2026-05-25/26 were written by the payload-less shape
+# HISTORICAL HAZARD (issue #1382 item 2). The 192 http_400 field
+# resolutions of 2026-05-25/26 (64 dual-written Discogs requests, three
+# release-reading fields each) were written by the payload-less shape
 # this heredoc had before commit 6d0da070 (a bare
 # ``resolve_all(row, db, ...)``): the resolvers themselves then sent a
 # dual-written Discogs row's numeric id to the MB mirror. They now
 # dispatch on the id's shape and take the stored row as-is. The payload
-# preamble below carries its own hazard: ``get_release_raw`` on a
-# dual-written row's numeric mb_release_id raises HTTP 400 outside the
-# inner try, so the outer except prints FAILED and the row is skipped
-# with no audit row at all. Key the fetch on the row's identity source
-# (``ReleaseIdentity.from_strict_fields``), not on mb_release_id.
+# preamble that commit added carried its own hazard: keyed on
+# mb_release_id, ``get_release_raw`` on a dual-written row's numeric id
+# raised HTTP 400 outside the inner try, so the outer except printed
+# FAILED and skipped the row with no audit row at all. The preamble
+# below keys each fetch on the row's identity source instead.
 cur = db._execute(
     "SELECT id, mb_release_id, mb_release_group_id, mb_artist_id, "
     "discogs_release_id, artist_name, year, source "
@@ -184,17 +186,19 @@ for i, row in enumerate(rows, start=1):
         mb_payload = None
         rg_payload = None
         discogs_payload = None
-        if row.get("mb_release_id"):
-            mb_payload = get_release_raw(row["mb_release_id"], fresh=False)
+        identity = ReleaseIdentity.from_strict_fields(
+            row.get("mb_release_id"), row.get("discogs_release_id"))
+        if identity is not None and identity.source == "musicbrainz":
+            mb_payload = get_release_raw(identity.release_id, fresh=False)
         if row.get("mb_release_group_id"):
             try:
                 rg_payload = get_release_group(row["mb_release_group_id"])
             except Exception:
                 rg_payload = None
-        if row.get("discogs_release_id") and not mb_payload:
+        if identity is not None and identity.source == "discogs":
             try:
                 discogs_payload = discogs_get_release(
-                    int(row["discogs_release_id"]), fresh=False)
+                    int(identity.release_id), fresh=False)
             except Exception:
                 discogs_payload = None
         result = resolve_all(

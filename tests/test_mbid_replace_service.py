@@ -891,11 +891,12 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
 
     def test_unparseable_target_is_refused_with_its_own_text(self):
         """The refusal message is the operator's evidence: it must quote
-        the target as typed. The padded case is the one that constrains
-        this — ``normalize_release_id`` strips it, so only the captured
-        typed text can put the padding back. The zero cases pin that a
-        target normalisation blanks (Beets' "no Discogs id") is still
-        quoted as typed rather than as an empty string."""
+        the target as typed. The padded non-zero case is the one that
+        constrains this — ``normalize_release_id`` strips it, so only the
+        captured typed text can put the padding back. The zero cases
+        (padded or not) pin that a target normalisation blanks (Beets'
+        "no Discogs id") is still quoted as typed rather than as an
+        empty string."""
         db = FakePipelineDB()
         self._seed_old(db)
         mb_lookup = MagicMock(side_effect=AssertionError("MB lookup reached"))
