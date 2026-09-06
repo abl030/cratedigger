@@ -387,6 +387,14 @@ class MbidReplaceService:
             "Replace: request_id=%d target_mb_release_id=%s cross_pathway=%s",
             request_id, target_mb_release_id, cross_pathway,
         )
+        # The target's letter case is not identity (issue #1382 item 3):
+        # canonicalise once here so the same-as-current check, the
+        # collision pre-check, the mirror lookup and the supersede write
+        # all see one id. An unparseable target keeps its raw text for the
+        # shape refusal below.
+        target_mb_release_id = (
+            normalize_release_id(target_mb_release_id) or target_mb_release_id
+        )
         # Phase 0 — validate.
         source = self.db.get_request(request_id)
         if source is None:

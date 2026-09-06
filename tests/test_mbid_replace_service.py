@@ -820,6 +820,79 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         )
         self.assertEqual(result.current_status, "replaced")
 
+    # -- target normalisation (issue #1382 item 3) -------------------------
+
+    def test_uppercase_mb_target_is_normalised_before_the_precheck(self):
+        """An MB UUID pasted in uppercase names the same release as its
+        canonical lowercase form. The pre-check must find the lowercase
+        holder without any mirror lookup, and never let the case
+        difference slip past the UNIQUE net as a second identity."""
+        db = FakePipelineDB()
+        self._seed_old(db)
+        db.seed_request(make_request_row(
+            id=43, mb_release_id=NEW_MBID, mb_release_group_id=RG_ID,
+            status="wanted",
+        ))
+        mb_lookup = MagicMock(side_effect=AssertionError("MB lookup reached"))
+        svc = self._make_service(db, mb_lookup=mb_lookup)
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_MBID.upper(),
+        )
+        self.assertEqual(result.outcome, RESULT_TARGET_COLLISION_REQUEST)
+        self.assertEqual(result.current_status, "wanted")
+        mb_lookup.assert_not_called()
+
+    def test_uppercase_own_id_is_the_same_as_current(self):
+        db = FakePipelineDB()
+        self._seed_old(db)
+        mb_lookup = MagicMock(side_effect=AssertionError("MB lookup reached"))
+        svc = self._make_service(db, mb_lookup=mb_lookup)
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=f"  {OLD_MBID.upper()} ",
+        )
+        self.assertEqual(result.outcome, RESULT_TARGET_SAME_AS_CURRENT)
+        mb_lookup.assert_not_called()
+
+    def test_unparseable_target_is_refused_with_its_own_text(self):
+        """The refusal message is the operator's evidence: it must quote
+        the target as typed. ``normalize_release_id`` passes an unknown
+        shape through but blanks a zero numeric (Beets' "no Discogs id"),
+        so the zero case is where the raw-text fallback earns its keep."""
+        db = FakePipelineDB()
+        self._seed_old(db)
+        mb_lookup = MagicMock(side_effect=AssertionError("MB lookup reached"))
+        svc = self._make_service(db, mb_lookup=mb_lookup)
+        for typed in ("not-a-release-id", "0", " 000 "):
+            with self.subTest(typed=typed):
+                result = svc.replace_request_mbid(42, target_mb_release_id=typed)
+                self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+                assert result.error_message is not None
+                self.assertIn(f"{typed!r}", result.error_message)
+                self.assertIn(
+                    "neither an MB release UUID nor a Discogs release id",
+                    result.error_message,
+                )
+        mb_lookup.assert_not_called()
+
+    def test_uppercase_mb_target_writes_the_lowercase_id(self):
+        db = FakePipelineDB()
+        self._seed_old(db)
+        seen: list[str] = []
+
+        def mb_lookup(mbid, *, fresh=False):
+            seen.append(str(mbid))
+            return _fake_target_payload()
+
+        svc = self._make_service(db, mb_lookup=mb_lookup)
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_MBID.upper(),
+        )
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        assert result.new_request_id is not None
+        new_row = db.request(result.new_request_id)
+        self.assertEqual(new_row["mb_release_id"], NEW_MBID)
+        self.assertEqual(seen, [NEW_MBID], "the mirror is asked with the canonical id")
+
     def test_collision_defensive_unique_violation(self):
         db = FakePipelineDB()
         self._seed_old(db)

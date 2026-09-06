@@ -1777,5 +1777,110 @@ class TestApplyResolveAllResult(unittest.TestCase):
         self.assertIsNone(db.get_tracks(request_id)[0]["track_artist"])
 
 
+
+# --------------------------------------------------------------------- #
+# Pathway dispatch on the stored row shape (issue #1382 item 2)
+# --------------------------------------------------------------------- #
+
+
+class TestPathwayDispatchOnStoredRows(unittest.TestCase):
+    """The resolvers dispatch on the id's shape (KTD-2), so the row shape
+    the DB actually stores is valid input: a dual-written Discogs row
+    carries the same numeric id in BOTH identity columns, and a legacy
+    Discogs row may carry it only in ``mb_release_id``. Before this,
+    the Discogs branch required ``mb_release_id`` to be empty — a shape
+    production never writes — and request creation masked the column to
+    reach it; live, 63 dual-written rows re-resolved on 2026-05-25/26 went
+    to the MB mirror with a numeric id and recorded ``http_400`` on every
+    field."""
+
+    DISCOGS_PAYLOAD: ClassVar[dict[str, object]] = {
+        "id": "555",
+        "title": "Album",
+        "artist_id": "12345",
+        "release_group_id": "rg-master-id",
+        "tracks": [{"disc_number": 1, "track_number": 1, "title": "T1",
+                    "artists": [{"name": "Artist X"}]}],
+        "labels": [{"catno": "CAT-7"}],
+    }
+
+    @staticmethod
+    def _mb_must_not_be_called(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise AssertionError("MB mirror reached for a Discogs row")
+
+    def _discogs_fetch(self, seen: list[tuple[str, bool]]):
+        # Records the id AND the freshness: add-time resolution must bypass
+        # the meta cache, so `fresh=True` is part of the contract.
+        def fetch(rid: str, *, fresh: bool = False) -> dict[str, object]:
+            seen.append((rid, fresh))
+            return self.DISCOGS_PAYLOAD
+        return fetch
+
+    def _assert_discogs_branch(self, req: dict[str, object]) -> None:
+        db = FakePipelineDB()
+        seen: list[tuple[str, bool]] = []
+        rg = resolve_release_group_id(
+            req, db,
+            mb_get_release=self._mb_must_not_be_called,
+            discogs_get_release=self._discogs_fetch(seen),
+        )
+        self.assertEqual((rg.status, rg.value), ("resolved", "rg-master-id"))
+        catno = resolve_catalog_number(
+            req, db,
+            mb_get_release=self._mb_must_not_be_called,
+            discogs_get_release=self._discogs_fetch(seen),
+        )
+        self.assertEqual((catno.status, catno.value), ("resolved", "CAT-7"))
+        artists = resolve_track_artists(
+            req, db,
+            mb_get_release=self._mb_must_not_be_called,
+            discogs_get_release=self._discogs_fetch(seen),
+        )
+        self.assertEqual([r.status for r in artists], ["resolved"])
+        self.assertEqual(
+            seen, [("555", True)] * 3,
+            "every fetch asked Discogs for the release, fresh",
+        )
+
+    def test_dual_written_discogs_row_dispatches_to_discogs(self):
+        self._assert_discogs_branch(_request(
+            id=901, mb_release_id="555", discogs_release_id="555",
+            mb_release_group_id=None,
+        ))
+
+    def test_legacy_numeric_only_row_dispatches_to_discogs(self):
+        self._assert_discogs_branch(_request(
+            id=902, mb_release_id="555", discogs_release_id=None,
+            mb_release_group_id=None,
+        ))
+
+    def test_discogs_only_row_still_dispatches_to_discogs(self):
+        self._assert_discogs_branch(_request(
+            id=903, mb_release_id=None, discogs_release_id="555",
+            mb_release_group_id=None,
+        ))
+
+    def test_mb_uuid_row_still_dispatches_to_mb(self):
+        db = FakePipelineDB()
+        mb_seen: list[str] = []
+
+        def mb_fetch(mbid: str, *, fresh: bool = True) -> dict[str, object]:
+            mb_seen.append(mbid)
+            return {"id": mbid, "release_group_id": "rg-uuid",
+                    "label-info": [], "media": []}
+
+        def discogs_must_not_be_called(*_a: object, **_k: object) -> dict[str, object]:
+            raise AssertionError("Discogs mirror reached for an MB row")
+
+        rg = resolve_release_group_id(
+            _request(id=904, mb_release_id="a0a2b395-7989-4ec7-99f9-9bc9425c53b7",
+                     discogs_release_id=None, mb_release_group_id=None),
+            db, mb_get_release=mb_fetch,
+            discogs_get_release=discogs_must_not_be_called,
+        )
+        self.assertEqual((rg.status, rg.value), ("resolved", "rg-uuid"))
+        self.assertEqual(mb_seen, ["a0a2b395-7989-4ec7-99f9-9bc9425c53b7"])
+
+
 if __name__ == "__main__":
     unittest.main()

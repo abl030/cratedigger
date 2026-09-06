@@ -33,6 +33,12 @@ Invariants, written down first:
 * The descendant carries the mirror's metadata (artist, title, artist id,
   year, country) on the right columns and the payload's tracks as its
   track rows.
+* The target id's letter case is inert (issue #1382 item 3): an MB UUID
+  pasted in uppercase names the same release as its canonical lowercase
+  form, so the same world driven with the uppercased target produces the
+  same outcome and reason, any row it writes carries the lowercase id, and
+  every mirror lookup it makes is by the lowercase id — the pre-check and
+  the UNIQUE net see one identity, never two.
 
 Ids are drawn in canonical spelling (lowercase UUIDs, plain integers);
 raw-spelling normalization is ``lib.release_identity``'s own contract and
@@ -439,6 +445,39 @@ def cross_pathway_violations(run: Run) -> list[str]:
     return out
 
 
+TargetCase = Literal["as_is", "upper"]
+
+
+def case_inert_violations(plain: Run, upper: Run) -> list[str]:
+    """An uppercased MB target must be indistinguishable from the canonical
+    one everywhere the service can be observed (issue #1382 item 3)."""
+    out: list[str] = []
+    if plain.world.target_pathway != "musicbrainz":
+        return out
+    if plain.result.outcome != upper.result.outcome:
+        out.append(
+            "target case changed the outcome: "
+            f"{plain.result.outcome!r} (lower) vs {upper.result.outcome!r} (upper)"
+        )
+    if plain.result.reason != upper.result.reason:
+        out.append(
+            "target case changed the reason: "
+            f"{plain.result.reason!r} (lower) vs {upper.result.reason!r} (upper)"
+        )
+    if (plain.descendant is None) != (upper.descendant is None):
+        out.append("target case changed whether a descendant was written")
+    if upper.descendant is not None:
+        written = str(upper.descendant.get("mb_release_id"))
+        if written != written.lower():
+            out.append(f"uppercase target wrote a non-canonical id: {written!r}")
+    if upper.mb_ids != plain.mb_ids:
+        out.append(
+            "target case changed the mirror lookups: "
+            f"{plain.mb_ids!r} (lower) vs {upper.mb_ids!r} (upper)"
+        )
+    return out
+
+
 def flag_inert_violations(plain: Run, flagged: Run) -> list[str]:
     """Same-pathway worlds: the opt-in must not change the outcome."""
     out: list[str] = []
@@ -486,7 +525,10 @@ class _Driver(_ServiceCase):
             )
         db.seed_request(row)
 
-    def drive(self, world: World, *, cross_pathway: bool) -> Run:
+    def drive(
+        self, world: World, *, cross_pathway: bool,
+        target_case: TargetCase = "as_is",
+    ) -> Run:
         db = FakePipelineDB()
         if world.source_pathway == "musicbrainz":
             self._seed_old(
@@ -536,7 +578,10 @@ class _Driver(_ServiceCase):
             )
             result = svc.replace_request_mbid(
                 42,
-                target_mb_release_id=world.target_id,
+                target_mb_release_id=(
+                    world.target_id.upper() if target_case == "upper"
+                    else world.target_id
+                ),
                 cross_pathway=cross_pathway,
             )
         source_after = dict(db.request(42))
@@ -653,6 +698,23 @@ class TestCrossPathwayReplaceGenerated(unittest.TestCase):
         violations = flag_inert_violations(plain, flagged)
         self.assertEqual(violations, [], "\n".join(violations))
 
+    @given(world=worlds())
+    @example(world=_SAME_MB)
+    @example(world=replace(_SAME_MB, collision="target"))
+    @example(world=replace(_SAME_MB, collision="canonical"))
+    @example(world=replace(_SAME_MB, canonical_redirect=True))
+    @example(world=replace(_SAME_MB, target_has_group=False))
+    @example(world=_CROSS_DISCOGS_TO_MB)
+    @example(world=replace(_CROSS_DISCOGS_TO_MB, collision="target"))
+    def test_target_case_is_inert(self, world: World) -> None:
+        assume(world.target_pathway == "musicbrainz")
+        plain = self.driver.drive(world, cross_pathway=world.crosses)
+        upper = self.driver.drive(
+            world, cross_pathway=world.crosses, target_case="upper",
+        )
+        violations = case_inert_violations(plain, upper)
+        self.assertEqual(violations, [], "\n".join(violations))
+
 
 def _with_result(run: Run, **changes: object) -> Run:
     """A copy of ``run`` whose ``ReplaceResult`` (a msgspec Struct, not a
@@ -676,6 +738,50 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 self.assertEqual(
                     cross_pathway_violations(self._correct(world)), [],
                 )
+
+    def test_case_inert_clauses_trip(self) -> None:
+        """Each clause of ``case_inert_violations`` on a planted upper run;
+        quiet on the real one and on a Discogs-target world."""
+        world = replace(_SAME_MB, collision="none")
+        plain = self.driver.drive(world, cross_pathway=False)
+        upper = self.driver.drive(world, cross_pathway=False, target_case="upper")
+        self.assertEqual(case_inert_violations(plain, upper), [])
+        with self.subTest(clause="outcome"):
+            self.assertRegex(
+                "\n".join(case_inert_violations(plain, _with_result(upper, outcome="target_invalid"))),
+                r"^target case changed the outcome",
+            )
+        with self.subTest(clause="reason"):
+            self.assertRegex(
+                "\n".join(case_inert_violations(plain, _with_result(upper, reason="planted"))),
+                r"target case changed the reason",
+            )
+        with self.subTest(clause="descendant presence"):
+            self.assertRegex(
+                "\n".join(case_inert_violations(plain, replace(upper, descendant=None))),
+                r"target case changed whether a descendant was written",
+            )
+        with self.subTest(clause="non-canonical id written"):
+            assert upper.descendant is not None
+            planted = replace(upper, descendant={
+                **upper.descendant, "mb_release_id": world.target_id.upper(),
+            })
+            self.assertRegex(
+                "\n".join(case_inert_violations(plain, planted)),
+                r"uppercase target wrote a non-canonical id",
+            )
+        with self.subTest(clause="mirror lookups"):
+            planted = replace(upper, mb_ids=(world.target_id.upper(),))
+            self.assertRegex(
+                "\n".join(case_inert_violations(plain, planted)),
+                r"target case changed the mirror lookups",
+            )
+        with self.subTest(clause="quiet on a Discogs target"):
+            discogs_world = _CROSS_MB_TO_DISCOGS
+            run = self.driver.drive(discogs_world, cross_pathway=True)
+            self.assertEqual(
+                case_inert_violations(run, _with_result(run, outcome="target_invalid")), [],
+            )
 
     def test_echo_and_message_clauses_trip(self) -> None:
         """The two world-independent clauses, planted on a refusal and on

@@ -33,13 +33,14 @@ import socket
 import threading
 import time
 import urllib.error
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, Literal, Protocol
 
 import msgspec
 
 from lib.json_narrow import json_dict as _json_dict
 from lib.json_narrow import json_list as _json_list
+from lib.release_identity import detect_release_source, normalize_release_id
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +150,29 @@ release_group_id resolver and the track-artist resolver."""
 DiscogsReleaseFn = Callable[..., dict[str, Any]]
 """``discogs_get_release(release_id, *, fresh: bool=False) -> dict``.
 Used by the release_group_id resolver and the track-artist resolver."""
+
+
+def _discogs_release_input(request: Mapping[str, object]) -> str | None:
+    """The Discogs release id this row resolves from, or ``None`` for an
+    MB row.
+
+    KTD-2: the id's SHAPE decides the pathway, so the row shape the DB
+    actually stores is valid input — a dual-written Discogs row carries
+    the same numeric id in both identity columns, and a legacy Discogs
+    row may carry it only in ``mb_release_id``. Before this, the Discogs
+    branch required ``mb_release_id`` to be empty, a shape production
+    never writes, and request creation masked the column to reach it;
+    63 dual-written rows re-resolved on 2026-05-25/26 went to the MB
+    mirror with a numeric id and recorded ``http_400`` on every field
+    (issue #1382 item 2).
+    """
+    discogs_release_id = request.get("discogs_release_id")
+    if discogs_release_id:
+        return str(discogs_release_id)
+    mb_release_id = request.get("mb_release_id")
+    if detect_release_source(mb_release_id) == "discogs":
+        return normalize_release_id(mb_release_id)
+    return None
 
 
 def _looks_numeric(value: Any) -> bool:
@@ -483,13 +507,14 @@ def resolve_release_group_id(
         return result
 
     # Discogs branch.
-    if discogs_release_id and not mb_release_id:
+    discogs_id = _discogs_release_input(request)
+    if discogs_id is not None:
         if discogs_release_payload is not None:
             data = discogs_release_payload
         else:
             fetch = discogs_get_release or _default_discogs_get_release
             try:
-                data = fetch(str(discogs_release_id), fresh=True)
+                data = fetch(discogs_id, fresh=True)
             except BaseException as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 status, reason = _classify_lookup_exception(exc)
                 result = ResolverResult(
@@ -611,13 +636,14 @@ def resolve_track_artists(
         return [result]
 
     # Pick branch.
-    if discogs_release_id and not mb_release_id:
+    discogs_id = _discogs_release_input(request)
+    if discogs_id is not None:
         if discogs_release_payload is not None:
             data = discogs_release_payload
         else:
             fetch_d = discogs_get_release or _default_discogs_get_release
             try:
-                data = fetch_d(str(discogs_release_id), fresh=True)
+                data = fetch_d(discogs_id, fresh=True)
             except BaseException as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 status, reason = _classify_lookup_exception(exc)
                 per_track = [ResolverResult(
@@ -909,13 +935,14 @@ def resolve_catalog_number(
         _record(pdb, request_id, FIELD_CATALOG_NUMBER, result)
         return result
 
-    if discogs_release_id and not mb_release_id:
+    discogs_id = _discogs_release_input(request)
+    if discogs_id is not None:
         if discogs_release_payload is not None:
             data = discogs_release_payload
         else:
             fetch = discogs_get_release or _default_discogs_get_release
             try:
-                data = fetch(str(discogs_release_id), fresh=True)
+                data = fetch(discogs_id, fresh=True)
             except BaseException as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 status, reason = _classify_lookup_exception(exc)
                 result = ResolverResult(
