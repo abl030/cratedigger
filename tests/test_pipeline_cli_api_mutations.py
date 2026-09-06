@@ -1074,7 +1074,9 @@ class TestRoutedCommandDeadlines(unittest.TestCase):
                 "replace",
                 lambda: pipeline_cli.cmd_replace(
                     None,
-                    self._args(id=1, target_mb_release_id="x", json=True)),
+                    self._args(
+                        id=1, target_mb_release_id="x", cross_pathway=False,
+                        json=True)),
                 api_mutations.TIMEOUT_MIRROR_SECONDS,
             ),
             (

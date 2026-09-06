@@ -646,6 +646,122 @@ class TestSupersedeRequestMbidRoundTrip(unittest.TestCase):
         assert old is not None
         self.assertEqual(old["status"], "replaced")
 
+    def _seed_old_discogs(self, db) -> int:
+        """A Discogs-pathway source: numeric id dual-written, master as
+        its group (KTD-1 / KTD-4)."""
+        return db.add_request(
+            artist_name="Pendulum",
+            album_title="Hold Your Colour (Discogs pressing)",
+            source="request",
+            mb_release_id="880001",
+            discogs_release_id="880001",
+            mb_release_group_id="880000",
+            mb_artist_id="art-d",
+            year=2005,
+            country="AU",
+            status="imported",
+        )
+
+    def test_supersede_round_trip_cross_pathway_mb_source_to_discogs_target(self):
+        """Issue #1366: an MB-shaped old row superseded by a Discogs-shaped
+        new row. The write is the same INSERT; this pins that the two
+        shapes coexist across the supersede link with every column intact
+        and the old row's own identity untouched."""
+        db = make_db()
+        old_id = self._seed_old(db)
+        new_id = db.supersede_request_mbid(
+            old_id,
+            new_mb_release_id="990001",
+            new_mb_release_group_id="990000",
+            new_mb_artist_id="art-d-new",
+            new_artist_name="Pendulum",
+            new_album_title="Hold Your Colour (Discogs pressing)",
+            new_year=2006,
+            new_country="UK",
+            new_discogs_release_id="990001",
+            new_tracks=[{"disc_number": 1, "track_number": 1, "title": "P"}],
+        )
+        new = db.get_request(new_id)
+        assert new is not None
+        for col, val in {
+            "mb_release_id": "990001",
+            "discogs_release_id": "990001",
+            "mb_release_group_id": "990000",
+            "mb_artist_id": "art-d-new",
+            "replaces_request_id": old_id,
+            "status": "wanted",
+            "source": "request",
+        }.items():
+            self.assertEqual(
+                new[col], val,
+                f"cross-pathway supersede field {col!r} did not round-trip")
+        old = db.get_request(old_id)
+        assert old is not None
+        self.assertEqual(old["status"], "replaced")
+        self.assertEqual(old["mb_release_id"], "old-mbid")
+        self.assertEqual(old["mb_release_group_id"], "rg-old")
+        self.assertIsNone(old["discogs_release_id"])
+
+    def test_supersede_round_trip_cross_pathway_discogs_source_to_mb_target(self):
+        """Issue #1366, the other direction: a dual-written Discogs old row
+        superseded by an MB-shaped new row (UUID, NULL Discogs id, MB
+        release group). The old row keeps its dual identity frozen."""
+        db = make_db()
+        old_id = self._seed_old_discogs(db)
+        new_id = db.supersede_request_mbid(
+            old_id,
+            new_mb_release_id="cccccccc-cccc-cccc-cccc-cccccccccccc",
+            new_mb_release_group_id="dddddddd-dddd-dddd-dddd-dddddddddddd",
+            new_mb_artist_id="art-mb",
+            new_artist_name="Pendulum",
+            new_album_title="Hold Your Colour",
+            new_year=2005,
+            new_country="AU",
+            new_discogs_release_id=None,
+            new_tracks=[],
+        )
+        new = db.get_request(new_id)
+        assert new is not None
+        self.assertEqual(
+            new["mb_release_id"], "cccccccc-cccc-cccc-cccc-cccccccccccc")
+        self.assertEqual(
+            new["mb_release_group_id"],
+            "dddddddd-dddd-dddd-dddd-dddddddddddd")
+        self.assertIsNone(new["discogs_release_id"])
+        self.assertEqual(new["replaces_request_id"], old_id)
+        self.assertEqual(new["status"], "wanted")
+        old = db.get_request(old_id)
+        assert old is not None
+        self.assertEqual(old["status"], "replaced")
+        self.assertEqual(old["mb_release_id"], "880001")
+        self.assertEqual(old["discogs_release_id"], "880001")
+        self.assertEqual(old["mb_release_group_id"], "880000")
+
+    def test_supersede_round_trip_masterless_discogs_target_has_null_group(self):
+        """Issue #1366: a masterless Discogs target is a legal cross-pathway
+        new row; its group column is NULL, exactly as the add flow writes
+        a masterless release."""
+        db = make_db()
+        old_id = self._seed_old(db)
+        new_id = db.supersede_request_mbid(
+            old_id,
+            new_mb_release_id="990002",
+            new_mb_release_group_id=None,
+            new_mb_artist_id="art-d-new",
+            new_artist_name="Pendulum",
+            new_album_title="Hold Your Colour (masterless)",
+            new_year=None,
+            new_country=None,
+            new_discogs_release_id="990002",
+            new_tracks=[],
+        )
+        new = db.get_request(new_id)
+        assert new is not None
+        self.assertEqual(new["mb_release_id"], "990002")
+        self.assertEqual(new["discogs_release_id"], "990002")
+        self.assertIsNone(new["mb_release_group_id"])
+        self.assertEqual(new["replaces_request_id"], old_id)
+
 
 @requires_postgres
 class TestPlexAddedAtPinsRoundTrip(unittest.TestCase):

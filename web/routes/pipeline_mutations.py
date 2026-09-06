@@ -15,7 +15,6 @@ from typing import Literal, Self
 from pydantic import BaseModel, Field, model_validator
 
 from lib.config import read_runtime_config
-from lib.json_narrow import is_object_list, is_str_object_dict
 from lib.pipeline_db import PipelineDB
 from lib.pipeline_db.rows import AlbumRequestRow
 from lib.request_creation_service import (
@@ -71,49 +70,15 @@ from lib.quality import (
     resolve_user_requeue_override,
 )
 from lib.release_identity import detect_release_source, normalize_release_id
+from lib.release_payload import (
+    release_int_or_none,
+    release_str,
+    release_str_or_none,
+    release_tracks,
+)
 from lib.set_intent_service import SET_INTENT_HTTP_STATUS, set_lossless_intent
 from web import discogs as discogs_api
 from web import mb as mb_api
-
-
-def _release_tracks(release: dict[str, object]) -> list[dict[str, object]]:
-    """Narrow a mirror ``get_release()`` payload's ``tracks`` field.
-
-    Both ``mb_api.get_release()`` and ``discogs_api.get_release()`` type
-    their return as ``dict[str, object]`` — the boundary every caller in
-    this module already assumes carries a list of per-track dicts under
-    ``"tracks"`` (or omits the key entirely). This narrows that one field
-    back to the concrete shape ``set_tracks`` and the response payloads
-    consume.
-
-    Gracefully narrow the already-decoded external mirror JSON through the
-    shared TypeGuard. A malformed member makes the field read as absent.
-    """
-    tracks = release.get("tracks")
-    if not is_object_list(tracks):
-        return []
-    result: list[dict[str, object]] = []
-    for track in tracks:
-        if not is_str_object_dict(track):
-            return []
-        result.append(track)
-    return result
-
-
-def _release_str(release: dict[str, object], key: str, default: str = "") -> str:
-    """Narrow one scalar field of a mirror ``get_release()`` payload to ``str``."""
-    value = release.get(key, default)
-    return value if isinstance(value, str) else default
-
-
-def _release_str_or_none(release: dict[str, object], key: str) -> str | None:
-    value = release.get(key)
-    return value if isinstance(value, str) else None
-
-
-def _release_int_or_none(release: dict[str, object], key: str) -> int | None:
-    value = release.get(key)
-    return value if isinstance(value, int) else None
 
 
 def _transition_applied_or_respond(
@@ -290,17 +255,17 @@ def post_pipeline_add(h: RouteHandler, body: dict[str, object]) -> None:
         # the pipeline DB (Codex review, issue #101).
         release = discogs_api.get_release(int(discogs_id), fresh=True)
 
-        discogs_tracks = _release_tracks(release)
+        discogs_tracks = release_tracks(release)
         creation_result = _creation_result_or_respond(h, _create_or_resume(
             RequestCreationInput(
                 release_id=discogs_id,
                 mb_release_id=discogs_id,
                 discogs_release_id=discogs_id,
                 mb_artist_id=str(release.get("artist_id") or "") or None,
-                artist_name=_release_str(release, "artist_name"),
-                album_title=_release_str(release, "title"),
-                year=_release_int_or_none(release, "year"),
-                country=_release_str_or_none(release, "country"),
+                artist_name=release_str(release, "artist_name"),
+                album_title=release_str(release, "title"),
+                year=release_int_or_none(release, "year"),
+                country=release_str_or_none(release, "country"),
                 source=source,
                 tracks=discogs_tracks,
                 discogs_release_payload=release,
@@ -341,19 +306,19 @@ def post_pipeline_add(h: RouteHandler, body: dict[str, object]) -> None:
     # trip; the second call is a cache hit.
     release_raw = mb_api.get_release_raw(mbid, fresh=True)
 
-    rg_id = _release_str_or_none(release, "release_group_id")
+    rg_id = release_str_or_none(release, "release_group_id")
 
-    mb_tracks = _release_tracks(release)
+    mb_tracks = release_tracks(release)
     creation_result = _creation_result_or_respond(h, _create_or_resume(
         RequestCreationInput(
             release_id=mbid,
             mb_release_id=mbid,
             mb_release_group_id=rg_id,
-            mb_artist_id=_release_str_or_none(release, "artist_id"),
-            artist_name=_release_str(release, "artist_name"),
-            album_title=_release_str(release, "title"),
-            year=_release_int_or_none(release, "year"),
-            country=_release_str_or_none(release, "country"),
+            mb_artist_id=release_str_or_none(release, "artist_id"),
+            artist_name=release_str(release, "artist_name"),
+            album_title=release_str(release, "title"),
+            year=release_int_or_none(release, "year"),
+            country=release_str_or_none(release, "country"),
             source=source,
             tracks=mb_tracks,
             mb_release_payload=release_raw,
@@ -522,12 +487,12 @@ def post_pipeline_upgrade(h: RouteHandler, body: dict[str, object]) -> None:
                 mb_release_id=mbid,
                 discogs_release_id=mbid,
                 mb_artist_id=str(release.get("artist_id") or "") or None,
-                artist_name=_release_str(release, "artist_name"),
-                album_title=_release_str(release, "title"),
-                year=_release_int_or_none(release, "year"),
-                country=_release_str_or_none(release, "country"),
+                artist_name=release_str(release, "artist_name"),
+                album_title=release_str(release, "title"),
+                year=release_int_or_none(release, "year"),
+                country=release_str_or_none(release, "country"),
                 source="request",
-                tracks=_release_tracks(release),
+                tracks=release_tracks(release),
                 discogs_release_payload=release,
                 final_fields={
                     "search_filetype_override": quality,
@@ -536,7 +501,7 @@ def post_pipeline_upgrade(h: RouteHandler, body: dict[str, object]) -> None:
             )
         else:
             release = mb_api.get_release(mbid, fresh=True)
-            rg_id_upgrade = _release_str_or_none(release, "release_group_id")
+            rg_id_upgrade = release_str_or_none(release, "release_group_id")
             # ``get_release_group_year`` now propagates ``HTTPError(404)``
             # so the resolver service can disambiguate "MBID does not
             # exist" from "exists but missing year". On this orphan-
@@ -556,14 +521,14 @@ def post_pipeline_upgrade(h: RouteHandler, body: dict[str, object]) -> None:
                 release_id=mbid,
                 mb_release_id=mbid,
                 mb_release_group_id=rg_id_upgrade,
-                mb_artist_id=_release_str_or_none(release, "artist_id"),
-                artist_name=_release_str(release, "artist_name"),
-                album_title=_release_str(release, "title"),
-                year=_release_int_or_none(release, "year"),
+                mb_artist_id=release_str_or_none(release, "artist_id"),
+                artist_name=release_str(release, "artist_name"),
+                album_title=release_str(release, "title"),
+                year=release_int_or_none(release, "year"),
                 release_group_year=rg_year_upgrade,
-                country=_release_str_or_none(release, "country"),
+                country=release_str_or_none(release, "country"),
                 source="request",
-                tracks=_release_tracks(release),
+                tracks=release_tracks(release),
                 mb_release_payload=mb_api.get_release_raw(mbid, fresh=True),
                 final_fields={
                     "search_filetype_override": quality,

@@ -351,7 +351,7 @@ inside socket authorization, never credentials.
 - `pipeline-cli quality` — Simulate quality decisions and replay current candidate evidence.
 - `pipeline-cli query` — Run one read-only SQL statement, or the explicit write escape hatch.
 - `pipeline-cli repair-spectral` — Repair stale spectral state.
-- `pipeline-cli replace` — Supersede a request with another exact pressing in its release family.
+- `pipeline-cli replace` — Supersede a request with another exact pressing in its release family, or with a pressing on the other pathway (MB↔Discogs) under `--cross-pathway`, the operator's assertion that the paired release group and master are one album (issue #1366).
 - `pipeline-cli resolve-rg` — Resolve a request release group through its canonical web route.
 - `pipeline-cli routes` — Discover every parser command, argument, and description.
 - `pipeline-cli search-plan advance` — Advance one persisted search-plan cursor.

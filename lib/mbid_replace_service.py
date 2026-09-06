@@ -22,11 +22,20 @@ Outcome → exit code / HTTP status convention (matches
 Both MusicBrainz and Discogs sources flow through this one service; the
 pathway is inferred from the id's shape (``detect_release_source``). MB×MB
 is the original path, unchanged; Discogs×Discogs anchors on the source's
-Discogs master (numeric id in ``mb_release_group_id``, KTD-1).
+Discogs master (numeric id in ``mb_release_group_id``, KTD-1). A target on
+the OTHER pathway is accepted only under the operator's explicit
+``cross_pathway`` opt-in (issue #1366): the Browse tab pairs an MB release
+group with a Discogs master as one album, that pairing surfaces the offer,
+and the operator's confirmation is the identity authority — there is no
+shared group across pathways for the service to compare, so the
+group-mismatch gate does not apply and the source's own group is never
+consulted. Everything else (target resolution, collisions, canonical
+redirects, the supersede itself) is the same machinery the two
+same-pathway arms use.
 
 See ``docs/plans/2026-07-04-001-feat-discogs-pathway-replace-plan.md`` and
 ``docs/plans/2026-05-18-001-feat-replace-operator-action-plan.md`` for the
-full design.
+full design; issue #1366 supersedes that plan's R4 / AE2.
 """
 
 from __future__ import annotations
@@ -37,7 +46,8 @@ import os
 import shutil
 import socket
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from urllib.error import URLError
 
 import msgspec
@@ -82,6 +92,12 @@ from lib.release_identity import (
     ReleaseIdentity,
     detect_release_source,
     normalize_release_id,
+)
+from lib.release_payload import (
+    release_int_or_none,
+    release_str,
+    release_str_or_none,
+    release_tracks,
 )
 from lib.replace_status import (
     REPLACE_REASON_CROSS_PATHWAY_TARGET,
@@ -150,7 +166,7 @@ class MbidReplaceDB(
         new_album_title: str,
         new_year: int | None,
         new_country: str | None,
-        new_tracks: list[dict[str, Any]],
+        new_tracks: list[dict[str, object]],
         new_discogs_release_id: str | None = None,
     ) -> int: ...
 
@@ -220,12 +236,30 @@ def _processing_locked_replace(
     )
 
 
-# Type aliases for the injectable dependencies.
-MBLookup = Callable[..., dict[str, Any]]
-"""Signature: ``mb_lookup(mbid, *, fresh: bool=False) -> dict``. The
-default is ``web.mb.get_release``; tests inject a fake."""
+@dataclass(frozen=True)
+class _ResolvedTarget:
+    """A target id the mirror resolved and the service pre-validated.
 
-DiscogsLookup = Callable[..., dict[str, Any]]
+    Internal to the service (never crosses JSON, so a dataclass). Produced
+    by ``_resolve_mb_target`` / ``_resolve_discogs_target`` — the shared
+    collision-precheck + fresh-lookup + payload/group validation that the
+    MB arm, the Discogs arm, and the cross-pathway arm all perform before
+    their own pathway-specific checks.
+    """
+
+    canonical_id: str
+    group_id: str | None
+    data: dict[str, object]
+
+
+# Type aliases for the injectable dependencies.
+MBLookup = Callable[..., dict[str, object]]
+"""Signature: ``mb_lookup(mbid, *, fresh: bool=False) -> dict[str, object]``
+(the one payload shape both mirrors emit; fields are read through
+``lib.release_payload``). The default is ``web.mb.get_release``; tests
+inject a fake."""
+
+DiscogsLookup = Callable[..., dict[str, object]]
 """Signature: ``discogs_lookup(release_id: int, *, fresh: bool=False) ->
 dict``. The default is ``web.discogs.get_release``; tests inject a fake
 that raises the real ``HTTPError``/``URLError``/``DiscogsMirrorNotConfigured``
@@ -250,7 +284,7 @@ BeetsDBFactory = Callable[[], ReplaceBeetsDB]
 ``lib.beets_db.BeetsDB`` against the configured library path."""
 
 
-def _default_mb_lookup(mbid: str, *, fresh: bool = False) -> dict[str, Any]:
+def _default_mb_lookup(mbid: str, *, fresh: bool = False) -> dict[str, object]:
     """Default MB-mirror lookup. Imported lazily so the service module
     doesn't pull in ``web.mb``'s urllib transport at import time."""
     from web.mb import get_release
@@ -259,7 +293,7 @@ def _default_mb_lookup(mbid: str, *, fresh: bool = False) -> dict[str, Any]:
 
 def _default_discogs_lookup(
     release_id: int, *, fresh: bool = False,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Default Discogs-mirror lookup. Imported lazily so the service
     module doesn't pull in ``web.discogs``'s transport at import time."""
     from web.discogs import get_release
@@ -284,7 +318,7 @@ class MbidReplaceService:
         self,
         db: MbidReplaceDB,
         config: CratediggerConfig,
-        slskd: Any = None,
+        slskd: object | None = None,
         beets_db_factory: BeetsDBFactory | None = None,
         mb_lookup: MBLookup | None = None,
         discogs_lookup: DiscogsLookup | None = None,
@@ -312,8 +346,15 @@ class MbidReplaceService:
         request_id: int,
         *,
         target_mb_release_id: str,
+        cross_pathway: bool = False,
     ) -> ReplaceResult:
         """Supersede ``request_id`` with a new row at ``target_mb_release_id``.
+
+        ``cross_pathway`` is the operator's explicit assertion that a target
+        on the other pathway (a Discogs release for an MB source, or an MB
+        release for a Discogs source) is the same album (issue #1366).
+        Without it a cross-pathway target is refused; with it the
+        cross-pathway arm runs. It is inert for a same-pathway target.
 
         Phases:
 
@@ -343,8 +384,8 @@ class MbidReplaceService:
            runs, so no importer worker would contend for it anyway.
         """
         logger.info(
-            "Replace: request_id=%d target_mb_release_id=%s",
-            request_id, target_mb_release_id,
+            "Replace: request_id=%d target_mb_release_id=%s cross_pathway=%s",
+            request_id, target_mb_release_id, cross_pathway,
         )
         # Phase 0 — validate.
         source = self.db.get_request(request_id)
@@ -391,29 +432,48 @@ class MbidReplaceService:
             )
         source_mbid = source_identity.release_id
 
-        # Pathway-aware target gate (replaces the old step-0a UUID gate).
-        # The target must be a valid release id in the SAME identity space
-        # as the source: UUID target ⇒ MB source, numeric target ⇒ Discogs
-        # source. A cross-pathway target (or an unparseable id) is
-        # RESULT_TARGET_INVALID — cross-pathway Replace is out of scope
-        # (R4 / AE2). ``detect_release_source`` is the single authority for
-        # the pathway (KTD-2); the branch below dispatches on the source's
-        # own shape, so MB×MB flows through the original path untouched.
+        # Pathway-aware target gate. ``detect_release_source`` is the single
+        # authority for each id's pathway (KTD-2). A target that parses as
+        # neither shape is invalid outright. A target on the OTHER pathway
+        # is valid only under the operator's explicit ``cross_pathway``
+        # opt-in (issue #1366, superseding the #282 plan's R4 / AE2 scope
+        # boundary): the Browse tab pairs an MB release group with a
+        # Discogs master as one album, that pairing surfaces the offer,
+        # and the operator's confirmation is the identity authority — no
+        # shared group exists across pathways for the service to compare.
+        # Same-pathway targets take the original arms untouched, whatever
+        # the flag says.
         source_source = source_identity.source
         target_source = detect_release_source(target_mb_release_id)
-        if (
-            target_source not in ("musicbrainz", "discogs")
-            or target_source != source_source
-        ):
+        if target_source not in ("musicbrainz", "discogs"):
             return ReplaceResult(
                 outcome=RESULT_TARGET_INVALID,
                 request_id=request_id,
                 error_message=(
-                    f"target {target_mb_release_id!r} ({target_source}) is "
-                    f"not a valid same-pathway target for source "
-                    f"({source_source})"
+                    f"target {target_mb_release_id!r} is neither an MB "
+                    "release UUID nor a Discogs release id"
                 ),
                 reason=REPLACE_REASON_CROSS_PATHWAY_TARGET,
+            )
+        if target_source != source_source:
+            if not cross_pathway:
+                return ReplaceResult(
+                    outcome=RESULT_TARGET_INVALID,
+                    request_id=request_id,
+                    error_message=(
+                        f"target {target_mb_release_id!r} ({target_source}) "
+                        f"is on the other pathway from source "
+                        f"({source_source}); pass cross_pathway to supersede "
+                        "across pathways when the two are the same album"
+                    ),
+                    reason=REPLACE_REASON_CROSS_PATHWAY_TARGET,
+                )
+            return self._replace_cross_pathway_target(
+                request_id,
+                source,
+                source_mbid,
+                target_mb_release_id,
+                target_source,
             )
 
         if source_mbid == target_mb_release_id:
@@ -442,9 +502,8 @@ class MbidReplaceService:
             if err is not None:
                 return err
             assert src_data is not None
-            # ``mb_lookup`` is typed dict[str, Any]; ``release_group_id``
-            # is None when the mirror doesn't have one.
-            source_rg = src_data.get("release_group_id")
+            # ``release_group_id`` is None when the mirror doesn't have one.
+            source_rg = release_str_or_none(src_data, "release_group_id")
             if not source_rg:
                 return ReplaceResult(
                     outcome=RESULT_TARGET_INVALID,
@@ -456,25 +515,74 @@ class MbidReplaceService:
                     reason=REPLACE_REASON_SOURCE_NO_RELEASE_GROUP,
                 )
 
-        # Pre-check collision against the active row set.
-        existing = self.db.get_request_by_mb_release_id(target_mb_release_id)
+        # Collision pre-check, fresh MB lookup, payload and release-group
+        # validation — shared with the cross-pathway arm.
+        resolved = self._resolve_mb_target(request_id, target_mb_release_id)
+        if isinstance(resolved, ReplaceResult):
+            return resolved
+
+        if resolved.group_id != source_rg:
+            return ReplaceResult(
+                outcome=RESULT_TARGET_RELEASE_GROUP_MISMATCH,
+                request_id=request_id,
+                error_message=(
+                    f"target release group {resolved.group_id} does not "
+                    f"match source release group {source_rg}"
+                ),
+            )
+
+        # Handle MB 301 redirect: if the canonical MBID differs from
+        # what the operator requested, re-check collision against the
+        # canonical and (defensively) against the source.
+        redirect = self._canonical_redirect_collision(
+            request_id,
+            source,
+            requested=target_mb_release_id,
+            canonical=resolved.canonical_id,
+            source_id=source_mbid,
+            lookup_existing=self.db.get_request_by_mb_release_id,
+            label=f"target MBID {target_mb_release_id}",
+            source_word="MBID",
+        )
+        if redirect is not None:
+            return redirect
+
+        return self._finalize_replace(
+            request_id,
+            canonical_mbid=resolved.canonical_id,
+            target_rg=resolved.group_id,
+            target_data=resolved.data,
+            new_discogs_release_id=None,
+        )
+
+    def _resolve_mb_target(
+        self,
+        request_id: int,
+        target_mbid: str,
+    ) -> _ResolvedTarget | ReplaceResult:
+        """Collision pre-check, fresh MB lookup, empty-payload and
+        release-group validation for an MB target, in the MB arm's
+        original order. Shared by the MB arm and the cross-pathway arm;
+        the caller adds whatever pathway-specific gate applies (the
+        release-group match, for same-pathway) and the canonical-redirect
+        re-check."""
+        existing = self.db.get_request_by_mb_release_id(target_mbid)
         if existing is not None and int(existing["id"]) != request_id:
             return ReplaceResult(
                 outcome=RESULT_TARGET_COLLISION_REQUEST,
                 request_id=request_id,
                 current_status=existing.get("status"),
                 error_message=(
-                    f"target MBID {target_mb_release_id} is already used "
+                    f"target MBID {target_mbid} is already used "
                     f"by request {existing['id']} "
                     f"(status={existing.get('status')!r})"
                 ),
             )
 
-        # Fresh MB lookup of the target.
         target_data, err = self._mb_lookup_or_error(
-            target_mb_release_id,
+            target_mbid,
             request_id=request_id,
-            detail_context=f"target MBID {target_mb_release_id}",
+            detail_context=f"target MBID {target_mbid}",
         )
         if err is not None:
             return err
@@ -485,75 +593,169 @@ class MbidReplaceService:
                 outcome=RESULT_TARGET_INVALID,
                 request_id=request_id,
                 error_message=(
-                    f"target MBID {target_mb_release_id} returned empty "
+                    f"target MBID {target_mbid} returned empty "
                     "payload from MB mirror"
                 ),
                 reason=REPLACE_REASON_UNRESOLVABLE_TARGET,
             )
 
-        canonical_mbid = target_data.get("id") or target_mb_release_id
-        target_rg = target_data.get("release_group_id")
+        canonical_mbid = release_str_or_none(target_data, "id") or target_mbid
+        if detect_release_source(canonical_mbid) != "musicbrainz":
+            # The mirror canonicalised the picked id onto something that is
+            # not an MB release UUID. Nothing downstream can trust that
+            # identity — refuse before it reaches the collision re-check
+            # or the supersede write.
+            return ReplaceResult(
+                outcome=RESULT_TARGET_INVALID,
+                request_id=request_id,
+                error_message=(
+                    f"target MBID {target_mbid} canonicalised to "
+                    f"{canonical_mbid!r}, which is not an MB release UUID"
+                ),
+                reason=REPLACE_REASON_UNRESOLVABLE_TARGET,
+            )
+        target_rg = release_str_or_none(target_data, "release_group_id")
         if not target_rg:
             return ReplaceResult(
                 outcome=RESULT_TARGET_INVALID,
                 request_id=request_id,
                 error_message=(
-                    f"target MBID {target_mb_release_id} resolved with "
+                    f"target MBID {target_mbid} resolved with "
                     "no release_group_id"
                 ),
                 reason=REPLACE_REASON_TARGET_NO_RELEASE_GROUP,
             )
+        return _ResolvedTarget(
+            canonical_id=canonical_mbid,
+            group_id=target_rg,
+            data=target_data,
+        )
 
-        if target_rg != source_rg:
+    def _canonical_redirect_collision(
+        self,
+        request_id: int,
+        source: AlbumRequestRow,
+        *,
+        requested: str,
+        canonical: str,
+        source_id: str,
+        lookup_existing: Callable[[str], AlbumRequestRow | None],
+        label: str,
+        source_word: str,
+    ) -> ReplaceResult | None:
+        """The canonical-redirect re-check every arm runs after its own
+        gates: when the mirror canonicalised the requested id onto a
+        different one, that canonical id must not be the source's own
+        current id nor held by another active request. ``lookup_existing``
+        is the pathway's collision lookup (``get_request_by_mb_release_id``
+        for MB, the identity-aware ``get_request_by_release_id`` for
+        Discogs, KTD-6); ``label`` / ``source_word`` keep each arm's
+        original wording."""
+        if canonical == requested:
+            return None
+        if canonical == source_id:
             return ReplaceResult(
-                outcome=RESULT_TARGET_RELEASE_GROUP_MISMATCH,
+                outcome=RESULT_TARGET_COLLISION_REQUEST,
                 request_id=request_id,
+                current_status=source.get("status"),
                 error_message=(
-                    f"target release group {target_rg} does not match "
-                    f"source release group {source_rg}"
+                    f"{label} redirects to canonical {canonical} which is "
+                    f"the source's current {source_word}"
                 ),
             )
-
-        # Handle MB 301 redirect: if the canonical MBID differs from
-        # what the operator requested, re-check collision against the
-        # canonical and (defensively) against the source.
-        if canonical_mbid != target_mb_release_id:
-            if canonical_mbid == source_mbid:
-                return ReplaceResult(
-                    outcome=RESULT_TARGET_COLLISION_REQUEST,
-                    request_id=request_id,
-                    current_status=source.get("status"),
-                    error_message=(
-                        f"target MBID {target_mb_release_id} redirects "
-                        f"to canonical {canonical_mbid} which is the "
-                        "source's current MBID"
-                    ),
-                )
-            existing_canon = self.db.get_request_by_mb_release_id(
-                canonical_mbid
+        existing_canon = lookup_existing(canonical)
+        if (
+            existing_canon is not None
+            and int(existing_canon["id"]) != request_id
+        ):
+            return ReplaceResult(
+                outcome=RESULT_TARGET_COLLISION_REQUEST,
+                request_id=request_id,
+                current_status=existing_canon.get("status"),
+                error_message=(
+                    f"target redirects to canonical "
+                    f"{canonical} held by request "
+                    f"{existing_canon['id']} "
+                    f"(status={existing_canon.get('status')!r})"
+                ),
             )
-            if (
-                existing_canon is not None
-                and int(existing_canon["id"]) != request_id
-            ):
-                return ReplaceResult(
-                    outcome=RESULT_TARGET_COLLISION_REQUEST,
-                    request_id=request_id,
-                    current_status=existing_canon.get("status"),
-                    error_message=(
-                        f"target redirects to canonical "
-                        f"{canonical_mbid} held by request "
-                        f"{existing_canon['id']} "
-                        f"(status={existing_canon.get('status')!r})"
-                    ),
-                )
+        return None
 
+    def _replace_cross_pathway_target(
+        self,
+        request_id: int,
+        source: AlbumRequestRow,
+        source_mbid: str,
+        target_mb_release_id: str,
+        target_source: str,
+    ) -> ReplaceResult:
+        """Cross-pathway arm (issue #1366) — reached only under the
+        operator's explicit ``cross_pathway`` opt-in with a target on the
+        other pathway from the source.
+
+        No shared release group exists across pathways, so there is no
+        group-mismatch gate and nothing about the source's group bears on
+        the target: the source-pathway lookup is never issued (a legacy
+        source with no persisted group crosses without a backfill). The
+        target pathway's own resolution runs exactly as in its
+        same-pathway arm — collision pre-check, fresh lookup, empty-payload
+        check, and the canonical-redirect re-check — with one relaxation:
+        a Discogs target may be masterless. Masterless releases pair in
+        the Browse tab too, and the same-pathway arm only demanded a
+        master to anchor siblings; the new row is born with no master,
+        exactly as the add flow writes one. An MB target still owes its
+        release group. The resolvers refuse a canonical id that is not on
+        the target's pathway, so the redirect re-check's "canonical is the
+        source's own id" branch cannot fire here (the two ids never share
+        a shape); its wording is kept pathway-neutral regardless. The
+        supersede then dual-writes the new row in ITS pathway's shape
+        (R5-R7), linked by the ordinary supersede link.
+        """
+        if target_source == "musicbrainz":
+            resolved = self._resolve_mb_target(request_id, target_mb_release_id)
+            if isinstance(resolved, ReplaceResult):
+                return resolved
+            redirect = self._canonical_redirect_collision(
+                request_id,
+                source,
+                requested=target_mb_release_id,
+                canonical=resolved.canonical_id,
+                source_id=source_mbid,
+                lookup_existing=self.db.get_request_by_mb_release_id,
+                label=f"target MBID {target_mb_release_id}",
+                source_word="id",
+            )
+            new_discogs_release_id: str | None = None
+        else:
+            resolved = self._resolve_discogs_target(
+                request_id, target_mb_release_id, require_master=False,
+            )
+            if isinstance(resolved, ReplaceResult):
+                return resolved
+            redirect = self._canonical_redirect_collision(
+                request_id,
+                source,
+                requested=normalize_release_id(target_mb_release_id),
+                canonical=resolved.canonical_id,
+                source_id=normalize_release_id(source_mbid),
+                lookup_existing=self.db.get_request_by_release_id,
+                label=f"target Discogs id {target_mb_release_id}",
+                source_word="id",
+            )
+            new_discogs_release_id = resolved.canonical_id
+        if redirect is not None:
+            return redirect
+
+        logger.info(
+            "Replace: cross-pathway request_id=%d source=%s target=%s (%s)",
+            request_id, source_mbid, resolved.canonical_id, target_source,
+        )
         return self._finalize_replace(
             request_id,
-            canonical_mbid=canonical_mbid,
-            target_rg=target_rg,
-            target_data=target_data,
-            new_discogs_release_id=None,
+            canonical_mbid=resolved.canonical_id,
+            target_rg=resolved.group_id,
+            target_data=resolved.data,
+            new_discogs_release_id=new_discogs_release_id,
         )
 
     def _mb_lookup_or_error(
@@ -562,7 +764,7 @@ class MbidReplaceService:
         *,
         request_id: int,
         detail_context: str,
-    ) -> tuple[dict[str, Any] | None, ReplaceResult | None]:
+    ) -> tuple[dict[str, object] | None, ReplaceResult | None]:
         """Fresh MB-mirror lookup + the two-way exception→outcome mapping
         shared by the source lazy-backfill and target lookup sites in
         ``replace_request_mbid``. Mirrors ``_discogs_lookup_or_error``
@@ -608,8 +810,8 @@ class MbidReplaceService:
     def _replace_discogs_target(
         self,
         request_id: int,
-        source: Mapping[str, Any],
-        source_mbid: str | None,
+        source: AlbumRequestRow,
+        source_mbid: str,
         target_mb_release_id: str,
     ) -> ReplaceResult:
         """Discogs arm of Phase 0 — mirror of the MB decision order
@@ -625,9 +827,6 @@ class MbidReplaceService:
         ``get_request_by_release_id`` (KTD-6); the MB arm's call sites stay
         on ``get_request_by_mb_release_id``.
         """
-        normalized_target = normalize_release_id(target_mb_release_id)
-        target_id_num = int(normalized_target)
-
         # Resolve the source master (guardrail before the target IO).
         source_master = source.get("mb_release_group_id")
         if not source_master:
@@ -639,7 +838,7 @@ class MbidReplaceService:
             if err is not None:
                 return err
             assert src_data is not None
-            source_master = src_data.get("release_group_id")
+            source_master = release_str_or_none(src_data, "release_group_id")
             if not source_master:
                 # Masterless source: the only valid target is the source
                 # itself, already caught by RESULT_TARGET_SAME_AS_CURRENT
@@ -655,25 +854,82 @@ class MbidReplaceService:
                     reason=REPLACE_REASON_SOURCE_NO_RELEASE_GROUP,
                 )
 
-        # Pre-check collision against the raw target id (identity-aware).
-        existing = self.db.get_request_by_release_id(target_mb_release_id)
+        # Collision pre-check, fresh Discogs lookup, payload and master
+        # validation — shared with the cross-pathway arm, which alone may
+        # relax the master requirement.
+        resolved = self._resolve_discogs_target(
+            request_id, target_mb_release_id, require_master=True,
+        )
+        if isinstance(resolved, ReplaceResult):
+            return resolved
+
+        if resolved.group_id != source_master:
+            return ReplaceResult(
+                outcome=RESULT_TARGET_RELEASE_GROUP_MISMATCH,
+                request_id=request_id,
+                error_message=(
+                    f"target master {resolved.group_id} does not match "
+                    f"source master {source_master}"
+                ),
+            )
+
+        # Canonical-redirect re-check (mirror the MB arm): if the mirror
+        # returned a different canonical id, re-check collision against it
+        # and (defensively) against the source.
+        redirect = self._canonical_redirect_collision(
+            request_id,
+            source,
+            requested=normalize_release_id(target_mb_release_id),
+            canonical=resolved.canonical_id,
+            source_id=normalize_release_id(source_mbid),
+            lookup_existing=self.db.get_request_by_release_id,
+            label=f"target Discogs id {target_mb_release_id}",
+            source_word="id",
+        )
+        if redirect is not None:
+            return redirect
+
+        return self._finalize_replace(
+            request_id,
+            canonical_mbid=resolved.canonical_id,
+            target_rg=resolved.group_id,
+            target_data=resolved.data,
+            new_discogs_release_id=resolved.canonical_id,
+        )
+
+    def _resolve_discogs_target(
+        self,
+        request_id: int,
+        target_id: str,
+        *,
+        require_master: bool,
+    ) -> _ResolvedTarget | ReplaceResult:
+        """Collision pre-check (identity-aware, KTD-6), fresh Discogs
+        lookup, empty-payload and master validation for a Discogs target,
+        in the Discogs arm's original order. Shared by the Discogs arm
+        (``require_master=True`` — siblings anchor on the master) and the
+        cross-pathway arm (``require_master=False`` — a masterless release
+        is a legal target there; see ``_replace_cross_pathway_target``)."""
+        normalized_target = normalize_release_id(target_id)
+        target_id_num = int(normalized_target)
+
+        existing = self.db.get_request_by_release_id(target_id)
         if existing is not None and int(existing["id"]) != request_id:
             return ReplaceResult(
                 outcome=RESULT_TARGET_COLLISION_REQUEST,
                 request_id=request_id,
                 current_status=existing.get("status"),
                 error_message=(
-                    f"target Discogs id {target_mb_release_id} is already "
+                    f"target Discogs id {target_id} is already "
                     f"used by request {existing['id']} "
                     f"(status={existing.get('status')!r})"
                 ),
             )
 
-        # Fresh Discogs lookup of the target.
         target_data, err = self._discogs_lookup_or_error(
             target_id_num,
             request_id=request_id,
-            detail_context=f"target Discogs id {target_mb_release_id}",
+            detail_context=f"target Discogs id {target_id}",
         )
         if err is not None:
             return err
@@ -684,72 +940,42 @@ class MbidReplaceService:
                 outcome=RESULT_TARGET_INVALID,
                 request_id=request_id,
                 error_message=(
-                    f"target Discogs id {target_mb_release_id} returned "
+                    f"target Discogs id {target_id} returned "
                     "empty payload from the mirror"
                 ),
                 reason=REPLACE_REASON_UNRESOLVABLE_TARGET,
             )
 
-        canonical_id = str(target_data.get("id") or target_mb_release_id)
-        target_master = target_data.get("release_group_id")
-        if not target_master:
+        canonical_id = release_str_or_none(target_data, "id") or target_id
+        if detect_release_source(canonical_id) != "discogs":
+            # Same guard as the MB resolver. This also refuses the mirror
+            # Struct's ``id`` default of ``0`` (``"0"`` normalizes to no
+            # release at all), which would otherwise be written as the new
+            # row's exact identity.
             return ReplaceResult(
                 outcome=RESULT_TARGET_INVALID,
                 request_id=request_id,
                 error_message=(
-                    f"target Discogs id {target_mb_release_id} resolved "
+                    f"target Discogs id {target_id} canonicalised to "
+                    f"{canonical_id!r}, which is not a Discogs release id"
+                ),
+                reason=REPLACE_REASON_UNRESOLVABLE_TARGET,
+            )
+        target_master = release_str_or_none(target_data, "release_group_id")
+        if require_master and not target_master:
+            return ReplaceResult(
+                outcome=RESULT_TARGET_INVALID,
+                request_id=request_id,
+                error_message=(
+                    f"target Discogs id {target_id} resolved "
                     "with no master"
                 ),
                 reason=REPLACE_REASON_TARGET_NO_RELEASE_GROUP,
             )
-
-        if target_master != source_master:
-            return ReplaceResult(
-                outcome=RESULT_TARGET_RELEASE_GROUP_MISMATCH,
-                request_id=request_id,
-                error_message=(
-                    f"target master {target_master} does not match source "
-                    f"master {source_master}"
-                ),
-            )
-
-        # Canonical-redirect re-check (mirror the MB arm): if the mirror
-        # returned a different canonical id, re-check collision against it
-        # and (defensively) against the source.
-        if canonical_id != normalized_target:
-            if canonical_id == normalize_release_id(source_mbid):
-                return ReplaceResult(
-                    outcome=RESULT_TARGET_COLLISION_REQUEST,
-                    request_id=request_id,
-                    current_status=source.get("status"),
-                    error_message=(
-                        f"target Discogs id {target_mb_release_id} "
-                        f"redirects to canonical {canonical_id} which is "
-                        "the source's current id"
-                    ),
-                )
-            existing_canon = self.db.get_request_by_release_id(canonical_id)
-            if (
-                existing_canon is not None
-                and int(existing_canon["id"]) != request_id
-            ):
-                return ReplaceResult(
-                    outcome=RESULT_TARGET_COLLISION_REQUEST,
-                    request_id=request_id,
-                    current_status=existing_canon.get("status"),
-                    error_message=(
-                        f"target redirects to canonical {canonical_id} "
-                        f"held by request {existing_canon['id']} "
-                        f"(status={existing_canon.get('status')!r})"
-                    ),
-                )
-
-        return self._finalize_replace(
-            request_id,
-            canonical_mbid=canonical_id,
-            target_rg=target_master,
-            target_data=target_data,
-            new_discogs_release_id=canonical_id,
+        return _ResolvedTarget(
+            canonical_id=canonical_id,
+            group_id=target_master,
+            data=target_data,
         )
 
     def _discogs_lookup_or_error(
@@ -758,7 +984,7 @@ class MbidReplaceService:
         *,
         request_id: int,
         detail_context: str,
-    ) -> tuple[dict[str, Any] | None, ReplaceResult | None]:
+    ) -> tuple[dict[str, object] | None, ReplaceResult | None]:
         """Fresh Discogs-mirror lookup + the three-way exception→outcome
         mapping shared by the source lazy-backfill and target lookup sites
         in ``_replace_discogs_target``.
@@ -813,12 +1039,14 @@ class MbidReplaceService:
         request_id: int,
         *,
         canonical_mbid: str,
-        target_rg: str,
-        target_data: dict[str, Any],
+        target_rg: str | None,
+        target_data: dict[str, object],
         new_discogs_release_id: str | None,
     ) -> ReplaceResult:
-        """Phases 1-5 — the mutation half, shared by the MB and Discogs
-        arms once the target identity is resolved and validated.
+        """Phases 1-5 — the mutation half, shared by the MB, Discogs, and
+        cross-pathway arms once the target identity is resolved and
+        validated. ``target_rg`` is ``None`` only for a masterless Discogs
+        target reached through the cross-pathway arm.
 
         Acquires the IMPORT advisory lock, captures pre-supersede state,
         atomically supersedes the row (dual-writing
@@ -943,12 +1171,14 @@ class MbidReplaceService:
                     request_id,
                     new_mb_release_id=canonical_mbid,
                     new_mb_release_group_id=target_rg,
-                    new_mb_artist_id=target_data.get("artist_id"),
-                    new_artist_name=target_data.get("artist_name") or "",
-                    new_album_title=target_data.get("title") or "",
-                    new_year=target_data.get("year"),
-                    new_country=target_data.get("country"),
-                    new_tracks=list(target_data.get("tracks") or []),
+                    new_mb_artist_id=release_str_or_none(
+                        target_data, "artist_id",
+                    ),
+                    new_artist_name=release_str(target_data, "artist_name"),
+                    new_album_title=release_str(target_data, "title"),
+                    new_year=release_int_or_none(target_data, "year"),
+                    new_country=release_str_or_none(target_data, "country"),
+                    new_tracks=release_tracks(target_data),
                     new_discogs_release_id=new_discogs_release_id,
                 )
             except MbidCollisionError as exc:
