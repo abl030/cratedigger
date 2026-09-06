@@ -153,7 +153,7 @@ export function renderPressingsList(releases, sourceMbid) {
     return '<p style="color:#888;">No pressings found in this release group.</p>';
   }
   const rows = releases.map((r) => {
-    const isCurrent = r.id === sourceMbid;
+    const isCurrent = isCurrentPressing(r, sourceMbid);
     const disabledAttr = isCurrent ? ' disabled' : '';
     const labelSuffix = isCurrent ? ' (current pressing)' : '';
     const meta = pressingMeta(r);
@@ -186,6 +186,42 @@ export function renderPressingsList(releases, sourceMbid) {
  */
 export function renderMasterlessNote() {
   return '<p style="color:#888;">This release has no Discogs master on file — there are no other pressings to switch to.</p>';
+}
+
+/**
+ * Explanatory note for a release group whose only pressing on file is the
+ * request's own (issue #1382 item 1): the list below shows just the
+ * current pressing, disabled, and without this line the picker is a
+ * dead end the operator learns nothing from.
+ *
+ * @returns {string}
+ */
+export function renderSolePressingNote() {
+  return '<p style="color:#888;">No other pressing of this album is on file — there is nothing to switch to.</p>';
+}
+
+/**
+ * Whether a listed pressing is the request's current one — the ONE
+ * comparison both the list's disabled row and the sole-pressing note
+ * rest on, so the two can never disagree.
+ *
+ * @param {ReleaseGroupSibling} r
+ * @param {string} sourceMbid
+ * @returns {boolean}
+ */
+export function isCurrentPressing(r, sourceMbid) {
+  return r.id === sourceMbid;
+}
+
+/**
+ * Whether every pressing in the group is the request's current one.
+ *
+ * @param {ReleaseGroupSibling[]} releases
+ * @param {string} sourceMbid
+ * @returns {boolean}
+ */
+export function onlyCurrentPressing(releases, sourceMbid) {
+  return releases.length > 0 && releases.every((r) => isCurrentPressing(r, sourceMbid));
 }
 
 /**
@@ -588,6 +624,7 @@ async function runStandard(options, showOverlay, close) {
   });
   showOverlay(`${renderStandardHeader(sourceLabel)}
     ${sourcePanel}
+    ${onlyCurrentPressing(releases, sourceMbid) ? renderSolePressingNote() : ''}
     ${renderPressingsList(releases, sourceMbid)}
     <div class="replace-picker-cancel-bar">
       <button class="btn" id="replace-picker-cancel">Cancel</button>

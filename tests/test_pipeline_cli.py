@@ -5632,6 +5632,44 @@ class TestCmdReplace(_FakeDbWebServerCase):
             {"target_mb_release_id": "1002", "cross_pathway": False},
         )
 
+    def test_route_refusal_without_an_outcome_renders_the_api_error(self):
+        """A route refusal that never reaches the service carries no
+        ``outcome``; the adapter prints the route's own error through
+        ``render_api_error`` and maps the status (issue #1382 item 4)."""
+        rc, out = self._run(
+            mock_outcome="replaced",
+            mock_kwargs={"new_request_id": 99},
+            target_mbid="   ",
+        )
+        self.assertEqual(rc, 3)
+        self.assertIn("API refused (400)", out)
+        # The refusal REASON is the operator's only evidence, so it is
+        # asserted verbatim, and the replace payload block never follows it.
+        self.assertIn("target_mb_release_id must be a non-empty string", out)
+        self.assertNotIn("Outcome:", out)
+        self.assertNotIn("Request ID:", out)
+        self.assertIsNone(self._service_call, "the service is never reached")
+
+    def test_help_text_names_the_cross_pathway_opt_in(self):
+        """The subparser's help is operator-facing copy (issue #1382 item
+        4): it must name ``--to``, ``--cross-pathway`` and what the flag
+        asserts."""
+        from scripts.pipeline_cli.routes_meta import _build_parser
+
+        parser, _, _ = _build_parser()
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), self.assertRaises(SystemExit) as exit_info:
+            parser.parse_args(["replace", "--help"])
+        self.assertEqual(exit_info.exception.code, 0)
+        # argparse wraps to the terminal width; compare phrases on the
+        # whitespace-normalised text (the idiom this file's list-help pin
+        # already uses), never on the raw wrapped output.
+        text = " ".join(stdout.getvalue().split())
+        self.assertIn("--to", text)
+        self.assertIn("--cross-pathway", text)
+        self.assertIn("other pathway", text)
+        self.assertIn("one album", text)
+
     def test_cross_pathway_is_a_parser_flag(self):
         from scripts.pipeline_cli.routes_meta import _build_parser
 
