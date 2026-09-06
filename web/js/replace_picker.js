@@ -1067,7 +1067,7 @@ async function runInverted(options, showOverlay, close) {
   // Discogs row that reached the picker through its PAIR has no group
   // to resolve and nothing to resolve it for: skip straight to the pair.
   let releaseGroupId = options.releaseGroupId || null;
-  if (!releaseGroupId) {
+  if (!releaseGroupId && !pairedGroupId) {
     showOverlay(`${renderInvertedHeader(options.targetLabel || options.targetMbid)}
       <p>Resolving release group…</p>`);
     try {
