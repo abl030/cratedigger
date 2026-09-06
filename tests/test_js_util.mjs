@@ -1226,7 +1226,7 @@ const invEnabled = renderReplaceButton({
   targetMbid: 'new-mbid',
   releaseGroupId: 'rg-1',
   targetLabel: 'Pet Grief — New',
-}, { enabled: true });
+}, { offer: { enabled: true, reason: 'own', title: '' } });
 t.contains(invEnabled, 'targetMbid',
   'renderReplaceButton inverted enabled wires targetMbid');
 t.excludes(invEnabled, 'disabled',
@@ -1237,7 +1237,7 @@ const invDisabled = renderReplaceButton({
   targetMbid: 'new-mbid',
   releaseGroupId: 'rg-1',
   targetLabel: 'Pet Grief — New',
-}, { enabled: false });
+}, { offer: { enabled: false, reason: 'no_pair', title: 'No existing request in this release group' } });
 t.contains(invDisabled, 'disabled',
   'renderReplaceButton inverted disabled carries disabled attr');
 t.excludes(invDisabled, 'window.openReplacePicker',
@@ -1263,7 +1263,7 @@ const invNullRg = renderReplaceButton({
   targetMbid: 'new-mbid',
   releaseGroupId: null,
   targetLabel: 'Pet Grief — New',
-}, { enabled: true });
+}, { offer: { enabled: true, reason: 'own', title: '' } });
 t.contains(invNullRg, 'window.openReplacePicker',
   'renderReplaceButton inverted renders with null releaseGroupId');
 t.contains(invNullRg, 'releaseGroupId: null',

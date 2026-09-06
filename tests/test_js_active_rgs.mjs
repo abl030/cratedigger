@@ -18,6 +18,7 @@
 import {
   loadActiveRgs,
   hasActiveRg,
+  hasActiveGrouplessRelease,
   activeRgsUnavailable,
   invalidateActiveRgs,
 } from '../web/js/active_rgs.js';
@@ -40,7 +41,7 @@ t.section('loadActiveRgs() — successful fetch caches real membership');
 {
   invalidateActiveRgs();
   stubGlobals({
-    fetch: async () => okJsonResponse({ release_group_ids: ['rg-1', 'rg-2'] }),
+    fetch: async () => okJsonResponse({ release_group_ids: ['rg-1', 'rg-2'], groupless_release_ids: [] }),
   });
   await loadActiveRgs();
   t.ok(hasActiveRg('rg-1'), 'a release group present in the response reports true');
@@ -68,11 +69,37 @@ t.section('loadActiveRgs() — network failure (fetch rejects) is also flagged u
 t.section('loadActiveRgs() — malformed release_group_ids is flagged unavailable, not cached as a confirmed empty answer');
 {
   invalidateActiveRgs();
-  stubGlobals({ fetch: async () => okJsonResponse({ release_group_ids: null }) });
+  stubGlobals({ fetch: async () => okJsonResponse({ release_group_ids: null, groupless_release_ids: [] }) });
   await loadActiveRgs();
   t.ok(!hasActiveRg('rg-1'), 'fail-closed: the button stays disabled on a malformed response');
   t.ok(activeRgsUnavailable(),
     'a malformed release_group_ids shape is flagged unavailable, where it used to be silently cached as a confirmed empty set');
+}
+
+t.section('loadActiveRgs() — the group-less release-id set is cached beside the group set (issue #1366 part 2)');
+{
+  invalidateActiveRgs();
+  stubGlobals({
+    fetch: async () => okJsonResponse({
+      release_group_ids: ['rg-1'],
+      groupless_release_ids: ['3938744', 'legacy-uuid'],
+    }),
+  });
+  await loadActiveRgs();
+  t.ok(hasActiveGrouplessRelease('3938744'), 'a masterless Discogs request is found by its exact release id');
+  t.ok(hasActiveGrouplessRelease('legacy-uuid'), 'a legacy MB row without a group is found by its UUID');
+  t.ok(!hasActiveGrouplessRelease('rg-1'), 'the two sets do not bleed: a group id is not a release id');
+  t.ok(!hasActiveRg('3938744'), 'and a release id is not a group id');
+  t.ok(!hasActiveGrouplessRelease(''), 'an empty key is never active');
+}
+
+t.section('loadActiveRgs() — a payload missing groupless_release_ids is malformed, not a confirmed-empty second set');
+{
+  invalidateActiveRgs();
+  stubGlobals({ fetch: async () => okJsonResponse({ release_group_ids: ['rg-1'] }) });
+  await loadActiveRgs();
+  t.ok(!hasActiveRg('rg-1'), 'fail-closed: neither set is cached from a payload that lacks the second field');
+  t.ok(activeRgsUnavailable(), 'the missing field is flagged unavailable like any other contract break');
 }
 
 t.section('loadActiveRgs() — retry: a failed attempt does not poison a later successful one');
@@ -83,7 +110,7 @@ t.section('loadActiveRgs() — retry: a failed attempt does not poison a later s
     fetch: async () => {
       call += 1;
       if (call === 1) return httpErrorResponse(500);
-      return okJsonResponse({ release_group_ids: ['rg-1'] });
+      return okJsonResponse({ release_group_ids: ['rg-1'], groupless_release_ids: [] });
     },
   });
   await loadActiveRgs();
@@ -132,7 +159,7 @@ t.section('loadActiveRgs() — a stale in-flight FAILURE cannot clobber a freshe
         await staleGate.promise;
         return httpErrorResponse(500);
       }
-      return okJsonResponse({ release_group_ids: ['rg-fresh'] });
+      return okJsonResponse({ release_group_ids: ['rg-fresh'], groupless_release_ids: [] });
     },
   });
   const staleLoad = loadActiveRgs();
@@ -166,9 +193,9 @@ t.section('loadActiveRgs() — a stale in-flight SUCCESS cannot overwrite a fres
         // generation guard, distinct from the failure-branch guard the
         // previous section exercises.
         await staleGate.promise;
-        return okJsonResponse({ release_group_ids: ['rg-stale'] });
+        return okJsonResponse({ release_group_ids: ['rg-stale'], groupless_release_ids: [] });
       }
-      return okJsonResponse({ release_group_ids: ['rg-fresh'] });
+      return okJsonResponse({ release_group_ids: ['rg-fresh'], groupless_release_ids: [] });
     },
   });
   const staleLoad = loadActiveRgs();
@@ -196,7 +223,7 @@ t.section('loadActiveRgs() — a caller arriving after a stale attempt settles s
         return httpErrorResponse(500);
       }
       await freshGate.promise;
-      return okJsonResponse({ release_group_ids: ['rg-fresh'] });
+      return okJsonResponse({ release_group_ids: ['rg-fresh'], groupless_release_ids: [] });
     },
   });
   const staleLoad = loadActiveRgs();
@@ -275,7 +302,9 @@ function unclaimedPressing(id, releaseGroupId) {
   };
 }
 
-async function expandReleaseGroup({ rgId, sourceId, activeRgsBody, activeRgsFails }) {
+async function expandReleaseGroup({
+  rgId, sourceId, activeRgsBody, activeRgsFails, pairing = 'checked', paired = null, source = 'mb',
+}) {
   pipelineStore.clear();
   invalidateActiveRgs();
   const relEl = element();
@@ -288,7 +317,9 @@ async function expandReleaseGroup({ rgId, sourceId, activeRgsBody, activeRgsFail
       return okJsonResponse({ releases: [unclaimedPressing(sourceId, rgId)] });
     },
   });
-  await loadReleaseGroup(rgId, null, { targetEl: relEl, source: 'mb', identityKind: 'work' });
+  await loadReleaseGroup(rgId, null, {
+    targetEl: relEl, source, identityKind: 'work', pairing, paired,
+  });
   return relEl.innerHTML;
 }
 
@@ -297,12 +328,119 @@ t.section('loadReleaseGroup() composed path — confirmed absence renders the co
   const html = await expandReleaseGroup({
     rgId: 'rg-composed-1',
     sourceId: '129bebd8-a7b9-4099-b0bc-545b704e7a95',
-    activeRgsBody: { release_group_ids: [] },
+    activeRgsBody: { release_group_ids: [], groupless_release_ids: [] },
   });
-  t.contains(html, 'disabled title="No existing request in this release group"',
-    'a genuinely empty active-RG set renders the confirmed-absence explanation');
+  // Since issue #1366 part 2 the confirmed-absence explanation also
+  // says what the OTHER pathway check found: with the pairing checked
+  // and no pair, that the album has no paired Discogs group.
+  t.contains(html, 'disabled title="No existing request in this release group; no paired Discogs master or release was found for this album."',
+    'a genuinely empty active-RG set with a checked, pairless compare renders the confirmed-absence explanation naming both checks');
   t.excludes(html, 'Could not check',
     'the unavailable explanation is not shown when the lookup actually succeeded');
+}
+
+t.section('loadReleaseGroup() composed path — an unchecked pairing is said, not described as absence (issue #1366 part 2)');
+{
+  const html = await expandReleaseGroup({
+    rgId: 'rg-composed-1b',
+    sourceId: '129bebd8-a7b9-4099-b0bc-545b704e7a95',
+    activeRgsBody: { release_group_ids: [], groupless_release_ids: [] },
+    pairing: 'pending',
+  });
+  t.contains(html, 'the other pathway&#39;s pairing could not be checked',
+    'a page whose compare never arrived says the pairing was not checked');
+  t.excludes(html, 'no paired Discogs',
+    'and does not claim the album has no pair');
+}
+
+t.section('loadReleaseGroup() composed path — a paired Discogs master holding a request enables Replace across pathways (issue #1366 part 2)');
+{
+  const paired = { id: '11052', kind: 'work', source: 'discogs', label: 'Absolution' };
+  const html = await expandReleaseGroup({
+    rgId: '6f151223-f3a3-3e57-810f-598f7897006c',
+    sourceId: 'fdd45566-5c8b-4beb-8ec3-1b5f93a01319',
+    activeRgsBody: { release_group_ids: ['11052'], groupless_release_ids: [] },
+    paired,
+  });
+  t.excludes(html, 'disabled', 'the button is enabled although the row\'s own release group holds no request');
+  t.contains(html, "pairedGroupId: &quot;11052&quot;, pairedGroupKind: 'work', pairedLabel: &quot;Absolution&quot;",
+    'the onclick hands the picker the paired master so it can list the other pathway\'s request');
+  t.contains(html, 'title="Replaces the request held on the other pathway: Discogs master &quot;Absolution&quot;"',
+    'the enabled button says the request it would replace is on the other pathway');
+}
+
+t.section('loadReleaseGroup() composed path — a paired MASTERLESS Discogs release is looked up in the group-less key set');
+{
+  const paired = { id: '3938744', kind: 'release', source: 'discogs', label: 'Fraulein' };
+  const enabled = await expandReleaseGroup({
+    rgId: '1c9e2970-b221-30ab-93c6-7896b52a240b',
+    sourceId: '19016167-1ba2-41ab-9bec-bf9ed2ac995c',
+    activeRgsBody: { release_group_ids: [], groupless_release_ids: ['3938744'] },
+    paired,
+  });
+  t.excludes(enabled, 'disabled', 'a masterless Discogs request found by its exact id enables the offer');
+  t.contains(enabled, "pairedGroupKind: 'release'", 'the picker is told to look the pair up by release');
+  const wrongSet = await expandReleaseGroup({
+    rgId: '1c9e2970-b221-30ab-93c6-7896b52a240b',
+    sourceId: '19016167-1ba2-41ab-9bec-bf9ed2ac995c',
+    activeRgsBody: { release_group_ids: ['3938744'], groupless_release_ids: [] },
+    paired,
+  });
+  t.contains(wrongSet, 'disabled', 'a release id is never matched against the group set');
+  t.contains(wrongSet, 'either pathway', 'and the pair is reported as checked but holding no request');
+}
+
+t.section('loadReleaseGroup() composed path — pair found, no request on either side');
+{
+  const html = await expandReleaseGroup({
+    rgId: '6f151223-f3a3-3e57-810f-598f7897006c',
+    sourceId: 'fdd45566-5c8b-4beb-8ec3-1b5f93a01319',
+    activeRgsBody: { release_group_ids: [], groupless_release_ids: [] },
+    paired: { id: '11052', kind: 'work', source: 'discogs', label: 'Absolution' },
+  });
+  t.contains(html, 'disabled title="No existing request for this album on either pathway (paired with Discogs master &quot;Absolution&quot;)."',
+    'the tooltip names the pair and says both sides were checked');
+}
+
+t.section('loadReleaseGroup() composed path — a pair handed to a PENDING page is neither believed nor carried to the picker');
+{
+  const html = await expandReleaseGroup({
+    rgId: '6f151223-f3a3-3e57-810f-598f7897006c',
+    sourceId: 'fdd45566-5c8b-4beb-8ec3-1b5f93a01319',
+    activeRgsBody: { release_group_ids: ['6f151223-f3a3-3e57-810f-598f7897006c', '11052'], groupless_release_ids: [] },
+    pairing: 'pending',
+    paired: { id: '11052', kind: 'work', source: 'discogs', label: 'Absolution' },
+  });
+  t.excludes(html, 'disabled', 'the own group holds a request, so the button is enabled through it');
+  t.excludes(html, 'pairedGroupId', 'but the picker is not handed a pair the compare has not confirmed');
+  t.excludes(html, 'title="Replaces the request held on the other pathway', 'and the tooltip does not claim one');
+}
+
+t.section('loadReleaseGroup() composed path — a Discogs row with no pair names the MB side it looked for (rowSource wiring)');
+{
+  const html = await expandReleaseGroup({
+    rgId: '11052',
+    sourceId: '793320',
+    activeRgsBody: { release_group_ids: [], groupless_release_ids: [] },
+    source: 'discogs',
+  });
+  t.contains(html, 'no paired MusicBrainz release group was found for this album',
+    'a Discogs row is told what was looked for on MusicBrainz, not on its own pathway');
+  t.excludes(html, 'no paired Discogs', 'never names its own pathway as the missing pair');
+}
+
+t.section('loadReleaseGroup() composed path — a surface with no compare keeps the pre-#1366 copy and never mentions pairing');
+{
+  const html = await expandReleaseGroup({
+    rgId: 'rg-no-compare',
+    sourceId: '129bebd8-a7b9-4099-b0bc-545b704e7a95',
+    activeRgsBody: { release_group_ids: [], groupless_release_ids: [] },
+    pairing: 'none',
+  });
+  t.contains(html, 'disabled title="No existing request in this release group"',
+    'a caller that says nothing about pairing (search results, the VA card) gets the plain own-group copy');
+  t.excludes(html, 'pairing', 'and no claim that a pairing was checked or pending');
+  t.excludes(html, 'no paired', 'nor that no pair was found');
 }
 
 t.section('loadReleaseGroup() composed path — a failed active-RG lookup renders the unavailable explanation, button still disabled');
@@ -329,7 +467,7 @@ t.section('loadReleaseGroup() composed path — a real match still enables the b
   const html = await expandReleaseGroup({
     rgId: 'rg-composed-3',
     sourceId: '129bebd8-a7b9-4099-b0bc-545b704e7a95',
-    activeRgsBody: { release_group_ids: ['rg-composed-3'] },
+    activeRgsBody: { release_group_ids: ['rg-composed-3'], groupless_release_ids: [] },
   });
   t.contains(html, 'window.openReplacePicker({targetMbid:',
     'the enabled button still wires the inverted-mode click handler');
@@ -439,10 +577,16 @@ t.section('loadReleaseGroup() composed path — a masterless Discogs release und
     identityKind: 'release',
     activeRgsFails: true,
   });
+  // This caller says nothing about pairing, so it is a surface with no
+  // compare (issue #1366 part 2 kept such surfaces on their pre-#1366
+  // copy): the row's text is the plain own-group wording, exactly as
+  // before, and never the unavailable explanation.
   t.contains(html, 'disabled title="No existing request in this release group"',
-    'a masterless Discogs release has no lookup key at all, so it keeps the confirmed-absence text even though the fetch failed');
+    'a masterless Discogs release has no lookup key at all, so a failed fetch is irrelevant to it and the text stays the pre-#1366 wording');
   t.excludes(html, 'Could not check',
     'the unavailable explanation is never claimed for a row with no lookup key to check');
+  t.excludes(html, 'pairing',
+    'and a surface that never ran the compare says nothing about one');
 }
 
 t.section('loadReleaseGroup() composed path — a Discogs master row with an active Discogs request for that master still enables Replace (must-still-work, proves the premise correction)');
@@ -450,7 +594,7 @@ t.section('loadReleaseGroup() composed path — a Discogs master row with an act
   const html = await expandDiscogsReleaseGroup({
     rgId: 424242,
     sourceId: '999999',
-    activeRgsBody: { release_group_ids: ['424242'] },
+    activeRgsBody: { release_group_ids: ['424242'], groupless_release_ids: [] },
   });
   t.contains(html, 'window.openReplacePicker({targetMbid:',
     'a real match on the master id enables the inverted-mode Replace button for a Discogs row, proving the cache genuinely holds Discogs-shaped ids');

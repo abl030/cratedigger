@@ -14,16 +14,21 @@
 
 import {
   addRelease,
+  applySearchTargetAfterDiscography,
   catalogueDomId,
   releaseGroupRequestPath,
   renderPressingRow,
   renderReleaseDetail,
   renderRgRow,
+  expansionOptsFromRow,
+  pairedGroupOf,
   synthesizeMasterlessRow,
   splitPressings,
   statusChipHtml,
 } from '../web/js/discography.js';
 import { renderYoutubeRescueControl } from '../web/js/youtube_rescue_control.js';
+import { invalidateActiveRgs } from '../web/js/active_rgs.js';
+import { state } from '../web/js/state.js';
 
 import { element, stubGlobals, suite } from './js_harness.mjs';
 
@@ -315,6 +320,69 @@ t.section('synthesizeMasterlessRow() — in-library payload keeps quality fields
   t.contains(html, '>F</span>', 'masterless row renders quality independently');
   t.contains(html, '>captured<', 'masterless row renders captured history');
   t.contains(html, '>verified<', 'masterless row renders carried proof');
+}
+
+t.section('renderRgRow() — the compare counterpart rides along to loadReleaseGroup as the pair (issue #1366 part 2)');
+{
+  const row = {
+    id: '6f151223-f3a3-3e57-810f-598f7897006c', title: 'Absolution', source: 'mb',
+    identity_kind: 'work', first_release_date: '2003-09-15', provenance: ['ordinary'],
+    counterpart: {
+      id: 11052, title: 'Absolution "Deluxe" <b>', source: 'discogs', identity_kind: 'work',
+    },
+  };
+  const html = renderRgRow(row, { artistName: 'Muse', nameLC: 'muse', pairingChecked: true });
+  t.contains(html,
+    "window.loadReleaseGroup(&quot;6f151223-f3a3-3e57-810f-598f7897006c&quot;, this, {source:'mb',identityKind:'work',pairing:'checked',paired:{id:&quot;11052&quot;,kind:'work',source:'discogs',label:&quot;Absolution &#92;&quot;Deluxe&#92;&quot; &lt;b&gt;&quot;}})",
+    'the onclick carries the pairing state and the pair, free text as escaped JS strings, vocabularies as literals');
+  t.contains(html, 'data-paired-id="11052" data-paired-kind="work" data-paired-source="discogs" data-paired-label="Absolution &quot;Deluxe&quot; &lt;b&gt;"',
+    'the row also carries the pair as data attributes for the late-compare reload');
+  t.contains(html, 'data-pairing="checked"', 'and the pairing state rides on the row');
+
+  const masterlessPair = renderRgRow({
+    ...row, counterpart: { id: '3938744', title: 'Fraulein', source: 'discogs', identity_kind: 'release' },
+  }, { artistName: 'Deloris', nameLC: 'deloris', pairingChecked: true });
+  t.contains(masterlessPair, "paired:{id:&quot;3938744&quot;,kind:'release',source:'discogs',label:&quot;Fraulein&quot;}",
+    'a masterless Discogs counterpart is passed as a release, so the expansion looks it up by exact id');
+
+  const unpaired = renderRgRow({ ...row, counterpart: undefined }, { artistName: 'Muse', nameLC: 'muse' });
+  t.contains(unpaired, "{source:'mb',identityKind:'work',pairing:'pending'}",
+    'no counterpart and no pairingChecked: the expansion is told the pairing is still pending');
+  t.excludes(unpaired, 'data-paired-id', 'no pair, no paired attributes');
+
+  t.deepEqual(pairedGroupOf(row), { id: '11052', kind: 'work', source: 'discogs', label: 'Absolution "Deluxe" <b>' },
+    'pairedGroupOf normalises the counterpart: string id, validated kind and source, raw label');
+
+  // The row's attributes are what a programmatic reload reads back; they
+  // must say exactly what the onclick says.
+  const rendered = {
+    dataset: {
+      catalogueSource: 'mb', identityKind: 'work', catalogueId: row.id, pairing: 'checked',
+      pairedId: '11052', pairedKind: 'work', pairedSource: 'discogs', pairedLabel: 'Absolution "Deluxe" <b>',
+    },
+  };
+  t.deepEqual(expansionOptsFromRow(rendered), {
+    source: 'mb', identityKind: 'work', masterless: false, pairing: 'checked',
+    paired: { id: '11052', kind: 'work', source: 'discogs', label: 'Absolution "Deluxe" <b>' },
+  }, 'expansionOptsFromRow reads the pairing state and the pair back off the row');
+  t.deepEqual(expansionOptsFromRow({ dataset: { catalogueSource: 'discogs', identityKind: 'release', catalogueId: '3938744', pairing: 'pending' } }), {
+    source: 'discogs', identityKind: 'release', masterless: true, pairing: 'pending', paired: null,
+  }, 'a pending masterless row reloads as a masterless release with no pair');
+  t.deepEqual(expansionOptsFromRow({ dataset: { catalogueSource: 'mb', identityKind: 'work', catalogueId: 'x' } }), {
+    source: 'mb', identityKind: 'work', masterless: false, pairing: 'none', paired: null,
+  }, 'a row without a pairing attribute is a surface with no compare');
+  t.equal(expansionOptsFromRow({ dataset: { pairing: 'bogus', catalogueSource: 'mb' } }).pairing, 'none',
+    'an unknown pairing value is never believed to be pending or checked');
+  t.deepEqual(expansionOptsFromRow({ dataset: {
+    catalogueSource: 'bogus', identityKind: 'bogus', catalogueId: 'x', pairing: 'checked',
+    pairedId: '11052', pairedKind: 'bogus', pairedSource: 'bogus', pairedLabel: 'L',
+  } }).paired, { id: '11052', kind: 'work', source: 'mb', label: 'L' },
+    'unknown pair kind and source fall back to their safe vocabulary values, never interpolated raw');
+  t.equal(pairedGroupOf({ counterpart: { source: 'bogus', identity_kind: 'bogus', id: 1, title: 't' } }).kind, 'work',
+    'an unknown identity kind is treated as a work');
+  t.equal(pairedGroupOf({ counterpart: { source: 'bogus', identity_kind: 'bogus', id: 1, title: 't' } }).source, 'mb',
+    'an unknown source falls back to mb, never interpolated raw');
+  t.equal(pairedGroupOf({}), null, 'no counterpart, no pair');
 }
 
 t.section('splitPressings() — owned/in-flight pressings are never hidden (The Meadowlands pin)');
@@ -614,6 +682,51 @@ t.section('Discogs DOM identity namespace — generated numeric collision sweep'
     false,
     'new checker rejects the known-bad collision',
   );
+}
+
+t.section('applySearchTargetAfterDiscography() — a search-by-ID expansion reads the pairing state and pair off its row (issue #1366 part 2)');
+{
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const RG = '6f151223-f3a3-3e57-810f-598f7897006c';
+  const saved = {
+    expandId: state.searchTargetExpandId, source: state.searchTargetSource,
+    kind: state.searchTargetIdentityKind, browseSource: state.browseSource,
+  };
+  state.searchTargetExpandId = RG;
+  state.searchTargetSource = 'mb';
+  state.searchTargetIdentityKind = 'work';
+  state.browseSource = 'mb';
+  const inner = { innerHTML: '', parentElement: null };
+  const row = {
+    dataset: {
+      catalogueSource: 'mb', identityKind: 'work', catalogueId: RG, pairing: 'checked',
+      pairedId: '11052', pairedKind: 'work', pairedSource: 'discogs', pairedLabel: 'Absolution',
+    },
+    querySelector: (sel) => (sel === '.releases' ? inner : null),
+  };
+  const rgEl = { querySelectorAll: (sel) => (sel === '.rg' ? [row] : []) };
+  invalidateActiveRgs();
+  stubGlobals({
+    fetch: async (url) => {
+      if (String(url).includes('/api/pipeline/active-rgs')) {
+        return { ok: true, status: 200, json: async () => ({ release_group_ids: ['11052'], groupless_release_ids: [] }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ releases: [{
+        id: 'fdd45566-5c8b-4beb-8ec3-1b5f93a01319', title: 'Absolution', status: 'Official',
+        country: 'JP', date: '2003-09-15', format: 'CD', track_count: 15,
+      }] }) };
+    },
+  });
+  applySearchTargetAfterDiscography(rgEl);
+  for (let i = 0; i < 4; i++) await flush();
+  t.contains(inner.innerHTML, 'pairedGroupId: &quot;11052&quot;',
+    'the programmatic expansion carries the row\'s pair to the picker, exactly as a click would');
+  t.excludes(inner.innerHTML, 'disabled', 'and the paired master holding a request enables Replace');
+  t.excludes(inner.innerHTML, 'could not be checked', 'a checked row is never described as pending');
+  state.searchTargetExpandId = saved.expandId;
+  state.searchTargetSource = saved.source;
+  state.searchTargetIdentityKind = saved.kind;
+  state.browseSource = saved.browseSource;
 }
 
 t.done();

@@ -4,6 +4,7 @@ import { esc, jsArg, parsePastedId } from './util.js';
 import {
   applySearchTargetAfterDiscography,
   catalogueDomId,
+  expansionOptsFromRow,
   loadReleaseGroup,
   renderReleaseDetail,
 } from './discography.js';
@@ -577,9 +578,38 @@ function renderUnified(
     ungroupedReleases: [],
     libraryAlbums: libRes.albums || [],
   });
-  el.innerHTML = renderArtistSections(sections, { artistId: aid, artistName: name });
+  el.innerHTML = renderArtistSections(sections, {
+    artistId: aid, artistName: name, pairingChecked: Boolean(compare),
+  });
   restoreExpandedRows(el, expanded);
   applySearchTargetAfterDiscography(el);
+}
+
+/**
+ * After the late compare render, expansions restored from the fast
+ * (pre-compare) render were built while the pairing was still pending,
+ * so every one of their Replace offers said so. Re-load every restored
+ * expansion with what its row now carries (issue #1366 part 2): a pair,
+ * or the confirmed absence of one — both change the offer, so both are
+ * reloaded rather than left claiming the pairing "could not be checked".
+ * @param {HTMLElement} el
+ * @param {() => boolean} isStale
+ * @returns {number} how many expansions were reloaded
+ */
+export function reloadExpansionsAfterCompare(el, isStale) {
+  let reloaded = 0;
+  for (const row of Array.from(el.querySelectorAll('.rg'))) {
+    const detail = /** @type {HTMLElement|null} */ (row.querySelector('.releases'));
+    if (!detail || !detail.innerHTML) continue;
+    detail.innerHTML = '';
+    loadReleaseGroup(row.dataset.catalogueId || '', null, {
+      targetEl: detail,
+      isStale,
+      ...expansionOptsFromRow(row),
+    }).catch(() => {});
+    reloaded += 1;
+  }
+  return reloaded;
 }
 
 /** Preserve already-loaded expansions across the one late compare render. */
@@ -644,6 +674,7 @@ async function fireCompareComplement(el, aid, name, token) {
     renderUnified(
       el, aid, name, cached.fast.rgRes, cached.fast.libRes, data, true,
     );
+    reloadExpansionsAfterCompare(el, () => token !== artistPageToken);
     if (cached.disamb) {
       state.disambData = cached.disamb;
       applyAnalysisChips(el, cached.disamb);

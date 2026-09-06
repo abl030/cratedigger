@@ -107,10 +107,22 @@ t.section('unmatched masterless rows stay reachable inside Other releases');
     artistId: ARTIST_ID, artistName: ARTIST_NAME,
   });
   t.excludes(html, 'Ungrouped', 'storage topology is not a heading');
-  t.contains(html, "{masterless:true,source:'discogs',identityKind:'release'}",
+  t.contains(html, "{masterless:true,source:'discogs',identityKind:'release',pairing:'pending'}",
     'masterless row keeps exact release expansion');
   t.contains(html, 'data-release-id="3938744"',
     'masterless row remains ringable by exact release id');
+  // The compare-completed flag reaches every rendered row (issue #1366
+  // part 2): a fast render leaves the pairing pending, the late render
+  // marks it checked — the seam a forced-true or dropped flag would hide.
+  t.contains(html, 'data-pairing="pending"', 'a render without the flag leaves every row pending');
+  t.excludes(html, "pairing:'checked'", 'and no row claims the pairing was checked');
+  const checked = renderArtistSections(sections, {
+    artistId: ARTIST_ID, artistName: ARTIST_NAME, pairingChecked: true,
+  });
+  t.contains(checked, "{masterless:true,source:'discogs',identityKind:'release',pairing:'checked'}",
+    'the completed compare marks the row checked in its onclick');
+  t.contains(checked, 'data-pairing="checked"', 'and on the row');
+  t.excludes(checked, "pairing:'pending'", 'no row is left pending after the compare');
 }
 
 t.section('paired display classification follows MB work precedence');

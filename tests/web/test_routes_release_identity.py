@@ -120,6 +120,7 @@ class TestPipelineReplaceContract(_FakeDbWebServerCase):
         "id", "mb_release_id", "mb_release_group_id", "status",
         "artist_name", "album_title", "processing_owner",
     }
+    ACTIVE_KEYS_FIELDS: ClassVar = {"release_group_ids", "groupless_release_ids"}
 
     def setUp(self) -> None:
         super().setUp()
@@ -486,14 +487,106 @@ class TestPipelineReplaceContract(_FakeDbWebServerCase):
             id=3, status="replaced", mb_release_id="m-3",
             mb_release_group_id="rg-cccc",
         ))
+        # Group-less MASTERLESS DISCOGS rows contribute their exact release
+        # ids instead (issue #1366 part 2); a legacy MB row with no group
+        # is not a key (the compare never pairs an MB release), and a
+        # replaced group-less row contributes nothing.
+        self.db.seed_request(make_request_row(
+            id=4, status="wanted", mb_release_id="3938744",
+            discogs_release_id="3938744", mb_release_group_id=None,
+        ))
+        self.db.seed_request(make_request_row(
+            id=5, status="imported", mb_release_id="legacy-uuid",
+            mb_release_group_id=None,
+        ))
+        self.db.seed_request(make_request_row(
+            id=6, status="replaced", mb_release_id="461206",
+            discogs_release_id="461206", mb_release_group_id=None,
+        ))
         status, data = self._get("/api/pipeline/active-rgs")
         self.assertEqual(status, 200)
+        _assert_required_fields(
+            self, data, self.ACTIVE_KEYS_FIELDS, "active-rgs response",
+        )
         self.assertEqual(data["release_group_ids"], ["rg-aaaa", "rg-bbbb"])
+        self.assertEqual(data["groupless_release_ids"], ["3938744"])
 
     def test_active_rgs_empty(self):
         status, data = self._get("/api/pipeline/active-rgs")
         self.assertEqual(status, 200)
         self.assertEqual(data["release_group_ids"], [])
+        self.assertEqual(data["groupless_release_ids"], [])
+
+    def test_requests_by_release_finds_the_exact_holder(self):
+        """``GET /api/pipeline/requests-by-release/<id>`` is the picker's
+        lookup for a paired MASTERLESS Discogs release (no group to ask
+        ``requests-by-rg`` about): the identity-aware lookup finds a
+        dual-written Discogs row by its numeric id and an MB row by its
+        UUID, in the same row shape as requests-by-rg."""
+        self.db.seed_request(make_request_row(
+            id=8840, mb_release_id="3938744", discogs_release_id="3938744",
+            mb_release_group_id=None, status="wanted",
+            artist_name="Deloris", album_title="Fraulein",
+        ))
+        self.db.seed_request(make_request_row(
+            id=425, mb_release_id="19016167-1ba2-41ab-9bec-bf9ed2ac995c",
+            mb_release_group_id="1c9e2970-b221-30ab-93c6-7896b52a240b",
+            status="wanted", artist_name="Deloris", album_title="Fraulein",
+        ))
+        status, data = self._get("/api/pipeline/requests-by-release/3938744")
+        self.assertEqual(status, 200)
+        self.assertEqual([r["id"] for r in data["requests"]], [8840])
+        _assert_required_fields(
+            self, data["requests"][0], self.REQUESTS_BY_RG_FIELDS,
+            "requests-by-release row",
+        )
+        # Every projected VALUE comes from the row, not just the key: the
+        # picker renders each of these (mutmut survivors in the breadth
+        # pass were exactly these lookups answering None unnoticed). A
+        # wanted row's owner projection is None by construction; the real
+        # handoff below is what makes the owner key itself load-bearing.
+        self.assertEqual(data["requests"][0], {
+            "id": 8840,
+            "mb_release_id": "3938744",
+            "mb_release_group_id": None,
+            "status": "wanted",
+            "artist_name": "Deloris",
+            "album_title": "Fraulein",
+            "processing_owner": None,
+        })
+        job = handoff_automation_owner(self.db, 8840)
+        status, data = self._get("/api/pipeline/requests-by-release/3938744")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["requests"][0]["status"], "processing")
+        self.assertEqual(
+            data["requests"][0]["processing_owner"],
+            {"job_id": job.id, "status": job.status,
+             "preview_status": job.preview_status},
+        )
+        status, data = self._get(
+            "/api/pipeline/requests-by-release/"
+            "19016167-1ba2-41ab-9bec-bf9ed2ac995c",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual([r["id"] for r in data["requests"]], [425])
+        self.assertEqual(
+            data["requests"][0]["mb_release_group_id"],
+            "1c9e2970-b221-30ab-93c6-7896b52a240b",
+            "a grouped holder projects its group (the masterless pin above "
+            "cannot tell the group lookup from None)",
+        )
+
+    def test_requests_by_release_excludes_replaced_and_unknown(self):
+        self.db.seed_request(make_request_row(
+            id=9028, mb_release_id="793320", discogs_release_id="793320",
+            mb_release_group_id="11052", status="replaced",
+        ))
+        status, data = self._get("/api/pipeline/requests-by-release/793320")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["requests"], [])
+        status, data = self._get("/api/pipeline/requests-by-release/424242")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["requests"], [])
 
 
 class TestPipelineResolveRgContract(_FakeDbWebServerCase):

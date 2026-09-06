@@ -691,6 +691,9 @@ ALLOWLIST: dict[str, str] = {
         "scalar list[int] return — no row projection",
     "list_active_release_group_ids":
         "set[str] release-group ids — scalar, no row projection",
+    "list_active_groupless_release_ids":
+        "set[str] exact release ids of masterless Discogs rows — scalar, "
+        "no row projection",
     # --- Computed-aggregate metric dicts ---
     "get_peer_metrics":
         "computed peer-telemetry metric dict — key set assembled in "

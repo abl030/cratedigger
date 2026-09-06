@@ -80,6 +80,27 @@ async function handle(operation, payload) {
         self.assertEqual(first["value"], "alpha")
         self.assertEqual(second["value"], "beta")
 
+    def test_js_line_terminators_in_a_payload_stay_one_frame(self) -> None:
+        """U+2028 / U+2029 are line breaks to Node's readline but legal
+        inside a JSON string; the frame must escape them so the child
+        sees one request and decodes the same string (2026-09-06: a
+        Hypothesis-drawn key split one frame into three, each answered
+        as an invalid request with id -1)."""
+        source = """
+async function handle(operation, payload) {
+  return { echoed: payload.value, length: payload.value.length };
+}
+"""
+        value = "a\nb\rc\x85d\x0be\x0cf\u2028g\u2029h\r\ni"
+        with NodeJsonlWorker(source, cwd=ROOT) as worker:
+            result = worker.request("echo", {"value": value})
+            again = worker.request("echo", {"value": "plain"})
+        assert isinstance(result, dict)
+        assert isinstance(again, dict)
+        self.assertEqual(result["echoed"], value)
+        self.assertEqual(result["length"], len(value))
+        self.assertEqual(again["echoed"], "plain")
+
     def test_malformed_stdout_fails_closed_and_poisoned_worker_stays_dead(self) -> None:
         source = """
 async function handle(_operation, payload) {

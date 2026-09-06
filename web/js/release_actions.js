@@ -6,6 +6,7 @@
  */
 
 import { esc, jsArg } from './util.js';
+import { NO_REQUEST_TITLE } from './replace_offer.js';
 import {
   processingDescriptionId,
   suppressProcessingAction,
@@ -251,28 +252,19 @@ export function renderBadRipButton(state, opts = {}) {
  *   releaseGroupId, sourceLabel})``.
  *
  *   Inverted mode (`opts.mode === 'inverted'`): the row IS the new
- *   MBID. Used on Browse-search rows. Enabled only when there is an
- *   existing non-replaced request in the same release group
- *   (``opts.enabled === true``); disabled otherwise so the affordance
- *   communicates "nothing to replace here" without requiring a click.
- *   A disabled button carries one of two different explanations
- *   (issue #1355 item 6). The caller passes ``opts.unavailable: true``
- *   when the active-RG lookup failed AND its answer would have been
- *   meaningful for this row — i.e. the row has a lookup key the cache
- *   could actually contain, an MB release-group UUID or a Discogs
- *   master id (Discogs requests persist their exact master in the same
- *   column MB releases use, KTD-1). Omitting it (or passing ``false``)
- *   claims the confirmed-absence explanation instead, which is what
- *   this surface has always claimed when the lookup simply doesn't
- *   apply to this row (a masterless Discogs release, with no master to
- *   fall back to) even if the fetch itself failed — a failed check on a
- *   question that could never have been answered is not "unavailable",
- *   it's irrelevant. Distinguishing "irrelevant" from "confirmed absent"
- *   as its own third explanation is out of scope for issue #1355 item 6.
- *   Either way the button stays disabled — this only changes what the
- *   operator is told about why.
+ *   MBID. Used on Browse-search rows. Enabled iff an existing
+ *   non-replaced request could be replaced by this pressing: one in the
+ *   row's own release group / master, or one in the group the artist
+ *   compare PAIRED it with on the other pathway (issue #1366 part 2).
+ *   ``opts.offer`` (``replace_offer.js::replaceOfferState``) carries that
+ *   decision and the honest tooltip for the disabled states — confirmed
+ *   absence on both sides, a failed key lookup, an unchecked pairing, or
+ *   no pair (issue #1355 item 6 kept: a failed lookup is never described
+ *   as confirmed absence). A pair is passed through to the picker so it
+ *   can list the other pathway's request and say so.
  *   Click → ``window.openReplacePicker({targetMbid, releaseGroupId,
- *   targetLabel})``.
+ *   targetLabel, pairedGroupId, pairedGroupKind, pairedLabel})`` (the
+ *   paired fields only when a pair exists).
  *
  * @param {Object} args
  * @param {'standard'|'inverted'} args.mode
@@ -281,10 +273,10 @@ export function renderBadRipButton(state, opts = {}) {
  * @param {string|null} [args.releaseGroupId]  // null → picker lazy-resolves
  * @param {string} [args.sourceLabel]
  * @param {string} [args.targetLabel]
+ * @param {import('./replace_offer.js').ReplacePair|null} [args.paired]  // inverted mode: the compare counterpart
  * @param {ReleaseActionState|null} [args.processingState]
  * @param {Object} [opts]
- * @param {boolean} [opts.enabled]  // inverted-mode enable flag
- * @param {boolean} [opts.unavailable]  // inverted-mode: disabled because the lookup failed, not because it confirmed absence
+ * @param {import('./replace_offer.js').ReplaceOffer} [opts.offer]  // inverted mode: the decided enable state + tooltip (required)
  * @param {string} [opts.className]
  * @param {string} [opts.style]
  * @param {string} [opts.label]
@@ -322,17 +314,23 @@ export function renderReplaceButton(args, opts = {}) {
 
   // Inverted mode.
   if (!args.targetMbid) return '';
-  const enabled = opts.enabled !== false;
+  // No offer means the caller never decided; fail closed with the plain
+  // own-group explanation rather than enabling speculatively.
+  const offer = opts.offer || {
+    enabled: false, reason: 'no_request', title: NO_REQUEST_TITLE,
+  };
   const mbidArg = jsArg(args.targetMbid);
   const rgArg = args.releaseGroupId ? jsArg(args.releaseGroupId) : 'null';
   const targetArg = jsArg(args.targetLabel || '');
-  if (!enabled) {
-    const title = opts.unavailable
-      ? 'Could not check for an existing request in this release group. Collapse and re-expand to retry.'
-      : 'No existing request in this release group';
-    return `<button class="${className}"${style} disabled title="${title}">${label}</button>`;
+  const titleAttr = offer.title ? ` title="${esc(offer.title)}"` : '';
+  if (!offer.enabled) {
+    return `<button class="${className}"${style} disabled${titleAttr}>${label}</button>`;
   }
-  return `<button class="${className}"${style} onclick="${stopPropagation}window.openReplacePicker({targetMbid: ${mbidArg}, releaseGroupId: ${rgArg}, targetLabel: ${targetArg}})">${label}</button>`;
+  const paired = args.paired || null;
+  const pairedArgs = paired
+    ? `, pairedGroupId: ${jsArg(paired.id)}, pairedGroupKind: '${paired.kind === 'release' ? 'release' : 'work'}', pairedLabel: ${jsArg(paired.label)}`
+    : '';
+  return `<button class="${className}"${style}${titleAttr} onclick="${stopPropagation}window.openReplacePicker({targetMbid: ${mbidArg}, releaseGroupId: ${rgArg}, targetLabel: ${targetArg}${pairedArgs}})">${label}</button>`;
 }
 
 /**

@@ -15,9 +15,11 @@ import {
   renderActionToolbar,
   renderAcquireActionButton,
   renderRemoveFromBeetsButton,
+  renderReplaceButton,
   suppressProcessingAction,
 } from '../web/js/release_actions.js';
 import { openReplacePicker } from '../web/js/replace_picker.js';
+import { NO_REQUEST_TITLE } from '../web/js/replace_offer.js';
 
 import { element, stubGlobals, suite } from './js_harness.mjs';
 
@@ -828,6 +830,55 @@ t.section('Processing conflict handler — failed refetch stays locked with work
   t.equal(retry.removed, true, 'successful retry removes retry affordance');
   t.equal(focused, 1, 'successful focused retry returns focus to the locked control');
   globals.restore();
+}
+
+t.section('renderReplaceButton() inverted — the decided offer drives enable state, tooltip and the paired onclick arguments (issue #1366 part 2)');
+{
+  const paired = { id: '11052', kind: 'work', source: 'discogs', label: 'Absolution "Deluxe" <b>' };
+  const enabled = renderReplaceButton({
+    mode: 'inverted',
+    targetMbid: 'fdd45566-5c8b-4beb-8ec3-1b5f93a01319',
+    releaseGroupId: '6f151223-f3a3-3e57-810f-598f7897006c',
+    targetLabel: 'Muse — Absolution',
+    paired,
+  }, {
+    offer: { enabled: true, reason: 'paired', title: 'Replaces the request held on the other pathway: Discogs master "Absolution "Deluxe" <b>"' },
+  });
+  t.contains(enabled,
+    "window.openReplacePicker({targetMbid: &quot;fdd45566-5c8b-4beb-8ec3-1b5f93a01319&quot;, releaseGroupId: &quot;6f151223-f3a3-3e57-810f-598f7897006c&quot;, targetLabel: &quot;Muse — Absolution&quot;, pairedGroupId: &quot;11052&quot;, pairedGroupKind: 'work', pairedLabel: &quot;Absolution &#92;&quot;Deluxe&#92;&quot; &lt;b&gt;&quot;})",
+    'the exact handler with the exact arguments, the paired label carried as an escaped JS string');
+  t.contains(enabled, 'title="Replaces the request held on the other pathway: Discogs master &quot;Absolution &quot;Deluxe&quot; &lt;b&gt;&quot;"',
+    'an enabled paired offer carries its tooltip, HTML-escaped');
+  t.excludes(enabled, 'disabled', 'an enabled offer is not disabled');
+
+  const own = renderReplaceButton({
+    mode: 'inverted', targetMbid: 'm-1', releaseGroupId: 'rg-1', targetLabel: 'X', paired: null,
+  }, { offer: { enabled: true, reason: 'own', title: '' } });
+  t.excludes(own, 'pairedGroupId', 'no pair, no paired arguments');
+  t.excludes(own, 'title=', 'an own-key offer carries no tooltip');
+
+  const disabled = renderReplaceButton({
+    mode: 'inverted', targetMbid: 'm-1', releaseGroupId: 'rg-1', targetLabel: 'X', paired,
+  }, { offer: { enabled: false, reason: 'pair_inactive', title: 'No existing request for this album on either pathway (paired with Discogs master "Absolution "Deluxe" <b>").' } });
+  t.contains(disabled, 'disabled title="No existing request for this album on either pathway (paired with Discogs master &quot;Absolution &quot;Deluxe&quot; &lt;b&gt;&quot;)."',
+    'a disabled offer renders its exact tooltip, escaped');
+  t.excludes(disabled, 'window.openReplacePicker', 'a disabled button has no handler');
+
+  const undecided = renderReplaceButton({
+    mode: 'inverted', targetMbid: 'm-1', releaseGroupId: 'rg-1', targetLabel: 'X',
+  }, {});
+  t.contains(undecided, 'disabled title="No existing request in this release group"',
+    'a caller that never decided gets a disabled button, never a speculative enable');
+  t.contains(undecided, `disabled title="${NO_REQUEST_TITLE}"`,
+    'and its copy is the offer module\'s own no-request string, not a second spelling of it');
+
+  const viaRelease = renderReplaceButton({
+    mode: 'inverted', targetMbid: '19016167-1ba2-41ab-9bec-bf9ed2ac995c',
+    releaseGroupId: '1c9e2970-b221-30ab-93c6-7896b52a240b', targetLabel: 'Deloris — Fraulein',
+    paired: { id: '3938744', kind: 'release', source: 'discogs', label: 'Fraulein' },
+  }, { offer: { enabled: true, reason: 'paired', title: 'Replaces the request held on the other pathway: Discogs release "Fraulein"' } });
+  t.contains(viaRelease, "pairedGroupId: &quot;3938744&quot;, pairedGroupKind: 'release', pairedLabel: &quot;Fraulein&quot;",
+    'a masterless Discogs pair is handed to the picker as a release, so it is looked up by exact id');
 }
 
 t.section('Processing conflict handler — closed Replace modal cannot lock document.body');

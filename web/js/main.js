@@ -61,10 +61,11 @@ async function openReplacePickerAndHandle(options) {
   if (status === 200) {
     const newId = body.new_request_id;
     toast(`Replaced — new request #${newId}.`, false);
-    // Replace may flip rows in/out of the active set (old row leaves,
-    // new row enters — same RG so the count stays positive, but the
-    // browse-tab cache needs to re-fetch so the per-MBID enable
-    // logic stays accurate).
+    // Replace may flip rows in/out of the active key sets (old row
+    // leaves, new row enters — in the same group for a same-pathway
+    // Replace, in a different group on the other pathway for a
+    // cross-pathway one, issue #1366), so the browse-tab cache must
+    // re-fetch for the per-row enable logic to stay accurate.
     invalidateActiveRgs();
     // Best-effort refetch on whichever tab the operator is most likely
     // on. Pipeline's operational views and Wrong Matches may expose state

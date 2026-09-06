@@ -88,6 +88,25 @@ for await (const line of lines) {
 """
 
 
+def _escape_js_line_terminators(frame: bytes) -> bytes:
+    """Escape U+2028 / U+2029 so a request frame stays ONE line for Node.
+
+    ``msgspec.json.encode`` emits both characters raw (they are legal
+    inside a JSON string), but Node's ``readline`` treats them as line
+    breaks, so a payload string carrying one arrived at the child as two
+    or three frames, each rejected as an invalid request (measured
+    2026-09-06 with Hypothesis's canonical all-line-terminators string).
+    The JSON ``\\uXXXX`` escapes are semantically identical, so the child
+    decodes the same string. Only the request direction needs this: the
+    Python reader splits responses on ``\\n`` alone.
+    """
+    return (
+        frame
+        .replace("\u2028".encode("utf-8"), b"\\u2028")
+        .replace("\u2029".encode("utf-8"), b"\\u2029")
+    )
+
+
 class NodeJsonlWorker:
     """One reusable Node child whose lifetime is bounded by one Python target."""
 
@@ -171,9 +190,9 @@ class NodeJsonlWorker:
         deadline = time.monotonic() + self._timeout_seconds
         request_id = self._next_id
         self._next_id += 1
-        frame = msgspec.json.encode(
+        frame = _escape_js_line_terminators(msgspec.json.encode(
             _Request(id=request_id, operation=operation, payload=payload),
-        ) + b"\n"
+        )) + b"\n"
         if len(frame) > MAX_REQUEST_BYTES:
             detail = self._poison(
                 f"request {request_id} exceeded {MAX_REQUEST_BYTES} bytes",

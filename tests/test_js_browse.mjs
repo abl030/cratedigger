@@ -14,10 +14,12 @@ import {
   loadArtistPage,
   pendingEarlyCompareHandoffsForTest,
   reloadBrowseArtist,
+  reloadExpansionsAfterCompare,
   resolverTargetIdentityKind,
   searchArtists,
   setBrowseSource,
 } from '../web/js/browse.js';
+import { invalidateActiveRgs } from '../web/js/active_rgs.js';
 import { state } from '../web/js/state.js';
 
 import { stubGlobals, suite } from './js_harness.mjs';
@@ -828,6 +830,183 @@ resetWorld();
     /onclick="window\.loadReleaseGroup\(&quot;rgva&quot;, this, \{source:'mb',identityKind:'work'\}\)"/,
     'VA release row onclick routes to loadReleaseGroup with (release group id, this, load opts)');
   state.browseSearchType = 'artist';
+}
+
+t.section('reloadExpansionsAfterCompare() — a late compare re-loads every open expansion with what its row now carries (issue #1366 part 2)');
+{
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+  function rgRow({ id, paired, expanded }) {
+    const detail = { innerHTML: expanded ? '<div class="release">stale, rendered before the compare</div>' : '' };
+    const dataset = { catalogueId: id, catalogueSource: 'mb', identityKind: 'work', pairing: 'checked' };
+    if (paired) {
+      Object.assign(dataset, {
+        pairedId: paired.id, pairedKind: paired.kind, pairedSource: 'discogs', pairedLabel: paired.label,
+      });
+    }
+    return { dataset, detail, querySelector: (sel) => (sel === '.releases' ? detail : null) };
+  }
+  const pairedExpanded = rgRow({
+    id: '6f151223-f3a3-3e57-810f-598f7897006c', expanded: true,
+    paired: { id: '11052', kind: 'work', label: 'Absolution' },
+  });
+  const pairedCollapsed = rgRow({
+    id: 'rg-collapsed', expanded: false, paired: { id: '99', kind: 'work', label: 'Other' },
+  });
+  const unpairedExpanded = rgRow({ id: 'rg-unpaired', expanded: true, paired: null });
+  const el = { querySelectorAll: (sel) => (sel === '.rg' ? [pairedExpanded, pairedCollapsed, unpairedExpanded] : []) };
+  const fetched = [];
+  invalidateActiveRgs();
+  stubGlobals({
+    fetch: async (url) => {
+      fetched.push(String(url));
+      if (String(url).includes('/api/pipeline/active-rgs')) {
+        return { ok: true, status: 200, json: async () => ({ release_group_ids: ['11052'], groupless_release_ids: [] }) };
+      }
+      return {
+        ok: true, status: 200,
+        json: async () => ({ releases: [{
+          id: 'fdd45566-5c8b-4beb-8ec3-1b5f93a01319', title: 'Absolution', status: 'Official',
+          country: 'JP', date: '2003-09-15', format: 'CD', track_count: 15,
+        }] }),
+      };
+    },
+  });
+  const reloaded = reloadExpansionsAfterCompare(el, () => false);
+  t.equal(reloaded, 2, 'both open expansions are reloaded, paired or not; the collapsed row is not');
+  await flush(); await flush(); await flush();
+  t.excludes(pairedExpanded.detail.innerHTML, 'stale, rendered before the compare', 'the stale paired expansion was replaced');
+  t.contains(pairedExpanded.detail.innerHTML, 'pairedGroupId: &quot;11052&quot;', 'the reloaded pressing rows carry the pair to the picker');
+  t.excludes(pairedExpanded.detail.innerHTML, 'disabled', 'and the paired master holding a request enables Replace');
+  t.equal(pairedCollapsed.detail.innerHTML, '', 'a collapsed paired row is left collapsed');
+  t.excludes(unpairedExpanded.detail.innerHTML, 'stale, rendered before the compare', 'the stale unpaired expansion was replaced too');
+  t.contains(unpairedExpanded.detail.innerHTML, 'no paired Discogs master or release was found for this album',
+    'an expanded row the compare proved unpaired now says so instead of "could not be checked"');
+  t.excludes(unpairedExpanded.detail.innerHTML, 'could not be checked', 'no stale pending tooltip survives the compare');
+  t.ok(fetched.some((u) => u.includes('6f151223-f3a3-3e57-810f-598f7897006c')), 'the reload fetched the paired row\'s pressings');
+  t.ok(fetched.some((u) => u.includes('rg-unpaired')), 'and the unpaired row\'s');
+  t.ok(!fetched.some((u) => u.includes('rg-collapsed')), 'never the collapsed row\'s');
+}
+
+t.section('reloadExpansionsAfterCompare() — a stale token discards the reload without writing pressing rows');
+{
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const detail = { innerHTML: '<div class="release">stale</div>' };
+  const row = {
+    dataset: {
+      catalogueId: 'rg-stale', catalogueSource: 'mb', identityKind: 'work', pairing: 'checked',
+      pairedId: '11052', pairedKind: 'work', pairedSource: 'discogs', pairedLabel: 'Absolution',
+    },
+    querySelector: (sel) => (sel === '.releases' ? detail : null),
+  };
+  const el = { querySelectorAll: (sel) => (sel === '.rg' ? [row] : []) };
+  invalidateActiveRgs();
+  stubGlobals({
+    fetch: async () => ({ ok: true, status: 200, json: async () => ({
+      release_group_ids: ['11052'], groupless_release_ids: [],
+      releases: [{ id: 'fdd45566-5c8b-4beb-8ec3-1b5f93a01319', title: 'Absolution', status: 'Official', country: 'JP', date: '2003-09-15', format: 'CD', track_count: 15 }],
+    }) }),
+  });
+  reloadExpansionsAfterCompare(el, () => true);
+  await flush(); await flush(); await flush();
+  // The fetch answered a real pressing; a fresh reload would have painted
+  // it. The stale one leaves only the loading placeholder behind — the
+  // row is off-page by then — and never the pressing row.
+  t.excludes(detail.innerHTML, '<div class="release"', 'a stale reload never writes pressing rows');
+  t.contains(detail.innerHTML, 'Loading releases', 'it stops at the placeholder the reload itself wrote');
+}
+
+t.section('late compare wiring — an expansion opened before the compare landed is re-loaded with its pair by the real complement path (issue #1366 part 2)');
+resetWorld();
+{
+  // The browse page stub gains just enough DOM for the late render's own
+  // capture/restore/reload loop: `.rg` rows parsed from the rendered HTML,
+  // each with a `.releases` detail keyed by catalogue id. As in a real
+  // DOM, painting the page replaces every element — the details are
+  // dropped on each innerHTML write, so only the production
+  // capture/restore path can carry an expansion across the late render.
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+  let details = new Map();
+  let painted = '';
+  Object.defineProperty(artistBody, 'innerHTML', {
+    configurable: true,
+    get() { return painted; },
+    set(value) { painted = value; details = new Map(); },
+  });
+  artistBody.querySelectorAll = (sel) => {
+    if (sel !== '.rg') return [];
+    return Array.from(artistBody.innerHTML.matchAll(/<div class="rg"([^>]*)>/g)).map(([, attrs]) => {
+      const dataset = {};
+      for (const [, name, value] of attrs.matchAll(/data-([a-z-]+)="([^"]*)"/g)) {
+        dataset[name.replace(/-([a-z])/g, (_m, c) => c.toUpperCase())] = value;
+      }
+      if (!details.has(dataset.catalogueId)) details.set(dataset.catalogueId, { innerHTML: '' });
+      const detail = details.get(dataset.catalogueId);
+      return { dataset, querySelector: (s) => (s === '.releases' ? detail : null) };
+    });
+  };
+  const RG = '6f151223-f3a3-3e57-810f-598f7897006c';
+  const mbRow = { id: RG, title: 'Absolution', source: 'mb', identity_kind: 'work', provenance: ['ordinary'] };
+  const discogsRow = { id: '11052', title: 'Absolution', source: 'discogs', identity_kind: 'work', provenance: ['ordinary'] };
+  const LONE = 'rg-showbiz';
+  const loneRow = { id: LONE, title: 'Showbiz', source: 'mb', identity_kind: 'work', provenance: ['ordinary'] };
+  const compare = deferred();
+  const fetched = [];
+  invalidateActiveRgs();
+  stubGlobals({ fetch: (url) => {
+    fetched.push(String(url));
+    if (url.includes('/api/artist/compare?')) return compare.promise;
+    if (url.includes('/api/library/artist')) return Promise.resolve(response(200, { albums: [] }));
+    if (url.includes('/disambiguate')) return Promise.resolve(response(503, {}));
+    if (url.includes('/api/pipeline/active-rgs')) {
+      return Promise.resolve(response(200, { release_group_ids: ['11052'], groupless_release_ids: [] }));
+    }
+    if (url.includes('/api/release-group/')) {
+      return Promise.resolve(response(200, { releases: [{
+        id: 'fdd45566-5c8b-4beb-8ec3-1b5f93a01319', title: 'Absolution', status: 'Official',
+        country: 'JP', date: '2003-09-15', format: 'CD', track_count: 15,
+      }] }));
+    }
+    return Promise.resolve(response(200, { release_groups: [mbRow, loneRow] }));
+  } });
+  await loadArtistPage('muse-mb-id', 'Muse');
+  t.contains(artistBody.innerHTML, `data-catalogue-id="${RG}"`, 'the fast page rendered the release group');
+  t.excludes(artistBody.innerHTML, 'data-paired-id', 'before the compare no row carries a pair');
+  t.contains(artistBody.innerHTML, `data-catalogue-id="${RG}" data-pairing="pending"`, 'the fast page marks the pairing pending');
+  t.excludes(artistBody.innerHTML, 'data-pairing="checked"', 'and no row claims it was checked');
+  // The operator expands both rows while the compare is still in flight.
+  t.equal(artistBody.querySelectorAll('.rg').length, 2, 'the fast page has exactly the two rows');
+  const detail = details.get(RG);
+  const loneDetail = details.get(LONE);
+  t.ok(detail !== undefined && loneDetail !== undefined, 'the fast render exposed both detail elements');
+  detail.innerHTML = '<div class="release">stale, rendered before the compare</div>';
+  loneDetail.innerHTML = '<div class="release">stale, rendered before the compare</div>';
+  compare.resolve(response(200, {
+    both: [{ mb: mbRow, discogs: discogsRow }],
+    mb_unpaired: [loneRow], discogs_unpaired: [], discogs_ungrouped_releases: [],
+  }));
+  for (let i = 0; i < 6; i++) await flush();
+  t.contains(artistBody.innerHTML, 'data-paired-id="11052"', 'the late render paired the row');
+  t.contains(artistBody.innerHTML, `data-catalogue-id="${RG}" data-pairing="checked"`, 'the late render marks the pairing checked');
+  t.contains(artistBody.innerHTML, `data-catalogue-id="${LONE}" data-pairing="checked"`, 'on the unpaired row too');
+  t.excludes(artistBody.innerHTML, 'data-pairing="pending"', 'no row is left pending');
+  // The paint replaced the row's elements; the detail production restored
+  // into, then reloaded, is the one now attached to the paired row.
+  const repainted = details.get(RG);
+  t.ok(repainted !== undefined && repainted !== detail, 'the late render attached a fresh detail element');
+  t.excludes(repainted.innerHTML, 'stale, rendered before the compare', 'the restored pre-compare expansion did not survive the reload');
+  t.contains(repainted.innerHTML, 'pairedGroupId: &quot;11052&quot;', 'the expansion was re-loaded with the pair carried to the picker');
+  t.excludes(repainted.innerHTML, 'disabled', 'and the paired master holding a request enabled Replace');
+  t.equal(fetched.filter((u) => u.includes(`/api/release-group/${RG}`)).length, 1, 'exactly one pressings reload was fetched for the paired row');
+  const loneRepainted = details.get(LONE);
+  t.ok(loneRepainted !== undefined && loneRepainted !== loneDetail, 'the unpaired row also got a fresh detail element');
+  t.excludes(loneRepainted.innerHTML, 'stale, rendered before the compare', 'its pre-compare expansion was reloaded too');
+  t.contains(loneRepainted.innerHTML, 'no paired Discogs master or release was found for this album',
+    'and now says the compare found no pair, instead of that the pairing could not be checked');
+  t.excludes(loneRepainted.innerHTML, 'could not be checked', 'no stale pending tooltip survives on the unpaired row');
+  t.equal(fetched.filter((u) => u.includes(`/api/release-group/${LONE}`)).length, 1, 'exactly one pressings reload was fetched for the unpaired row');
+  delete artistBody.querySelectorAll;
+  delete artistBody.innerHTML;
+  artistBody.innerHTML = painted;
 }
 
 t.done();
