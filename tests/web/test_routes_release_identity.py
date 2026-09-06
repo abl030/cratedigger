@@ -252,6 +252,49 @@ class TestPipelineReplaceContract(_FakeDbWebServerCase):
         self.assertEqual(status, 422)
         self.assertEqual(data["reason"], "unresolvable_target")
 
+    def test_replace_forwards_cross_pathway_opt_in(self):
+        """Issue #1366: the body's ``cross_pathway`` boolean reaches the
+        service as its keyword; omitted means False."""
+        with self._patch_service(
+            outcome="replaced", request_id=100, new_request_id=200,
+        ) as svc:
+            status, _data = self._post(
+                "/api/pipeline/100/replace",
+                {"target_mb_release_id": "1002", "cross_pathway": True},
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(svc.call_args.args, (100,))
+        self.assertEqual(
+            svc.call_args.kwargs,
+            {"target_mb_release_id": "1002", "cross_pathway": True},
+        )
+        with self._patch_service(
+            outcome="replaced", request_id=100, new_request_id=200,
+        ) as svc:
+            self._post(
+                "/api/pipeline/100/replace",
+                {"target_mb_release_id": "1002"},
+            )
+        self.assertEqual(
+            svc.call_args.kwargs,
+            {"target_mb_release_id": "1002", "cross_pathway": False},
+        )
+
+    def test_replace_rejects_non_boolean_cross_pathway(self):
+        """``cross_pathway`` is strict: a string "true" is not the
+        operator's assertion, it is a bug in the caller (400, service
+        never reached)."""
+        with self._patch_service(
+            outcome="replaced", request_id=100, new_request_id=200,
+        ) as svc:
+            status, data = self._post(
+                "/api/pipeline/100/replace",
+                {"target_mb_release_id": "1002", "cross_pathway": "true"},
+            )
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+        svc.assert_not_called()
+
     def test_replace_rg_mismatch_returns_422(self):
         with self._patch_service(
             outcome="target_release_group_mismatch", request_id=100,

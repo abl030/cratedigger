@@ -56,8 +56,11 @@ def _render_replace(status: int, payload: dict[str, object]) -> None:
 
 def cmd_replace(_db: object, args: argparse.Namespace) -> int:
     """Supersede a request with a new row at a different release id (an
-    MB release UUID or a Discogs numeric release id — must share the
-    source's pathway and release group/master).
+    MB release UUID or a Discogs numeric release id). A same-pathway
+    target must share the source's release group/master; a target on the
+    other pathway needs ``--cross-pathway``, the operator's explicit
+    assertion that the paired MB release group and Discogs master are one
+    album (issue #1366).
 
     Thin adapter over ``POST /api/pipeline/<id>/replace``, which is the
     one execution path for both surfaces (see ``CLAUDE.md`` § "CLI ⇄ API
@@ -80,7 +83,12 @@ def cmd_replace(_db: object, args: argparse.Namespace) -> int:
         args.api_endpoint,
         _ApiMutation(
             path=f"/api/pipeline/{int(args.id)}/replace",
-            body={"target_mb_release_id": args.target_mb_release_id},
+            body={
+                "target_mb_release_id": args.target_mb_release_id,
+                # store_true: the parser always sets it, so a hand-built
+                # Namespace must too (no getattr default to hide a typo).
+                "cross_pathway": bool(args.cross_pathway),
+            },
         ),
         render=_render_replace,
         json_output=getattr(args, "json", False),
@@ -96,11 +104,18 @@ def add_replace_subparser(
     p_replace = sub.add_parser(
         "replace",
         help="Supersede a request with a new row at a different release id "
-             "in the same release group/master (same pathway as the source)")
+             "in the same release group/master, or on the other pathway "
+             "with --cross-pathway")
     p_replace.add_argument("id", type=int, help="Source request ID")
     p_replace.add_argument(
         "--to", dest="target_mb_release_id", required=True,
-        help="Target release id — MB UUID or Discogs numeric id; must "
-             "share the source's pathway and release group/master")
+        help="Target release id — MB UUID or Discogs numeric id; a "
+             "same-pathway target must share the source's release "
+             "group/master")
+    p_replace.add_argument(
+        "--cross-pathway", dest="cross_pathway", action="store_true",
+        help="Accept a target on the other pathway (Discogs for an MB "
+             "source, MB for a Discogs source): your assertion that the "
+             "paired MB release group and Discogs master are one album")
     p_replace.add_argument("--json", action="store_true",
                            help="Print structured JSON instead of text")

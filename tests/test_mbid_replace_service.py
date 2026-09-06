@@ -112,7 +112,7 @@ def _empty_wrong_match_summary(_db, request_id: int) -> WrongMatchDeleteSummary:
 def _fake_target_payload(
     *,
     mbid: str = NEW_MBID,
-    rg_id: str = RG_ID,
+    rg_id: str | None = RG_ID,
     artist_name: str = "Pet Grief",
     title: str = "New Pressing",
     artist_id: str | None = "art-1",
@@ -554,6 +554,51 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         result = svc.replace_request_mbid(42, target_mb_release_id=OLD_MBID)
         self.assertEqual(result.outcome, RESULT_TARGET_SAME_AS_CURRENT)
 
+    def test_canonical_of_the_wrong_shape_is_unresolvable(self):
+        """MB arm: the mirror canonicalises the picked UUID onto a numeric
+        id. Refused as unresolvable before the redirect re-check; nothing
+        is written."""
+        db = FakePipelineDB()
+        self._seed_old(db)
+        before = db.request(42).copy()
+        svc = self._make_service(
+            db,
+            mb_lookup=lambda mbid, *, fresh=False: _fake_target_payload(
+                mbid="1002", rg_id=RG_ID,
+            ),
+        )
+        result = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
+        self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+        self.assertEqual(result.reason, REPLACE_REASON_UNRESOLVABLE_TARGET)
+        self.assertEqual(result.request_id, 42)
+        assert result.error_message is not None
+        self.assertIn("'1002'", result.error_message)
+        self.assertEqual(db.advisory_lock_calls, [])
+        self.assertEqual(db.request(42), before)
+
+    def test_canonical_redirects_to_the_source_itself(self):
+        """The picked MBID passes the same-as-current gate but the mirror
+        canonicalises it onto the source's OWN current MBID (an upstream
+        merge of the two). The redirect re-check refuses as a collision
+        naming the source's status, before any lock is taken."""
+        db = FakePipelineDB()
+        self._seed_old(db, status="imported")
+        svc = self._make_service(
+            db,
+            mb_lookup=lambda mbid, *, fresh=False: _fake_target_payload(
+                mbid=OLD_MBID, rg_id=RG_ID,
+            ),
+        )
+        result = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
+        self.assertEqual(result.outcome, RESULT_TARGET_COLLISION_REQUEST)
+        self.assertEqual(result.current_status, "imported")
+        self.assertEqual(result.request_id, 42)
+        assert result.error_message is not None
+        self.assertIn(OLD_MBID, result.error_message)
+        self.assertIn("source's current MBID", result.error_message)
+        self.assertEqual(db.advisory_lock_calls, [])
+        self.assertEqual(db.request(42)["status"], "imported")
+
     def test_release_group_mismatch(self):
         db = FakePipelineDB()
         self._seed_old(db)
@@ -893,7 +938,7 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         """MB lookup follows a 301 to a canonical MBID that's already
         held by a different active request. The redirect-recheck branch
         in Phase 0 catches it and reports the holder's status."""
-        CANONICAL = "canonical-cccccccc-cccc-cccc-cccc-cccccccccccc"
+        CANONICAL = "cccccccc-cccc-cccc-cccc-cccccccccccc"
         db = FakePipelineDB()
         self._seed_old(db)
         # Third request holds the canonical the redirect resolves to.
@@ -1150,7 +1195,8 @@ class TestReplaceDiscogsArm(_ServiceCase):
         self.assertEqual(old["status"], "wanted")
 
     def test_discogs_source_uuid_target_invalid(self):
-        """AE2: a UUID target against a Discogs source is cross-pathway →
+        """AE2 as amended by issue #1366: a UUID target against a Discogs
+        source is cross-pathway and, WITHOUT the ``cross_pathway`` opt-in,
         target_invalid (never reaches the mirror)."""
         db = FakePipelineDB()
         self._seed_discogs(db)
@@ -1167,8 +1213,9 @@ class TestReplaceDiscogsArm(_ServiceCase):
         self.assertFalse(called["hit"])
 
     def test_mb_source_numeric_target_invalid(self):
-        """AE2 (mirror direction): a numeric Discogs target against an MB
-        source is cross-pathway → target_invalid."""
+        """AE2 (mirror direction) as amended by issue #1366: a numeric
+        Discogs target against an MB source, WITHOUT the opt-in →
+        target_invalid."""
         db = FakePipelineDB()
         self._seed_old(db)
         svc = self._make_service(db)
@@ -1252,6 +1299,9 @@ class TestReplaceDiscogsArm(_ServiceCase):
         self.assertEqual(
             result.reason, REPLACE_REASON_TARGET_NO_RELEASE_GROUP,
         )
+        self.assertEqual(result.request_id, 42)
+        assert result.error_message is not None
+        self.assertIn("master", result.error_message)
 
     def test_discogs_target_empty_payload(self):
         """#501 item 2: the Discogs arm's analog of
@@ -1298,6 +1348,92 @@ class TestReplaceDiscogsArm(_ServiceCase):
             42, target_mb_release_id=NEW_DISCOGS_ID,
         )
         self.assertEqual(result.outcome, RESULT_TRANSIENT)
+
+    def test_discogs_canonical_zero_id_is_unresolvable(self):
+        """Discogs arm: a payload whose ``id`` is the Struct default ``0``
+        used to be written as the new row's exact identity. It is now
+        refused as unresolvable, with no write."""
+        db = FakePipelineDB()
+        self._seed_discogs(db, master=DISCOGS_MASTER)
+        before = db.request(42).copy()
+        svc = self._make_service(
+            db,
+            discogs_lookup=(
+                lambda rid, *, fresh=False: _fake_discogs_payload(
+                    release_id="0", master=DISCOGS_MASTER,
+                )
+            ),
+        )
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_DISCOGS_ID,
+        )
+        self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+        self.assertEqual(result.reason, REPLACE_REASON_UNRESOLVABLE_TARGET)
+        self.assertEqual(result.request_id, 42)
+        assert result.error_message is not None
+        self.assertIn("'0'", result.error_message)
+        self.assertEqual(db.advisory_lock_calls, [])
+        self.assertEqual(db.request(42), before)
+
+    def test_discogs_canonical_redirects_to_the_source_itself(self):
+        """Discogs×Discogs: the picked id passes the same-as-current gate
+        but the mirror canonicalises it onto the source's OWN id. Refused
+        as a collision naming the source's status, before any lock."""
+        db = FakePipelineDB()
+        self._seed_discogs(db, master=DISCOGS_MASTER, status="imported")
+        svc = self._make_service(
+            db,
+            discogs_lookup=(
+                lambda rid, *, fresh=False: _fake_discogs_payload(
+                    release_id=OLD_DISCOGS_ID, master=DISCOGS_MASTER,
+                )
+            ),
+        )
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_DISCOGS_ID,
+        )
+        self.assertEqual(result.outcome, RESULT_TARGET_COLLISION_REQUEST)
+        self.assertEqual(result.current_status, "imported")
+        self.assertEqual(result.request_id, 42)
+        assert result.error_message is not None
+        self.assertIn(OLD_DISCOGS_ID, result.error_message)
+        self.assertIn("source's current id", result.error_message)
+        self.assertEqual(db.advisory_lock_calls, [])
+        self.assertEqual(db.request(42)["status"], "imported")
+
+    def test_discogs_canonical_redirect_collision_names_the_holder(self):
+        """Discogs×Discogs canonical redirect: the mirror canonicalises the
+        picked id onto one another active row holds. The redirect
+        PRE-CHECK answers with the holder's status and no lock is ever
+        taken; the supersede's UNIQUE net would neither name the status
+        nor stop short of the lock."""
+        db = FakePipelineDB()
+        self._seed_discogs(db, master=DISCOGS_MASTER)
+        # Holder carries the canonical only in ``discogs_release_id`` so
+        # the pin distinguishes the identity-aware lookup (KTD-6) from an
+        # MB-only one and from the supersede's UNIQUE net.
+        db.seed_request(make_request_row(
+            id=43, mb_release_id=None, discogs_release_id="1003",
+            mb_release_group_id=DISCOGS_MASTER, status="downloading",
+        ))
+        svc = self._make_service(
+            db,
+            discogs_lookup=(
+                lambda rid, *, fresh=False: _fake_discogs_payload(
+                    release_id="1003", master=DISCOGS_MASTER,
+                )
+            ),
+        )
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_DISCOGS_ID,
+        )
+        self.assertEqual(result.outcome, RESULT_TARGET_COLLISION_REQUEST)
+        self.assertEqual(result.current_status, "downloading")
+        self.assertEqual(result.request_id, 42)
+        assert result.error_message is not None
+        self.assertIn("1003", result.error_message)
+        self.assertEqual(db.advisory_lock_calls, [])
+        self.assertEqual(db.request(42)["status"], "wanted")
 
     def test_discogs_collision_via_identity_lookup(self):
         """KTD-6: an active row already holding the target Discogs id (in
@@ -2110,6 +2246,620 @@ if TYPE_CHECKING:
     # tests/test_wrong_match_cleanup_service.py for the rationale.
     _pipeline_db_satisfies_replace_protocol: _ReplaceDB = cast("PipelineDB", None)
     _fake_db_satisfies_replace_protocol: _ReplaceDB = cast("FakePipelineDB", None)
+
+
+class TestReplaceCrossPathway(_ServiceCase):
+    """Cross-pathway Replace (issue #1366).
+
+    The Browse tab pairs an MB release group with a Discogs master as
+    one album; that pairing surfaces the offer, and the operator's
+    explicit ``cross_pathway`` opt-in is the identity authority here.
+    There is no shared release group across pathways, so there is no
+    group-mismatch gate and the source's own group is never consulted.
+    Everything the service CAN verify with authority still fails closed:
+    the target must resolve, an MB target must carry its release group,
+    collisions are identity-aware, and canonical redirects re-check.
+    Supersede semantics are exactly the same-pathway ones (R5-R7): the
+    old row freezes as ``replaced`` with its own identity untouched, the
+    new row is born ``wanted`` in ITS pathway's shape, back-linked.
+    """
+
+    def _assert_source_untouched(self, db: FakePipelineDB, request_id: int,
+                                 before: dict) -> None:
+        self.assertEqual(db.request(request_id), before)
+
+    def _service_with_target_lookup(
+        self, db: FakePipelineDB, source_kind: str, lookup,
+    ) -> MbidReplaceService:
+        """Wire ``lookup`` as the TARGET pathway's mirror for a cross-pathway
+        attempt from ``source_kind`` (the other pathway)."""
+        if source_kind == "mb":
+            return self._make_service(db, discogs_lookup=lookup)
+        return self._make_service(db, mb_lookup=lookup)
+
+    # -- the unflagged gate -------------------------------------------------
+
+    def test_unflagged_mb_source_discogs_target_names_the_opt_in(self):
+        """Without the opt-in a Discogs target against an MB source is
+        still rejected — and the message tells the operator how to say
+        "these are the same album"."""
+        db = FakePipelineDB()
+        self._seed_old(db)
+        before = db.request(42).copy()
+        discogs_lookup = MagicMock(
+            side_effect=AssertionError("Discogs lookup reached"),
+        )
+        mb_lookup = MagicMock(side_effect=AssertionError("MB lookup reached"))
+        svc = self._make_service(
+            db, mb_lookup=mb_lookup, discogs_lookup=discogs_lookup,
+        )
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_DISCOGS_ID,
+        )
+        self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+        self.assertEqual(result.reason, REPLACE_REASON_CROSS_PATHWAY_TARGET)
+        self.assertEqual(result.request_id, 42)
+        assert result.error_message is not None
+        self.assertIn("cross_pathway", result.error_message)
+        discogs_lookup.assert_not_called()
+        mb_lookup.assert_not_called()
+        self._assert_source_untouched(db, 42, before)
+
+    def test_unflagged_discogs_source_mb_target_names_the_opt_in(self):
+        db = FakePipelineDB()
+        self._seed_discogs(db)
+        before = db.request(42).copy()
+        mb_lookup = MagicMock(side_effect=AssertionError("MB lookup reached"))
+        svc = self._make_service(db, mb_lookup=mb_lookup)
+        result = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
+        self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+        self.assertEqual(result.reason, REPLACE_REASON_CROSS_PATHWAY_TARGET)
+        assert result.error_message is not None
+        self.assertIn("cross_pathway", result.error_message)
+        mb_lookup.assert_not_called()
+        self._assert_source_untouched(db, 42, before)
+
+    def test_flagged_unparseable_target_still_invalid(self):
+        """The opt-in unlocks the OTHER pathway, not arbitrary strings."""
+        for source_kind in ("mb", "discogs"):
+            with self.subTest(source=source_kind):
+                db = FakePipelineDB()
+                if source_kind == "mb":
+                    self._seed_old(db)
+                else:
+                    self._seed_discogs(db)
+                before = db.request(42).copy()
+                svc = self._make_service(
+                    db,
+                    mb_lookup=MagicMock(side_effect=AssertionError("mb")),
+                    discogs_lookup=MagicMock(
+                        side_effect=AssertionError("discogs"),
+                    ),
+                )
+                result = svc.replace_request_mbid(
+                    42, target_mb_release_id="not-an-id", cross_pathway=True,
+                )
+                self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+                self.assertEqual(
+                    result.reason, REPLACE_REASON_CROSS_PATHWAY_TARGET,
+                )
+                self.assertEqual(result.request_id, 42)
+                self.assertIsNotNone(result.error_message)
+                self._assert_source_untouched(db, 42, before)
+
+    # -- the two directions -------------------------------------------------
+
+    def test_flagged_mb_source_supersedes_into_discogs_identity(self):
+        """MB source → Discogs pressing. The new row is one pathway's
+        shape (numeric id dual-written, master as its group) and the old
+        row the other's, linked by the ordinary supersede link. The
+        source's MB release group is never looked up: nothing about it
+        bears on a target that has no MB group to match."""
+        self._patch_externals()
+        db = FakePipelineDB()
+        self._seed_old(db, status="imported")
+        mb_lookup = MagicMock(side_effect=AssertionError("MB lookup reached"))
+        plan_svc = MagicMock()
+        asked: list[tuple[str, bool]] = []
+
+        def discogs_lookup(rid, *, fresh=False):
+            asked.append((str(rid), fresh))
+            return _fake_discogs_payload(
+                release_id=NEW_DISCOGS_ID, master=DISCOGS_MASTER,
+            )
+
+        svc = self._make_service(
+            db,
+            mb_lookup=mb_lookup,
+            search_plan_service=plan_svc,
+            discogs_lookup=discogs_lookup,
+        )
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_DISCOGS_ID, cross_pathway=True,
+        )
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        self.assertEqual(result.request_id, 42)
+        # Strict pressing identity starts at the mirror: one fresh lookup,
+        # for exactly the id the operator picked.
+        self.assertEqual(asked, [(NEW_DISCOGS_ID, True)])
+        assert result.new_request_id is not None
+        new = db.get_request(result.new_request_id)
+        assert new is not None
+        self.assertEqual(new["status"], "wanted")
+        self.assertEqual(new["replaces_request_id"], 42)
+        self.assertEqual(new["mb_release_id"], NEW_DISCOGS_ID)
+        self.assertEqual(new["discogs_release_id"], NEW_DISCOGS_ID)
+        self.assertEqual(new["mb_release_group_id"], DISCOGS_MASTER)
+        # The mirror's metadata lands on the right columns, and the
+        # payload's tracks become the new row's track rows.
+        self.assertEqual(new["artist_name"], "Pet Grief")
+        self.assertEqual(new["album_title"], "New Pressing")
+        self.assertEqual(new["mb_artist_id"], "art-d-1")
+        self.assertEqual(new["year"], 2025)
+        self.assertEqual(new["country"], "JP")
+        self.assertEqual(
+            [t["title"] for t in db.get_tracks(result.new_request_id)],
+            ["T1", "T2"],
+        )
+        old = db.get_request(42)
+        assert old is not None
+        self.assertEqual(old["status"], "replaced")
+        self.assertEqual(old["mb_release_id"], OLD_MBID)
+        self.assertIsNone(old["discogs_release_id"])
+        self.assertEqual(old["mb_release_group_id"], RG_ID)
+        mb_lookup.assert_not_called()
+        plan_svc.generate_for_request.assert_called_once_with(
+            result.new_request_id, regenerate=False,
+        )
+        self._assert_slskd_untouched(svc.slskd)
+
+    def test_flagged_discogs_source_supersedes_into_mb_identity(self):
+        """Discogs source → MB pressing: the new row is MB-shaped (UUID,
+        no Discogs id, MB release group) and the Discogs master is never
+        looked up."""
+        self._patch_externals()
+        db = FakePipelineDB()
+        self._seed_discogs(db, status="imported")
+        discogs_lookup = MagicMock(
+            side_effect=AssertionError("Discogs lookup reached"),
+        )
+        plan_svc = MagicMock()
+        asked: list[tuple[str, bool]] = []
+
+        def mb_lookup(mbid, *, fresh=False):
+            asked.append((str(mbid), fresh))
+            return _fake_target_payload(mbid=NEW_MBID, rg_id=RG_ID)
+
+        svc = self._make_service(
+            db,
+            discogs_lookup=discogs_lookup,
+            search_plan_service=plan_svc,
+            mb_lookup=mb_lookup,
+        )
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_MBID, cross_pathway=True,
+        )
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        self.assertEqual(result.request_id, 42)
+        self.assertEqual(asked, [(NEW_MBID, True)])
+        assert result.new_request_id is not None
+        new = db.get_request(result.new_request_id)
+        assert new is not None
+        self.assertEqual(new["status"], "wanted")
+        self.assertEqual(new["replaces_request_id"], 42)
+        self.assertEqual(new["mb_release_id"], NEW_MBID)
+        self.assertIsNone(new["discogs_release_id"])
+        self.assertEqual(new["mb_release_group_id"], RG_ID)
+        self.assertEqual(new["artist_name"], "Pet Grief")
+        self.assertEqual(new["album_title"], "New Pressing")
+        self.assertEqual(new["mb_artist_id"], "art-1")
+        self.assertEqual(new["year"], 2025)
+        self.assertEqual(new["country"], "JP")
+        self.assertEqual(
+            [t["title"] for t in db.get_tracks(result.new_request_id)],
+            ["T1", "T2"],
+        )
+        old = db.get_request(42)
+        assert old is not None
+        self.assertEqual(old["status"], "replaced")
+        self.assertEqual(old["mb_release_id"], OLD_DISCOGS_ID)
+        self.assertEqual(old["discogs_release_id"], OLD_DISCOGS_ID)
+        self.assertEqual(old["mb_release_group_id"], DISCOGS_MASTER)
+        discogs_lookup.assert_not_called()
+        plan_svc.generate_for_request.assert_called_once_with(
+            result.new_request_id, regenerate=False,
+        )
+
+    def test_flagged_cross_pathway_needs_nothing_from_the_source_group(self):
+        """A source with NO persisted group (legacy row) still crosses:
+        the lazy backfill exists to anchor same-pathway siblings, and
+        there are none here. No source-pathway lookup is issued."""
+        for source_kind in ("mb", "discogs"):
+            with self.subTest(source=source_kind), \
+                    self._patch_externals_scoped():
+                db = FakePipelineDB()
+                source_lookup = MagicMock(
+                    side_effect=AssertionError("source-pathway lookup reached"),
+                )
+                if source_kind == "mb":
+                    self._seed_old(db, mb_release_group_id=None)
+                    target = NEW_DISCOGS_ID
+                    svc = self._make_service(
+                        db,
+                        mb_lookup=source_lookup,
+                        discogs_lookup=(
+                            lambda rid, *, fresh=False: _fake_discogs_payload(
+                                release_id=NEW_DISCOGS_ID,
+                                master=DISCOGS_MASTER,
+                            )
+                        ),
+                    )
+                else:
+                    self._seed_discogs(db, master=None)
+                    target = NEW_MBID
+                    svc = self._make_service(
+                        db,
+                        discogs_lookup=source_lookup,
+                        mb_lookup=(
+                            lambda mbid, *, fresh=False: _fake_target_payload(
+                                mbid=NEW_MBID, rg_id=RG_ID,
+                            )
+                        ),
+                    )
+                result = svc.replace_request_mbid(
+                    42, target_mb_release_id=target, cross_pathway=True,
+                )
+                self.assertEqual(result.outcome, RESULT_REPLACED)
+                source_lookup.assert_not_called()
+
+    def test_flagged_masterless_discogs_target_accepted(self):
+        """A masterless Discogs release pairs in the Browse tab too. The
+        same-pathway arm needs a master to anchor siblings; crossing
+        needs none, so the new row is born with no master, exactly as
+        the add flow writes a masterless release."""
+        self._patch_externals()
+        db = FakePipelineDB()
+        self._seed_old(db)
+        svc = self._make_service(
+            db,
+            discogs_lookup=(
+                lambda rid, *, fresh=False: _fake_discogs_payload(
+                    release_id=NEW_DISCOGS_ID, master=None,
+                )
+            ),
+        )
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_DISCOGS_ID, cross_pathway=True,
+        )
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        assert result.new_request_id is not None
+        new = db.get_request(result.new_request_id)
+        assert new is not None
+        self.assertEqual(new["mb_release_id"], NEW_DISCOGS_ID)
+        self.assertEqual(new["discogs_release_id"], NEW_DISCOGS_ID)
+        self.assertIsNone(new["mb_release_group_id"])
+
+    def test_flagged_mb_target_without_release_group_rejected(self):
+        """An MB target still owes its release group: MB releases carry
+        one, and the new row must be a valid same-pathway source later."""
+        db = FakePipelineDB()
+        self._seed_discogs(db)
+        before = db.request(42).copy()
+        svc = self._make_service(
+            db,
+            mb_lookup=lambda mbid, *, fresh=False: _fake_target_payload(
+                mbid=NEW_MBID, rg_id=None,
+            ),
+        )
+        result = svc.replace_request_mbid(
+            42, target_mb_release_id=NEW_MBID, cross_pathway=True,
+        )
+        self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+        self.assertEqual(
+            result.reason, REPLACE_REASON_TARGET_NO_RELEASE_GROUP,
+        )
+        self.assertEqual(result.request_id, 42)
+        self.assertIsNotNone(result.error_message)
+        self._assert_source_untouched(db, 42, before)
+
+    # -- fail-closed guardrails the cross path keeps ------------------------
+
+    def test_flagged_cross_pathway_collision_is_identity_aware(self):
+        """An active row already holding the target id is a collision in
+        both directions; the Discogs direction finds the holder through
+        ``discogs_release_id`` (KTD-6), not only ``mb_release_id``."""
+        with self.subTest(direction="mb→discogs"):
+            db = FakePipelineDB()
+            self._seed_old(db)
+            db.seed_request(make_request_row(
+                id=43, mb_release_id="9999",
+                discogs_release_id=NEW_DISCOGS_ID,
+                mb_release_group_id=DISCOGS_MASTER, status="downloading",
+            ))
+            svc = self._make_service(db)
+            result = svc.replace_request_mbid(
+                42, target_mb_release_id=NEW_DISCOGS_ID, cross_pathway=True,
+            )
+            self.assertEqual(result.outcome, RESULT_TARGET_COLLISION_REQUEST)
+            self.assertEqual(result.current_status, "downloading")
+            self.assertEqual(result.request_id, 42)
+            self.assertIsNotNone(result.error_message)
+            self.assertEqual(db.request(42)["status"], "wanted")
+        with self.subTest(direction="discogs→mb"):
+            db = FakePipelineDB()
+            self._seed_discogs(db)
+            db.seed_request(make_request_row(
+                id=43, mb_release_id=NEW_MBID,
+                mb_release_group_id=RG_ID, status="imported",
+            ))
+            svc = self._make_service(db)
+            result = svc.replace_request_mbid(
+                42, target_mb_release_id=NEW_MBID, cross_pathway=True,
+            )
+            self.assertEqual(result.outcome, RESULT_TARGET_COLLISION_REQUEST)
+            self.assertEqual(result.current_status, "imported")
+            self.assertEqual(result.request_id, 42)
+            self.assertIsNotNone(result.error_message)
+            self.assertEqual(db.request(42)["status"], "wanted")
+
+    def test_flagged_cross_pathway_canonical_redirect_collision(self):
+        """A target that the mirror canonicalises onto an id another
+        active row holds is a collision, in both directions — answered by
+        the redirect PRE-CHECK (which names the holder's status), not by
+        the supersede's UNIQUE-violation safety net (which cannot). The
+        holder is seeded ``downloading`` so ``current_status`` is only
+        right when the pre-check produced it."""
+        canonical_mbid = "18056805-33f5-3e99-aa4b-5f5919c4f8af"
+        with self.subTest(direction="discogs→mb"):
+            db = FakePipelineDB()
+            self._seed_discogs(db)
+            db.seed_request(make_request_row(
+                id=43, mb_release_id=canonical_mbid,
+                mb_release_group_id=RG_ID, status="downloading",
+            ))
+            svc = self._make_service(
+                db,
+                mb_lookup=lambda mbid, *, fresh=False: _fake_target_payload(
+                    mbid=canonical_mbid, rg_id=RG_ID,
+                ),
+            )
+            result = svc.replace_request_mbid(
+                42, target_mb_release_id=NEW_MBID, cross_pathway=True,
+            )
+            self.assertEqual(result.outcome, RESULT_TARGET_COLLISION_REQUEST)
+            self.assertEqual(result.current_status, "downloading")
+            self.assertEqual(result.request_id, 42)
+            assert result.error_message is not None
+            self.assertIn(canonical_mbid, result.error_message)
+            self.assertEqual(db.request(42)["status"], "wanted")
+            self.assertEqual(db.advisory_lock_calls, [])
+        with self.subTest(direction="mb→discogs"):
+            db = FakePipelineDB()
+            self._seed_old(db)
+            # The holder carries the canonical ONLY in ``discogs_release_id``
+            # (the shape ``get_request_by_release_id`` resolves first,
+            # KTD-6): an MB-only lookup here would miss it, and so would
+            # the supersede's UNIQUE net on ``mb_release_id``.
+            db.seed_request(make_request_row(
+                id=43, mb_release_id=None, discogs_release_id="1003",
+                mb_release_group_id=DISCOGS_MASTER, status="downloading",
+            ))
+            svc = self._make_service(
+                db,
+                discogs_lookup=(
+                    lambda rid, *, fresh=False: _fake_discogs_payload(
+                        release_id="1003", master=DISCOGS_MASTER,
+                    )
+                ),
+            )
+            result = svc.replace_request_mbid(
+                42, target_mb_release_id=NEW_DISCOGS_ID, cross_pathway=True,
+            )
+            self.assertEqual(result.outcome, RESULT_TARGET_COLLISION_REQUEST)
+            self.assertEqual(result.current_status, "downloading")
+            self.assertEqual(result.request_id, 42)
+            assert result.error_message is not None
+            self.assertIn("1003", result.error_message)
+            self.assertEqual(db.request(42)["status"], "wanted")
+            self.assertEqual(db.advisory_lock_calls, [])
+
+    def test_flagged_cross_pathway_refuses_a_canonical_of_the_wrong_shape(self):
+        """The mirror's canonical id must be a release id on the TARGET's
+        pathway. A canonical that carries the other shape (including one
+        equal to the source's own id) or no shape at all (the Discogs
+        Struct's ``id`` default, ``"0"``) is refused before the redirect
+        re-check and before any write."""
+        cases = (
+            ("discogs→mb: canonical is the source's numeric id", "discogs",
+             NEW_MBID,
+             lambda mbid, *, fresh=False: _fake_target_payload(
+                 mbid=OLD_DISCOGS_ID, rg_id=RG_ID)),
+            ("mb→discogs: canonical is the source's UUID", "mb",
+             NEW_DISCOGS_ID,
+             lambda rid, *, fresh=False: _fake_discogs_payload(
+                 release_id=OLD_MBID, master=DISCOGS_MASTER)),
+            ("mb→discogs: canonical is the Struct default 0", "mb",
+             NEW_DISCOGS_ID,
+             lambda rid, *, fresh=False: _fake_discogs_payload(
+                 release_id="0", master=DISCOGS_MASTER)),
+        )
+        for desc, source_kind, target, lookup in cases:
+            with self.subTest(desc=desc):
+                db = FakePipelineDB()
+                if source_kind == "mb":
+                    self._seed_old(db)
+                else:
+                    self._seed_discogs(db)
+                before = db.request(42).copy()
+                svc = self._service_with_target_lookup(db, source_kind, lookup)
+                result = svc.replace_request_mbid(
+                    42, target_mb_release_id=target, cross_pathway=True,
+                )
+                self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+                self.assertEqual(
+                    result.reason, REPLACE_REASON_UNRESOLVABLE_TARGET,
+                )
+                self.assertEqual(result.request_id, 42)
+                assert result.error_message is not None
+                self.assertIn("canonicalised", result.error_message)
+                self.assertEqual(db.advisory_lock_calls, [])
+                self._assert_source_untouched(db, 42, before)
+
+    def test_flagged_cross_pathway_empty_payload_unresolvable(self):
+        for source_kind, target in (
+            ("mb", NEW_DISCOGS_ID),
+            ("discogs", NEW_MBID),
+        ):
+            with self.subTest(source=source_kind):
+                db = FakePipelineDB()
+                if source_kind == "mb":
+                    self._seed_old(db)
+                else:
+                    self._seed_discogs(db)
+                svc = self._service_with_target_lookup(
+                    db, source_kind, lambda _id, *, fresh=False: {},
+                )
+                result = svc.replace_request_mbid(
+                    42, target_mb_release_id=target, cross_pathway=True,
+                )
+                self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+                self.assertEqual(
+                    result.reason, REPLACE_REASON_UNRESOLVABLE_TARGET,
+                )
+                self.assertEqual(result.request_id, 42)
+                self.assertIsNotNone(result.error_message)
+                self.assertEqual(db.request(42)["status"], "wanted")
+
+    def test_flagged_cross_pathway_lookup_failures_map_like_same_pathway(self):
+        """The target pathway's lookup failure classes keep their
+        outcomes (Rule B: the real exception classes are raised)."""
+        cases = (
+            ("discogs target: mirror unconfigured", "mb", NEW_DISCOGS_ID,
+             DiscogsMirrorNotConfigured("no mirror"),
+             RESULT_MIRROR_UNCONFIGURED, None),
+            ("discogs target: transient", "mb", NEW_DISCOGS_ID,
+             URLError("connection refused"),
+             RESULT_TRANSIENT, None),
+            ("discogs target: unexpected", "mb", NEW_DISCOGS_ID,
+             RuntimeError("mirror 500"),
+             RESULT_TARGET_INVALID, REPLACE_REASON_UNEXPECTED_LOOKUP_ERROR),
+            ("mb target: transient", "discogs", NEW_MBID,
+             URLError("connection refused"),
+             RESULT_TRANSIENT, None),
+            ("mb target: unexpected", "discogs", NEW_MBID,
+             RuntimeError("mirror 500"),
+             RESULT_TARGET_INVALID, REPLACE_REASON_UNEXPECTED_LOOKUP_ERROR),
+        )
+        for desc, source_kind, target, exc, outcome, reason in cases:
+            with self.subTest(desc=desc):
+                db = FakePipelineDB()
+                if source_kind == "mb":
+                    self._seed_old(db)
+                else:
+                    self._seed_discogs(db)
+
+                def raising(_id, *, fresh=False, _exc=exc):
+                    raise _exc
+
+                svc = self._service_with_target_lookup(db, source_kind, raising)
+                result = svc.replace_request_mbid(
+                    42, target_mb_release_id=target, cross_pathway=True,
+                )
+                self.assertEqual(result.outcome, outcome)
+                if reason is not None:
+                    self.assertEqual(result.reason, reason)
+                self.assertEqual(db.request(42)["status"], "wanted")
+
+    def test_flag_is_inert_for_same_pathway_targets(self):
+        """The opt-in unlocks the other pathway; it never relaxes the
+        same-pathway group gate."""
+        with self.subTest(pathway="mb", expect="mismatch"):
+            db = FakePipelineDB()
+            self._seed_old(db)
+            svc = self._make_service(
+                db,
+                mb_lookup=lambda mbid, *, fresh=False: _fake_target_payload(
+                    rg_id=OTHER_RG_ID,
+                ),
+            )
+            result = svc.replace_request_mbid(
+                42, target_mb_release_id=NEW_MBID, cross_pathway=True,
+            )
+            self.assertEqual(
+                result.outcome, RESULT_TARGET_RELEASE_GROUP_MISMATCH,
+            )
+        with self.subTest(pathway="discogs", expect="mismatch"):
+            db = FakePipelineDB()
+            self._seed_discogs(db)
+            svc = self._make_service(
+                db,
+                discogs_lookup=(
+                    lambda rid, *, fresh=False: _fake_discogs_payload(
+                        release_id=NEW_DISCOGS_ID, master=OTHER_DISCOGS_MASTER,
+                    )
+                ),
+            )
+            result = svc.replace_request_mbid(
+                42, target_mb_release_id=NEW_DISCOGS_ID, cross_pathway=True,
+            )
+            self.assertEqual(
+                result.outcome, RESULT_TARGET_RELEASE_GROUP_MISMATCH,
+            )
+        with self.subTest(pathway="mb", expect="replaced"), \
+                self._patch_externals_scoped():
+            db = FakePipelineDB()
+            self._seed_old(db)
+            svc = self._make_service(db)
+            result = svc.replace_request_mbid(
+                42, target_mb_release_id=NEW_MBID, cross_pathway=True,
+            )
+            self.assertEqual(result.outcome, RESULT_REPLACED)
+        with self.subTest(pathway="mb", expect="same_as_current"):
+            db = FakePipelineDB()
+            self._seed_old(db)
+            svc = self._make_service(db)
+            result = svc.replace_request_mbid(
+                42, target_mb_release_id=OLD_MBID, cross_pathway=True,
+            )
+            self.assertEqual(result.outcome, RESULT_TARGET_SAME_AS_CURRENT)
+
+    def test_flagged_cross_pathway_displaces_the_old_install(self):
+        """Phase 4 keys on the OLD row's exact identity, whichever pathway
+        it is on: the displaced pressing leaves beets and the rescans
+        fire on its former path — same as same-pathway Replace."""
+        for source_kind in ("mb", "discogs"):
+            with self.subTest(source=source_kind), \
+                    self._patch_externals_scoped() as mocks:
+                db = FakePipelineDB()
+                if source_kind == "mb":
+                    self._seed_old(db, status="imported")
+                    old_id, target = OLD_MBID, NEW_DISCOGS_ID
+                else:
+                    self._seed_discogs(db, status="imported")
+                    old_id, target = OLD_DISCOGS_ID, NEW_MBID
+                beets = self._installed_beets(release_id=old_id)
+                exact_delete = MagicMock(side_effect=self._completed_delete)
+                svc = self._make_service(
+                    db,
+                    beets_db_factory=lambda beets=beets: beets,
+                    beets_delete_fn=exact_delete,
+                )
+                result = svc.replace_request_mbid(
+                    42, target_mb_release_id=target, cross_pathway=True,
+                )
+                self.assertEqual(result.outcome, RESULT_REPLACED)
+                self.assertEqual(result.warnings, ())
+                exact_delete.assert_called_once()
+                request = exact_delete.call_args.args[0]
+                self.assertEqual(request.album_id, 77)
+                self.assertEqual(request.expected_release_id, old_id)
+                _wm, plex, jellyfin = mocks
+                plex.assert_called_once()
+                self.assertEqual(
+                    plex.call_args.kwargs["imported_path"],
+                    "/library/Current Artist/Current Album",
+                )
+                jellyfin.assert_called_once()
 
 
 class TestReplaceDBProtocolParity(unittest.TestCase):

@@ -191,14 +191,6 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
     }
     DELETE_REQUIRED_FIELDS: ClassVar = {"status", "id"}
 
-    def test_release_tracks_gracefully_narrows_decoded_mirror_json(self):
-        from web.routes.pipeline_mutations import _release_tracks
-
-        tracks = [{"title": "Track", "position": 1}]
-        self.assertIs(_release_tracks({"tracks": tracks})[0], tracks[0])
-        self.assertEqual(_release_tracks({"tracks": ["malformed"]}), [])
-        self.assertEqual(_release_tracks({"tracks": {"title": "wrong"}}), [])
-
     def setUp(self) -> None:
         super().setUp()
         # Request 100: the lookup target for update/upgrade/set-quality

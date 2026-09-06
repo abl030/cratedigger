@@ -27,7 +27,6 @@ TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "lib/json_narrow.py": {"any": 3},
     "lib/long_tail_service.py": {"any": 6},
     "lib/matching.py": {"any": 8},
-    "lib/mbid_replace_service.py": {"any": 11},
     "lib/measurement.py": {"any": 2},
     "lib/peer_cache.py": {"any": 8},
     "lib/pipeline_db/_core.py": {"any": 13},

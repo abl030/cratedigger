@@ -5580,7 +5580,7 @@ class TestCmdReplace(_FakeDbWebServerCase):
     historical exit codes and text/JSON output survive the move."""
 
     def _run(self, *, mock_outcome, mock_kwargs=None, json_out=False,
-             req_id=42, target_mbid="new-mbid"):
+             req_id=42, target_mbid="new-mbid", cross_pathway=False):
         from lib.mbid_replace_service import ReplaceResult
 
         result = ReplaceResult(
@@ -5590,6 +5590,7 @@ class TestCmdReplace(_FakeDbWebServerCase):
         )
         args = argparse.Namespace(
             id=req_id, target_mb_release_id=target_mbid, json=json_out,
+            cross_pathway=cross_pathway,
             api_endpoint=TcpApiEndpoint(self.base),
         )
         stdout = io.StringIO()
@@ -5603,7 +5604,46 @@ class TestCmdReplace(_FakeDbWebServerCase):
             mock_cfg.return_value = CratediggerConfig.from_ini(cp)
             MS.return_value.replace_request_mbid.return_value = result
             rc = pipeline_cli.cmd_replace(None, args)
+            self._service_call = MS.return_value.replace_request_mbid.call_args
         return rc, stdout.getvalue()
+
+    def test_cross_pathway_flag_reaches_the_service(self):
+        """Issue #1366: ``--cross-pathway`` rides the same route body the
+        web picker sends, and the route forwards it to the service as
+        the ``cross_pathway`` keyword. Default is off."""
+        rc, _ = self._run(
+            mock_outcome="replaced",
+            mock_kwargs={"new_request_id": 99},
+            target_mbid="1002",
+            cross_pathway=True,
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            self._service_call.kwargs,
+            {"target_mb_release_id": "1002", "cross_pathway": True},
+        )
+        self._run(
+            mock_outcome="replaced",
+            mock_kwargs={"new_request_id": 99},
+            target_mbid="1002",
+        )
+        self.assertEqual(
+            self._service_call.kwargs,
+            {"target_mb_release_id": "1002", "cross_pathway": False},
+        )
+
+    def test_cross_pathway_is_a_parser_flag(self):
+        from scripts.pipeline_cli.routes_meta import _build_parser
+
+        parser, _, _ = _build_parser()
+        flagged = parser.parse_args(
+            ["replace", "42", "--to", "1002", "--cross-pathway"])
+        self.assertIs(flagged.cross_pathway, True)
+        self.assertEqual(flagged.target_mb_release_id, "1002")
+        self.assertEqual(flagged.id, 42)
+        plain = parser.parse_args(["replace", "42", "--to", "1002"])
+        self.assertIs(plain.cross_pathway, False)
+        self.assertEqual(plain.target_mb_release_id, "1002")
 
     def test_exit_0_on_replaced(self):
         rc, out = self._run(

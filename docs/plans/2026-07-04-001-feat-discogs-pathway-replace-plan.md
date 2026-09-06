@@ -18,6 +18,8 @@ execution: code
 - **Product Contract preservation:** unchanged from the brainstorm except (a) R10-R11 added — service-level guardrails surfaced by flow analysis (master-mismatch gate, mirror-unconfigured outcome); (b) the Outstanding Question (persist vs live-lookup master anchor) is resolved into KTD-1 and the section removed; (c) R6 clarified in review — parity is with MB Replace's supersede (base identity, no resolver re-run), not the full add flow.
 - **Open blockers:** None.
 - **Stop conditions:** Any change that would touch MB Replace behavior beyond routing (R3), or that requires a new `album_requests` column, contradicts this plan — stop and surface rather than improvise.
+- **Superseded in part (2026-09-06):** R4 and AE2 — the same-pathway-only target rule — were a scope boundary on this already large piece of work, not a product ruling that the two pathways must never meet. GitHub issue #1366 records the operator's decision to go over the top of them: a target on the other pathway is accepted under the explicit `cross_pathway` opt-in (API body field / `pipeline-cli replace --cross-pathway`), to be surfaced in the Browse tab through the artist compare pairing that already presents an MB release group and a Discogs master as one album (the issue's second half). R5-R7 (supersede semantics, dual-written identity, strict pressing identity) are unchanged and hold across pathways. The "Cross-pathway replace — out" Scope Boundary below is likewise superseded by #1366.
+  Authority: "yesh open a new issue for this as a new feature, plainly describing my authority to go over the top. we can re-use as much machinery as possible, we already do this comparison elsewhere, and the reason it would ahve been out of scope was we were alreday building something big and I didn't want it to get bigger, i wouldn't have been saying we should never ever do this." — https://github.com/abl030/cratedigger/issues/1366
 
 ---
 
@@ -50,7 +52,7 @@ The operator job this serves is simple: "we keep downloading the wrong release f
 
 **Replace action**
 
-- R4. Replace accepts a Discogs release id as target when the source request is Discogs-pathway; a target from the other pathway is rejected as invalid.
+- R4. Replace accepts a Discogs release id as target when the source request is Discogs-pathway; a target from the other pathway is rejected as invalid. *Superseded by issue #1366 (see Goal Capsule): a cross-pathway target is accepted under the explicit `cross_pathway` opt-in; without it the rejection stands.*
 - R5. Supersede semantics are identical to MB Replace: the old row flips to `replaced` (terminal, frozen audit), the new row is created as `wanted` pointing back via `replaces_request_id`, and the next pipeline cycle rebuilds derived state.
 - R6. The superseded-into row carries complete Discogs identity — `mb_release_id` and `discogs_release_id` dual-written as the add flow writes them; resolver-derived fields (`is_va_compilation`, `release_group_year`, `catalog_number`, `track_artist`) are not re-resolved, matching MB Replace's supersede.
 - R7. Strict pressing identity holds: the new request anchors on exactly the Discogs release id the operator picked — no substitution, no sibling fallback.
@@ -76,7 +78,7 @@ The operator job this serves is simple: "we keep downloading the wrong release f
 ### Acceptance Examples
 
 - AE1. **Covers R2, R10.** Given a Discogs-pathway request whose release has no master, when the operator opens Replace, then the picker shows only the current release; any submitted target other than the current release is rejected. The operator's fallback is delete-and-re-add via browse.
-- AE2. **Covers R4.** Given a Discogs-pathway request, when the operator submits an MB UUID as the replacement target, then the action is rejected as invalid — cross-pathway replace is not supported.
+- AE2. **Covers R4.** Given a Discogs-pathway request, when the operator submits an MB UUID as the replacement target, then the action is rejected as invalid — cross-pathway replace is not supported. *Superseded by issue #1366: holds only when the `cross_pathway` opt-in is absent.*
 - AE3. **Covers R11.** Given a host with no Discogs mirror configured, when the operator attempts Replace on a Discogs request, then the outcome names the missing mirror (HTTP 503 / CLI exit 5), not an invalid-target error.
 
 ### Success Criteria
@@ -85,7 +87,7 @@ The operator job this serves is simple: "we keep downloading the wrong release f
 
 ### Scope Boundaries
 
-- Cross-pathway replace (Discogs↔MB, scenario (c) in #282) — out. Delete-and-re-add via browse covers the rare pathway jump, at the acknowledged cost of the `replaces_request_id` audit link.
+- Cross-pathway replace (Discogs↔MB, scenario (c) in #282) — out. Delete-and-re-add via browse covers the rare pathway jump, at the acknowledged cost of the `replaces_request_id` audit link. *Superseded by issue #1366, which delivers exactly this with the audit link intact.*
 - Mixed-pathway picker (showing MB and Discogs candidates together) — out; lists are never merged.
 - Refactoring or simplifying the existing MB Replace machinery — out; this issue only recreates the action for the second pathway.
 - Special handling for upstream Discogs rename/merge in dump rebuilds (scenario (b)) — no dedicated machinery; Replace itself is the remedy when it happens.
@@ -126,7 +128,8 @@ flowchart TB
   A[replace_request_mbid] --> B{source row found + status wanted/manual?}
   B -->|no| X1[not_found / wrong_state]
   B -->|yes| C{detect_release_source of source vs target}
-  C -->|shapes differ| X2[target_invalid - cross-pathway]
+  C -->|shapes differ, no cross_pathway opt-in| X2[target_invalid - cross-pathway]
+  C -->|shapes differ, cross_pathway opt-in - issue 1366| CP[cross-pathway arm: target resolved in its own pathway, no group gate, supersede]
   C -->|both MB| D[mb_lookup path - unchanged]
   C -->|both Discogs| E{source mb_release_group_id set?}
   E -->|no| F[lazy backfill: discogs_lookup source id -> master id, persist]

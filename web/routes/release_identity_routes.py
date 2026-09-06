@@ -303,6 +303,10 @@ def post_pipeline_resolve_rg(
 
 class PipelineReplaceRequest(BaseModel):
     target_mb_release_id: str = Field(min_length=1)
+    # The operator's explicit assertion that a target on the other pathway
+    # is the same album (issue #1366). Strict: a JSON string is a caller
+    # bug, never an assertion.
+    cross_pathway: bool = Field(default=False, strict=True)
 
 
 def post_pipeline_replace(
@@ -315,9 +319,12 @@ def post_pipeline_replace(
     ``MbidReplaceService.replace_request_mbid`` — keep them in sync (see
     ``CLAUDE.md`` § "CLI ⇄ API surface symmetry").
 
-    Body: ``{"target_mb_release_id": "<id>"}`` — an MB release UUID or a
-    Discogs numeric release id; must share the source's pathway (MB or
-    Discogs) and release group/master.
+    Body: ``{"target_mb_release_id": "<id>", "cross_pathway": false}`` —
+    an MB release UUID or a Discogs numeric release id. A same-pathway
+    target must share the source's release group/master; a target on the
+    other pathway needs ``cross_pathway: true``, the operator's explicit
+    assertion that the paired MB release group and Discogs master are one
+    album (issue #1366).
 
     Status-code mapping mirrors the CLI exit codes:
       * 200 — ``RESULT_REPLACED``
@@ -366,7 +373,9 @@ def post_pipeline_replace(
     cfg = read_runtime_config()
     svc = MbidReplaceService(db=db, config=cfg)
     result = svc.replace_request_mbid(
-        request_id, target_mb_release_id=target,
+        request_id,
+        target_mb_release_id=target,
+        cross_pathway=req_body.cross_pathway,
     )
 
     payload: dict[str, object] = {
@@ -528,7 +537,8 @@ ROUTES: list[RouteRegistration] = [
         "POST", r"^/api/pipeline/(\d+)/replace$", post_pipeline_replace,
         "Supersede the source request with a new row at a different "
         "release id (MB UUID or Discogs numeric id) in the same "
-        "release group/master, same pathway as the source.",
+        "release group/master, or on the other pathway under the "
+        "explicit cross_pathway opt-in (issue #1366).",
         classified=True,
     ),
     pattern_route(

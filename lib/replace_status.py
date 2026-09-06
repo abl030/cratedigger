@@ -20,13 +20,16 @@ design (no MB/Discogs adapter asymmetry) — the same reason applies
 whether the failing lookup was against the MB mirror or the Discogs
 mirror:
 
-    cross_pathway_target      target/source pathways differ, or the
-                               target id doesn't parse as either shape
+    cross_pathway_target      target/source pathways differ without the
+                               operator's ``cross_pathway`` opt-in (issue
+                               #1366), or the target id doesn't parse as
+                               either shape
     source_no_release_group   the source has no release group/master to
                                anchor siblings against (MB: no RG after
                                lazy-backfill; Discogs: masterless)
     unresolvable_target       the target lookup returned no usable data
-                               (empty/falsy payload)
+                               (empty/falsy payload, or a canonical id that
+                               is not a release id on the target's pathway)
     target_no_release_group   the target resolved but has no release
                                group/master (MB: no release_group_id;
                                Discogs: no master)

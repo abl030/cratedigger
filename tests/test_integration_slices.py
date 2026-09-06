@@ -11914,14 +11914,16 @@ class TestReplaceFullPath(unittest.TestCase):
         ) as mock_plex, patch(
             "lib.mbid_replace_service.trigger_jellyfin_scan", MagicMock(),
         ) as mock_jellyfin:
+            slskd_mock = MagicMock()
             svc = MbidReplaceService(
-                db=db, config=cfg, slskd=MagicMock(),
+                db=db, config=cfg, slskd=slskd_mock,
                 beets_db_factory=lambda: beets,
                 beets_delete_fn=exact_delete,
                 mb_lookup=lambda mbid, *, fresh=False: target,
                 search_plan_service=plan_svc,
             )
-            self._svc_slskd_mock = svc.slskd
+            self._svc_slskd_mock = slskd_mock
+            self.assertIs(svc.slskd, slskd_mock)
             result = svc.replace_request_mbid(
                 4194, target_mb_release_id=self.PET_GRIEF_CANONICAL,
             )
