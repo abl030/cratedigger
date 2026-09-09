@@ -253,11 +253,15 @@ _NIX_EVAL_CACHE: dict[str, dict[str, object] | Exception] = {}
 
 #: No expression below ever hands Nix the live repository tree. The
 #: JavaScript phase runs concurrently with this one, and
-#: ``tests/test_js_harness.mjs`` writes a transient in-repo fixture under
-#: ``tests/_harness_fixtures`` for the length of one child process; an
+#: ``tests/test_js_harness.mjs`` used to write a transient in-repo fixture
+#: under ``tests/_harness_fixtures`` for the length of one child process; an
 #: eval whose store copy of ``./.`` began while that directory existed
 #: died with "path .../tests/_harness_fixtures does not exist"
-#: (2026-09-09, #1378). Two halves close that: the preambles load the
+#: (2026-09-09, #1378). That producer is fixed too — #1394 made the one
+#: in-repo fixture a tracked file, so nothing appears and vanishes there
+#: any more — but the walk is the half that generalizes to every other
+#: untracked path a suite run touches, and it stays closed here. Two halves
+#: close it: the preambles load the
 #: flake as ``git+file://<root>``, whose snapshot carries every tracked
 #: file's working-tree content (uncommitted edits included, measured) but
 #: no untracked path, and every world takes the flake module's default
@@ -267,9 +271,9 @@ _NIX_EVAL_CACHE: dict[str, dict[str, object] | Exception] = {}
 #: these worlds can see it, which fails loudly rather than silently. A tree
 #: with no ``.git`` at all (a ``git archive`` snapshot, which is where the
 #: mutant runner works) cannot be fetched as ``git+file``, so the preamble
-#: falls back to #1248's filtered ``builtins.path`` copy there, now
-#: excluding the two churn paths seen so far (``__pycache__`` and
-#: ``tests/_harness_fixtures``); ``builtins.path``'s result carries a
+#: falls back to #1248's filtered ``builtins.path`` copy there, excluding
+#: ``__pycache__`` and ``tests/_harness_fixtures`` (the latter now belt and
+#: braces, since its contents are tracked); ``builtins.path``'s result carries a
 #: store-path string context that ``getFlake`` refuses, so the fallback
 #: discards it with ``unsafeDiscardStringContext``, which is safe because
 #: the copy is already realized on disk by then. That fallback is weaker,
@@ -1065,7 +1069,29 @@ class TestNixEvalPreamblesNeverWalkTheLiveTree(unittest.TestCase):
     are found by scanning for it rather than listed, every occurrence must
     be followed by the one accepted shape, and the literals are spelled
     from parts so this test's own text never satisfies it.
+
+    The second method closes the same invariant's other half (#1394): a
+    flake ref handed to ``nix`` on the COMMAND LINE never passes through
+    ``builtins.getFlake``, so the scan above cannot see it, and
+    ``tests/test_readme_nix_quick_start.py`` was still overriding an input
+    with ``path:<live root>`` long after the preambles were fixed. That ref
+    walks wider than the shape above ever did: it copies untracked paths,
+    ``.gitignore``d ones, and ``.git`` itself (measured 2026-09-09).
     """
+
+    def test_no_module_names_the_live_tree_as_a_flake_ref(self) -> None:
+        forbidden = "path:" + "{REPO_ROOT}"
+        offenders = sorted(
+            path.name for path in (REPO_ROOT / "tests").glob("*.py")
+            if forbidden in path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            offenders,
+            [],
+            f"a flake ref spelled {forbidden!r} hands Nix the live worktree; "
+            "resolve the source to a store path first "
+            "(tests/test_readme_nix_quick_start.py has the one helper)",
+        )
 
     def test_every_preamble_prefers_the_git_snapshot(self) -> None:
         call = "builtins.getFlake" + " ("

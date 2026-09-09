@@ -12,6 +12,66 @@ from tempfile import TemporaryDirectory
 REPO_ROOT = Path(__file__).resolve().parent.parent
 README = REPO_ROOT / "README.md"
 
+#: Resolve the repository to a store path, never handing Nix the live tree.
+#:
+#: This test overrides the README flake's ``cratedigger`` input with the
+#: repository itself. Naming it as ``path:<root>`` made Nix copy and hash the
+#: WHOLE working directory. Measured 2026-09-09 by planting probe files and
+#: reading the resulting store copy: it carried untracked paths (a file under
+#: ``tests/_harness_fixtures/``), ``.gitignore``d ones (under ``build/`` and
+#: ``.hypothesis/``) and ``.git`` itself, and its store hash moved whenever
+#: any of them changed — so the walk repeats every run in a tree a suite is
+#: writing to. Nothing is excluded, so the root a developer runs this from
+#: decides the size: this repository's own shared checkout measured 2.2 GB
+#: that day, 1.8 GB of it agent worktrees under ``.claude/worktrees/``. The
+#: plain ``.`` ref carried none of the probes.
+#:
+#: That is the same walk #1378 removed from ``tests/test_nix_module.py`` and
+#: ``tests/test_web_auth_mode_generated.py`` after one died mid-walk with
+#: "path .../tests/_harness_fixtures does not exist" — the JavaScript phase
+#: runs concurrently with this one. The flake ref on the command line was
+#: the live-tree walker those two left behind (#1394 item 2).
+#:
+#: So the override is a store path, resolved through the same expression
+#: those two modules use: the git snapshot when ``.git`` exists (tracked
+#: working-tree content, no untracked path), else #1248's filtered copy for a
+#: ``git archive`` snapshot, which cannot be fetched as ``git+file``.
+#: ``builtins.path``'s result carries a store-path string context that
+#: ``getFlake`` refuses, hence ``unsafeDiscardStringContext``; the copy is
+#: already realized on disk by then. Cost, measured in a 52 MB worktree at
+#: host load ~30: 0.04s for this call, against 0.55s to re-walk the live tree
+#: after a one-file change.
+_SOURCE_EXPRESSION = r"""
+  (builtins.getFlake (
+    if builtins.pathExists ./.git
+    then "git+file://" + toString ./.
+    else builtins.unsafeDiscardStringContext (toString (builtins.path {
+      path = toString ./.;
+      filter = path: type:
+        baseNameOf path != "__pycache__"
+        && baseNameOf path != "_harness_fixtures";
+      name = "cratedigger-nix-eval-source";
+    }))
+  )).outPath
+"""
+
+
+def _cratedigger_source_flake_ref(root: Path = REPO_ROOT) -> str:
+    """The flake ref the README's ``cratedigger`` input is overridden with."""
+    result = subprocess.run(
+        ["nix", "eval", "--impure", "--raw", "--expr", _SOURCE_EXPRESSION],
+        cwd=root,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise AssertionError(result.stderr)
+    store_path = result.stdout.strip()
+    if not store_path.startswith("/nix/store/"):
+        raise AssertionError(f"source did not resolve to a store path: {store_path!r}")
+    return f"path:{store_path}"
+
 
 def _extract_nix_quick_start(readme: str) -> str:
     section = readme.partition("## Running it (NixOS)")[2]
@@ -28,6 +88,47 @@ def _extract_nix_quick_start(readme: str) -> str:
 
 def _read_nix_quick_start() -> str:
     return _extract_nix_quick_start(README.read_text(encoding="utf-8"))
+
+
+class TestCratediggerSourceFlakeRef(unittest.TestCase):
+    """#1394: the ``cratedigger`` input override never names the live tree.
+
+    Both branches are driven for real. The ``.git`` branch is asserted
+    against this repository; the fallback is asserted against a throwaway
+    flake with no ``.git`` at all, which is the only way to reach it.
+    """
+
+    def test_the_repository_resolves_to_a_store_path_without_untracked_state(
+        self,
+    ) -> None:
+        ref = _cratedigger_source_flake_ref()
+        self.assertTrue(ref.startswith("path:/nix/store/"), ref)
+        self.assertNotIn(str(REPO_ROOT), ref)
+        source = Path(ref.removeprefix("path:"))
+        # It really is this repository...
+        self.assertTrue((source / "flake.nix").is_file(), source)
+        # ...and it is the git snapshot, not a copy of the working
+        # directory: a `path:` copy of the live tree carries `.git`.
+        self.assertFalse((source / ".git").exists(), source)
+
+    def test_a_tree_with_no_git_falls_back_to_the_filtered_copy(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "flake.nix").write_text(
+                "{ outputs = _: {}; }\n", encoding="utf-8"
+            )
+            (root / "kept.txt").write_text("kept\n", encoding="utf-8")
+            for churn in ("_harness_fixtures", "__pycache__"):
+                (root / churn).mkdir()
+                (root / churn / "transient.txt").write_text("x\n", encoding="utf-8")
+
+            ref = _cratedigger_source_flake_ref(root)
+
+        self.assertTrue(ref.startswith("path:/nix/store/"), ref)
+        source = Path(ref.removeprefix("path:"))
+        self.assertTrue((source / "kept.txt").is_file(), source)
+        self.assertFalse((source / "_harness_fixtures").exists(), source)
+        self.assertFalse((source / "__pycache__").exists(), source)
 
 
 class TestReadmeNixQuickStart(unittest.TestCase):
@@ -98,7 +199,7 @@ class TestReadmeNixQuickStart(unittest.TestCase):
                     "--no-write-lock-file",
                     "--override-input",
                     "cratedigger",
-                    f"path:{REPO_ROOT}",
+                    _cratedigger_source_flake_ref(),
                     "--apply",
                     projection,
                     f"path:{temp_dir}#nixosConfigurations.myhost.config",
