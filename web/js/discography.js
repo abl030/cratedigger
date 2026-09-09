@@ -412,7 +412,8 @@ export function statusChipHtml(status) {
  * other browse surface; an enabled beets removal remains visible.
  *
  * @param {Object} rel - Pressing row with pipeline/library overlay fields.
- * @param {{artistName: string, parentRgId: string|null, offer: import('./replace_offer.js').ReplaceOffer, paired: import('./replace_offer.js').ReplacePair|null}} ctx -
+ * @param {{artistName: string, rgForReplace: string|null, offer: import('./replace_offer.js').ReplaceOffer, paired: import('./replace_offer.js').ReplacePair|null}} ctx -
+ *   rgForReplace is the row's already-resolved Replace lookup key,
  *   offer is the inverted Replace button's decision for this row
  *   (``replace_offer.js``), paired the compare counterpart it may replace
  *   a request under (issue #1366 part 2).
@@ -454,7 +455,14 @@ export function renderPressingRow(rel, ctx) {
   // lazy-resolves it via ``POST /api/pipeline/<id>/resolve-rg``
   // (standard) or ``GET /api/release/<mbid>`` (inverted) before
   // fetching siblings.
-  const rgForReplace = rel.release_group_id || ctx.parentRgId || null;
+  //
+  // The key arrives already resolved. ``loadReleaseGroup`` derives it
+  // once per row and decides ``ctx.offer`` from that same value, so the
+  // key the offer was taken on IS the key the picker opens on. Deriving
+  // it a second time here was one formula spelled twice in one closure
+  // (issue #1355 Batch D residual), and a later edit to either spelling
+  // alone would have split them without a failing test.
+  const rgForReplace = ctx.rgForReplace || null;
   const isCurrent = actionState.acquireKind === 'remove_request';
   let replaceBtn = '';
   if (actionState.processingLocked) {
@@ -608,7 +616,7 @@ export async function loadReleaseGroup(id, el, opts = {}) {
       });
       return renderPressingRow(rel, {
         artistName,
-        parentRgId,
+        rgForReplace,
         offer,
         paired,
       });
