@@ -385,6 +385,10 @@ Untracked rows.
   transitions the request: `wanted`, an explicit `unsearchable` stop, and
   terminal `imported` remain exactly as they were.
 - `source TEXT NOT NULL DEFAULT 'slskd'` — sourcing-channel discriminator added by migration 037. CHECK constraint admits `'slskd'`, `'youtube'`, and (migration 080, issue #1176 PR1) `'local'`. The default backfilled every pre-037 row to `'slskd'` in one ALTER (no separate backfill script per the single-operator no-backfill-script rule). Consumers rendering `download_log` rows (`pipeline-cli show`, web routes' "recent attempts") use this column to distinguish channels. Two writers can reach the operator-visible terminal row: `_insert_terminal_download_audit`'s job_type-derived SQL CASE (`lib/pipeline_db/terminal_outcomes.py`) derives `'local'` for a `local_import` job's terminal outcome; and `_insert_nonjob_download_audit` (`lib/pipeline_db/terminal_outcomes.py`) is a separate job-less INSERT that both `PipelineDB.persist_request_success_outcome` (issue #1355 item A1) and `PipelineDB.persist_request_rejection_outcome` (issue #1355 item 3) call directly, inside their own transaction, so a job-less acceptance's or rejection's audit row commits atomically alongside its request transition and any denylist/cooldown writes instead of as a separate autocommit call (`_do_mark_done`'s job-less branch used to call `log_download` directly as a second, separate statement — issue #1355 item A1 closed that gap) — it relies on the same schema `'slskd'` default rather than passing `source=` explicitly. The import-local lane (issue #1176 PR3, `lib/local_import_service.py` → `pipeline-cli import-local` / `POST /api/pipeline/import-local`) is the sole writer that reaches the `'local'` value in production — every dispatch for a `local_import` job carries `import_job_id`, so it always goes through the SQL CASE path, never a job-less writer.
+- `search_log_id INTEGER NULL REFERENCES search_log(id) ON DELETE SET NULL` — migration 085 (issue #811): the exact `search_log` row whose `found` outcome produced the grab this row audits. This is the ONLY link between "what the search found" and "what came of it"; before it, a `found` search row and the `timeout` it produced 20 seconds later were two unconnected facts about the same peer. Partial index `idx_download_log_search_log_id` covers the non-NULL rows. `ON DELETE SET NULL` because `search_log` is forensic and prunable — losing the link must never delete the audit row.
+  - **How it is set.** Not at write time: the grab is claimed *before* the search row exists (`lib/enqueue.py::_claim_initial_download_ownership` → `writer.claim_downloading`, then `find_download` returns, then `cratedigger.py::_log_search_result` records the attempt). So `PipelineDB.record_consumed_search_attempt` stamps the new `search_log.id` onto `album_requests.active_download_state` inside its own existing transaction, guarded on `status='downloading'` AND an exact `active_download_state->>'attempt_fingerprint'` match against the fingerprint the executor computed from the SAME files list the claim fingerprinted. A mismatch or a non-`downloading` row is a zero-write, never an error, and `ConsumedAttemptResult.download_state_stamped` reports which happened. The stamp is deliberately NOT suppressed on a stale completion: cursor staleness is about the cursor, not about whether the download happened.
+  - **How it reaches the row.** `lib/download_reconstruction.py::reconstruct_grab_list_entry` reads it back off the persisted state onto `GrabListEntry.search_log_id`, `lib/dispatch/helpers.py::_build_download_info` copies it to `DownloadInfo.search_log_id`, and every terminal construction site that holds that `DownloadInfo` copies it to `TerminalDownloadAudit.search_log_id`. All three writers persist it: `log_download`, `_insert_nonjob_download_audit`, and `_insert_terminal_download_audit`.
+  - **What stays NULL, and why that is correct.** The enqueue-time `user_offline` row (`lib/enqueue.py`, written before any search row exists); the merge audit (`lib/download_validation.py`) and library-delete audit (`lib/destructive_release_service.py`), neither of which is a grab; `insert_youtube_running` queue rows; force-import, local-import and manifest-guard rows, whose `DownloadInfo` is built from candidate evidence or a bare username rather than from live grab state; the preview measurement-failure bundle and the non-automation import-job failure diagnostic, which hold no `DownloadInfo` at all; and every row written before migration 085.
 - `youtube_metadata JSONB` — YT-specific audit payload added by migration 037. Nullable; populated only for `source='youtube'` rows. Typed at the read seam as `lib.youtube_ingest_service.YoutubeIngestMetadata: msgspec.Struct`. Carries `yt_url`, `browse_id`, `audio_playlist_id`, optional `expected_track_count`, `resolver_mapping_id`, `per_track_video_ids`, and terminal-state fields (`reason`, `stderr_excerpt`, `observed_track_count`).
 - **Partial unique index `one_youtube_running_per_request` ON `download_log (request_id) WHERE source = 'youtube' AND outcome = 'youtube_running'`** — added by migration 037. Enforces idempotency at the DB layer: at most one in-flight YT rescue per `request_id` at any time. Application-level pre-insert checks would race; this index is atomic. Once the row transitions to a terminal `youtube_success` / `youtube_failed`, the index admits the next submission.
 
@@ -1138,6 +1142,32 @@ so it cannot change `classify_unfindable_from_state`'s inputs. Rendered on
 `pipeline-cli triage show` (`conflict=<ids>` per recent entry) and the
 matching `SearchLogEntry.cross_request_conflict_request_ids` field on the
 `/api/triage/<id>` response.
+
+### `active_download_state.search_log_id` (issue #811)
+
+A key inside the `album_requests.active_download_state` JSONB, declared on
+`lib/quality/download_state.py::ActiveDownloadState` (`omit_defaults=True`,
+so it is absent rather than `null` until stamped). It is the in-flight half
+of the `download_log.search_log_id` link documented above: the DB stamps it
+once, from `record_consumed_search_attempt`, and every audit row this grab
+later writes reads it back through
+`reconstruct_grab_list_entry`. It is cleared with the rest of the state when
+the request leaves `downloading`/`processing`, so it never outlives the
+attempt it describes.
+
+### `search_log` reads that surface the grab
+
+`PipelineDB.get_search_history_page` LEFT JOINs the newest `download_log`
+row per search (`grab_download_log_id`, `grab_outcome`, `grab_filetype`,
+`grab_soulseek_username`, `grab_error_message`, `grab_at`) — all NULL on a
+search that never enqueued or predates migration 085. The `search_log`
+columns themselves stay a plain `SELECT *`. `PipelineDB.
+get_search_acquisition_summary` aggregates the same world for the
+search-plan detail view: candidate tiers, grabs by filetype, the newest
+`found` search with its best-matched peer and linked grab, and a peer
+roster — all windowed to rows strictly after the request's newest
+`outcome='success'` download_log row (all history when there has never been
+one).
 
 ### `album_requests` observability columns (migration 028, written by PR3 U12 / U13 / U14)
 

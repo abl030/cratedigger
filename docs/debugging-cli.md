@@ -108,6 +108,27 @@ success 0, not found 2, input/semantic violation 3, conflict 4, transient 5.
   cannot disagree. The line is derived, not stored: `error_message` and
   `transfer_detail` in the DB and the journal stay raw, so query them
   directly when you need the untruncated text.
+- `search-plan show` answers two questions before the plan dump (issue
+  #811). **Search scope** prints the tier ladder the next search will
+  actually walk — the request's `search_filetype_override`, its
+  `target_format`, which of those (or the config default) decided the
+  ladder, the resolved tiers, and whether catch-all is on. It is computed
+  through `lib/quality/filetypes.py::effective_search_tiers`, the same
+  function `find_download` calls, so "is my lossless override in force?"
+  is answered by the executor's own resolution rather than by reading the
+  override string. **Acquisition** then reports what the search has found
+  SINCE the request's last successful import (all history when there has
+  never been one): candidate tiers with counts, how many of those fell
+  outside the scope above, grabs by filetype with their latest outcome,
+  the newest `found` search with its best-matched peer and the exact
+  `download_log` row that grab produced, and the top peers by attempts.
+  `--json` emits the same two blocks as `search_scope` and `acquisition`,
+  which is what the web view renders.
+- `search-plan history` rows carry `grab_*` columns — the newest
+  `download_log` row each search produced — so a run of `found` searches
+  that all timed out is visible as such instead of as unexplained
+  repetition. All-NULL on searches that never enqueued and on rows
+  predating migration 085.
 - `import-job-recovery show` prints read-only exact-owner, liveness, completion,
   library, and cleanup evidence. It remains useful for historical
   `recovery_required` rows, which startup convergence handles automatically
@@ -359,7 +380,7 @@ inside socket authorization, never credentials.
 - `pipeline-cli search-plan history` — Read cursor-paginated per-request search history.
 - `pipeline-cli search-plan regenerate` — Regenerate one persisted request plan.
 - `pipeline-cli search-plan saturation` — Show recent search-plan saturation and pre-filter skips.
-- `pipeline-cli search-plan show` — Show one request's plan, cursor, items, and provenance.
+- `pipeline-cli search-plan show` — Show one request's effective search scope, what it has acquired since its last import, plan, cursor, items, and provenance.
 - `pipeline-cli set` — Apply a typed request lifecycle transition.
 - `pipeline-cli set-intent` — Set lossless-on-disk intent.
 - `pipeline-cli mark-incomplete` — Set/clear the operator's incomplete mark

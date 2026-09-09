@@ -4719,6 +4719,64 @@ class TestCmdSearchPlanShow(unittest.TestCase):
         self.assertTrue(
             payload["currentness"]["current_generator_searchable"])
 
+    def test_search_plan_show_renders_the_effective_search_scope(self):
+        """Issue #811: the operator's "is lossless in force?" question."""
+        db, rid = self._seed_request()
+        self._create_active_plan(db, rid)
+        db.update_request_fields(rid, search_filetype_override="lossless")
+        rc, out = self._run(db, rid)
+        self.assertEqual(rc, 0)
+        self.assertIn("Search scope:", out)
+        self.assertIn("quality override:  lossless", out)
+        self.assertIn("decided by:        override", out)
+        self.assertIn("tiers searched:    lossless", out)
+        self.assertIn("catch-all:         no", out)
+
+    def test_search_plan_show_renders_acquisition_since_the_last_import(self):
+        db, rid = self._seed_request()
+        self._create_active_plan(db, rid)
+        from lib.quality import CandidateScore
+        db.log_search(
+            request_id=rid, query="q", outcome="found",
+            candidates=[CandidateScore(
+                username="anjingpaeh", dir="/a/b", filetype="lossless",
+                matched_tracks=11, total_tracks=11, avg_ratio=0.97,
+                missing_titles=[], file_count=11)],
+        )
+        search_log_id = db.get_search_history(rid)[0]["id"]
+        assert isinstance(search_log_id, int)
+        db.log_download(
+            rid, soulseek_username="anjingpaeh", filetype="flac",
+            outcome="timeout", error_message="remote queue timeout",
+            search_log_id=search_log_id)
+
+        rc, out = self._run(db, rid)
+        self.assertEqual(rc, 0)
+        self.assertIn("Acquisition:", out)
+        self.assertIn("(request_created)", out)
+        self.assertIn("candidate tiers:   lossless=1", out)
+        self.assertIn("grabs:             1 total", out)
+        self.assertIn(f"search_log_id={search_log_id}", out)
+        self.assertIn("peer=anjingpaeh", out)
+        self.assertIn("outcome=timeout", out)
+        self.assertIn("error: remote queue timeout", out)
+
+    def test_search_plan_show_json_carries_scope_and_acquisition(self):
+        db, rid = self._seed_request()
+        self._create_active_plan(db, rid)
+        db.update_request_fields(rid, search_filetype_override="lossless")
+        rc, out = self._run(db, rid, json_out=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["search_scope"]["tiers"], ["lossless"])
+        self.assertEqual(payload["search_scope"]["source"], "override")
+        self.assertFalse(payload["search_scope"]["catch_all"])
+        self.assertEqual(
+            payload["request"]["search_filetype_override"], "lossless")
+        self.assertEqual(
+            payload["acquisition"]["since_reason"], "request_created")
+        self.assertEqual(payload["acquisition"]["grabs_total"], 0)
+
     def test_search_plan_show_human_marks_failures_and_retryable(self):
         db, rid = self._seed_request()
         # No active plan; one deterministic and one transient failure.
