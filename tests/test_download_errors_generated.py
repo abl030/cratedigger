@@ -69,9 +69,8 @@ tests/_hypothesis_profiles.py and docs/generated-testing.md.
 import os
 import sys
 import unittest
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -171,7 +170,7 @@ def assert_capture_progress_preserves_terminal_observation(
 
 
 @st.composite
-def _capture_progress_worlds(draw: Any) -> dict:
+def _capture_progress_worlds(draw: st.DrawFn) -> dict:
     return {
         "prev_state": draw(st.one_of(st.none(), st.sampled_from(_ALL_STATES))),
         "prev_exception": draw(st.one_of(st.none(), st.sampled_from(_EXCEPTIONS))),
@@ -237,7 +236,7 @@ class TestGeneratedCaptureProgressNeverLosesTerminalObservation(unittest.TestCas
 
 
 class TestCaptureProgressCheckerTripsOnViolations(unittest.TestCase):
-    def _base(self, **overrides: Any) -> dict:
+    def _base(self, **overrides: object) -> dict:
         defaults = {
             "prev_state": None, "prev_exception": None, "prev_bytes": 0,
             "has_snapshot": True, "snap_state": "Completed, Rejected",
@@ -305,14 +304,26 @@ _REDUCER_PHASES = (
 )
 
 
+@dataclass(frozen=True)
+class ReducerWorld:
+    """One drawn poll-cycle world, shared by both reducer properties."""
+
+    phase: str
+    prev_bytes: int
+    retry_count: int
+    exception: str | None
+    attempt_fingerprint: str | None = None
+    search_log_id: int | None = None
+
+
 @st.composite
-def _reducer_purity_worlds(draw: Any) -> dict[str, Any]:
-    return {
-        "phase": draw(st.sampled_from(_REDUCER_PHASES)),
-        "prev_bytes": draw(st.integers(min_value=0, max_value=1_000_000)),
-        "retry_count": draw(st.integers(min_value=0, max_value=4)),
-        "exception": draw(st.one_of(st.none(), st.sampled_from(_EXCEPTIONS))),
-    }
+def _reducer_purity_worlds(draw: st.DrawFn) -> ReducerWorld:
+    return ReducerWorld(
+        phase=draw(st.sampled_from(_REDUCER_PHASES)),
+        prev_bytes=draw(st.integers(min_value=0, max_value=1_000_000)),
+        retry_count=draw(st.integers(min_value=0, max_value=4)),
+        exception=draw(st.one_of(st.none(), st.sampled_from(_EXCEPTIONS))),
+    )
 
 
 #: Phases only the #1405 identity property below draws: the one branch
@@ -330,7 +341,7 @@ _REDUCER_NOW = datetime(2026, 1, 1, 0, 10, tzinfo=UTC)
 
 
 def _build_reducer_world(
-    world: dict[str, Any],
+    world: ReducerWorld,
 ) -> tuple[
     ActiveDownloadState | None,
     PollCycleSnapshot,
@@ -350,19 +361,19 @@ def _build_reducer_world(
         filename="Album\\01.flac",
         file_dir="Album",
         size=1_000_000,
-        retry_count=world["retry_count"],
-        bytes_transferred=world["prev_bytes"],
-        last_exception=world["exception"],
+        retry_count=world.retry_count,
+        bytes_transferred=world.prev_bytes,
+        last_exception=world.exception,
     )
     state = ActiveDownloadState(
         filetype="flac",
         enqueued_at="2026-01-01T00:00:00+00:00",
         last_progress_at="2026-01-01T00:09:30+00:00",
         files=[file],
-        attempt_fingerprint=world.get("attempt_fingerprint"),
-        search_log_id=world.get("search_log_id"),
+        attempt_fingerprint=world.attempt_fingerprint,
+        search_log_id=world.search_log_id,
     )
-    phase = world["phase"]
+    phase = world.phase
     expected = PollCycleDecision.in_progress
     cfg = PollCycleConfig(
         remote_queue_timeout=10_000,
@@ -372,7 +383,7 @@ def _build_reducer_world(
     snapshot = PollCycleSnapshot(files=[PollFileSnapshot(
         transfer_id="tx-1",
         state="InProgress",
-        bytes_transferred=world["prev_bytes"] + 1,
+        bytes_transferred=world.prev_bytes + 1,
     )])
 
     if phase == "fresh_vanished":
@@ -394,8 +405,8 @@ def _build_reducer_world(
             PollFileSnapshot(
                 transfer_id="tx-1",
                 state="Completed, Rejected",
-                bytes_transferred=world["prev_bytes"],
-                exception=world["exception"],
+                bytes_transferred=world.prev_bytes,
+                exception=world.exception,
             ),
             PollFileSnapshot(
                 transfer_id="tx-2",
@@ -428,7 +439,7 @@ def _build_reducer_world(
         snapshot = PollCycleSnapshot(files=[PollFileSnapshot(
             transfer_id="tx-1",
             state="Queued, Remotely",
-            bytes_transferred=world["prev_bytes"],
+            bytes_transferred=world.prev_bytes,
         )])
         cfg = PollCycleConfig(
             remote_queue_timeout=300,
@@ -444,7 +455,7 @@ def _build_reducer_world(
         snapshot = PollCycleSnapshot(files=[PollFileSnapshot(
             transfer_id="tx-1",
             state="InProgress",
-            bytes_transferred=world["prev_bytes"],
+            bytes_transferred=world.prev_bytes,
         )])
         cfg = PollCycleConfig(
             remote_queue_timeout=10_000,
@@ -456,15 +467,15 @@ def _build_reducer_world(
         snapshot = PollCycleSnapshot(files=[PollFileSnapshot(
             transfer_id="tx-1",
             state="Completed, Errored",
-            bytes_transferred=world["prev_bytes"],
-            exception=world["exception"],
+            bytes_transferred=world.prev_bytes,
+            exception=world.exception,
         )])
         expected = PollCycleDecision.timeout_all_errored
 
     return state, snapshot, cfg, expected
 
 
-def _run_reducer_purity(world: dict[str, Any]) -> None:
+def _run_reducer_purity(world: ReducerWorld) -> None:
     state, snapshot, cfg, expected = _build_reducer_world(world)
     assert state is not None
     state_before = _state_shape(state)
@@ -550,22 +561,22 @@ def assert_attempt_identity_survives_the_cycle(
 
 
 @st.composite
-def _reducer_identity_worlds(draw: Any) -> dict[str, Any]:
-    return {
-        "phase": draw(st.sampled_from(_IDENTITY_PHASES)),
-        "prev_bytes": draw(st.integers(min_value=0, max_value=1_000_000)),
-        "retry_count": draw(st.integers(min_value=0, max_value=4)),
-        "exception": draw(st.one_of(st.none(), st.sampled_from(_EXCEPTIONS))),
-        "attempt_fingerprint": draw(st.one_of(
+def _reducer_identity_worlds(draw: st.DrawFn) -> ReducerWorld:
+    return ReducerWorld(
+        phase=draw(st.sampled_from(_IDENTITY_PHASES)),
+        prev_bytes=draw(st.integers(min_value=0, max_value=1_000_000)),
+        retry_count=draw(st.integers(min_value=0, max_value=4)),
+        exception=draw(st.one_of(st.none(), st.sampled_from(_EXCEPTIONS))),
+        attempt_fingerprint=draw(st.one_of(
             st.none(),
             st.text(alphabet="0123456789abcdef", min_size=1, max_size=16),
         )),
-        "search_log_id": draw(st.one_of(
+        search_log_id=draw(st.one_of(
             st.none(), st.integers(min_value=1, max_value=2_000_000))),
-    }
+    )
 
 
-def _run_reducer_identity(world: dict[str, Any]) -> None:
+def _run_reducer_identity(world: ReducerWorld) -> None:
     state, snapshot, cfg, expected = _build_reducer_world(world)
     # An independent copy, so an in-place mutation of the input cannot
     # launder the comparison into a tautology. (That the reducer never
@@ -579,13 +590,12 @@ def _run_reducer_identity(world: dict[str, Any]) -> None:
 
 
 class TestGeneratedReducerCarriesAttemptIdentity(unittest.TestCase):
-    @example(world={
+    @example(world=ReducerWorld(
         # The measured #1405 world: a stamped link on an ordinary
         # progress cycle, the first poll after the claim.
-        "phase": "progress", "prev_bytes": 0, "retry_count": 0,
-        "exception": None, "attempt_fingerprint": "9dff7841",
-        "search_log_id": 563143,
-    })
+        phase="progress", prev_bytes=0, retry_count=0, exception=None,
+        attempt_fingerprint="9dff7841", search_log_id=563143,
+    ))
     @given(world=_reducer_identity_worlds())
     def test_reduce_poll_cycle_never_rewrites_attempt_identity(self, world):
         _run_reducer_identity(world)
@@ -599,18 +609,27 @@ class TestAttemptIdentityCheckerTripsOnViolations(unittest.TestCase):
     """
 
     @staticmethod
-    def _state(**overrides: Any) -> ActiveDownloadState:
-        values: dict[str, Any] = {
-            "filetype": "flac",
-            "enqueued_at": "2026-01-01T00:00:00+00:00",
-            "files": [ActiveDownloadFileState(
+    def _state(
+        *,
+        files: list[ActiveDownloadFileState] | None = None,
+        last_progress_at: str | None = None,
+        processing_started_at: str | None = None,
+        current_path: str | None = None,
+        attempt_fingerprint: str | None = "9dff7841",
+        search_log_id: int | None = 563143,
+    ) -> ActiveDownloadState:
+        return ActiveDownloadState(
+            filetype="flac",
+            enqueued_at="2026-01-01T00:00:00+00:00",
+            files=files if files is not None else [ActiveDownloadFileState(
                 username="user", filename="Album\\01.flac",
                 file_dir="Album", size=1_000_000)],
-            "attempt_fingerprint": "9dff7841",
-            "search_log_id": 563143,
-        }
-        values.update(overrides)
-        return ActiveDownloadState(**values)
+            last_progress_at=last_progress_at,
+            processing_started_at=processing_started_at,
+            current_path=current_path,
+            attempt_fingerprint=attempt_fingerprint,
+            search_log_id=search_log_id,
+        )
 
     def test_trips_when_the_reset_branch_fabricates_state(self):
         with self.assertRaisesRegex(AssertionError, "fabricated state"):
@@ -734,7 +753,7 @@ def assert_harvest_preserves_terminal_observation(
 
 
 @st.composite
-def _harvest_worlds(draw: Any) -> dict:
+def _harvest_worlds(draw: st.DrawFn) -> dict:
     return {
         "processing_started": draw(st.booleans()),
         "prev_state": draw(st.one_of(st.none(), st.sampled_from(_ALL_STATES))),
@@ -819,7 +838,7 @@ class TestGeneratedHarvestNeverLosesTerminalObservation(unittest.TestCase):
 
 
 class TestHarvestCheckerTripsOnViolations(unittest.TestCase):
-    def _base(self, **overrides: Any) -> dict:
+    def _base(self, **overrides: object) -> dict:
         defaults = {
             "processing_started": False, "prev_state": None, "prev_exception": None,
             "prev_bytes": 0, "has_snapshot_match": True,
@@ -875,7 +894,7 @@ def _file_evidence_reason(last_state: str | None,
 
 
 @st.composite
-def _fail_file_specs(draw: Any) -> tuple[tuple[str | None, str | None], ...]:
+def _fail_file_specs(draw: st.DrawFn) -> tuple[tuple[str | None, str | None], ...]:
     n = draw(st.integers(min_value=0, max_value=6))
     specs = []
     for _ in range(n):
@@ -1033,7 +1052,7 @@ def assert_stamped_reason_propagates(
 
 
 @st.composite
-def _stamp_reason_worlds(draw: Any) -> tuple[str | None, int]:
+def _stamp_reason_worlds(draw: st.DrawFn) -> tuple[str | None, int]:
     reason = draw(st.one_of(st.none(), st.text(min_size=1, max_size=80)))
     n = draw(st.integers(min_value=1, max_value=4))
     return reason, n
