@@ -1,12 +1,22 @@
-"""Redis cache layer for the Cratedigger web UI.
+"""The process's one Redis client, and the two namespaces it serves.
 
 `meta:<key>` namespace — PURE MusicBrainz / Discogs metadata. 24h TTL
-(mirrors sync daily). Populated via `memoize_meta()` inside `web/mb.py`
-and `web/discogs.py`. **Never** invalidated by pipeline / library
+(mirrors sync daily). Populated via `memoize_meta()` inside `lib/mb_api.py`
+and `lib/discogs_api.py`. **Never** invalidated by pipeline / library
 writes — MB/Discogs metadata doesn't care about pipeline state.
+
+`web:<key>` namespace — routing-cache responses, invalidated in groups
+by `invalidate_groups()`. Those group patterns name web route prefixes,
+which is why this module lived at ``web/cache.py`` until issue #1389.
+The mirror clients above are its other caller and now sit under ``lib``,
+so the one client they share sits here too; `_GROUP_PATTERNS` is route
+data this module holds, not a web import it makes.
 
 All operations fail-safe — Redis being down means cache miss, never
 an error.
+
+Distinct from ``lib/peer_cache.py``, which is a different mechanism for
+a different subject (Soulseek peer folder listings).
 """
 
 from __future__ import annotations

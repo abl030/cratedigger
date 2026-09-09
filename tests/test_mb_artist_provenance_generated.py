@@ -13,7 +13,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
-from web.mb import get_artist_release_groups
+from lib.mb_api import get_artist_release_groups
 
 ARTIST_ID = "00000000-0000-0000-0000-000000000695"
 OWN_RG = "00000000-0000-0000-0000-000000000696"
@@ -86,8 +86,8 @@ def _run_consumer(
             }
         raise AssertionError(f"unexpected MusicBrainz URL: {url}")
 
-    with patch("web.mb._get", side_effect=get), patch(
-        "web.mb._cache.memoize_meta", side_effect=lambda _key, fetch: fetch(),
+    with patch("lib.mb_api._get", side_effect=get), patch(
+        "lib.mb_api._cache.memoize_meta", side_effect=lambda _key, fetch: fetch(),
     ):
         rows = get_artist_release_groups(ARTIST_ID)
     return {row.id: list(row.provenance) for row in rows}

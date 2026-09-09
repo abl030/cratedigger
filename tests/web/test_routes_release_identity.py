@@ -621,7 +621,7 @@ class TestPipelineResolveRgContract(_FakeDbWebServerCase):
         """Idempotent: row already has a RG → return it untouched
         and do NOT hit the MB mirror or write to the DB."""
         self._seed("rrrrrrrr-rrrr-rrrr-rrrr-rrrrrrrrrrrr")
-        with patch("web.mb.get_release") as mock_mb:
+        with patch("lib.mb_api.get_release") as mock_mb:
             status, data = self._post(
                 "/api/pipeline/42/resolve-rg", {},
             )
@@ -648,7 +648,7 @@ class TestPipelineResolveRgContract(_FakeDbWebServerCase):
         """Row has no RG → MB lookup → UPDATE row → 200."""
         self._seed(None)
         with patch(
-            "web.mb.get_release",
+            "lib.mb_api.get_release",
             return_value={"release_group_id": "rrrr-rrrr-rrrr"},
         ) as mock_mb:
             status, data = self._post(
@@ -689,7 +689,7 @@ class TestPipelineResolveRgContract(_FakeDbWebServerCase):
             )
             return {"release_group_id": "rrrr-rrrr-rrrr"}
 
-        with patch("web.mb.get_release", side_effect=replace_then_resolve):
+        with patch("lib.mb_api.get_release", side_effect=replace_then_resolve):
             status, data = self._post("/api/pipeline/42/resolve-rg", {})
 
         self.assertEqual(status, 409)
@@ -708,7 +708,7 @@ class TestPipelineResolveRgContract(_FakeDbWebServerCase):
         owner = handoff_automation_owner(self.db, 42)
 
         with patch(
-            "web.mb.get_release",
+            "lib.mb_api.get_release",
             return_value={"release_group_id": "rrrr-rrrr-rrrr"},
         ):
             status, data = self._post(
@@ -729,7 +729,7 @@ class TestPipelineResolveRgContract(_FakeDbWebServerCase):
         self.assertIsNone(self.db.request(42)["mb_release_group_id"])
 
     def test_resolve_rg_not_found_returns_404(self):
-        with patch("web.mb.get_release") as mock_mb:
+        with patch("lib.mb_api.get_release") as mock_mb:
             status, data = self._post(
                 "/api/pipeline/9999/resolve-rg", {},
             )
@@ -747,7 +747,7 @@ class TestPipelineResolveRgContract(_FakeDbWebServerCase):
         anomaly, or a release whose RG is missing upstream)."""
         self._seed(None)
         with patch(
-            "web.mb.get_release",
+            "lib.mb_api.get_release",
             return_value={"release_group_id": None},
         ):
             status, data = self._post(
@@ -777,7 +777,7 @@ class TestPipelineResolveRgContract(_FakeDbWebServerCase):
         the master id via the same DB method the MB branch uses."""
         self._seed(None, mb_release_id="12345")
         with patch(
-            "web.discogs.get_release",
+            "lib.discogs_api.get_release",
             return_value={"id": "12345", "release_group_id": "98765"},
         ) as mock_discogs:
             status, data = self._post(
@@ -800,7 +800,7 @@ class TestPipelineResolveRgContract(_FakeDbWebServerCase):
         untouched — not an error shape."""
         self._seed(None, mb_release_id="12345")
         with patch(
-            "web.discogs.get_release",
+            "lib.discogs_api.get_release",
             return_value={"id": "12345", "release_group_id": None},
         ):
             status, data = self._post(
@@ -818,10 +818,10 @@ class TestPipelineResolveRgContract(_FakeDbWebServerCase):
     def test_resolve_rg_discogs_mirror_unconfigured_returns_503(self):
         """AE3 / R11: unconfigured mirror is its own outcome, distinct
         from a lookup failure or an invalid target."""
-        from web.discogs import DiscogsMirrorNotConfigured
+        from lib.discogs_api import DiscogsMirrorNotConfigured
         self._seed(None, mb_release_id="12345")
         with patch(
-            "web.discogs.get_release",
+            "lib.discogs_api.get_release",
             side_effect=DiscogsMirrorNotConfigured("no mirror configured"),
         ):
             status, data = self._post(
@@ -842,7 +842,7 @@ class TestPipelineResolveRgContract(_FakeDbWebServerCase):
         from urllib.error import URLError
         self._seed(None, mb_release_id="12345")
         with patch(
-            "web.discogs.get_release",
+            "lib.discogs_api.get_release",
             side_effect=URLError("connection refused"),
         ):
             status, data = self._post(
@@ -863,7 +863,7 @@ class TestPipelineResolveRgContract(_FakeDbWebServerCase):
         422, not 503 — and leaves the row untouched."""
         self._seed(None, mb_release_id="12345")
         with patch(
-            "web.discogs.get_release",
+            "lib.discogs_api.get_release",
             side_effect=KeyError("malformed payload"),
         ):
             status, data = self._post(
@@ -883,7 +883,7 @@ class TestPipelineResolveRgContract(_FakeDbWebServerCase):
         from urllib.error import URLError
         self._seed(None)
         with patch(
-            "web.mb.get_release",
+            "lib.mb_api.get_release",
             side_effect=URLError("connection refused"),
         ):
             status, data = self._post(

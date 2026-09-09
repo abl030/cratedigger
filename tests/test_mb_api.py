@@ -1,4 +1,4 @@
-"""Seam tests for web/mb.py search builders.
+"""Seam tests for lib/mb_api.py search builders.
 
 Mirrors the urlopen-mock pattern of tests/test_discogs_api.py: patch the
 leaf urllib seam and assert on the URL the builder constructs. The VA
@@ -19,8 +19,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 — registers active profile
-from lib.va_identity import MB_VA_ARTIST_MBID
-from web.mb import (
+from lib.mb_api import (
     _MB_MIRROR_CONCURRENCY,
     _MBArtistCreditName,
     _MBArtistRef,
@@ -37,11 +36,12 @@ from web.mb import (
     search_artists,
     search_release_groups,
 )
+from lib.va_identity import MB_VA_ARTIST_MBID
 
 # URL-construction tests use the public default base but never intend to test
 # pacing. Bypass the policy function itself: a no-op sleep would still mutate
 # the real module-global public schedule and contaminate later timing tests.
-_public_pacing_patch = patch("web.mb._wait_for_public_musicbrainz", lambda _url: None)
+_public_pacing_patch = patch("lib.mb_api._wait_for_public_musicbrainz", lambda _url: None)
 
 
 def setUpModule() -> None:
@@ -53,12 +53,12 @@ def tearDownModule() -> None:
 
 
 def _mock_urlopen(response_data):
-    """Patch web.mb's urlopen to return canned JSON; capture the Request."""
+    """Patch lib.mb_api's urlopen to return canned JSON; capture the Request."""
     mock_resp = MagicMock()
     mock_resp.read.return_value = json.dumps(response_data).encode()
     mock_resp.__enter__ = lambda s: s
     mock_resp.__exit__ = MagicMock(return_value=False)
-    return patch("web.mb.urllib.request.urlopen", return_value=mock_resp)
+    return patch("lib.mb_api.urllib.request.urlopen", return_value=mock_resp)
 
 
 def _mock_urlopen_by_fragment(responses):
@@ -73,7 +73,7 @@ def _mock_urlopen_by_fragment(responses):
                 return mock_resp
         raise AssertionError(f"no response for {request.full_url}")
 
-    return patch("web.mb.urllib.request.urlopen", side_effect=_side_effect)
+    return patch("lib.mb_api.urllib.request.urlopen", side_effect=_side_effect)
 
 
 _EMPTY = {"releases": []}
@@ -119,7 +119,7 @@ def _mock_urlopen_by_url(responses: dict[str, dict]):
                 return mock_resp
         raise AssertionError(f"unexpected URL: {req.full_url}")
 
-    return patch("web.mb.urllib.request.urlopen", side_effect=_side_effect)
+    return patch("lib.mb_api.urllib.request.urlopen", side_effect=_side_effect)
 
 
 def assert_identifier_urls_quoted(identifier: str, urls: list[str]) -> None:
@@ -224,7 +224,7 @@ class TestSearchReleaseGroupsVaRewrite(unittest.TestCase):
     def test_cache_key_uses_effective_query(self) -> None:
         # Pre-fix VA queries cached junk/empty results under the raw
         # string; keying on the rewritten query bypasses those entries.
-        with patch("web.mb._cache.memoize_meta", return_value=[]) as memo:
+        with patch("lib.mb_api._cache.memoize_meta", return_value=[]) as memo:
             search_release_groups("Rock Christmas Various Artists")
         key = memo.call_args[0][0]
         self.assertEqual(
@@ -371,7 +371,7 @@ class TestArtistReleaseGroupsWithAppearances(unittest.TestCase):
 
     def test_calls_the_shared_parallel_fanout_owner_for_its_three_families(self):
         """Regression guard for issue #1355 WE5: this module must reach
-        ``web.parallel_fanout``'s shared owner rather than falling back to
+        ``lib.parallel_fanout``'s shared owner rather than falling back to
         a private per-module copy of the same lifecycle."""
         calls: list[tuple[frozenset, int]] = []
 
@@ -379,7 +379,7 @@ class TestArtistReleaseGroupsWithAppearances(unittest.TestCase):
             calls.append((frozenset(jobs), max_workers))
             return {key: job() for key, job in jobs.items()}
 
-        with patch("web.mb.parallel_results", side_effect=fake_parallel_results), \
+        with patch("lib.mb_api.parallel_results", side_effect=fake_parallel_results), \
              _mock_urlopen_by_fragment({
                 "/release-group?artist=": self.DIRECT,
                 "/release?artist=": self.DIRECT_RELEASES,

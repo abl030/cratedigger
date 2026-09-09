@@ -1181,7 +1181,7 @@ Discogs encodes hidden-track runs as sub-positions of one physical track
 (`10.1 Song / 10.2 (silence) / 10.3 Untitled`), and a rip of that disc has
 ONE file at position 10. `lib/discogs_positions.py::normalize_release_tracks`
 — the one canonical parser, feeding every Discogs manifest persist path
-(`web/discogs.py::get_release` for the add/Replace/CLI persist callers
+(`lib/discogs_api.py::get_release` for the add/Replace/CLI persist callers
 and the browse display, `album_source.py::_populate_tracks_discogs` for
 the search worker's empty-manifest fallback) — collapses each
 sub-position group into a single row: title from the first

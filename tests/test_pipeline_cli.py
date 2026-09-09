@@ -125,10 +125,10 @@ class TestCmdAdd(unittest.TestCase):
     def tearDown(self):
         self.db.close()
 
-    @patch("web.mb.get_release", return_value={
+    @patch("lib.mb_api.get_release", return_value={
         "release_group_id": "rg-uuid", "tracks": [], "labels": [],
     })
-    @patch("web.mb.get_release_group_year", return_value=2014)
+    @patch("lib.mb_api.get_release_group_year", return_value=2014)
     @patch("scripts.pipeline_cli.album_requests.fetch_mb_release")
     def test_add_with_mbid(self, mock_fetch, _mock_rgy, _mock_get_release):
         mock_fetch.return_value = SAMPLE_MB_RELEASE
@@ -145,10 +145,10 @@ class TestCmdAdd(unittest.TestCase):
         tracks = self.db.get_tracks(req["id"])
         self.assertEqual(len(tracks), 3)
 
-    @patch("web.mb.get_release", return_value={
+    @patch("lib.mb_api.get_release", return_value={
         "release_group_id": "rg-uuid", "tracks": [], "labels": [],
     })
-    @patch("web.mb.get_release_group_year", return_value=2014)
+    @patch("lib.mb_api.get_release_group_year", return_value=2014)
     @patch("scripts.pipeline_cli.album_requests.fetch_mb_release")
     def test_add_with_mbid_creates_active_search_plan(
         self, mock_fetch, _mock_rgy, _mock_get_release,
@@ -196,7 +196,7 @@ class TestCmdAdd(unittest.TestCase):
         self.assertIn("Already in DB:", out.getvalue())
         self.assertIn("status=imported", out.getvalue())
 
-    @patch("web.discogs.get_release")
+    @patch("lib.discogs_api.get_release")
     def test_discogs_preflight_race_reports_authoritative_existing_status(
         self, mock_release,
     ):
@@ -236,8 +236,8 @@ class TestCmdAdd(unittest.TestCase):
         self.assertEqual(rc, 4)
         self.assertIn("disappeared", err.getvalue())
 
-    @patch("web.mb.get_release")
-    @patch("web.mb.get_release_group_year")
+    @patch("lib.mb_api.get_release")
+    @patch("lib.mb_api.get_release_group_year")
     @patch("scripts.pipeline_cli.album_requests.fetch_mb_release")
     def test_add_with_mbid_persists_release_group_year_reissue(
         self, mock_fetch, mock_get_rgy, mock_get_release,
@@ -245,7 +245,7 @@ class TestCmdAdd(unittest.TestCase):
         """U4: reissue MB release → release_group_year populated and
         differs from the per-release year. The CLI add path now routes
         through ``field_resolver_service.resolve_all``, which by default
-        dispatches to ``web.mb.get_release_group_year`` for MB UUIDs."""
+        dispatches to ``lib.mb_api.get_release_group_year`` for MB UUIDs."""
         mock_fetch.return_value = SAMPLE_MB_RELEASE  # date=2014, rg=rg-uuid
         mock_get_rgy.return_value = 2008
         mock_get_release.return_value = {
@@ -265,8 +265,8 @@ class TestCmdAdd(unittest.TestCase):
         self.assertEqual(req["release_group_year"], 2008)
         mock_get_rgy.assert_called_once_with("rg-uuid")
 
-    @patch("web.mb.get_release")
-    @patch("web.mb.get_release_group_year")
+    @patch("lib.mb_api.get_release")
+    @patch("lib.mb_api.get_release_group_year")
     @patch("scripts.pipeline_cli.album_requests.fetch_mb_release")
     def test_add_with_mbid_persists_release_group_year_original(
         self, mock_fetch, mock_get_rgy, mock_get_release,
@@ -291,14 +291,14 @@ class TestCmdAdd(unittest.TestCase):
         self.assertEqual(req["year"], 2014)
         self.assertEqual(req["release_group_year"], 2014)
 
-    @patch("web.mb.get_release")
-    @patch("web.mb.get_release_group_year")
+    @patch("lib.mb_api.get_release")
+    @patch("lib.mb_api.get_release_group_year")
     @patch("scripts.pipeline_cli.album_requests.fetch_mb_release")
     def test_add_with_mbid_release_group_404_leaves_column_null(
         self, mock_fetch, mock_get_rgy, mock_get_release,
     ):
         """U4: 404 / missing release-group → ``release_group_year`` is
-        NULL on the new row, no error raised. ``web.mb.get_release_group_year``
+        NULL on the new row, no error raised. ``lib.mb_api.get_release_group_year``
         returns None for both 404 and unparseable dates; the resolver
         maps that to ``unresolved_field_missing_upstream``."""
         mock_fetch.return_value = SAMPLE_MB_RELEASE
@@ -319,7 +319,7 @@ class TestCmdAdd(unittest.TestCase):
         self.assertEqual(req["year"], 2014)
         self.assertIsNone(req["release_group_year"])
 
-    @patch("web.mb.get_release", return_value={
+    @patch("lib.mb_api.get_release", return_value={
         "release_group_id": "rg-uuid",
         "tracks": [], "labels": [],
         # Rule 2 (tightened post-#373): release-group is typed as
@@ -327,7 +327,7 @@ class TestCmdAdd(unittest.TestCase):
         # album-level credit (a real VA shape, not a greatest-hits).
         "release-group": {"primary-type": "Compilation"},
     })
-    @patch("web.mb.get_release_group_year", return_value=2010)
+    @patch("lib.mb_api.get_release_group_year", return_value=2010)
     @patch("scripts.pipeline_cli.album_requests.fetch_mb_release")
     def test_add_with_mbid_va_compilation_flag_set(
         self, mock_fetch, _mock_rgy, _mock_release,
@@ -393,10 +393,10 @@ class TestCmdAddPlanGenerationFakeDB(unittest.TestCase):
     enforced even on environments where the ephemeral PG isn't bootstrapped.
     """
 
-    @patch("web.mb.get_release", return_value={
+    @patch("lib.mb_api.get_release", return_value={
         "release_group_id": "rg-uuid", "tracks": [], "labels": [],
     })
-    @patch("web.mb.get_release_group_year", return_value=2014)
+    @patch("lib.mb_api.get_release_group_year", return_value=2014)
     @patch("scripts.pipeline_cli.album_requests.fetch_mb_release")
     def test_cli_add_calls_search_plan_service(
         self, mock_fetch, _mock_rgy, _mock_get_release,
@@ -474,7 +474,7 @@ class TestCmdAddPlanGenerationFakeDB(unittest.TestCase):
         db = RacingDB()
         stderr = io.StringIO()
         with patch(
-            "web.mb.get_release_group_year",
+            "lib.mb_api.get_release_group_year",
             return_value=2014,
         ), redirect_stderr(stderr):
             exit_code = pipeline_cli.cmd_add(db, MagicMock(
@@ -2084,7 +2084,7 @@ class TestMainExitCodes(unittest.TestCase):
     def test_convergence_stop_constructor_outage_maps_to_exit_five(self):
         import psycopg2
 
-        import web.mb
+        import lib.mb_api
 
         argv = [
             "pipeline_cli.py",
@@ -2101,8 +2101,8 @@ class TestMainExitCodes(unittest.TestCase):
         ]
         stdout = io.StringIO()
         stderr = io.StringIO()
-        old_mb_base = web.mb.MB_API_BASE
-        self.addCleanup(setattr, web.mb, "MB_API_BASE", old_mb_base)
+        old_mb_base = lib.mb_api.MB_API_BASE
+        self.addCleanup(setattr, lib.mb_api, "MB_API_BASE", old_mb_base)
         with tempfile.TemporaryDirectory() as root:
             config_path = os.path.join(root, "config.ini")
             with open(config_path, "w", encoding="utf-8") as handle:
@@ -2152,7 +2152,7 @@ class TestMainExitCodes(unittest.TestCase):
         constructor.assert_not_called()
 
     def test_non_quarantine_main_still_configures_mirror_api_bases(self):
-        import web.mb
+        import lib.mb_api
 
         argv = [
             "pipeline_cli.py",
@@ -2161,8 +2161,8 @@ class TestMainExitCodes(unittest.TestCase):
             "status",
         ]
         db = FakePipelineDB()
-        old_mb_base = web.mb.MB_API_BASE
-        self.addCleanup(setattr, web.mb, "MB_API_BASE", old_mb_base)
+        old_mb_base = lib.mb_api.MB_API_BASE
+        self.addCleanup(setattr, lib.mb_api, "MB_API_BASE", old_mb_base)
         with tempfile.TemporaryDirectory() as root:
             config_path = os.path.join(root, "config.ini")
             with open(config_path, "w", encoding="utf-8") as handle:
@@ -2181,7 +2181,7 @@ class TestMainExitCodes(unittest.TestCase):
                 pipeline_cli.main()
 
         self.assertEqual(
-            web.mb.MB_API_BASE,
+            lib.mb_api.MB_API_BASE,
             "http://main-entrypoint-mirror.test:5200/ws/2",
         )
         self.assertEqual(db.close_calls, 1)
@@ -5894,7 +5894,7 @@ class TestCmdBeetsDistance(_FakeDbWebServerCase):
 
     def test_discogs_numeric_id_routes_through_discogs_lookup(self):
         """A numeric mbid (Discogs sibling) must route through
-        ``discogs_api.get_release``, not ``web.mb.get_release`` — CLI
+        ``discogs_api.get_release``, not ``lib.mb_api.get_release`` — CLI
         counterpart of the same dispatch fixed in the API route (#530).
         No new MB<->Discogs adapter: ``compute_beets_distance`` already
         treats ``release_group_id`` as optional and ``discogs_api.get_release``
@@ -5929,7 +5929,7 @@ class TestCmdBeetsDistance(_FakeDbWebServerCase):
             "lib.beets_distance.compute_beets_distance",
             side_effect=_fake_compute,
         ), patch(
-            "web.discogs.get_release",
+            "lib.discogs_api.get_release",
             return_value=discogs_release,
         ) as discogs_get:
             rc = pipeline_cli.cmd_beets_distance(None, args)

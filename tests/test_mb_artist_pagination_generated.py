@@ -3,7 +3,7 @@
 The server intentionally models the nested-recordings browse quirk observed
 for Taylor Swift and The Beatles: a short ``limit=100`` page followed by the
 old ``offset += len(page)``/``limit=100`` request overlaps an earlier ID.
-Tests never replace ``web.mb._get`` or its paginator; production urllib code
+Tests never replace ``lib.mb_api._get`` or its paginator; production urllib code
 talks to this local threaded HTTP server.
 """
 from __future__ import annotations
@@ -23,8 +23,8 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
-from web import mb
-from web.api_bases import PUBLIC_MB_WS2_BASE
+from lib import mb_api as mb
+from lib.api_bases import PUBLIC_MB_WS2_BASE
 
 ARTIST_ID = "00000000-0000-0000-0000-000000000917"
 
@@ -278,7 +278,7 @@ class TestArtistRecordingPaginationPins(unittest.TestCase):
     def _fetch(self, total: int, short_page: int = 59) -> tuple[list[str], _NestedRecordingWorld]:
         world = _NestedRecordingWorld(total, short_page)
         with _Mirror(world) as api_base, patch.object(mb, "MB_API_BASE", api_base), patch(
-            "web.mb._cache.memoize_meta", side_effect=_without_metadata_cache,
+            "lib.mb_api._cache.memoize_meta", side_effect=_without_metadata_cache,
         ):
             releases = mb.get_artist_releases_with_recordings(ARTIST_ID)
         return [release.get("id", "") for release in releases], world
@@ -297,7 +297,7 @@ class TestArtistRecordingPaginationPins(unittest.TestCase):
         with _Mirror(world) as api_base, _ClientSlotProbe(api_base) as probe, patch.object(
             mb, "MB_API_BASE", api_base,
         ), patch(
-            "web.mb._cache.memoize_meta", side_effect=_without_metadata_cache,
+            "lib.mb_api._cache.memoize_meta", side_effect=_without_metadata_cache,
         ):
             rows = mb.get_artist_release_groups(ARTIST_ID)
         assert_request_cap(probe.max_active)
@@ -311,7 +311,7 @@ class TestArtistRecordingPaginationPins(unittest.TestCase):
     def test_short_catalogue_pages_fill_each_counted_segment(self) -> None:
         world = _NestedRecordingWorld(150, catalogue_short_page=80)
         with _Mirror(world) as api_base, patch.object(mb, "MB_API_BASE", api_base), patch(
-            "web.mb._cache.memoize_meta", side_effect=_without_metadata_cache,
+            "lib.mb_api._cache.memoize_meta", side_effect=_without_metadata_cache,
         ):
             rows = mb.get_artist_release_groups(ARTIST_ID)
         # Direct work and track appearances deliberately occupy separate IDs.
@@ -325,7 +325,7 @@ class TestArtistRecordingPaginationPins(unittest.TestCase):
             with self.subTest(world=world.__dict__), _Mirror(world) as api_base, patch.object(
                 mb, "MB_API_BASE", api_base,
             ), patch(
-                "web.mb._cache.memoize_meta", side_effect=_without_metadata_cache,
+                "lib.mb_api._cache.memoize_meta", side_effect=_without_metadata_cache,
             ), self.assertRaises(mb.MusicBrainzArtistCatalogueIncomplete):
                 mb.get_artist_release_groups(ARTIST_ID)
 
@@ -381,7 +381,7 @@ class TestArtistRecordingPaginationPins(unittest.TestCase):
         try:
             with patch.object(mb, "_monotonic", monotonic), patch.object(
                 mb, "_sleep", sleep,
-            ), patch("web.mb.urllib.request.urlopen", side_effect=urlopen):
+            ), patch("lib.mb_api.urllib.request.urlopen", side_effect=urlopen):
                 mb._get(pacing_url)
         finally:
             with mb._mb_mirror_semaphores_lock:
@@ -407,9 +407,9 @@ class TestArtistRecordingPaginationPins(unittest.TestCase):
                 raise AssertionError(f"background worker escaped to public MB: {url}")
             return real_urlopen(request, timeout=timeout)
 
-        with patch("web.mb.urllib.request.urlopen", side_effect=local_only), patch.object(
+        with patch("lib.mb_api.urllib.request.urlopen", side_effect=local_only), patch.object(
             mb, "MB_API_BASE", "http://invalid-before-mirror/ws/2",
-        ), patch("web.mb._cache.memoize_meta", side_effect=_without_metadata_cache):
+        ), patch("lib.mb_api._cache.memoize_meta", side_effect=_without_metadata_cache):
             with _Mirror(world) as api_base, patch.object(mb, "MB_API_BASE", api_base):
                 started = time.monotonic()
                 with self.assertRaises(mb.MusicBrainzArtistCatalogueIncomplete):
@@ -433,7 +433,7 @@ class TestArtistRecordingPaginationGenerated(unittest.TestCase):
         with _Mirror(world) as api_base, _ClientSlotProbe(api_base) as probe, patch.object(
             mb, "MB_API_BASE", api_base,
         ), patch(
-            "web.mb._cache.memoize_meta", side_effect=_without_metadata_cache,
+            "lib.mb_api._cache.memoize_meta", side_effect=_without_metadata_cache,
         ):
             actual = [
                 release.get("id", "")
@@ -450,7 +450,7 @@ class TestArtistRecordingPaginationGenerated(unittest.TestCase):
     ) -> None:
         world = _NestedRecordingWorld(total, catalogue_short_page=short_page)
         with _Mirror(world) as api_base, patch.object(mb, "MB_API_BASE", api_base), patch(
-            "web.mb._cache.memoize_meta", side_effect=_without_metadata_cache,
+            "lib.mb_api._cache.memoize_meta", side_effect=_without_metadata_cache,
         ):
             rows = mb.get_artist_release_groups(ARTIST_ID)
         assert_catalogue_identity_count(total * 2, len(rows))
@@ -475,9 +475,9 @@ class TestArtistRecordingPaginationGenerated(unittest.TestCase):
                 raise AssertionError(f"background worker escaped to public MB: {url}")
             return real_urlopen(request, timeout=timeout)
 
-        with patch("web.mb.urllib.request.urlopen", side_effect=local_only), patch.object(
+        with patch("lib.mb_api.urllib.request.urlopen", side_effect=local_only), patch.object(
             mb, "MB_API_BASE", "http://invalid-before-mirror/ws/2",
-        ), patch("web.mb._cache.memoize_meta", side_effect=_without_metadata_cache):
+        ), patch("lib.mb_api._cache.memoize_meta", side_effect=_without_metadata_cache):
             with _Mirror(world) as api_base, patch.object(
                 mb, "MB_API_BASE", api_base,
             ), self.assertRaises(mb.MusicBrainzArtistCatalogueIncomplete):

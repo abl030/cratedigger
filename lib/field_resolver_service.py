@@ -38,6 +38,7 @@ from typing import Any, Literal, Protocol
 
 import msgspec
 
+from lib import discogs_api, mb_api
 from lib.json_narrow import json_dict as _json_dict
 from lib.json_narrow import json_list as _json_list
 from lib.release_identity import ReleaseIdentity
@@ -118,9 +119,9 @@ class ResolverResult(msgspec.Struct, kw_only=True):
     reason_code: str | None = None
 
 
-# Injectable collaborator protocols. The defaults import lazily inside
-# helper wrappers so the service module is importable in environments
-# that don't pull in ``web.mb`` / ``web.discogs`` (e.g. lib-only tests).
+# Injectable collaborator protocols. The defaults below wrap
+# ``lib.mb_api`` / ``lib.discogs_api``; production passes them, tests inject
+# fakes.
 class _PdbRecorder(Protocol):
     def record_field_resolution(
         self,
@@ -271,19 +272,17 @@ def _classify_lookup_exception(
     raise exc  # programmer error; surface it
 
 
-# Default collaborator wrappers. Imports stay lazy so this module is
-# importable from contexts that don't have ``web.mb`` / ``web.discogs``
-# on the path (e.g. fast unit-test boots).
+# Default collaborator wrappers. Each resolves its mirror function as a
+# module attribute at CALL time, so a test patching
+# ``lib.mb_api.get_release_group_year`` still reaches the default.
 
 
 def _default_mb_get_release_group_year(rg_mbid: str) -> int | None:
-    from web.mb import get_release_group_year
-    return get_release_group_year(rg_mbid)
+    return mb_api.get_release_group_year(rg_mbid)
 
 
 def _default_discogs_get_master_year(master_id: str) -> int | None:
-    from web.discogs import get_master_releases
-    data = get_master_releases(int(master_id))
+    data = discogs_api.get_master_releases(int(master_id))
     raw = data.get("first_release_date")
     if not raw:
         return None
@@ -300,19 +299,17 @@ def _default_mb_get_release(
     # ``label-info`` (for catalog_number), ``media[].tracks[].artist-
     # credit`` (for track_artist), and ``release-group`` nested fields
     # (for VA Rule 2). The slimmed shape returned by
-    # ``web.mb.get_release`` drops all three. Pre-2026-05-25 deploy
+    # ``lib.mb_api.get_release`` drops all three. Pre-2026-05-25 deploy
     # the resolver service silently downgraded those fields to
     # ``unresolved_field_missing_upstream`` for every MB request
     # because the wrong fetcher was wired in here.
-    from web.mb import get_release_raw
-    return get_release_raw(mbid, fresh=fresh)
+    return mb_api.get_release_raw(mbid, fresh=fresh)
 
 
 def _default_discogs_get_release(
     release_id: str, *, fresh: bool = False,
 ) -> dict[str, Any]:
-    from web.discogs import get_release
-    return get_release(int(release_id), fresh=fresh)
+    return discogs_api.get_release(int(release_id), fresh=fresh)
 
 
 # === Helpers for record-keeping =========================================
@@ -459,7 +456,7 @@ def resolve_release_group_year(
         _record(pdb, request_id, FIELD_RELEASE_GROUP_YEAR, result)
         return result
     if year is None:
-        # ``web.mb.get_release_group_year`` now propagates
+        # ``lib.mb_api.get_release_group_year`` now propagates
         # ``HTTPError(404)`` (the resolver classifies that as
         # ``unresolved_404`` via ``_classify_lookup_exception``). So a
         # ``None`` here unambiguously means "release-group record exists
@@ -713,12 +710,12 @@ def _resolve_mb_track_artists(
     """Walk an MB release payload and extract per-track artist credits.
 
     The shape we see depends on whether the caller fetched via
-    ``web.mb.get_release`` (which strips most artist-credit info) or
+    ``lib.mb_api.get_release`` (which strips most artist-credit info) or
     via a direct ``inc=artist-credits`` call. We try both shapes:
 
     1. Direct MB JSON: ``media[].tracks[].artist-credit[].name``,
        joined with ``joinphrase``.
-    2. ``web.mb.get_release`` shape: ``tracks[].title`` only -- no
+    2. ``lib.mb_api.get_release`` shape: ``tracks[].title`` only -- no
        artist info, so we surface ``unresolved_field_missing_upstream``.
 
     The integration slice fetches via a real MB mirror response shape
@@ -760,7 +757,7 @@ def _resolve_mb_track_artists(
                     status="resolved",
                 ))
     else:
-        # Shape 2: web.mb.get_release shape -- no per-track artist info.
+        # Shape 2: lib.mb_api.get_release shape -- no per-track artist info.
         tracks_summary = data.get("tracks")
         if isinstance(tracks_summary, list) and tracks_summary:
             # Fall back to the release-level artist for every track --
@@ -847,7 +844,7 @@ def _resolve_discogs_track_artists(
     """Walk a Discogs release payload and extract per-track artist credits.
 
     Discogs shape: ``tracks[].artists[].name`` (the existing
-    ``web.discogs.get_release`` flattens to ``tracks[]`` without
+    ``lib.discogs_api.get_release`` flattens to ``tracks[]`` without
     per-track artist info, so the direct mirror endpoint is what we
     actually want here). We try both shapes:
 
@@ -1037,7 +1034,7 @@ def _first_mb_catalog_number(data: dict[str, Any]) -> str | None:
             continue
         entry = _json_dict(entry_raw)
         # MB JSON uses kebab-case key for label-info; our
-        # ``web.mb.get_release`` shape doesn't currently carry catno
+        # ``lib.mb_api.get_release`` shape doesn't currently carry catno
         # at all, but the direct MB JSON does.
         catno = entry.get("catalog-number")
         if catno:
@@ -1230,7 +1227,7 @@ def detect_va_compilation(
         # request rows from the Discogs path don't always carry the
         # discogs artist id directly; the payload is authoritative.
         # Two shapes appear in the wild:
-        #   * ``web/discogs.py::get_release`` (the real production caller)
+        #   * ``lib/discogs_api.py::get_release`` (the real production caller)
         #     flattens to ``payload["artist_id"]`` at the top level.
         #   * Direct Discogs-mirror payloads carry the nested
         #     ``payload["artists"][0]["id"]`` shape.

@@ -18,13 +18,15 @@ import psycopg2
 from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
+import lib.api_bases
+import lib.discogs_api
+import lib.mb_api
 import tests._hypothesis_profiles
 import tests.conftest  # noqa: F401 - bootstraps TEST_DB_DSN
-import web.api_bases
-import web.discogs
-import web.mb
 import web.routes.browse
 import web.server
+from lib import redis_cache as cache
+from lib.api_bases import PUBLIC_MB_ORIGIN
 from lib.mb_canonical import configure_canonical_base, configured_canonical_base
 from scripts.web_dev_server import (
     DevConfig,
@@ -34,14 +36,12 @@ from scripts.web_dev_server import (
 )
 from tests.fakes import FakeBeetsDB
 from tests.helpers import make_web_runtime
-from tests.test_web_cache import FakeRedis
+from tests.test_redis_cache import FakeRedis
 from tests.test_web_dev_server import (
     _get_http_outcome,
     _wait_for_blocked_backend,
     assert_live_db_parallel_outcomes,
 )
-from web import cache
-from web.api_bases import PUBLIC_MB_ORIGIN
 from web.routes.browse import get_artist_compare
 from web.runtime import install_runtime, runtime
 
@@ -62,8 +62,8 @@ def assert_metadata_wiring(config: DevConfig) -> None:
     expected_mb = config.mb_api or urllib.parse.urljoin(
         f"{PUBLIC_MB_ORIGIN.rstrip('/')}/", "ws/2",
     )
-    assert web.mb.MB_API_BASE == expected_mb
-    assert web.discogs.DISCOGS_API_BASE == config.discogs_api
+    assert lib.mb_api.MB_API_BASE == expected_mb
+    assert lib.discogs_api.DISCOGS_API_BASE == config.discogs_api
     assert configured_canonical_base() == expected_mb
 
 
@@ -71,7 +71,7 @@ def assert_missing_discogs_blocks(call_route: Callable[[], None]) -> None:
     """A missing mirror must reject before any warm-cache route result."""
     try:
         call_route()
-    except web.discogs.DiscogsMirrorNotConfigured:
+    except lib.discogs_api.DiscogsMirrorNotConfigured:
         return
     raise AssertionError("warm metadata cache bypassed missing Discogs config")
 
@@ -205,8 +205,8 @@ def _config(*, mb_api: str | None, discogs_api: str | None) -> DevConfig:
 class TestLiveDbMetadataWiringGenerated(unittest.TestCase):
     def setUp(self) -> None:
         self.saved = (
-            web.mb.MB_API_BASE,
-            web.discogs.DISCOGS_API_BASE,
+            lib.mb_api.MB_API_BASE,
+            lib.discogs_api.DISCOGS_API_BASE,
         )
         # #1089 NOTE-3 (review round 2): the third process-global
         # configure_live_db_metadata now mutates.
@@ -214,7 +214,7 @@ class TestLiveDbMetadataWiringGenerated(unittest.TestCase):
         self.saved_redis = cache._redis
 
     def tearDown(self) -> None:
-        web.mb.MB_API_BASE, web.discogs.DISCOGS_API_BASE = self.saved
+        lib.mb_api.MB_API_BASE, lib.discogs_api.DISCOGS_API_BASE = self.saved
         configure_canonical_base(self.saved_canonical_base)
         cache._redis = self.saved_redis
 
@@ -279,8 +279,8 @@ class TestLiveDbMetadataWiringGenerated(unittest.TestCase):
 
 class TestBrowseResolveWarmCacheGenerated(unittest.TestCase):
     def setUp(self) -> None:
-        self.saved_base = web.discogs.DISCOGS_API_BASE
-        self.saved_mb_base = web.mb.MB_API_BASE
+        self.saved_base = lib.discogs_api.DISCOGS_API_BASE
+        self.saved_mb_base = lib.mb_api.MB_API_BASE
         # #1089 NOTE-3 (review round 2): the third process-global
         # configure_live_db_metadata now mutates.
         self.saved_canonical_base = configured_canonical_base()
@@ -303,8 +303,8 @@ class TestBrowseResolveWarmCacheGenerated(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=2)
-        web.discogs.DISCOGS_API_BASE = self.saved_base
-        web.mb.MB_API_BASE = self.saved_mb_base
+        lib.discogs_api.DISCOGS_API_BASE = self.saved_base
+        lib.mb_api.MB_API_BASE = self.saved_mb_base
         configure_canonical_base(self.saved_canonical_base)
         cache._redis = self.saved_redis
 
@@ -462,8 +462,8 @@ class TestDiscogsRouteCacheInventory(unittest.TestCase):
 class TestMetadataWiringCheckerKnownBad(unittest.TestCase):
     def setUp(self) -> None:
         self.saved = (
-            web.mb.MB_API_BASE,
-            web.discogs.DISCOGS_API_BASE,
+            lib.mb_api.MB_API_BASE,
+            lib.discogs_api.DISCOGS_API_BASE,
         )
         # #1089 NOTE-3 (review round 2): the third process-global
         # configure_live_db_metadata now mutates —
@@ -472,7 +472,7 @@ class TestMetadataWiringCheckerKnownBad(unittest.TestCase):
         self.saved_canonical_base = configured_canonical_base()
 
     def tearDown(self) -> None:
-        web.mb.MB_API_BASE, web.discogs.DISCOGS_API_BASE = self.saved
+        lib.mb_api.MB_API_BASE, lib.discogs_api.DISCOGS_API_BASE = self.saved
         configure_canonical_base(self.saved_canonical_base)
 
     def test_checker_rejects_swapped_origins(self) -> None:
@@ -480,8 +480,8 @@ class TestMetadataWiringCheckerKnownBad(unittest.TestCase):
             mb_api="https://mb.test/ws/2",
             discogs_api="https://discogs.test",
         )
-        web.mb.MB_API_BASE = config.discogs_api or ""
-        web.discogs.DISCOGS_API_BASE = config.mb_api
+        lib.mb_api.MB_API_BASE = config.discogs_api or ""
+        lib.discogs_api.DISCOGS_API_BASE = config.mb_api
         with self.assertRaises(AssertionError):
             assert_metadata_wiring(config)
 
@@ -489,23 +489,23 @@ class TestMetadataWiringCheckerKnownBad(unittest.TestCase):
         self,
     ) -> None:
         config = _config(mb_api=None, discogs_api=None)
-        web.mb.MB_API_BASE = urllib.parse.urljoin(
+        lib.mb_api.MB_API_BASE = urllib.parse.urljoin(
             f"{PUBLIC_MB_ORIGIN.rstrip('/')}/", "ws/2",
         )
-        web.discogs.DISCOGS_API_BASE = "https://stale-discogs.test"
+        lib.discogs_api.DISCOGS_API_BASE = "https://stale-discogs.test"
         with self.assertRaises(AssertionError):
             assert_metadata_wiring(config)
 
     def test_missing_mb_uses_the_canonical_public_ws2_declaration(self) -> None:
         config = _config(mb_api=None, discogs_api=None)
         sentinel = "https://canonical-mb.test/custom-ws2"
-        saved_public_base = web.api_bases.PUBLIC_MB_WS2_BASE
+        saved_public_base = lib.api_bases.PUBLIC_MB_WS2_BASE
         try:
-            web.api_bases.PUBLIC_MB_WS2_BASE = sentinel
+            lib.api_bases.PUBLIC_MB_WS2_BASE = sentinel
             configure_live_db_metadata(config)
         finally:
-            web.api_bases.PUBLIC_MB_WS2_BASE = saved_public_base
-        self.assertEqual(web.mb.MB_API_BASE, sentinel)
+            lib.api_bases.PUBLIC_MB_WS2_BASE = saved_public_base
+        self.assertEqual(lib.mb_api.MB_API_BASE, sentinel)
 
     def test_warm_cache_guard_checker_rejects_a_silent_route(self) -> None:
         with self.assertRaises(AssertionError):

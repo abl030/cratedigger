@@ -11,7 +11,7 @@ lambda whose body is a bare ``None``, used to fake a not-found::
 
     compute_beets_distance(..., mb_get_release=lambda mbid: None)   # FLAGGED
 
-Production ``web.mb.get_release`` / ``web.discogs.get_release`` (and the
+Production ``lib.mb_api.get_release`` / ``lib.discogs_api.get_release`` (and the
 release-group / master listings) **raise** ``urllib.error.HTTPError`` on a
 404 — they never return ``None``. A ``lambda: None`` miss-fake therefore
 exercises a branch production cannot produce (round-1 P0 of the YT-resolver

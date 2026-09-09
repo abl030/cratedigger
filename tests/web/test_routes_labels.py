@@ -49,7 +49,7 @@ class TestLabelRouteContracts(_WebServerCase):
 
     def _make_label_entity(self, **overrides):
         """Build a `LabelEntity` with sensible defaults for tests."""
-        from web.discogs import LabelEntity
+        from lib.discogs_api import LabelEntity
         defaults = {
             "source": "discogs",
             "id": "757",

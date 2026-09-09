@@ -9,8 +9,8 @@ paths:
 - HTML + CSS in `web/index.html`, JS in `web/js/*.js` (ES6 modules, `<script type="module">`)
 - Route handlers in `web/routes/*.py` — server.py is the HTTP handler, the route dispatch tables, and `main()`; the process's state lives in `web/runtime.py`
 - Beets queries via `lib/beets_db.py` `BeetsDB` class — never raw `sqlite3.connect()` in handlers
-- MusicBrainz queries through local mirror at `http://192.168.1.35:5200` via `web/mb.py`
-- Redis cache: `meta:` namespace only — pure MB/Discogs mirror metadata, 24h TTL via `memoize_meta` in `web/mb.py`/`web/discogs.py`. The routing-level response cache was REMOVED by #101 (it baked pipeline overlay state into cached responses); do not reintroduce response caching or reference `cache_api.cached(...)` — it no longer exists
+- MusicBrainz queries through local mirror at `http://192.168.1.35:5200` via `lib/mb_api.py` — the mirror clients moved out of `web/` in #1389, and Ruff's TID251 ban now refuses a `lib`→`web` import
+- Redis cache: `meta:` namespace only — pure MB/Discogs mirror metadata, 24h TTL via `memoize_meta` in `lib/mb_api.py`/`lib/discogs_api.py` (the cache itself is `lib/redis_cache.py`). The routing-level response cache was REMOVED by #101 (it baked pipeline overlay state into cached responses); do not reintroduce response caching or reference `cache_api.cached(...)` — it no longer exists
 - Static JS served at `/js/*.js` by server.py — `node --check web/js/*.js` must pass (pre-commit + CI)
 - `// @ts-check` + JSDoc types on all exported functions; no inline `<script>` in HTML
 - Pure functions in `web/js/util.js` — testable via Node without DOM; JS unit tests in `tests/test_js_util.mjs`, run with `node`, no npm

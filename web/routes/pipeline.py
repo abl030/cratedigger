@@ -45,8 +45,9 @@ from web.runtime import runtime
 
 logger = logging.getLogger(__name__)
 
+from lib.accusation_flags import evidence_accusation_flags
 from lib.quality import CandidateScore, top_candidates
-from web.classify import classify_import_job_display, evidence_accusation_flags
+from web.classify import classify_import_job_display
 from web.download_history_view import (
     build_download_history_row,
     build_download_history_rows,

@@ -14,15 +14,15 @@ from typing import TYPE_CHECKING
 
 # This module is pure logic — no HTTP client dependency — so the MB release
 # JSON shape it consumes is imported ``TYPE_CHECKING``-only: zero runtime
-# coupling to ``web.mb`` (no import-time cost, no risk of pulling in HTTP
+# coupling to ``lib.mb_api`` (no import-time cost, no risk of pulling in HTTP
 # client deps), but the SAME structural type as the one real producer
-# (``web.mb.get_artist_releases_with_recordings``) rather than a
+# (``lib.mb_api.get_artist_releases_with_recordings``) rather than a
 # hand-maintained parallel that could silently drift from it. TypedDict
 # nested fields are invariant even under ``Sequence`` covariance, so
 # reusing the exact producer type (not a structurally-similar local one)
 # is what lets ``web/routes/browse.py`` pass the result straight through.
 if TYPE_CHECKING:
-    from web.mb import _MBReleaseFullJSON
+    from lib.mb_api import _MBReleaseFullJSON
 
 
 # Tier ordering: lower number = higher priority (Album beats EP beats Single).

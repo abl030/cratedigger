@@ -245,9 +245,9 @@ _patch("lib.owned.string")
         source = '''
 from unittest.mock import patch as _patch
 
-with _patch("web.mb.urllib.request.urlopen"):
+with _patch("lib.mb_api.urllib.request.urlopen"):
     pass
-with _patch("web.discogs.urllib.request.urlopen"):
+with _patch("lib.discogs_api.urllib.request.urlopen"):
     pass
 '''
         self.assertEqual(scan_source(source, web_file=False), {})

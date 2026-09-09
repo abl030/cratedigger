@@ -386,8 +386,8 @@ class TestConcurrentRequests(_WebServerCase):
 
     def test_concurrent_cold_compare_requests_execute_one_metadata_fill(self):
         """The real threaded HTTP route shares one cold compare skeleton."""
-        from tests.test_web_cache import FakeRedis
-        from web import cache
+        from lib import redis_cache as cache
+        from tests.test_redis_cache import FakeRedis
 
         artist_id = "664c3e0e-42d8-48c1-b209-1efca19c0325"
         entered = threading.Event()
@@ -444,8 +444,8 @@ class TestConcurrentRequests(_WebServerCase):
 
     def test_aborted_compare_leader_finishes_fill_for_next_http_request(self):
         """A real client RST cannot cancel its route's metadata fill."""
-        from tests.test_web_cache import FakeRedis
-        from web import cache
+        from lib import redis_cache as cache
+        from tests.test_redis_cache import FakeRedis
         from web import server as srv
 
         artist_id = "664c3e0e-42d8-48c1-b209-1efca19c0325"

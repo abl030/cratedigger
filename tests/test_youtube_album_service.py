@@ -92,7 +92,7 @@ def _ok_mb_release(
 
 
 def _ok_mb_rg_releases(*release_ids_with_year: tuple[str, int | None]) -> dict:
-    """Build a slim release-group-releases payload mirroring web/mb.py."""
+    """Build a slim release-group-releases payload mirroring lib/mb_api.py."""
     return {
         "title": "Dr. Octagonecologyst",
         "type": "Album",
@@ -867,7 +867,7 @@ class TestResolveYoutubeAlbumHappyPath(unittest.TestCase):
 
     def test_mb_leaf_raises_http_error_falls_through_to_group_path(self) -> None:
         """Finding #1: passing an MB release-group MBID through
-        ``web.mb.get_release`` raises ``urllib.error.HTTPError`` because
+        ``lib.mb_api.get_release`` raises ``urllib.error.HTTPError`` because
         RG MBIDs aren't releases. The resolver must catch and fall
         through to the group-releases endpoint, not 500.
         """
@@ -876,7 +876,7 @@ class TestResolveYoutubeAlbumHappyPath(unittest.TestCase):
         rg = MB_RG
 
         def _raising_mb_leaf(identifier: str) -> dict | None:
-            # AE3 mirrors the live behaviour: web.mb.get_release raises
+            # AE3 mirrors the live behaviour: lib.mb_api.get_release raises
             # urllib.error.HTTPError when handed a non-release MBID.
             raise urllib.error.HTTPError(
                 f"http://mb-mirror/release/{identifier}",

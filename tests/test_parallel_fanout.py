@@ -1,6 +1,6 @@
 """Direct contract tests for the shared fan-out owner (issue #1355 WE5).
 
-``web.mb``, ``web.discogs``, and ``web.routes.browse`` used to each carry
+``lib.mb_api``, ``lib.discogs_api``, and ``web.routes.browse`` used to each carry
 their own copy of this lifecycle. These tests pin the owner's full contract
 so a future edit changes it in exactly one place: successful completion,
 what happens when one job raises (every future is asked to cancel, the
@@ -16,7 +16,7 @@ import time
 import unittest
 from unittest import mock
 
-from web.parallel_fanout import parallel_results
+from lib.parallel_fanout import parallel_results
 
 
 class _ProbeError(RuntimeError):
@@ -104,7 +104,7 @@ class TestParallelResultsSuccess(unittest.TestCase):
     def test_success_path_shuts_down_with_wait_true_and_no_cancel(self):
         """Replaces the three per-module success-shutdown pins that used
         to live in ``tests/test_parallel_executor_shutdown.py`` (one each
-        for ``web.mb``, ``web.discogs``, ``web.routes.browse``'s own former
+        for ``lib.mb_api``, ``lib.discogs_api``, ``web.routes.browse``'s own former
         private copy) — now that all three call this one owner, the fact
         belongs here once. A fake ``executor``/``Future`` proved the same
         fact there without ever touching a real thread; this drives the

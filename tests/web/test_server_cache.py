@@ -49,7 +49,7 @@ class TestOverlayNotBakedIntoRoutingCache(_WebServerCase):
 
     Fix: drop every overlay-baking endpoint from Handler._CACHE_TTLS and
     move pure MB/Discogs metadata into a separate meta: namespace at the
-    API helper layer (web/mb.py, web/discogs.py). Local DB lookups
+    API helper layer (lib/mb_api.py, lib/discogs_api.py). Local DB lookups
     (check_pipeline, check_beets_library) run on every request — cheap.
     """
 
@@ -94,8 +94,8 @@ class _CachedServerCase(_FakeDbWebServerCase):
     @classmethod
     def setUpClass(cls) -> None:
         super().setUpClass()
-        from tests.test_web_cache import FakeRedis
-        from web import cache
+        from lib import redis_cache as cache
+        from tests.test_redis_cache import FakeRedis
         cls._cache = cache
         cls._saved_redis = cache._redis
         cache._redis = FakeRedis()
@@ -126,7 +126,7 @@ class TestReleaseEndpointReflectsPipelineWrite(_CachedServerCase):
         # Clear any state left behind by a previous test that shares the
         # FakeRedis instance, so each scenario starts cold. `_redis` is
         # typed `object | None` on the module; narrow to FakeRedis here.
-        from tests.test_web_cache import FakeRedis
+        from tests.test_redis_cache import FakeRedis
         fake = self._cache._redis
         assert isinstance(fake, FakeRedis)
         fake._store.clear()
@@ -235,7 +235,7 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
 
     def setUp(self) -> None:
         super().setUp()
-        from tests.test_web_cache import FakeRedis
+        from tests.test_redis_cache import FakeRedis
         fake = self._cache._redis
         assert isinstance(fake, FakeRedis)
         fake._store.clear()
@@ -246,7 +246,7 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
         """First GET computes the skeleton; second GET reuses it. We
         assert the skeleton ended up under `meta:` and the pure-
         analysis fetch is only issued once across both requests."""
-        from tests.test_web_cache import FakeRedis
+        from tests.test_redis_cache import FakeRedis
         fake = self._cache._redis
         assert isinstance(fake, FakeRedis)
 
@@ -364,7 +364,7 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
 
     def test_compare_skeleton_cached_in_meta_namespace(self) -> None:
         """merge_discographies is pure — its output is cacheable."""
-        from tests.test_web_cache import FakeRedis
+        from tests.test_redis_cache import FakeRedis
         fake = self._cache._redis
         assert isinstance(fake, FakeRedis)
 

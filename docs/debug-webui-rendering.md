@@ -14,7 +14,7 @@ Some release groups with many releases (100+) intermittently fail to render when
 ## Backend (confirmed working)
 
 The server-side pagination fix is deployed and working:
-- `web/mb.py` `get_release_group_releases()` uses the browse endpoint (`/release?release-group=...`) with pagination, not the lookup endpoint (which caps at 25)
+- `lib/mb_api.py` `get_release_group_releases()` uses the browse endpoint (`/release?release-group=...`) with pagination, not the lookup endpoint (which caps at 25)
 - Response time: ~1 second for Born to Run
 
 ## Frontend code to investigate
@@ -60,5 +60,5 @@ async function loadReleaseGroup(id, el) {
 
 - `web/index.html` — frontend (the bug is here)
 - `web/server.py` — backend (confirmed working)
-- `web/mb.py` — MB API helpers (confirmed working)
+- `lib/mb_api.py` — MB API helpers (confirmed working)
 - `docs/webui-primer.md` — full architecture docs

@@ -2,7 +2,7 @@
 
 The single canonical parser for Discogs ``position`` strings and the
 manifest normalization built on it. Every ``album_tracks`` persist path
-for Discogs tracklists flows through here — ``web/discogs.py::get_release``
+for Discogs tracklists flows through here — ``lib/discogs_api.py::get_release``
 feeds the add/Replace/CLI persist callers (and, with the same normalized
 shape, the read-only browse surfaces), while
 ``album_source.py::_populate_tracks_discogs`` (the search worker's
@@ -200,7 +200,7 @@ def normalize_release_tracks(
     correct COUNT, but their relative order under ``album_tracks``'s
     ``(disc_number, track_number)`` read ordering is not defined. Raw
     consumers keep literal positions via
-    ``web/discogs.py::get_release_raw``.
+    ``lib/discogs_api.py::get_release_raw``.
     """
     parsed: list[tuple[str, str, int | None, str, str, bool, bool]] = []
     for track in raw_tracks:

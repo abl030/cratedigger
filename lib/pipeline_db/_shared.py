@@ -83,7 +83,7 @@ CURRENT_EVIDENCE_PREFIX = "_current_evidence_"
 
 #: ``(column, alias suffix)`` for exactly the ``album_quality_evidence``
 #: columns the audit-only accusation derivation reads — the measurement
-#: fields ``web/classify.py::evidence_column_accusation_flags`` rebuilds.
+#: fields ``lib/accusation_flags.py::evidence_column_accusation_flags`` rebuilds.
 #: Four queries in two modules project them now that six operator surfaces
 #: render a spectral grade through that derivation; one spelling is what
 #: stops a query projecting eight of the nine columns and silently

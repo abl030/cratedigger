@@ -13,31 +13,31 @@ from typing import NotRequired, TypedDict, TypeGuard
 
 import msgspec
 
+from lib import discogs_api, mb_api
+from lib import redis_cache as _cache
 from lib.artist_catalogue import (
     ArtistCatalogueRow,
     ArtistCompareSkeleton,
 )
-
-# VA constants are imported directly so that test patches of the two
-# mirror modules (web.routes.browse.discogs_api, web.routes.browse.mb_api)
-# don't replace the constants with auto-generated Mock attributes.
 from lib.artist_compare import annotate_in_library, merge_discographies
 from lib.banding import current_library_bitrate
+
+# The two VA constants below are imported directly so that test patches of
+# the mirror modules bound above (web.routes.browse.discogs_api,
+# web.routes.browse.mb_api) don't replace them with auto-generated Mock
+# attributes.
+from lib.discogs_api import VA_ARTIST_ID as _DISCOGS_VA_ARTIST_ID
 from lib.json_narrow import is_object_list, is_str_object_dict
+from lib.mb_api import VA_ARTIST_MBID as _MB_VA_ARTIST_MBID
+from lib.parallel_fanout import parallel_results
 from lib.pipeline_db._shared import ProcessingOwnerProjection
 from lib.release_identity import (
     ReleaseIdentity,
     normalize_release_id,
 )
-from web import cache as _cache
-from web import discogs as discogs_api
-from web import mb as mb_api
-from web.discogs import VA_ARTIST_ID as _DISCOGS_VA_ARTIST_ID
 from web.library_album_row import AmbiguousLibraryRequestAttachmentError
 from web.library_artist_service import list_library_artist_rows
-from web.mb import VA_ARTIST_MBID as _MB_VA_ARTIST_MBID
 from web.overlay import compute_library_rank
-from web.parallel_fanout import parallel_results
 from web.routes._overlay import overlay_release_rows_in_place
 from web.routes._registry import (
     RouteHandler,
@@ -534,7 +534,7 @@ def get_artist_disambiguate(h: RouteHandler, params: dict[str, list[str]], artis
 def _as_release_rows(value: object) -> TypeGuard[list[dict[str, object]]]:
     """Narrow an adapter envelope's ``releases``/``results`` value.
 
-    `web.mb` / `web.discogs` return `dict[str, object]` envelopes, so a
+    `lib.mb_api` / `lib.discogs_api` return `dict[str, object]` envelopes, so a
     nested list is `object`-typed at the type-checker boundary even
     though it is always built as `list[dict[str, object]]`. Overlay
     helpers mutate rows in place, so this narrows the existing list
@@ -553,7 +553,7 @@ def get_release_group(h: RouteHandler, params: dict[str, list[str]], rg_id: str)
         # UUID — dispatch server-side the same way get_release() forwards
         # numeric release ids to get_discogs_release(). get_master_releases
         # deliberately mirrors mb.get_release_group_releases()'s shape
-        # (web/discogs.py), so get_discogs_master's overlay is the same
+        # (lib/discogs_api.py), so get_discogs_master's overlay is the same
         # contract the frontend already reads for MB rows (#501 item 1).
         get_discogs_master(h, params, identity.release_id)
         return

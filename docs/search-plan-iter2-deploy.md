@@ -132,7 +132,7 @@ the canonical resolver service's surface; it doesn't live in
 
 ```python
 # Run on doc2 inside the cratedigger nix env so PYTHONPATH +
-# psycopg2 + msgspec + web.mb / web.discogs all resolve correctly.
+# psycopg2 + msgspec + lib.mb_api / lib.discogs_api all resolve correctly.
 # The agent generates this from the resolver service's surface at
 # deploy time — function names below should be verified against the
 # current lib/field_resolver_service.py and lib/pipeline_db.py:
@@ -142,8 +142,8 @@ import os
 from lib.pipeline_db import PipelineDB
 from lib.field_resolver_service import apply_resolve_all_result, resolve_all
 from lib.release_identity import ReleaseIdentity
-from web.mb import get_release_raw, get_release_group
-from web.discogs import get_release as discogs_get_release
+from lib.mb_api import get_release_raw, get_release_group
+from lib.discogs_api import get_release as discogs_get_release
 
 dsn = os.environ["PIPELINE_DB_DSN"]
 db = PipelineDB(dsn)
@@ -494,7 +494,7 @@ the single-operator invariant). The example shape:
 import os
 from lib.pipeline_db import PipelineDB
 from lib.field_resolver_service import detect_va_compilation
-from web import mb as mb_api
+from lib import mb_api
 
 dsn = os.environ["PIPELINE_DB_DSN"]
 db = PipelineDB(dsn)

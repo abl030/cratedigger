@@ -12120,6 +12120,10 @@ class TestGetWrongMatches(unittest.TestCase):
         accusing an audit-only codec. Asserted through the production
         adapter, not by eyeballing column names.
         """
+        from lib.accusation_flags import (
+            AccusationFlags,
+            evidence_column_accusation_flags,
+        )
         from lib.pipeline_db._shared import (
             CANDIDATE_EVIDENCE_PREFIX,
             CURRENT_EVIDENCE_PREFIX,
@@ -12128,10 +12132,6 @@ class TestGetWrongMatches(unittest.TestCase):
             AudioQualityMeasurement,
             CodecFamily,
             EvidenceSubject,
-        )
-        from web.classify import (
-            AccusationFlags,
-            evidence_column_accusation_flags,
         )
 
         def _link(
@@ -12192,13 +12192,13 @@ class TestGetWrongMatches(unittest.TestCase):
 
     def test_shared_wrong_match_projects_candidate_source_lineage(self):
         """A current-linked canonical row cannot lend lineage to a candidate."""
+        from lib.accusation_flags import (
+            AccusationFlags,
+            evidence_column_accusation_flags,
+        )
         from lib.pipeline_db._shared import (
             CANDIDATE_EVIDENCE_PREFIX,
             CURRENT_EVIDENCE_PREFIX,
-        )
-        from web.classify import (
-            AccusationFlags,
-            evidence_column_accusation_flags,
         )
 
         self._log_rejected(self.req1, "peer", "/failed/Shared")
@@ -19252,12 +19252,12 @@ class TestReadProjectionParity(unittest.TestCase):
     def test_long_tail_cohort_carries_the_current_accusation_columns(self):
         """Issue #829 PR4/N3: the worklist chip's codec facts come from a
         real join, so real PG must actually return them."""
-        from lib.pipeline_db._shared import CURRENT_EVIDENCE_PREFIX
-        from lib.quality import AudioQualityMeasurement
-        from web.classify import (
+        from lib.accusation_flags import (
             AccusationFlags,
             evidence_column_accusation_flags,
         )
+        from lib.pipeline_db._shared import CURRENT_EVIDENCE_PREFIX
+        from lib.quality import AudioQualityMeasurement
 
         rid = self._seed_long_tail_request(
             self.db, mb_release_id="lt-audit-only", with_tracks=False,

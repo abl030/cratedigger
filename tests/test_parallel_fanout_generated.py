@@ -1,6 +1,6 @@
-"""Generated contract for web.parallel_fanout.parallel_results (#1355 WE5).
+"""Generated contract for lib.parallel_fanout.parallel_results (#1355 WE5).
 
-The deterministic pins in ``tests/test_web_parallel_fanout.py`` own the
+The deterministic pins in ``tests/test_parallel_fanout.py`` own the
 cancellation/shutdown mechanics for named worlds (three jobs, two workers,
 a specific insertion order). This property patrols the value/exception
 contract across the job-count and raiser-position combinations those pins
@@ -25,7 +25,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
-from web.parallel_fanout import parallel_results
+from lib.parallel_fanout import parallel_results
 
 _MAX_JOBS = 8
 

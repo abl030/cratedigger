@@ -8,7 +8,7 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
-from web.artist_search import merge_exact_artist_identities
+from lib.artist_search import merge_exact_artist_identities
 
 
 def assert_identity_merge(

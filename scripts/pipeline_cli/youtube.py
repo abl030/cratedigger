@@ -129,7 +129,7 @@ class _SubmitsYoutubeRescue(Protocol):
 
 
 class _RedisYoutubeCache:
-    """Adapt ``web/cache.py``'s Redis client to the ``BeetsDistanceCache``
+    """Adapt ``lib/redis_cache.py``'s Redis client to the ``BeetsDistanceCache``
     protocol.
 
     The service-side keys already carry the ``youtube:album:`` /
@@ -146,7 +146,7 @@ class _RedisYoutubeCache:
 
     def __init__(self) -> None:
         try:
-            from web import cache as _cache_mod
+            from lib import redis_cache as _cache_mod
             self._redis = getattr(_cache_mod, "_redis", None)
         except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             self._redis = None
@@ -160,7 +160,7 @@ class _RedisYoutubeCache:
             return None
         if raw is None:
             return None
-        # web/cache.py initialises Redis with ``decode_responses=True``,
+        # lib/redis_cache.py initialises Redis with ``decode_responses=True``,
         # so ``get`` returns str. Encode to bytes for the protocol.
         if isinstance(raw, str):
             return raw.encode("utf-8")
@@ -195,9 +195,8 @@ def cmd_youtube_album(db: YoutubeResolverDB, args: argparse.Namespace) -> int:
             ``transient``
       * 1 — unknown outcome (safety net)
     """
+    from lib import discogs_api, mb_api
     from lib.beets_distance import compute_beets_distance
-    from web import discogs as discogs_api
-    from web import mb as mb_api
 
     yt, session = _build_youtube_client()
     cache = _RedisYoutubeCache()

@@ -437,7 +437,7 @@ class DevHandler(BaseHTTPRequestHandler):
 
     def _serve_live_db_get(self, parsed: ParseResult) -> None:
         import web.server as web_server
-        from web import discogs as _discogs
+        from lib import discogs_api as _discogs
 
         # The injected session is process-global.  This lock intentionally
         # spans dispatch, HTTP exception mapping, and reconnect: releasing it
@@ -623,9 +623,13 @@ def _api_fixture_slug(path: str) -> str:
 
 def configure_live_db_metadata(config: DevConfig) -> None:
     """Replace process-global mirror origins for one live-db dev session."""
+    # Aliased: this module's own DevConfig already has ``mb_api`` /
+    # ``discogs_api`` fields holding the ORIGIN strings, so binding the
+    # client modules under those names would read as the same thing.
+    from lib import discogs_api as discogs
+    from lib import mb_api as mb
+    from lib.api_bases import PUBLIC_MB_WS2_BASE
     from lib.mb_canonical import configure_canonical_base
-    from web import discogs, mb
-    from web.api_bases import PUBLIC_MB_WS2_BASE
 
     mb_ws2_base = config.mb_api or PUBLIC_MB_WS2_BASE
     mb.MB_API_BASE = mb_ws2_base
@@ -644,8 +648,10 @@ def configure_live_db(
     if not config.dsn:
         raise SystemExit("--dsn or PIPELINE_DB_DSN is required for --data live-db")
 
+    from lib import discogs_api as discogs
+    from lib import mb_api as mb
+    from lib import redis_cache as cache
     from lib.pipeline_db import PipelineDB
-    from web import cache, discogs, mb
     from web.runtime import WebRuntime, install_runtime
 
     class _ReadOnlyDevPipelineDB(PipelineDB):

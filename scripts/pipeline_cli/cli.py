@@ -156,12 +156,12 @@ def main(*, api_socket: str | None = None):
     ):
         sys.exit(cmd_triage_quarantine(None, args))
 
-    # Mirror origins for every web.mb / web.discogs consumer left in this
+    # Mirror origins for every lib.mb_api / lib.discogs_api consumer left in this
     # process (add --discogs, youtube-album). Distance and Replace moved to
     # the web routes in #1063, so their mirror lookups now happen in the
     # service process. ``routes`` and ``triage quarantine`` already returned
     # above for the same zero-init reason.
-    from web.api_bases import configure_api_bases_from_runtime_config
+    from lib.api_bases import configure_api_bases_from_runtime_config
     configure_api_bases_from_runtime_config()
 
     try:

@@ -1,4 +1,4 @@
-"""Unit tests for web/discogs.py — Discogs mirror API wrapper."""
+"""Unit tests for lib/discogs_api.py — Discogs mirror API wrapper."""
 import json
 import os
 import sys
@@ -11,7 +11,7 @@ import msgspec
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import web.discogs
+import lib.discogs_api
 
 
 def _is_dict(value: object) -> TypeGuard[dict[str, object]]:
@@ -27,24 +27,18 @@ def _is_list(value: object) -> TypeGuard[list[object]]:
 
 
 def setUpModule() -> None:
-    # These tests exercise the REAL web/discogs.py with urlopen patched.
+    # These tests exercise the REAL lib/discogs_api.py with urlopen patched.
     # Since tier-2 U6 the module ships with NO default base (Discogs is
     # mirror-required, R13) — give the suite a synthetic mirror origin so
     # URL construction proceeds; assertions check paths, not the origin.
-    web.discogs.DISCOGS_API_BASE = "https://discogs-mirror.test"
+    lib.discogs_api.DISCOGS_API_BASE = "https://discogs-mirror.test"
 
 
 def tearDownModule() -> None:
-    web.discogs.DISCOGS_API_BASE = None
+    lib.discogs_api.DISCOGS_API_BASE = None
 
 
-from lib.discogs_positions import (
-    parse_duration as _parse_duration,
-)
-from lib.discogs_positions import (
-    parse_position as _parse_position,
-)
-from web.discogs import (
+from lib.discogs_api import (
     LabelEntity,
     _DiscogsArtistRef,
     _parse_year,
@@ -59,6 +53,12 @@ from web.discogs import (
     search_artists,
     search_labels,
     search_releases,
+)
+from lib.discogs_positions import (
+    parse_duration as _parse_duration,
+)
+from lib.discogs_positions import (
+    parse_position as _parse_position,
 )
 
 
@@ -129,7 +129,7 @@ def _mock_urlopen(response_data):
     mock_resp.read.return_value = json.dumps(response_data).encode()
     mock_resp.__enter__ = lambda s: s
     mock_resp.__exit__ = MagicMock(return_value=False)
-    return patch("web.discogs.urllib.request.urlopen", return_value=mock_resp)
+    return patch("lib.discogs_api.urllib.request.urlopen", return_value=mock_resp)
 
 
 class TestGetRelease(unittest.TestCase):
@@ -772,7 +772,7 @@ class TestSearchReleases(unittest.TestCase):
 
     def test_long_query_uses_bounded_cache_key(self):
         long_query = "r" * 250
-        with patch("web.discogs._cache.memoize_meta", return_value=[]) as memo:
+        with patch("lib.discogs_api._cache.memoize_meta", return_value=[]) as memo:
             search_releases(long_query)
 
         cache_key = memo.call_args[0][0]
@@ -836,7 +836,7 @@ class TestSearchReleasesVaRewrite(unittest.TestCase):
         self.assertNotIn("artist_id", qs)
 
     def _cache_key_for(self, query: str) -> str:
-        with patch("web.discogs._cache.memoize_meta", return_value=[]) as memo:
+        with patch("lib.discogs_api._cache.memoize_meta", return_value=[]) as memo:
             search_releases(query)
         return memo.call_args[0][0]
 
@@ -899,7 +899,7 @@ class TestSearchArtists(unittest.TestCase):
 
     def test_long_query_uses_bounded_cache_key(self):
         long_query = "a" * 250
-        with patch("web.discogs._cache.memoize_meta", return_value=[]) as memo:
+        with patch("lib.discogs_api._cache.memoize_meta", return_value=[]) as memo:
             search_artists(long_query)
 
         cache_key = memo.call_args[0][0]
@@ -955,7 +955,7 @@ def _mock_urlopen_by_url(responses: dict):
                 return mock_resp
         raise AssertionError(f"no mock response configured for URL: {url}")
 
-    return patch("web.discogs.urllib.request.urlopen", side_effect=_side_effect)
+    return patch("lib.discogs_api.urllib.request.urlopen", side_effect=_side_effect)
 
 
 class TestGetArtistReleases(unittest.TestCase):
@@ -1009,7 +1009,7 @@ class TestGetArtistReleases(unittest.TestCase):
 
     def test_calls_the_shared_parallel_fanout_owner_for_masters_and_appearances(self):
         """Regression guard for issue #1355 WE5: this module must reach
-        ``web.parallel_fanout``'s shared owner rather than falling back to
+        ``lib.parallel_fanout``'s shared owner rather than falling back to
         a private per-module copy of the same lifecycle."""
         calls: list[tuple[frozenset, int]] = []
 
@@ -1017,7 +1017,7 @@ class TestGetArtistReleases(unittest.TestCase):
             calls.append((frozenset(jobs), max_workers))
             return {key: job() for key, job in jobs.items()}
 
-        with patch("web.discogs.parallel_results", side_effect=fake_parallel_results), \
+        with patch("lib.discogs_api.parallel_results", side_effect=fake_parallel_results), \
              _mock_urlopen_by_url({
                 "/masters": self.MASTERS_DATA,
                 "/appearances": self.EMPTY_APPEARANCES,
@@ -1027,7 +1027,7 @@ class TestGetArtistReleases(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         keys, max_workers = calls[0]
         self.assertEqual(keys, frozenset({"masters", "appearances"}))
-        self.assertEqual(max_workers, web.discogs._DISCOGS_ARTIST_CONCURRENCY)
+        self.assertEqual(max_workers, lib.discogs_api._DISCOGS_ARTIST_CONCURRENCY)
         # The fake still ran every job for real (just serially), so the
         # downstream merge saw genuine data.
         self.assertEqual(len(rows), 3)
@@ -1041,7 +1041,7 @@ class TestGetArtistReleases(unittest.TestCase):
         }
         responses[endpoint] = payload
         with _mock_urlopen_by_url(responses), self.assertRaises(
-            web.discogs.DiscogsArtistCatalogueIncomplete,
+            lib.discogs_api.DiscogsArtistCatalogueIncomplete,
         ):
             get_artist_releases(3840)
 
@@ -1074,7 +1074,7 @@ class TestGetArtistReleases(unittest.TestCase):
             "/masters": self.MASTERS_DATA,
             "/appearances": self.EMPTY_APPEARANCES,
         }) as mock, patch(
-            "web.discogs._cache.memoize_meta",
+            "lib.discogs_api._cache.memoize_meta",
             side_effect=lambda _key, fetch: fetch(),
         ) as memo:
             results = msgspec.to_builtins(get_artist_releases(3840))
@@ -1473,7 +1473,7 @@ class TestSearchLabels(unittest.TestCase):
         q1 = "x" * 250
         q2 = ("x" * 200) + ("y" * 50)
 
-        with patch("web.discogs._cache.memoize_meta", return_value=[]) as memo:
+        with patch("lib.discogs_api._cache.memoize_meta", return_value=[]) as memo:
             search_labels(q1)
             search_labels(q2)
 
@@ -1619,7 +1619,7 @@ class TestGetLabelReleases(unittest.TestCase):
 
         direct = rows[0]
         assert _is_dict(direct)
-        # Match shape used by web/discogs.py::get_master_releases / get_release
+        # Match shape used by lib/discogs_api.py::get_master_releases / get_release
         # so the U4 route layer can overlay library/pipeline state without
         # renaming fields. ID is stringified, year derived from `released`,
         # primary_artist_id surfaces for cross-source overlay.
@@ -1721,7 +1721,7 @@ class TestGetLabelReleases(unittest.TestCase):
                     fp=BytesIO(b'{"error":"timeout"}'))
             return success_resp
 
-        with patch("web.discogs.urllib.request.urlopen", side_effect=_urlopen):
+        with patch("lib.discogs_api.urllib.request.urlopen", side_effect=_urlopen):
             payload = get_label_releases(
                 99887766, include_sublabels=True, page=3, per_page=50)
 
@@ -1750,7 +1750,7 @@ class TestGetLabelReleases(unittest.TestCase):
                 raise TimeoutError("timed out")
             return success_resp
 
-        with patch("web.discogs.urllib.request.urlopen", side_effect=_urlopen):
+        with patch("lib.discogs_api.urllib.request.urlopen", side_effect=_urlopen):
             payload = get_label_releases(99887762, include_sublabels=True)
 
         self.assertTrue(payload["sub_labels_dropped"])
@@ -1767,9 +1767,9 @@ class TestGetLabelReleases(unittest.TestCase):
             mock_resp.__exit__ = MagicMock(return_value=False)
             return mock_resp
 
-        with patch("web.discogs._cache.memoize_meta",
+        with patch("lib.discogs_api._cache.memoize_meta",
                    side_effect=lambda _key, fn: fn()), \
-                patch("web.discogs.urllib.request.urlopen", side_effect=_urlopen):
+                patch("lib.discogs_api.urllib.request.urlopen", side_effect=_urlopen):
             get_label_releases(99887761, include_sublabels=True)
             get_label_releases(99887760, include_sublabels=False)
 
@@ -1787,7 +1787,7 @@ class TestGetLabelReleases(unittest.TestCase):
                 hdrs=None,  # type: ignore[arg-type]
                 fp=BytesIO(b'{"error":"timeout"}'))
 
-        with patch("web.discogs.urllib.request.urlopen", side_effect=_always_503), self.assertRaises(HTTPError):
+        with patch("lib.discogs_api.urllib.request.urlopen", side_effect=_always_503), self.assertRaises(HTTPError):
             get_label_releases(99887765, include_sublabels=True)
 
     def test_503_when_sub_labels_already_false_reraises(self):
@@ -1802,7 +1802,7 @@ class TestGetLabelReleases(unittest.TestCase):
                 hdrs=None,  # type: ignore[arg-type]
                 fp=BytesIO(b'{"error":"timeout"}'))
 
-        with patch("web.discogs.urllib.request.urlopen", side_effect=_503), self.assertRaises(HTTPError):
+        with patch("lib.discogs_api.urllib.request.urlopen", side_effect=_503), self.assertRaises(HTTPError):
             get_label_releases(99887764, include_sublabels=False)
 
     def test_404_propagates_unchanged(self):
@@ -1817,7 +1817,7 @@ class TestGetLabelReleases(unittest.TestCase):
                 hdrs=None,  # type: ignore[arg-type]
                 fp=BytesIO(b'{"error":"not found"}'))
 
-        with patch("web.discogs.urllib.request.urlopen", side_effect=_404), self.assertRaises(HTTPError):
+        with patch("lib.discogs_api.urllib.request.urlopen", side_effect=_404), self.assertRaises(HTTPError):
             get_label_releases(99887763, include_sublabels=True)
 
 

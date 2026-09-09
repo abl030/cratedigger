@@ -13,8 +13,8 @@ from typing import TypeGuard
 
 import msgspec
 
-from web import discogs as discogs_api
-from web.discogs import LabelEntity
+from lib import discogs_api
+from lib.discogs_api import LabelEntity
 from web.routes._overlay import overlay_release_rows_in_place
 from web.routes._registry import (
     RouteHandler,
@@ -69,7 +69,7 @@ def _parse_positive_int(
 def _as_release_rows(value: object) -> TypeGuard[list[dict[str, object]]]:
     """Narrow the label-releases envelope's ``results`` value.
 
-    `web.discogs.get_label_releases` returns a `dict[str, object]`
+    `lib.discogs_api.get_label_releases` returns a `dict[str, object]`
     envelope, so its nested ``results`` list is `object`-typed at the
     type-checker boundary even though it is always built as
     `list[dict[str, object]]`. `overlay_release_rows_in_place` mutates

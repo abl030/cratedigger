@@ -51,6 +51,7 @@ from typing import Any, Literal, Protocol
 
 import msgspec
 
+from lib.accusation_flags import evidence_column_accusation_flags
 from lib.banding import BAND_MISSING as _BAND_MISSING
 from lib.banding import (
     CurrentBeetsBandingAmbiguityError,
@@ -58,6 +59,7 @@ from lib.banding import (
     CurrentBeetsBandingUnavailableError,
 )
 from lib.beets_db import beets_authority_availability_category
+from lib.pipeline_db._shared import CURRENT_EVIDENCE_PREFIX
 from lib.release_identity import (
     ConflictingReleaseIdentityError,
     ReleaseIdentity,
@@ -316,15 +318,10 @@ def _band_row(
     identity: ReleaseIdentity,
     bands: dict[str, str],
 ) -> LongTailRow:
-    # Deferred so the service module keeps importing nothing from the web
-    # layer at load time (the same shape ``lib/mbid_replace_service.py``
-    # uses for ``web.mb``). The audit-only accusation rule has exactly one
-    # owner and both worklist surfaces — API and ``pipeline-cli
-    # long-tail`` — reach it through this call rather than through an
-    # injected collaborator neither caller could vary meaningfully.
-    from lib.pipeline_db._shared import CURRENT_EVIDENCE_PREFIX
-    from web.classify import evidence_column_accusation_flags
-
+    # The audit-only accusation rule has exactly one owner and both
+    # worklist surfaces — API and ``pipeline-cli long-tail`` — reach it
+    # through this call rather than through an injected collaborator
+    # neither caller could vary meaningfully.
     flags = evidence_column_accusation_flags(
         row, prefix=CURRENT_EVIDENCE_PREFIX)
     return LongTailRow(

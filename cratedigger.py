@@ -1477,7 +1477,7 @@ from lib.download import poll_active_downloads as _poll_active_downloads
 
 def _default_phase1_source(cfg: CratediggerConfig) -> DatabaseSource:
     from album_source import DatabaseSource
-    from web.api_bases import mb_ws2_base
+    from lib.api_bases import mb_ws2_base
     return DatabaseSource(
         cfg.pipeline_db_dsn,
         musicbrainz_ws2_base=mb_ws2_base(cfg.musicbrainz_api_base),
@@ -1854,7 +1854,7 @@ def main() -> int:
             sys.exit(1)
 
         from album_source import DatabaseSource
-        from web.api_bases import mb_ws2_base
+        from lib.api_bases import mb_ws2_base
         pipeline_db_source = DatabaseSource(
             cfg.pipeline_db_dsn,
             musicbrainz_ws2_base=mb_ws2_base(cfg.musicbrainz_api_base),

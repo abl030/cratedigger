@@ -4,7 +4,7 @@ Documents and locks **what the real MB / Discogs mirror adapters raise**.
 Rule B (``.claude/rules/test-fidelity.md``) forbids fakes that are more
 permissive than production — but a fake can only mirror a contract that is
 itself pinned. These tests are that pin: they exercise the *real* adapter
-code in ``web/mb.py`` and ``web/discogs.py`` with the HTTP transport stubbed
+code in ``lib/mb_api.py`` and ``lib/discogs_api.py`` with the HTTP transport stubbed
 at the ``urllib.request.urlopen`` leaf seam, so they run fully offline and
 deterministically (no live mirror, no skip-gating — see CLAUDE.md
 § "Skipped tests are an anti-pattern").
@@ -16,7 +16,7 @@ if the production contract ever drifts (adapter starts returning ``None``
 on 404, say), the contract test fails and the fake is updated in lockstep.
 
 Round-1 P0 recap: ``_resolve_mb_group`` expected ``None`` on 404; the real
-``web.mb.get_release`` raises ``urllib.error.HTTPError``. Every resolver
+``lib.mb_api.get_release`` raises ``urllib.error.HTTPError``. Every resolver
 test used ``lambda m: None`` so the production crash never surfaced. The
 404-raises contract below is the one that bug violated.
 """
@@ -29,9 +29,10 @@ import urllib.error
 from typing import Self
 from unittest.mock import patch
 
-import web.cache as _cache
+import lib.redis_cache as _cache
+from lib import discogs_api as discogs
+from lib import mb_api as mb
 from tests.fakes import FakeDiscogsLookup, FakeMBLookup, http_error
-from web import discogs, mb
 
 
 class _FakeResp:
@@ -54,7 +55,7 @@ class _FakeResp:
 def _raise_http(code: int):
     """An ``urlopen`` replacement that always raises ``HTTPError(code)``.
 
-    Always-raise (not one-shot) because ``web.mb._get`` retries once on a
+    Always-raise (not one-shot) because ``lib.mb_api._get`` retries once on a
     ``URLError`` — and ``HTTPError`` is a ``URLError`` subclass — so the
     transport is hit twice before the error escapes. The contract is that
     it still escapes; a one-shot stub would mask the retry."""

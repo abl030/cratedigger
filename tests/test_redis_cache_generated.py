@@ -21,8 +21,8 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
-from tests.test_web_cache import FakeRedis
-from web import cache
+from lib import redis_cache as cache
+from tests.test_redis_cache import FakeRedis
 
 
 class _GeneratedAbort(BaseException):

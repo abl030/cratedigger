@@ -870,7 +870,7 @@ class TestAccusationEvidenceColumnsAreSpelledOnce(unittest.TestCase):
     """Every accusation-column block projects the SAME nine aliases.
 
     Issue #829 Phase 5 PR4/N3. Four queries in two modules hand
-    ``web/classify.py::evidence_column_accusation_flags`` an evidence
+    ``lib/accusation_flags.py::evidence_column_accusation_flags`` an evidence
     column block; a block that projects eight of the nine silently
     resolves a different codec than the surface beside it, and the flag
     fails accusing rather than loudly. Three of those blocks are spelled

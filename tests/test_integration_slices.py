@@ -12044,8 +12044,8 @@ class TestReplaceFullPath(unittest.TestCase):
 class TestFieldResolverSlice(unittest.TestCase):
     """Round-trip the field resolvers through the real HTTP client.
 
-    Patches the leaf seam (``urllib.request.urlopen`` in ``web.mb`` /
-    ``web.discogs``) with realistic JSON payloads captured from the live
+    Patches the leaf seam (``urllib.request.urlopen`` in ``lib.mb_api`` /
+    ``lib.discogs_api``) with realistic JSON payloads captured from the live
     mirrors at ``192.168.1.35:5200`` (MusicBrainz) and
     ``discogs.ablz.au``. The resolver service drives the real ``_get``
     helpers, the real Redis-memoised wrappers (bypassed by ``fresh=True``
@@ -12058,7 +12058,7 @@ class TestFieldResolverSlice(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        # Redis is not initialised in the test harness (web.cache._redis
+        # Redis is not initialised in the test harness (lib.redis_cache._redis
         # stays None), so ``memoize_meta`` is a pass-through -- every
         # call runs ``fetch_fn`` and nothing is cached. No additional
         # cache-disabling plumbing required.
@@ -12078,7 +12078,7 @@ class TestFieldResolverSlice(unittest.TestCase):
     def _patch_urlopen(monkey_patches: dict[str, bytes]):
         """Return a context manager patching urlopen with URL→bytes dispatch.
 
-        Both ``web.mb`` and ``web.discogs`` route through
+        Both ``lib.mb_api`` and ``lib.discogs_api`` route through
         ``urllib.request.urlopen``; we patch each module's reference.
         Bytes are returned via a tiny shim that mimics the
         ``urlopen() -> response`` contract enough for ``json.loads``.
@@ -12113,10 +12113,10 @@ class TestFieldResolverSlice(unittest.TestCase):
         def _ctx():
             with ExitStack() as stack:
                 stack.enter_context(
-                    _patch("web.mb.urllib.request.urlopen", new=_urlopen),
+                    _patch("lib.mb_api.urllib.request.urlopen", new=_urlopen),
                 )
                 stack.enter_context(
-                    _patch("web.discogs.urllib.request.urlopen", new=_urlopen),
+                    _patch("lib.discogs_api.urllib.request.urlopen", new=_urlopen),
                 )
                 yield
         return _ctx()
@@ -12155,14 +12155,14 @@ class TestFieldResolverSlice(unittest.TestCase):
 
     def test_discogs_master_year_round_trips_through_real_client(self):
         """Realistic Discogs master payload → resolved year + side-table row."""
-        import web.discogs
+        import lib.discogs_api
         from lib.field_resolver_service import (
             resolve_release_group_year,
         )
 
         # Mirror-required since tier-2 U6; urlopen is patched below, so a
         # synthetic origin suffices for the real-client round trip.
-        base_p = patch.object(web.discogs, "DISCOGS_API_BASE",
+        base_p = patch.object(lib.discogs_api, "DISCOGS_API_BASE",
                               "https://discogs-mirror.test")
         base_p.start()
         self.addCleanup(base_p.stop)
@@ -12191,7 +12191,7 @@ class TestFieldResolverSlice(unittest.TestCase):
         self.assertEqual(result.value, 1997)
 
     def test_mb_release_group_year_404_round_trips_to_unresolved_404(self):
-        """MB mirror returns 404 → ``HTTPError`` propagates from web.mb,
+        """MB mirror returns 404 → ``HTTPError`` propagates from lib.mb_api,
         resolver classifies as ``unresolved_404`` (sticky 30d).
 
         Disambiguated from "exists but year unparseable" — that landed on
@@ -12222,7 +12222,7 @@ class TestFieldResolverSlice(unittest.TestCase):
                 hdrs=None, fp=None,  # type: ignore[arg-type]
             )
 
-        with _patch("web.mb.urllib.request.urlopen", new=_raise_404):
+        with _patch("lib.mb_api.urllib.request.urlopen", new=_raise_404):
             result = resolve_release_group_year(req, db)
 
         self.assertEqual(result.status, "unresolved_404")
@@ -12235,7 +12235,7 @@ class TestFieldResolverSlice(unittest.TestCase):
 
     def test_mb_release_group_year_missing_round_trips_to_field_missing(self):
         """MB mirror returns 200 with no ``first-release-date`` →
-        ``web.mb.get_release_group_year`` returns None → resolver maps
+        ``lib.mb_api.get_release_group_year`` returns None → resolver maps
         to ``unresolved_field_missing_upstream``. Pairs with
         ``test_mb_release_group_year_404_round_trips_to_unresolved_404``
         to pin the 404 / missing-year disambiguation (code-review #17).
@@ -12276,7 +12276,7 @@ class TestFieldResolverSlice(unittest.TestCase):
         """Realistic MB release payload → per-track artist credits.
 
         Uses the ``inc=recordings+artist-credits+media+release-groups``
-        shape that ``web.mb.get_release`` requests, but unlike the
+        shape that ``lib.mb_api.get_release`` requests, but unlike the
         normalised return type of ``get_release``, the resolver works
         directly off the raw MB JSON (which carries per-track
         ``artist-credit``).
@@ -12287,7 +12287,7 @@ class TestFieldResolverSlice(unittest.TestCase):
         )
 
         # Minimal but realistic MB release payload shape -- direct from
-        # the MB mirror, not via web.mb.get_release's normaliser.
+        # the MB mirror, not via lib.mb_api.get_release's normaliser.
         mb_payload = (
             b'{"id":"rec-mbid-xyz","title":"Some Album",'
             b'"date":"1997","artist-credit":[{"name":"Various","joinphrase":""}],'
@@ -12308,7 +12308,7 @@ class TestFieldResolverSlice(unittest.TestCase):
             "discogs_release_id": None,
         }
 
-        # The resolver's default uses ``web.mb.get_release`` which
+        # The resolver's default uses ``lib.mb_api.get_release`` which
         # NORMALISES the payload (strips per-track artist-credit). To
         # exercise the resolver's MB-track-artist extraction logic
         # end-to-end through real HTTP, we inject the raw-payload
@@ -12316,7 +12316,7 @@ class TestFieldResolverSlice(unittest.TestCase):
         # the normaliser. This matches the production path the
         # backfill / enqueue will use once U3/U4 wire it.
 
-        from web.mb import MB_API_BASE, _get
+        from lib.mb_api import MB_API_BASE, _get
 
         def _raw_mb_get_release(mbid, fresh=False):
             return _get(
@@ -12360,7 +12360,7 @@ class TestEnqueueFieldResolutionSlice(unittest.TestCase):
     add path) round-trips through ``field_resolver_service.resolve_all``
     via real ``FakePipelineDB``, exercising the production decision
     points (resolver fanout, side-table writes, VA detection, budget
-    enforcement). Patches only the leaf HTTP seam (``web.mb.urlopen``
+    enforcement). Patches only the leaf HTTP seam (``lib.mb_api.urlopen``
     / kwarg-injectable resolver collaborators).
     """
 

@@ -17,11 +17,11 @@ from lib.artist_compare import (
     merge_discographies,
     normalize_title,
 )
-from web.discogs import (
+from lib.discogs_api import (
     _DiscogsArtistMasterEntry,
     _DiscogsArtistMastersResponse,
 )
-from web.mb import _MBReleaseGroupRef, _normalize_artist_release_group
+from lib.mb_api import _MBReleaseGroupRef, _normalize_artist_release_group
 from web.routes.browse import _apply_rg_pipeline_overlay, _PipelineHit
 
 StructuralType = Literal["Album", "EP", "Single"]

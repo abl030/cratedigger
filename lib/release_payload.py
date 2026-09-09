@@ -1,6 +1,6 @@
 """Narrow one mirror ``get_release()`` payload field at a time.
 
-``web.mb.get_release()`` and ``web.discogs.get_release()`` both return
+``lib.mb_api.get_release()`` and ``lib.discogs_api.get_release()`` both return
 ``dict[str, object]`` in ONE shape (``id``, ``title``, ``artist_name``,
 ``artist_id``, ``release_group_id``, ``year``, ``country``, ``tracks``, ...)
 — the same columns in the same shape, no adapter between the pathways. The

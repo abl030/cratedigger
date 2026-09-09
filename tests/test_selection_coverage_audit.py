@@ -301,7 +301,7 @@ STALE_PROBE_PATHS: dict[str, tuple[str, str]] = {
     ),
     "migrations": ("migrations/001_initial.sql", "tests.test_migrator"),
     "nix": ("nix/module.nix", "tests.test_nix_module"),
-    "web": ("web/cache.py", "tests.test_web_cache"),
+    "web": ("web/overlay.py", "tests.test_web_overlay"),
     "harness": ("harness/import_one.py", "tests.test_harness_beets2_contract"),
     "<top-level>": ("album_source.py", "tests.test_album_source"),
 }
@@ -334,6 +334,16 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
         "tests.test_download",
         "tests.test_slskd_sweep_exception_contracts",
         "tests.test_convergence_runner_generated",
+    ),
+    # Issue #1389 moved this module from web/discogs.py to lib/, where the
+    # basename probe resolves its own two modules — so the loss of the
+    # cache-key literal pin (test_web_dev_server) and the mirror-concurrency
+    # module is now silent, which it was not under web/.
+    "lib/discogs_api.py": (
+        "tests.test_discogs_api",
+        "tests.test_discogs_api_generated",
+        "tests.test_web_dev_server",
+        "tests.test_discogs_artist_concurrency",
     ),
     # The basename probe resolves tests.test_slskd_searches regardless,
     # masking the loss of the sweep-exception-contract module (#1312).
@@ -1886,14 +1896,14 @@ class TestSelectionCoverageCheckersTripOnViolations(unittest.TestCase):
         self,
     ) -> None:
         """Contract D's measurement, driven by a probe row added to the real
-        prefix table. Removing it leaves `web/cache.py` resolving its own
-        basename module, and no rule polices web/ — so the probe's neighbour
+        prefix table. Removing it leaves `web/overlay.py` resolving its own
+        basename module (tests.test_web_overlay), so the probe's neighbour
         vanishes with nothing raising, which is the whole shape.
         """
         probe = SelectionRule(
             name="prefix:_silent_probe",
             description="probe",
-            exact_paths=("web/cache.py",),
+            exact_paths=("web/overlay.py",),
             neighbours=("tests.test_fakes",),
         )
 
@@ -1901,7 +1911,7 @@ class TestSelectionCoverageCheckersTripOnViolations(unittest.TestCase):
             probe, REPO_ROOT, prefix_rules=(*PREFIX_RULES, probe)
         )
 
-        self.assertEqual(losses, {"web/cache.py": ("tests.test_fakes",)})
+        self.assertEqual(losses, {"web/overlay.py": ("tests.test_fakes",)})
 
     def test_silent_loss_checker_is_quiet_when_the_deletion_fails_closed(
         self,
@@ -2011,7 +2021,7 @@ class TestSelectionCoverageCheckersTripOnViolations(unittest.TestCase):
         probe = SelectionRule(
             name="prefix:_absent_probe",
             description="probe",
-            exact_paths=("web/cache.py",),
+            exact_paths=("web/overlay.py",),
             neighbours=("tests.test_fakes",),
         )
 

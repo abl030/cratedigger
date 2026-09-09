@@ -248,7 +248,7 @@ class TestResolveReleaseGroupYear(unittest.TestCase):
         self.assertIsNone(result.value)
 
     def test_mb_release_group_with_no_parseable_year_is_field_missing(self):
-        """Code-review #17: ``web.mb.get_release_group_year`` now
+        """Code-review #17: ``lib.mb_api.get_release_group_year`` now
         propagates ``HTTPError(404)`` so the resolver can disambiguate
         "MBID does not exist" (→ ``unresolved_404``) from "exists but
         no parseable year" (→ ``unresolved_field_missing_upstream``).
@@ -570,14 +570,14 @@ class TestDetectVaCompilation(unittest.TestCase):
         ))
 
     def test_rule1_canonical_discogs_va_id_match_real_payload_shape(self):
-        """Real ``web/discogs.py::get_release`` shape carries ``artist_id``
+        """Real ``lib/discogs_api.py::get_release`` shape carries ``artist_id``
         at the top level, not nested under ``artists``. The detector
         must read both — Rule 1 was broken for the live web/CLI add
         path before this guard (code-review finding #5)."""
         req = _request(mb_release_id=None,
                        discogs_release_id="555",
                        mb_artist_id=None)
-        # Shape produced by web/discogs.py::get_release (see line 349-362).
+        # Shape produced by lib/discogs_api.py::get_release (see line 349-362).
         discogs_payload = {
             "id": "555",
             "title": "Some Compilation",

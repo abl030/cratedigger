@@ -1,6 +1,6 @@
 # Test Fidelity Rules
 
-The smell: **a fix lands in code that the tests confirm, but production never actually sees it, because the test infrastructure is more permissive than production.** Two PRs back-to-back tripped on the same shape — round 1 had `_resolve_mb_group` expecting `None` on 404 when the real `web/mb.py::get_release` raises `HTTPError`, and round 2 had `album_title` written into the row dict by the service but silently dropped by `psycopg2.extras.execute_values` because the SQL INSERT column list didn't include it (`FakePipelineDB` stored the whole dict so the test passed).
+The smell: **a fix lands in code that the tests confirm, but production never actually sees it, because the test infrastructure is more permissive than production.** Two PRs back-to-back tripped on the same shape — round 1 had `_resolve_mb_group` expecting `None` on 404 when the real `lib/mb_api.py::get_release` raises `HTTPError`, and round 2 had `album_title` written into the row dict by the service but silently dropped by `psycopg2.extras.execute_values` because the SQL INSERT column list didn't include it (`FakePipelineDB` stored the whole dict so the test passed).
 
 These rules codify the meta-pattern as forbidden anti-patterns.
 
@@ -34,8 +34,8 @@ def test_upsert_round_trip_preserves_every_field(self):
 A fake must also mirror *when* the real edge fails, not only what it raises. An operator-facing claim about process behaviour owes a real-subprocess test. A fake that fails earlier than the real producer can manufacture a passing test for a false claim (a write-failing stdout fake vs a block-buffered pipe that raises EPIPE at shutdown).
 
 External dependencies in scope:
-- `web/mb.py::get_release` and `get_release_group_releases` — raises `urllib.error.HTTPError` on 404, `urllib.error.URLError` on transport failure
-- `web/discogs.py::get_release` and `get_master_releases` — same exception shape plus `requests.HTTPError` paths
+- `lib/mb_api.py::get_release` and `get_release_group_releases` — raises `urllib.error.HTTPError` on 404, `urllib.error.URLError` on transport failure
+- `lib/discogs_api.py::get_release` and `get_master_releases` — same exception shape plus `requests.HTTPError` paths
 - `ytmusicapi.YTMusic.search` and `get_album` — raises `YTMusicServerError` / `YTMusicUserError` / `requests.Timeout` / `requests.ConnectionError` / `KeyError`; either method may also propagate `requests.exceptions.RetryError` when the injected production Session exhausts its configured status retries
 - `lib/slskd_client.py` — `requests.HTTPError` with structural `.response.text`
 

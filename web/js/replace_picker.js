@@ -40,7 +40,7 @@
  * /api/release-group/<id>` already forwards numeric ids to the Discogs
  * master endpoint server-side (`web/routes/browse.py::get_release_group`,
  * #501 item 1) and returns the identical pressing-row shape
- * (`web/discogs.py::get_master_releases` deliberately mirrors
+ * (`lib/discogs_api.py::get_master_releases` deliberately mirrors
  * `mb.get_release_group_releases()`), proven by
  * `tests/web/test_routes_browse.py::test_release_group_numeric_id_forwards_to_discogs`.
  * `POST .../resolve-rg` returning `status: 'masterless'` (Discogs release
@@ -267,7 +267,7 @@ export function formatLength(secs) {
  * (`web/routes/browse.py::get_release` → `get_discogs_release`) and both
  * backends emit `tracks` in the identical shape (`disc_number`/
  * `track_number`/`title`/`length_seconds` — compare
- * `web/mb.py::_strip_release` and `web/discogs.py::get_release`). This
+ * `lib/mb_api.py::_strip_release` and `lib/discogs_api.py::get_release`). This
  * helper is the one seam that would catch a future field-name drift
  * between the two backends instead of silently rendering a blank
  * tracklist.

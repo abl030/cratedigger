@@ -131,8 +131,9 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^music_tag\."),
     re.compile(r"\.redis\.Redis$"),
     re.compile(r"^redis\."),
-    # MusicBrainz / Discogs client objects on the web side. Narrowed from
-    # a blanket ``web.(mb|discogs).`` pattern (issue #1355 F1): that
+    # MusicBrainz / Discogs mirror-client objects (``lib/mb_api.py`` and
+    # ``lib/discogs_api.py``; both lived under ``web/`` until issue
+    # #1389). Narrowed from a blanket module pattern (issue #1355 F1): that
     # pattern exempted 14 distinct patch targets, only two of which are
     # our own owner binding. Each pattern below names exactly the
     # external-boundary shape it covers instead of the whole module.
@@ -145,38 +146,38 @@ _LEAF_SEAM_PATTERNS = [
     # ``urllib.error.HTTPError`` on 404 / ``URLError`` on transport
     # failure, and faking them at a caller's call site is Rule B's own
     # sanctioned "documented stand-in", not a decision this codebase owns.
-    re.compile(r"^web\.mb\._get$"),
-    re.compile(r"^web\.discogs\._get$"),
-    re.compile(r"^web\.mb\.get_release$"),
-    re.compile(r"^web\.mb\.get_release_group_year$"),
-    re.compile(r"^web\.mb\.get_release_group_releases$"),
-    re.compile(r"^web\.discogs\.get_release$"),
-    re.compile(r"^web\.discogs\.get_master_releases$"),
+    re.compile(r"^lib\.mb_api\._get$"),
+    re.compile(r"^lib\.discogs_api\._get$"),
+    re.compile(r"^lib\.mb_api\.get_release$"),
+    re.compile(r"^lib\.mb_api\.get_release_group_year$"),
+    re.compile(r"^lib\.mb_api\.get_release_group_releases$"),
+    re.compile(r"^lib\.discogs_api\.get_release$"),
+    re.compile(r"^lib\.discogs_api\.get_master_releases$"),
     # Discogs mirror origin constant. Tests point it at a local
     # mirror-shaped test server, the same override production performs
     # via config.ini at startup — not a code decision.
-    re.compile(r"^web\.discogs\.DISCOGS_API_BASE$"),
-    # 24h metadata cache layer (``web.cache.memoize_meta``, bound
+    re.compile(r"^lib\.discogs_api\.DISCOGS_API_BASE$"),
+    # 24h metadata cache layer (``lib.redis_cache.memoize_meta``, bound
     # per-module as ``_cache``). Tests bypass the cache directly; the
     # cache module's own key derivation and TTL policy have their own
     # dedicated coverage.
-    re.compile(r"^web\.mb\._cache\.memoize_meta$"),
-    re.compile(r"^web\.discogs\._cache\.memoize_meta$"),
+    re.compile(r"^lib\.mb_api\._cache\.memoize_meta$"),
+    re.compile(r"^lib\.discogs_api\._cache\.memoize_meta$"),
     # Public-MusicBrainz pacing/concurrency bookkeeping — the same
     # category as the generic time.sleep/threading.* leaf patterns above,
     # scoped to this module's own per-mirror-origin semaphore and request
     # spacing so a test can exercise concurrency without sleeping in real
     # time.
-    re.compile(r"^web\.mb\._mirror_semaphore$"),
-    re.compile(r"^web\.mb\._wait_for_public_musicbrainz$"),
-    # Route-to-owner DI seam. ``web.mb`` / ``web.discogs`` each bind
+    re.compile(r"^lib\.mb_api\._mirror_semaphore$"),
+    re.compile(r"^lib\.mb_api\._wait_for_public_musicbrainz$"),
+    # Route-to-owner DI seam. ``lib.mb_api`` / ``lib.discogs_api`` each bind
     # ``parallel_fanout.parallel_results`` at import time for their own
     # browse fan-out — the same owner ``web.routes.browse.parallel_results``
     # binds below. The owner's own lifecycle is pinned in
-    # ``tests/test_web_parallel_fanout.py``; these seam tests only prove
+    # ``tests/test_parallel_fanout.py``; these seam tests only prove
     # each module reaches that owner rather than a private per-module copy.
-    re.compile(r"^web\.mb\.parallel_results$"),
-    re.compile(r"^web\.discogs\.parallel_results$"),
+    re.compile(r"^lib\.mb_api\.parallel_results$"),
+    re.compile(r"^lib\.discogs_api\.parallel_results$"),
     re.compile(r"^web\.routes\.\w+\.(mb_api|discogs_api)"),
     re.compile(r"^web\.server\.(mb_api|discogs_api|mb)"),
     # The same overlay/handle family after #1313 moved it from module
@@ -401,13 +402,13 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^web\.routes\.imports\.cleanup_all_wrong_matches$"),
 
     # Route-to-owner DI seam. ``web.routes.browse.parallel_results`` is the
-    # module-level binding for ``web.parallel_fanout.parallel_results``
+    # module-level binding for ``lib.parallel_fanout.parallel_results``
     # (issue #1355 WE5's shared fan-out lifecycle owner — also used by
-    # ``web.mb``/``web.discogs``, already leaf-exempt there via the blanket
+    # ``lib.mb_api``/``lib.discogs_api``, already leaf-exempt there via the blanket
     # ``web.(mb|discogs).`` pattern above). ``web.routes.browse`` has no
     # such blanket exemption, so the binding needs its own entry. The
     # owner's own lifecycle (success, cancel-on-exception, shutdown
-    # ordering) is pinned directly in ``tests/test_web_parallel_fanout.py``;
+    # ordering) is pinned directly in ``tests/test_parallel_fanout.py``;
     # this route module's seam test only proves it reaches that owner
     # rather than a private per-module copy.
     re.compile(r"^web\.routes\.browse\.parallel_results$"),

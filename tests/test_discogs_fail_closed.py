@@ -12,8 +12,9 @@ from collections.abc import Callable
 from typing import Any, Self
 from unittest.mock import patch
 
-from tests.test_web_cache import FakeRedis
-from web import cache, discogs
+from lib import discogs_api as discogs
+from lib import redis_cache as cache
+from tests.test_redis_cache import FakeRedis
 
 PUBLIC_CACHED_DISCOGS_ADAPTERS = (
     "search_releases",
@@ -189,7 +190,7 @@ class TestPublicCachedDiscogsAdaptersFailClosed(unittest.TestCase):
                 cache._redis = FakeRedis()
                 discogs.DISCOGS_API_BASE = "https://discogs-mirror.test"
                 with patch(
-                    "web.discogs.urllib.request.urlopen",
+                    "lib.discogs_api.urllib.request.urlopen",
                     side_effect=mirror.urlopen,
                 ):
                     call_public_cached_adapter(

@@ -64,8 +64,8 @@ from lib.pipeline_db import PersistedDistance, PersistedTrack, PersistedYoutubeR
 from lib.release_identity import detect_release_source, normalize_release_id
 from lib.surface_outcomes import exit_codes_from_http
 
-# Exception classes that the MB / Discogs adapters in ``web/mb.py`` and
-# ``web/discogs.py`` raise on miss / mirror outage.
+# Exception classes that the MB / Discogs adapters in ``lib/mb_api.py`` and
+# ``lib/discogs_api.py`` raise on miss / mirror outage.
 #
 # Round 2 P1-1: this tuple used to catch every ``URLError`` /
 # ``requests.RequestException`` and swallow it as "leaf miss," which
@@ -343,7 +343,7 @@ class YoutubeAlbumResolverResult(msgspec.Struct, kw_only=True):
 
 # Type aliases for clarity.
 MBLookup = Callable[[str], dict[str, object] | None]
-"""``mb_get_release(id) -> slim release dict | None`` (web/mb.py shape)."""
+"""``mb_get_release(id) -> slim release dict | None`` (lib/mb_api.py shape)."""
 
 MBRGReleases = Callable[[str], dict[str, object] | None]
 """``mb_get_release_group_releases(rg) -> {title, type, releases[]}``."""
@@ -956,7 +956,7 @@ def _safe_leaf_lookup(
 ) -> dict[str, object] | None:
     """Call a leaf lookup, treating ONLY 404 (and Discogs ValueError) as a miss.
 
-    Real adapters (``web.mb.get_release`` / ``web.discogs.get_release``)
+    Real adapters (``lib.mb_api.get_release`` / ``lib.discogs_api.get_release``)
     raise:
 
     * ``urllib.error.HTTPError(404)`` — release isn't at this leaf. Miss.
@@ -1013,7 +1013,7 @@ def _resolve_mb_group(
 
     Adapter errors (``urllib.error.HTTPError`` on 404,
     ``urllib.error.URLError`` on transport failure) are caught and treated
-    as a leaf miss — passing a release-group MBID through ``web.mb.get_release``
+    as a leaf miss — passing a release-group MBID through ``lib.mb_api.get_release``
     will 404 because RG MBIDs aren't releases, and we want to fall
     through to the group path rather than 500.
     """

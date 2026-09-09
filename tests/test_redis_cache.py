@@ -111,7 +111,7 @@ class RaisingRedis(FakeRedis):
 class _CacheTestBase(unittest.TestCase):
 
     def setUp(self) -> None:
-        from web import cache
+        from lib import redis_cache as cache
         self.cache = cache
         self.fake = FakeRedis()
         self._saved = cache._redis

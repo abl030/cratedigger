@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import msgspec
 
+from lib import mb_api
 from lib import pipeline_db as _pipeline_db_mod
 from lib.import_queue import (
     ImportJob,
@@ -445,7 +446,7 @@ def _default_mb_track_count(_mbid: str) -> int | None:
 def default_mb_track_count_from_mirror(mbid: str) -> int | None:
     """Production ``mb_track_count_fn`` — counts tracks via the MB mirror.
 
-    Thin wrapper around ``web.mb.get_release`` that counts entries in the
+    Thin wrapper around ``lib.mb_api.get_release`` that counts entries in the
     slimmed ``tracks`` array. Returns ``None`` if the MB mirror responds
     without a usable track list — the service then surfaces
     ``track_count_precheck_failed`` and the operator escalates.
@@ -457,8 +458,6 @@ def default_mb_track_count_from_mirror(mbid: str) -> int | None:
     let them drift in subtle ways (different timeout, different cache
     behaviour). Tests inject a fake instead of calling this helper.
     """
-    from web import mb as mb_api
-
     release = mb_api.get_release(mbid, fresh=False)
     tracks = release.get("tracks")
     if not isinstance(tracks, list):
