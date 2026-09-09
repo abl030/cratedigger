@@ -1424,7 +1424,8 @@ export async function checkYoutube(id, useUrl = false) {
     return;
   }
   const manualUrl = useUrl && typeof document !== 'undefined'
-    ? (document.getElementById(`yt-watch-long-tail-${id}`)?.value.trim() || '')
+    ? (/** @type {HTMLInputElement|null} */ (
+      document.getElementById(`yt-watch-long-tail-${id}`))?.value.trim() || '')
     : '';
   if (useUrl && !manualUrl) {
     patchYoutubePanel(id, consoleToken(consoleStates, id), generation,

@@ -198,8 +198,8 @@ nix-shell --run "bash scripts/run_tests.sh"              # complete suite
 
 `scripts/test.sh` expands the requested unittest selector with its generated or
 deterministic sibling, tests adjacent to every changed path, and every audit and
-ratchet. It also runs JavaScript, both Pyright contracts, Ruff, and Vulture in
-the same aggregate failure bundle. With no selector it derives targets from the
+ratchet. It also runs JavaScript, `tsc` over `web/js`, both Pyright contracts,
+Ruff, and Vulture in the same aggregate failure bundle. With no selector it derives targets from the
 working-tree diff. A changed shared `tests/**.py` module (a fake, helper, or
 other non-`test_*.py` file) with no registered mapping in
 `scripts/targeted_test_selection.py` fails closed with exit code 2 before any

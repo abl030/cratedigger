@@ -67,7 +67,7 @@ function applySourceUI(src) {
  * Set the browse metadata source (mb or discogs). Preserves artist context
  * when possible: if an artist is currently selected, look up the equivalent
  * on the new source and re-render in place instead of dumping back to search.
- * @param {string} src - 'mb' or 'discogs'
+ * @param {'mb'|'discogs'} src
  */
 export async function setBrowseSource(src) {
   if (state.browseSource === src) return;
@@ -598,7 +598,9 @@ function renderUnified(
  */
 export function reloadExpansionsAfterCompare(el, isStale) {
   let reloaded = 0;
-  for (const row of Array.from(el.querySelectorAll('.rg'))) {
+  const rows = /** @type {HTMLElement[]} */ (
+    Array.from(el.querySelectorAll('.rg')));
+  for (const row of rows) {
     const detail = /** @type {HTMLElement|null} */ (row.querySelector('.releases'));
     if (!detail || !detail.innerHTML) continue;
     detail.innerHTML = '';

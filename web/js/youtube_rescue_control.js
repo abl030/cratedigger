@@ -1,3 +1,5 @@
+// @ts-check
+
 /* Shared search / manual-URL / choose / confirm rescue control (#1003/#1016). */
 import { API, toast } from './state.js';
 import { esc, jsArg, youtubeBrowseUrl, youtubeSectionState } from './util.js';
@@ -74,7 +76,9 @@ export async function checkYoutubeRescue(key, requestId, identifier, useUrl = fa
       return;
     }
     resultHost.innerHTML = renderCandidateChoices(result, identifier, requestId, '') || '<span>No YouTube album found.</span>';
-    resultHost.querySelectorAll('[data-browse-id]').forEach((button) => button.addEventListener('click', async (event) => {
+    const choiceButtons = /** @type {NodeListOf<HTMLElement>} */ (
+      resultHost.querySelectorAll('[data-browse-id]'));
+    choiceButtons.forEach((button) => button.addEventListener('click', async (event) => {
       event.stopPropagation();
       if (host.dataset.submitting === 'true' || !window.confirm('Queue this YouTube Music rescue?')) return;
       host.dataset.submitting = 'true';

@@ -569,9 +569,11 @@ converged tree is committed and clean; it owns the receipt and unchanged-tree
 no-replay rules. If review changes nothing, that same receipt is the final
 pre-push confirmation.
 
-`run_tests.sh` exhausts JavaScript, the concurrent complementary Pyright phase,
-Ruff, Vulture, and the complete Python scheduler
-before returning one aggregate status. `run_final_gate.sh` can only execute
+`run_tests.sh` exhausts JavaScript, `tsc` over `web/js` (issue #1390 — every
+module carries `// @ts-check` and nothing ran it until then; options in
+`web/js/jsconfig.json`, so an editor checks what the gate checks), the
+concurrent complementary Pyright phase, Ruff, Vulture, and the complete
+Python scheduler before returning one aggregate status. `run_final_gate.sh` can only execute
 that exact suite; it adds clean-commit receipt semantics, not another selection
 of checks. The suite's terminal output is a compact complete failure index; the
 printed private-tmpfs bundle contains `summary.json`, `summary.md`, and every

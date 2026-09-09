@@ -369,8 +369,7 @@ export async function openLabelDetail(labelId, labelName) {
       // Flag the label as big so any future affordance that wants to
       // know can branch on it. (The toggle itself reads totalCount
       // directly today, but the flag is cheap to keep.)
-      state.labelFilters = state.labelFilters || {};
-      /** @type {any} */ (state.labelFilters).bigLabel = true;
+      state.labelFilters.bigLabel = true;
     }
     renderLabelDetail(body, payload);
   } catch (e) {
