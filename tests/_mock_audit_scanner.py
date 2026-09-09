@@ -404,9 +404,10 @@ _LEAF_SEAM_PATTERNS = [
     # Route-to-owner DI seam. ``web.routes.browse.parallel_results`` is the
     # module-level binding for ``lib.parallel_fanout.parallel_results``
     # (issue #1355 WE5's shared fan-out lifecycle owner — also used by
-    # ``lib.mb_api``/``lib.discogs_api``, already leaf-exempt there via the blanket
-    # ``web.(mb|discogs).`` pattern above). ``web.routes.browse`` has no
-    # such blanket exemption, so the binding needs its own entry. The
+    # ``lib.mb_api``/``lib.discogs_api``, each of which has its own
+    # ``parallel_results`` entry above; there is no blanket module
+    # pattern for either, #1355 F1 narrowed that away). So this binding
+    # needs its own entry too. The
     # owner's own lifecycle (success, cancel-on-exception, shutdown
     # ordering) is pinned directly in ``tests/test_parallel_fanout.py``;
     # this route module's seam test only proves it reaches that owner

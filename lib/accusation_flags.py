@@ -13,9 +13,11 @@ consumers is a ``lib`` service (``lib/long_tail_service.py``), which had
 to reach it through a function-local import to dodge the resulting cycle.
 ``web/classify.py`` keeps the rendering that reads these flags.
 
-The ``_as_*`` narrowers below come with it: they read the same persisted
-evidence-column block, and ``web/classify.py::proof_gate_projection``
-reads that block through the very same helpers. One owner keeps the two
+The ``_as_*`` narrowers below come with it: they narrow the persisted
+evidence columns off a joined row, and
+``web/classify.py::proof_gate_projection`` narrows its own aliases for
+those same columns through the very same helpers. (The two read
+different alias prefixes, not one shared block.) One owner keeps two
 readers of one column set from narrowing it differently.
 """
 

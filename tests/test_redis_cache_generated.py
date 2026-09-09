@@ -2,7 +2,7 @@
 
 Across arbitrary cold/warm waves and cache keys, each cold key is fetched once,
 every caller receives the value for its own key, and mutable results never
-alias. Deterministic tests in ``test_web_cache`` pin stale-miss, failure,
+alias. Deterministic tests in ``test_redis_cache`` pin stale-miss, failure,
 BaseException, Redis-down, fresh-bypass, and abandoned-waiter paths.
 """
 from __future__ import annotations

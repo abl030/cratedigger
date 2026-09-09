@@ -43,7 +43,7 @@ A single-page app for browsing MusicBrainz and Discogs, viewing the beets librar
 
 ### Debugging the Discogs pathway
 
-This is the current focus. The Discogs source came from a CC0 mirror at `discogs.ablz.au`; the UI routes through `web/discogs.py` helpers. Typical failure modes:
+This is the current focus. The Discogs source came from a CC0 mirror at `discogs.ablz.au`; the UI routes through `lib/discogs_api.py` helpers. Typical failure modes:
 
 - **Search returns nothing / wrong results** → check `browser_network_requests` for `/api/search?artist=X&title=Y&source=discogs` (or whatever shape the frontend uses). Grab the response body, compare to a direct `curl https://discogs.ablz.au/api/search?...` hit.
 - **Artist discography / master page broken** → look for `/api/masters/{id}` or `/api/artists/{id}/releases` calls. Empty arrays vs 4xx/5xx point at different bugs (missing data vs API error).

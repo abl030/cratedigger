@@ -13,9 +13,11 @@ leaked stale badges when the pipeline updated Postgres outside the
 web UI's POST invalidation paths. See issue #101.
 
 This module lived at ``web/mb.py`` until issue #1389. Five ``lib``
-services consumed it through function-local imports to dodge the
-resulting import cycle; it is a mirror client, not a web surface, so it
-sits under ``lib`` and those imports are ordinary top-level ones.
+modules consumed it without importing it at module scope, to dodge the
+resulting cycle — four through function-local imports, and
+``lib/artist_releases.py`` through a ``TYPE_CHECKING``-only one it
+keeps for its own reason. It is a mirror client, not a web surface, so
+it sits under ``lib`` and the other four are ordinary top-level imports.
 """
 
 import json

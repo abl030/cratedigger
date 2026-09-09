@@ -53,6 +53,8 @@ from lib.mbid_replace_service import (
     RESULT_TRANSIENT,
     RESULT_WRONG_STATE,
     MbidReplaceService,
+    _default_discogs_lookup,
+    _default_mb_lookup,
 )
 from lib.pipeline_db import MbidCollisionError, SupersedeRaceError
 from lib.release_identity import ReleaseIdentity
@@ -3010,6 +3012,34 @@ class TestReplaceDBProtocolParity(unittest.TestCase):
 
         self.assertTrue(issubclass(MbidReplaceDB, WrongMatchDeleteDB))
         self.assertTrue(issubclass(MbidReplaceDB, SearchPlanDB))
+
+
+class TestDefaultMirrorLookupsResolveAtCallTime(unittest.TestCase):
+    """The two default lookups read their mirror function off the MODULE.
+
+    `web/routes/release_identity_routes.py` constructs `MbidReplaceService`
+    with no lookups, so these defaults are the production path for the
+    Replace route. Issue #1389 moved the clients into `lib/` and converted
+    both wrappers from a function-local import to a module attribute read;
+    a bare `from lib.mb_api import get_release` would compile and pass
+    every other test in this file while freezing the pre-patch function,
+    which is exactly what these two assertions refuse.
+    """
+
+    def test_mb_default_reads_lib_mb_api_at_call_time(self) -> None:
+        sentinel: dict[str, object] = {"id": "mb-sentinel"}
+        with patch("lib.mb_api.get_release", return_value=sentinel) as mb:
+            self.assertIs(_default_mb_lookup("mbid-1", fresh=True), sentinel)
+        mb.assert_called_once_with("mbid-1", fresh=True)
+
+    def test_discogs_default_reads_lib_discogs_api_at_call_time(self) -> None:
+        sentinel: dict[str, object] = {"id": "discogs-sentinel"}
+        with patch(
+            "lib.discogs_api.get_release", return_value=sentinel,
+        ) as discogs:
+            self.assertIs(
+                _default_discogs_lookup(4242, fresh=False), sentinel)
+        discogs.assert_called_once_with(4242, fresh=False)
 
 
 if __name__ == "__main__":

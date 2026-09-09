@@ -4,9 +4,12 @@ Three files under ``harness/`` run inside the deployment-owned Beets
 interpreter, not Cratedigger's: `beets_harness.py` is what
 `run_beets_harness.sh` execs, and it loads `beets_compat.py` and
 `discogs_patches.py`. That interpreter has `beets`, `msgspec` and
-`requests` on its path and nothing of ours, so an import of `lib` or
-`web` from one of these three files is an `ImportError` at the first
-real import — not a test failure, a broken import child.
+`requests` on its path and none of Cratedigger's own third-party
+dependencies, so an import of `lib` or `web` from one of these three
+files breaks the import child rather than failing a test. Exactly where
+it breaks depends on the invocation: often at the import itself, and
+where the repo root happens to be on `sys.path`, deeper in the imported
+module's own transitive closure instead.
 
 `harness/import_one.py` and `harness/delete_album.py` are deliberately NOT
 in this set. They run in Cratedigger's own interpreter and import `lib`
@@ -182,11 +185,21 @@ class TestCheckerIsQuietWhereTheFileIsCorrect(unittest.TestCase):
         )
 
     def test_a_relative_import_is_not_a_finding(self) -> None:
-        """`harness/` is the deepest package these files can reach."""
+        """`harness/` is the deepest package these files can reach.
+
+        The last two lines are what make the ``node.level`` skip
+        load-bearing. The first two do not: their ``node.module`` is
+        ``None`` / ``"beets_compat"``, which no root-segment check would
+        report anyway, so with the skip deleted they still return ``[]``.
+        A sibling named ``lib`` or ``web`` inside ``harness/`` is the only
+        world that tells the two apart.
+        """
         self.assertEqual(
             cratedigger_package_imports(
                 "from . import beets_compat\n"
-                "from .beets_compat import duplicate_action\n",
+                "from .beets_compat import duplicate_action\n"
+                "from .lib import helper\n"
+                "from .web.mb import get_release\n",
                 filename="probe.py",
             ),
             [],

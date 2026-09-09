@@ -1,4 +1,4 @@
-"""The process's one Redis client, and the two namespaces it serves.
+"""The Redis client behind the mirror metadata and the route cache.
 
 `meta:<key>` namespace — PURE MusicBrainz / Discogs metadata. 24h TTL
 (mirrors sync daily). Populated via `memoize_meta()` inside `lib/mb_api.py`
@@ -15,8 +15,10 @@ data this module holds, not a web import it makes.
 All operations fail-safe — Redis being down means cache miss, never
 an error.
 
-Distinct from ``lib/peer_cache.py``, which is a different mechanism for
-a different subject (Soulseek peer folder listings).
+Not the only Redis client in a Cratedigger process: ``lib/peer_cache.py``
+constructs its own, for a different subject (Soulseek peer folder
+listings) in a different encoding. These two namespaces are this
+module's, and nothing else writes them.
 """
 
 from __future__ import annotations

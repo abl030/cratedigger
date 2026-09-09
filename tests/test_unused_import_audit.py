@@ -494,12 +494,15 @@ class TestUnusedImportAudit(unittest.TestCase):
         """`lib/` may not import `web` in any of the three import shapes.
 
         Issue #1389 moved the MusicBrainz and Discogs mirror clients into
-        `lib/` and deleted the function-local imports five `lib` services
-        used to dodge the cycle; this ban is what stops the cycle coming
-        back. The three shapes are spelled out because a ban keyed on the
-        module name catches `import web.x`, `from web.x import y`, and
-        `from web import x` — the last one being how every deleted lazy
-        import was written.
+        `lib/` and deleted the imports six `lib` modules used to dodge the
+        cycle; this ban is what stops the cycle coming back. All three
+        shapes are spelled out because the deleted imports used two of them
+        (ten `from web.x import y`, one `from web import x`) and nothing
+        stops the third being written next.
+
+        The two controls are the other half: an ignored file may import
+        `web` freely, and a `scripts/` file that is NOT one of the three
+        named grants may not.
         """
         findings = ruff_findings({
             "lib/layering.py": (
@@ -533,6 +536,49 @@ class TestUnusedImportAudit(unittest.TestCase):
             web_control.returncode,
             0,
             web_control.stdout + web_control.stderr,
+        )
+        # The `scripts/` grants are three named files, not the root. Only
+        # the exact-dict pin above notices a widening to `scripts/**` in the
+        # config; this is the behavioural half — an unlisted script that
+        # reaches into `web` is still refused.
+        unlisted_script = subprocess.run(
+            [
+                "bash",
+                "scripts/run_ruff.sh",
+                "--stdin-filename",
+                "scripts/unlisted_helper.py",
+                "-",
+            ],
+            cwd=REPO_ROOT,
+            input="from web.classify import LogEntry\n\nprint(LogEntry)\n",
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(
+            unlisted_script.returncode,
+            1,
+            unlisted_script.stdout + unlisted_script.stderr,
+        )
+        self.assertIn("TID251", unlisted_script.stdout)
+        granted_script = subprocess.run(
+            [
+                "bash",
+                "scripts/run_ruff.sh",
+                "--stdin-filename",
+                "scripts/render_differential.py",
+                "-",
+            ],
+            cwd=REPO_ROOT,
+            input="from web.classify import LogEntry\n\nprint(LogEntry)\n",
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(
+            granted_script.returncode,
+            0,
+            granted_script.stdout + granted_script.stderr,
         )
 
     def test_ruff_toolchain_comes_from_locked_nixpkgs(self) -> None:
@@ -569,10 +615,12 @@ class TestUnusedImportAudit(unittest.TestCase):
         # bans are TID251, so an ignore added for one relaxes the other on
         # the same files — which is why the three `web`-importing scripts
         # are listed one by one rather than as `scripts/**`, and why the
-        # only wholesale grant is `web/**`, where every module imports its
-        # own package. `harness/**` is deliberately absent: the harness
-        # imports no `web` module at all (measured 2026-09-09), so granting
-        # it would relax the `tests` ban there for nothing.
+        # only wholesale grant is `web/**` (24 of its 36 modules import
+        # their own package, measured 2026-09-09; naming them would go
+        # stale on the next route added). That grant does cost the `tests`
+        # ban across the web tree, which nothing there uses today.
+        # `harness/**` is deliberately absent: the harness imports no `web`
+        # module at all, so granting it would buy nothing for the same cost.
         self.assertEqual(
             config["lint"]["per-file-ignores"],
             {

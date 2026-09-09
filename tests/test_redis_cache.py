@@ -1,4 +1,4 @@
-"""Tests for the web metadata cache — the `meta:` namespace.
+"""Tests for the mirror metadata cache — the `meta:` namespace.
 
 The `meta:` namespace caches PURE MusicBrainz / Discogs metadata only.
 It is deliberately separate from the old routing-level `web:` namespace

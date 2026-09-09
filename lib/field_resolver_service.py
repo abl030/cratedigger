@@ -119,9 +119,10 @@ class ResolverResult(msgspec.Struct, kw_only=True):
     reason_code: str | None = None
 
 
-# Injectable collaborator protocols. The defaults below wrap
-# ``lib.mb_api`` / ``lib.discogs_api``; production passes them, tests inject
-# fakes.
+# Injectable collaborator protocols. Every resolver takes its fetcher as
+# ``injected or _default_x``, so the defaults below — thin wrappers over
+# ``lib.mb_api`` / ``lib.discogs_api`` — ARE the production path; tests
+# inject fakes instead.
 class _PdbRecorder(Protocol):
     def record_field_resolution(
         self,

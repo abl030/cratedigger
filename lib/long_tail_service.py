@@ -51,7 +51,7 @@ from typing import Any, Literal, Protocol
 
 import msgspec
 
-from lib.accusation_flags import evidence_column_accusation_flags
+from lib import accusation_flags
 from lib.banding import BAND_MISSING as _BAND_MISSING
 from lib.banding import (
     CurrentBeetsBandingAmbiguityError,
@@ -321,8 +321,9 @@ def _band_row(
     # The audit-only accusation rule has exactly one owner and both
     # worklist surfaces — API and ``pipeline-cli long-tail`` — reach it
     # through this call rather than through an injected collaborator
-    # neither caller could vary meaningfully.
-    flags = evidence_column_accusation_flags(
+    # neither caller could vary meaningfully. Read off the MODULE, as
+    # every other converted site does, so the name resolves at call time.
+    flags = accusation_flags.evidence_column_accusation_flags(
         row, prefix=CURRENT_EVIDENCE_PREFIX)
     return LongTailRow(
         id=int(row["id"]),

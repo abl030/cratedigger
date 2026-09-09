@@ -33,6 +33,11 @@ extend-select = [
 # `scripts/**` so the rest of that root keeps the `tests` ban. `harness/**`
 # imports no web module at all (measured 2026-09-09) and so is deliberately
 # absent — granting it would relax the `tests` ban there for nothing.
+#
+# Stated plainly rather than left implied: `web/**` DOES cost the `tests`
+# ban across the whole web tree. Nothing there imports `tests` today, and
+# the alternative is naming the 24 web modules that import their own
+# package one by one, which would go stale on the next route added.
 [lint.per-file-ignores]
 "scripts/pipeline_cli/api_mutations.py" = [
   "TID251", # Thin CLI HTTP adapter; reads the web channel header contract.
