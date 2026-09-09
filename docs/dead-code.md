@@ -5,7 +5,12 @@ Two complementary static checks protect the Python tree:
 - Ruff comes from the flake-locked nixpkgs and is configured by `ruff.toml`,
   which requires Ruff 0.16 or newer. The canonical `scripts/run_ruff.sh` gate
   checks production, tools, ordinary tests, generated tests, and fakes with
-  Ruff's default rules plus the explicit `B905` correctness ratchet. Its
+  Ruff's default rules plus three explicit correctness families: `B`
+  (flake8-bugbear, which includes the `B905` zip-strictness ratchet),
+  `BLE001` (a blind `except Exception` must carry a `# noqa: BLE001` saying
+  why), and `DTZ` (naive datetimes). Issue #1322 measured every Ruff family
+  against the whole tree before enabling these three at zero present-day
+  findings; the style families were rejected there with their numbers. Its
   source-local `F401`/`F811` analysis means a name used in another module
   cannot hide an unused import. The exact redundant-alias audit pins both
   `cratedigger.py` and `scripts/pipeline_cli/__init__.py` to empty baselines,
