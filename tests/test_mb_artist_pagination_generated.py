@@ -117,8 +117,8 @@ class _FanoutLatch:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     self.failures.append(
-                        f"only {self._alive()} handler threads ever overlapped; "
-                        f"wanted {wanted}",
+                        f"handler threads never overlapped {wanted} deep "
+                        f"({self._alive()} alive at the deadline)",
                     )
                     self._overlap_open = True
                     self._condition.notify_all()
@@ -193,6 +193,18 @@ class _NestedRecordingWorld:
             if self.latch is not None:
                 self.latch.wake_all()
 
+    def catalogue_date(self, index: int) -> str:
+        """A ``first-release-date`` that DESCENDS as ids ascend.
+
+        Production sorts its catalogue rows by ``(first_release_date, id)``
+        and the browse pages arrive id-ascending, so a world that dates
+        every row the same year hands the sort a list already in its own
+        output order: deleting the sort survives, and only reversing it
+        fails.  Dating the rows against their arrival makes the ordering
+        assertion measure the sort instead of the mirror.
+        """
+        return f"{1000 + len(self.ids) - index}"
+
     def response(self, path: str, query: dict[str, list[str]]) -> dict[str, object]:
         offset = int(query.get("offset", ["0"])[0])
         limit = int(query.get("limit", ["100"])[0])
@@ -204,7 +216,8 @@ class _NestedRecordingWorld:
                 {
                     "id": "" if self.blank_catalogue_id and index == 0 else f"rg-{index:05d}",
                     "title": f"Group {index}",
-                    "primary-type": "Album", "first-release-date": "2000",
+                    "primary-type": "Album",
+                    "first-release-date": self.catalogue_date(index),
                     "artist-credit": [{"name": "Artist", "artist": {
                         "id": ARTIST_ID, "name": "Artist",
                     }}],
@@ -223,7 +236,8 @@ class _NestedRecordingWorld:
                     "id": f"track-{index:05d}", "status": "Official",
                     "release-group": {
                         "id": f"track-rg-{index:05d}", "title": f"Track {index}",
-                        "primary-type": "Album", "first-release-date": "2000",
+                        "primary-type": "Album",
+                        "first-release-date": self.catalogue_date(index),
                         "artist-credit": [{"name": "Various", "artist": {
                             "id": "various", "name": "Various",
                         }}],
@@ -469,6 +483,9 @@ class TestArtistRecordingPaginationPins(unittest.TestCase):
         assert_request_cap(probe.max_active)
         self.assertEqual(probe.max_active, _MIRROR_SLOTS)
         self.assertGreater(world.max_active_server_handlers, _MIRROR_SLOTS)
+        # The world dates its rows against their arrival order (see
+        # ``catalogue_date``), so this measures the production sort rather
+        # than the order the mirror happened to answer in.
         self.assertEqual(
             [(row.first_release_date, row.id) for row in rows],
             sorted((row.first_release_date, row.id) for row in rows),
@@ -501,7 +518,7 @@ class TestArtistRecordingPaginationPins(unittest.TestCase):
         overlap.hold_after_write()
         self.assertEqual(
             overlap.failures,
-            ["only 1 handler threads ever overlapped; wanted 2"],
+            ["handler threads never overlapped 2 deep (1 alive at the deadline)"],
         )
         # Q3: a gate its world does reach stays quiet, and says so at teardown.
         satisfied = _FanoutLatch(

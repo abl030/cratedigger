@@ -11,10 +11,27 @@ nothing composed the two.
 This test crosses that wire end to end: real PostgreSQL rows, the real
 routes (``GET /api/pipeline/<id>/search-plan`` and its ``/history``
 sibling, including their own serialisation), and the real
-``renderDetailPage`` running under Node. Nothing between the two is a
-fixture except the library payload, which belongs to a third route this
-test does not exercise. Every seeded value is a sentinel unique to its
-field, so a needle can never match a neighbour.
+``renderDetailPage`` running under Node. Every seeded value is a
+sentinel unique to its field, so a needle can never match a neighbour.
+
+Three seams are deliberately outside it:
+
+* the library column's payload, which belongs to a third route this test
+  does not exercise, is a literal;
+* ``_render`` re-spells the caller glue in ``renderSearchPlanDetail``
+  rather than driving it — the ``rows`` unwrap and the
+  ``next_before_id`` -> ``nextBeforeId`` rename — so a JS-side rename of
+  ``historyPayload.rows`` is not caught here;
+* ``renderPlanTable``'s ``identity.plan_id === args.planId`` half cannot
+  fire from any payload this route builds: ``get_search_plan_stats``
+  partitions ``stats.current`` on the active plan id, so a superseded
+  plan's slots reach ``superseded_and_legacy`` and never ``statsSlots``.
+  Measured 2026-09-09 by superseding a consumed plan through
+  ``supersede_search_plan_with_replacement`` — ``current.slots`` carried
+  only the active plan's identity. That clause is fail-closed
+  legislation against a payload whose two halves disagree, and its
+  regression pin is the fixture-driven one in
+  ``tests/test_js_search_plan.mjs``.
 
 Deterministic by construction — no Hypothesis, no sampling.
 """
@@ -61,6 +78,13 @@ OFF_SCOPE_TIER = "wiretier-offscope"
 CONFIGURED_TIER = "wiretier-configured"
 STRATEGIES = ("wirestrat-alpha", "wirestrat-beta", "wirestrat-gamma")
 QUERIES = ("wirequery alpha", "wirequery beta", "wirequery gamma")
+#: Per-slot, so a row rendered against another slot's stats shows the
+#: wrong mean rather than the same one every row would carry anyway.
+ELAPSED_S_BY_ORDINAL = (2.0, 5.0, 9.0)
+#: Minutes between consecutive attempts, walking backwards from now, so
+#: each slot's newest attempt lands in its own rendered minute.
+MINUTES_PER_ATTEMPT = 3
+SEEDED_ATTEMPTS = 7
 FOUND_PEER = "wirepeer-found"
 OTHER_PEER = "wirepeer-other"
 GRAB_FILETYPE = "wireflac"
@@ -137,14 +161,18 @@ class TestSearchPlanDetailPageWire(_WebServerCase):
         self.enterContext(install_runtime(
             dataclasses.replace(runtime(), shared_db=self.db)))
         cp = configparser.RawConfigParser()
+        # The override names a tier the configured ladder does NOT list, so
+        # the chip row is the UNION of the two and a renderer that walked
+        # only the configured half would drop the override chip entirely.
         cp.read_string(
             "[Search Settings]\n"
-            f"allowed_filetypes = {CONFIGURED_TIER}, {IN_SCOPE_TIER}\n")
+            f"allowed_filetypes = {CONFIGURED_TIER}\n")
         self.enterContext(patch(
             "lib.config.read_runtime_config",
             return_value=CratediggerConfig.from_ini(cp)))
         self.req_id = self._seed_request()
         self._seed_plan()
+        self._attempt_seq = 0
         self.grab_log_id = self._seed_attempts()
 
     # ── seeding ────────────────────────────────────────────────────
@@ -183,9 +211,13 @@ class TestSearchPlanDetailPageWire(_WebServerCase):
 
     def _consume(
         self, outcome: str, *, candidates: list[CandidateScore] | None = None,
-        result_count: int = 0, elapsed_s: float = 2.0,
+        result_count: int = 0,
     ) -> int:
-        """Consume the slot the cursor really schedules next, executor-style."""
+        """Consume the slot the cursor really schedules next, executor-style.
+
+        Telemetry is keyed on the ordinal the cursor hands over, so each
+        slot's rendered mean and last-seen belong to that slot alone.
+        """
         active = self.db.get_active_search_plan(self.req_id)
         assert active is not None
         item = next(
@@ -202,7 +234,7 @@ class TestSearchPlanDetailPageWire(_WebServerCase):
             query=item.query,
             outcome=outcome,
             result_count=result_count,
-            elapsed_s=elapsed_s,
+            elapsed_s=ELAPSED_S_BY_ORDINAL[item.ordinal],
             candidates_json=(
                 None if candidates is None
                 else msgspec.json.encode(candidates).decode()),
@@ -211,6 +243,13 @@ class TestSearchPlanDetailPageWire(_WebServerCase):
         ))
         self.assertFalse(
             result.is_stale, "seeding must follow the cursor, never race it")
+        self._attempt_seq += 1
+        self.db._execute(
+            "UPDATE search_log SET created_at = NOW() - "
+            "make_interval(mins => %s) WHERE id = %s",
+            (MINUTES_PER_ATTEMPT * (SEEDED_ATTEMPTS + 1 - self._attempt_seq),
+             result.search_log_id),
+        )
         return result.search_log_id
 
     def _seed_attempts(self) -> int:
@@ -262,6 +301,18 @@ class TestSearchPlanDetailPageWire(_WebServerCase):
             raise TypeError("worker returned no html")
         return html
 
+    def _checks_section(self, html: str) -> str:
+        """The "Is the override holding?" block, without the page below it.
+
+        The Attempts table renders the same grab from its own producer (the
+        history page's LATERAL join), so a whole-page needle for a grab
+        fact passes on either lane's evidence alone.
+        """
+        marker = '<div class="sp-checks">'
+        self.assertIn(marker, html)
+        return html.split(marker, 1)[1].split(
+            '<div class="sp-detail-section">', 1)[0]
+
     def _attempts_section(self, html: str) -> str:
         marker = '<table class="sp-attempts-table"'
         self.assertIn(marker, html)
@@ -281,13 +332,21 @@ class TestSearchPlanDetailPageWire(_WebServerCase):
         self.assertEqual(
             rows[STRATEGIES[2]][:7],
             ["2", STRATEGIES[2], QUERIES[2], "2", "1", "1", "0"])
-        # The mean-elapsed and last-seen cells prove the matched stats row
-        # carried its own telemetry, not just a count.
-        self.assertEqual(rows[STRATEGIES[0]][7], "2s")
-        self.assertNotEqual(rows[STRATEGIES[0]][8], "")
+        # Each slot's own mean and its own newest attempt: seeded per
+        # ordinal, so a row carrying a neighbour's stats reads wrong here
+        # rather than reading the one value every row would share.
+        for ordinal, strategy in enumerate(STRATEGIES):
+            self.assertEqual(
+                rows[strategy][7],
+                f"{int(ELAPSED_S_BY_ORDINAL[ordinal])}s", strategy)
+        last_seen = [rows[strategy][8] for strategy in STRATEGIES]
+        self.assertNotIn("", last_seen)
+        self.assertEqual(len(set(last_seen)), len(STRATEGIES), last_seen)
 
     def test_scope_chips_light_the_seeded_override_only(self) -> None:
         html = self._render()
+        # The override tier is NOT in the configured ladder, so this chip
+        # exists only because the chip row unions the active tiers in.
         self.assertIn(
             f'<span class="sp-tier sp-tier-on">{IN_SCOPE_TIER}</span>', html)
         self.assertIn(f'<span class="sp-tier">{CONFIGURED_TIER}</span>', html)
@@ -298,20 +357,22 @@ class TestSearchPlanDetailPageWire(_WebServerCase):
     def test_override_checks_carry_the_seeded_tiers_and_last_found(
         self,
     ) -> None:
-        html = self._render()
+        checks = self._checks_section(self._render())
         self.assertIn(
             f"<strong>1</strong> of <strong>4</strong> candidates scored "
             f"outside the scope · 3 {IN_SCOPE_TIER} · 1 {OFF_SCOPE_TIER}"
             f" · off-scope: {OFF_SCOPE_TIER}",
-            html)
+            checks)
         self.assertIn(
             f"<strong>1</strong> grabs · <strong>1</strong> {GRAB_FILETYPE}",
-            html)
+            checks)
         self.assertIn(
             f'Last found: <span class="sp-check-peer">{FOUND_PEER}</span> '
             f"{IN_SCOPE_TIER} <strong>11/11</strong> via {STRATEGIES[2]} ",
-            html)
-        self.assertIn(f"grab timeout · {GRAB_ERROR_FIRST_CLAUSE}", html)
+            checks)
+        # The acquisition query's own grab join, not the history page's:
+        # this block is sliced above the Attempts table for that reason.
+        self.assertIn(f"grab timeout · {GRAB_ERROR_FIRST_CLAUSE}", checks)
         # Every peer the search scored, each with its own best match and
         # its own attempt count -- the peers query's own aggregation.
         self.assertIn(
@@ -319,7 +380,7 @@ class TestSearchPlanDetailPageWire(_WebServerCase):
             f'{IN_SCOPE_TIER} 9/11 <span class="sp-check-when">×3</span> · '
             f'<span class="sp-check-peer">{FOUND_PEER}</span> '
             f'{IN_SCOPE_TIER} 11/11 <span class="sp-check-when">×1</span>',
-            html)
+            checks)
 
     def test_history_rows_carry_their_own_grab_and_cursor(self) -> None:
         html = self._render()
