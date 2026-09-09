@@ -2276,10 +2276,18 @@ PREFIX_RULES: tuple[SelectionRule, ...] = (
     ),
     SelectionRule(
         name="prefix:harness/",
-        description="harness code regresses the real-beets drift gate",
+        description=(
+            "harness code regresses the real-beets drift gate and the "
+            "Beets-interpreter import boundary"
+        ),
         prefixes=("harness/",),
         exact_paths=("lib/beets.py",),
-        neighbours=("tests.test_harness_beets2_contract",),
+        neighbours=(
+            "tests.test_harness_beets2_contract",
+            # Issue #1389: three harness files may import no `lib`/`web`
+            # module, and an added import is exactly a harness/ edit.
+            "tests.test_harness_interpreter_boundary",
+        ),
     ),
     SelectionRule(
         name="prefix:lib/quality/",

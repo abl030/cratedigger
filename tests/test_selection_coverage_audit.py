@@ -632,7 +632,10 @@ MASKABLE_RULE_PINS: dict[str, dict[str, tuple[str, ...]]] = {
     # the pre-existing lib/ row before this change (a different mechanism
     # entirely, unaffected by adding the harness/ row).
     "prefix:harness/": {
-        "harness/import_one.py": ("tests.test_harness_beets2_contract",),
+        "harness/import_one.py": (
+            "tests.test_harness_beets2_contract",
+            "tests.test_harness_interpreter_boundary",
+        ),
     },
     # Silent for four of the fifteen quality modules; the other eleven fail
     # closed on the lib/ row. Three of the four are masked by their own

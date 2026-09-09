@@ -24,13 +24,30 @@ extend-select = [
 
 [lint.flake8-tidy-imports.banned-api]
 "tests".msg = "Runtime code must not import test-only modules."
+"web".msg = "web/ is the top of the stack: lib/ must not import it. The MusicBrainz and Discogs mirror clients live in lib/ (#1389)."
 
+# Both bans above are TID251, and an ignore here relaxes BOTH on the files it
+# names. So the grants are as narrow as the measurement allows: `web/**`,
+# where every module imports its own package, and the three scripts that
+# genuinely consume the web layer, listed one by one rather than as
+# `scripts/**` so the rest of that root keeps the `tests` ban. `harness/**`
+# imports no web module at all (measured 2026-09-09) and so is deliberately
+# absent — granting it would relax the `tests` ban there for nothing.
 [lint.per-file-ignores]
+"scripts/pipeline_cli/api_mutations.py" = [
+  "TID251", # Thin CLI HTTP adapter; reads the web channel header contract.
+]
+"scripts/render_differential.py" = [
+  "TID251", # Drives the real web render targets over a live corpus.
+]
 "scripts/run_fuzz_tests.py" = [
   "TID251", # Deliberate adapter that discovers and runs tests.
 ]
 "scripts/run_python_tests.py" = [
   "TID251", # Deliberate adapter that discovers and runs tests.
+]
+"scripts/web_dev_server.py" = [
+  "TID251", # Runs the web server itself against a live-db or proxied API.
 ]
 "tests/**" = [
   "TID251",
@@ -38,4 +55,7 @@ extend-select = [
 "tools/vulture/whitelist.py" = [
   "B018",
   "F821",
+]
+"web/**" = [
+  "TID251", # The web layer is what this ban protects, not what it binds.
 ]

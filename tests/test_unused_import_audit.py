@@ -490,6 +490,51 @@ class TestUnusedImportAudit(unittest.TestCase):
             test_control.stdout + test_control.stderr,
         )
 
+    def test_web_layer_import_ban_uses_real_ruff(self) -> None:
+        """`lib/` may not import `web` in any of the three import shapes.
+
+        Issue #1389 moved the MusicBrainz and Discogs mirror clients into
+        `lib/` and deleted the function-local imports five `lib` services
+        used to dodge the cycle; this ban is what stops the cycle coming
+        back. The three shapes are spelled out because a ban keyed on the
+        module name catches `import web.x`, `from web.x import y`, and
+        `from web import x` — the last one being how every deleted lazy
+        import was written.
+        """
+        findings = ruff_findings({
+            "lib/layering.py": (
+                "import web.mb as mirror\n\n"
+                "from web.classify import proof_gate_projection\n\n"
+                "print(mirror, proof_gate_projection)\n\n\n"
+                "def load():\n"
+                "    from web import server\n\n"
+                "    return server\n"
+            ),
+        })
+        self.assertEqual(
+            [finding["code"] for finding in findings],
+            ["TID251", "TID251", "TID251"],
+        )
+        web_control = subprocess.run(
+            [
+                "bash",
+                "scripts/run_ruff.sh",
+                "--stdin-filename",
+                "web/routes/control.py",
+                "-",
+            ],
+            cwd=REPO_ROOT,
+            input="from web.runtime import runtime\n\nprint(runtime)\n",
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(
+            web_control.returncode,
+            0,
+            web_control.stdout + web_control.stderr,
+        )
+
     def test_ruff_toolchain_comes_from_locked_nixpkgs(self) -> None:
         result = subprocess.run(
             ["ruff", "--version"],
@@ -520,13 +565,25 @@ class TestUnusedImportAudit(unittest.TestCase):
             ["B", "BLE001", "DTZ", "TID251"],
         )
         self.assertNotIn("ignore", config["lint"])
+        # Issue #1389 added the `web` ban and, with it, four ignores. Both
+        # bans are TID251, so an ignore added for one relaxes the other on
+        # the same files — which is why the three `web`-importing scripts
+        # are listed one by one rather than as `scripts/**`, and why the
+        # only wholesale grant is `web/**`, where every module imports its
+        # own package. `harness/**` is deliberately absent: the harness
+        # imports no `web` module at all (measured 2026-09-09), so granting
+        # it would relax the `tests` ban there for nothing.
         self.assertEqual(
             config["lint"]["per-file-ignores"],
             {
+                "scripts/pipeline_cli/api_mutations.py": ["TID251"],
+                "scripts/render_differential.py": ["TID251"],
                 "scripts/run_fuzz_tests.py": ["TID251"],
                 "scripts/run_python_tests.py": ["TID251"],
+                "scripts/web_dev_server.py": ["TID251"],
                 "tests/**": ["TID251"],
                 "tools/vulture/whitelist.py": ["B018", "F821"],
+                "web/**": ["TID251"],
             },
         )
         self.assertEqual(
@@ -534,6 +591,13 @@ class TestUnusedImportAudit(unittest.TestCase):
             {
                 "tests": {
                     "msg": "Runtime code must not import test-only modules.",
+                },
+                "web": {
+                    "msg": (
+                        "web/ is the top of the stack: lib/ must not import "
+                        "it. The MusicBrainz and Discogs mirror clients live "
+                        "in lib/ (#1389)."
+                    ),
                 },
             },
         )
