@@ -1,18 +1,21 @@
 /**
  * Unit tests for web/js/labels.js label-search render + click wiring,
- * and the label detail page composition (renderLabelDetail).
+ * the label detail page composition (renderLabelDetail), and the
+ * detail-page load flow (openLabelDetail).
  * Run with: node tests/test_js_labels.mjs
  */
 
 import {
   BIG_LABEL_THRESHOLD,
+  closeLabelDetail,
+  openLabelDetail,
   openLabelDetailFromList,
   renderLabelDetail,
   renderLabelSearchResults,
 } from '../web/js/labels.js';
 import { state } from '../web/js/state.js';
 
-import { suite } from './js_harness.mjs';
+import { domStub, element, stubGlobals, suite } from './js_harness.mjs';
 
 const t = suite(import.meta.url);
 
@@ -184,6 +187,135 @@ t.section('renderLabelDetail() falls back to the entity count when pagination is
   t.ok(container._totalCount === 4, 'stash carries the fallback total');
   t.excludes(container.innerHTML, 'goToLabelPage',
     'no pagination controls without a pagination payload');
+}
+
+// --- openLabelDetail: the detail page LOAD flow (#1390 residual 4) ---
+//
+// Nothing drove this function before: this file drove
+// `openLabelDetailFromList`, which stops at the handler call, and the
+// module header called the load flow "DOM-bound and verified via
+// playwright". A branch inside it therefore shipped writing a
+// `state.labelFilters.bigLabel` flag no reader anywhere consumes.
+
+/** The DOM nodes openLabelDetail reaches for, fresh each world. */
+function makeDetailDom() {
+  const rows = element();
+  const body = element({
+    querySelector: (selector) => (selector === '#browse-label-rows' ? rows : null),
+  });
+  const nodes = {
+    results: element({ style: { display: 'block' } }),
+    'browse-artist': element({ style: { display: 'block' } }),
+    'browse-label': element({ style: { display: 'none' } }),
+    'browse-label-name': element(),
+    'browse-label-body': body,
+  };
+  return { nodes, body, rows, document: domStub(nodes) };
+}
+
+/** A label payload advertising `count` releases on the entity. */
+function labelPayload(count) {
+  return {
+    label: { id: 42, name: 'Sarah Records', release_count: count },
+    releases: [
+      { id: '101', title: 'Pristine Christine', date: '1987', format: 'Vinyl', in_library: false },
+    ],
+    pagination: { items: count, pages: 1, page: 1 },
+    include_sublabels: true,
+  };
+}
+
+function jsonResponse(payload) {
+  return { ok: true, status: 200, async json() { return payload; } };
+}
+
+/** The four keys closeLabelDetail resets labelFilters to, sorted. */
+const FILTER_KEYS = ['format', 'hideHeld', 'yearMax', 'yearMin'];
+
+t.section('openLabelDetail() publishes the label, swaps the panes and renders the catalogue');
+{
+  state.labelFilters = { yearMin: null, yearMax: null, format: '', hideHeld: false };
+  state.labelPage = 7;
+  const { nodes, body, rows, document } = makeDetailDom();
+  stubGlobals({ document });
+  const urls = [];
+  stubGlobals({ fetch: (url) => { urls.push(url); return Promise.resolve(jsonResponse(labelPayload(7))); } });
+
+  await openLabelDetail('42', 'Sarah Records');
+
+  t.deepEqual(state.browseLabel, { id: '42', name: 'Sarah Records' },
+    'the opened label is published to state as (id, name)');
+  t.equal(state.labelPage, 1, 'opening a label resets the page cursor to 1');
+  t.anyContains(urls, '/api/discogs/label/42?page=1',
+    'the load requests page 1 of that label');
+  t.equal(nodes.results.style.display, 'none', 'the search results pane is hidden');
+  t.equal(nodes['browse-artist'].style.display, 'none', 'the artist pane is hidden');
+  t.equal(nodes['browse-label'].style.display, 'block', 'the label pane is shown');
+  t.equal(nodes['browse-label-name'].textContent, 'Sarah Records',
+    'the header node carries the label name the caller passed');
+  t.contains(body.innerHTML, 'Sarah Records', 'the detail header renders into the label body');
+  t.excludes(body.innerHTML, 'Loading label catalogue',
+    'the loading placeholder is replaced by the render');
+  t.contains(rows.innerHTML, 'Pristine Christine',
+    'the payload release rows render into the body’s row slot');
+}
+
+t.section('openLabelDetail() writes no key into labelFilters, at any label size');
+{
+  // #1390 residual 4. The big-label arm used to set
+  // `state.labelFilters.bigLabel = true`; nothing in web/, tests/ or
+  // scripts/ ever read it (measured 2026-09-09), and the toggle it was
+  // written for derives from the payload's own count inside
+  // renderLabelDetail. A flag with no reader is not a feature, and a
+  // stale one survives every label navigation short of closeLabelDetail.
+  for (const count of [BIG_LABEL_THRESHOLD - 1, BIG_LABEL_THRESHOLD, BIG_LABEL_THRESHOLD + 1]) {
+    state.labelFilters = { yearMin: null, yearMax: null, format: '', hideHeld: false };
+    const { document } = makeDetailDom();
+    const documentHandle = stubGlobals({ document });
+    const fetchHandle = stubGlobals({ fetch: () => Promise.resolve(jsonResponse(labelPayload(count))) });
+
+    await openLabelDetail('42', 'Sarah Records');
+
+    t.deepEqual(Object.keys(state.labelFilters).sort(), FILTER_KEYS,
+      `a ${count}-release label leaves labelFilters at its four filter keys`);
+    fetchHandle.restore();
+    documentHandle.restore();
+  }
+}
+
+t.section('openLabelDetail() renders the failure state when the load fails');
+{
+  state.labelFilters = { yearMin: null, yearMax: null, format: '', hideHeld: false };
+  const { body, rows, document } = makeDetailDom();
+  stubGlobals({ document });
+  stubGlobals({ fetch: () => Promise.resolve({ ok: false, status: 503, async json() { return {}; } }) });
+
+  await openLabelDetail('42', 'Sarah Records');
+
+  t.contains(body.innerHTML, 'Failed to load label',
+    'a non-ok response paints the failure state');
+  t.equal(rows.innerHTML, '', 'a failed load renders no catalogue rows');
+}
+
+t.section('openLabelDetail() drops a payload the operator has already navigated away from');
+{
+  state.labelFilters = { yearMin: null, yearMax: null, format: '', hideHeld: false };
+  const { body, rows, document } = makeDetailDom();
+  stubGlobals({ document });
+  let resolveFetch = () => {};
+  const pending = new Promise((resolve) => { resolveFetch = resolve; });
+  stubGlobals({ fetch: () => pending });
+
+  const load = openLabelDetail('42', 'Sarah Records');
+  await new Promise((resolve) => setImmediate(resolve));
+  closeLabelDetail();
+  resolveFetch(jsonResponse(labelPayload(7)));
+  await load;
+
+  t.contains(body.innerHTML, 'Loading label catalogue',
+    'a superseded load leaves the placeholder it painted, rendering nothing over it');
+  t.equal(rows.innerHTML, '', 'a superseded load never paints its catalogue');
+  t.equal(state.browseLabel, null, 'the close wins over the in-flight load');
 }
 
 t.done();

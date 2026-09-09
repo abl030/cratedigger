@@ -830,6 +830,18 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     "web/index_document.py": (
         "tests.web.test_server_endpoints",
     ),
+    # The basename probe resolves tests.web.test_static_assets, which owns
+    # the rule in isolation and production's side of it. The half it cannot
+    # reach is the one #1390's own review found broken: production and the
+    # dev server answering the same request target differently, which only
+    # the two dev-server modules drive (WebDevServerProductionParityTest
+    # and TestStaticSurfaceParity, both standing up BOTH real servers).
+    # Verified by reading their imports: both name web.static_assets
+    # directly.
+    "web/static_assets.py": (
+        "tests.test_web_dev_server",
+        "tests.test_web_dev_server_generated",
+    ),
     # cratedigger.py is a single top-level file (``len(path.parts) == 1``),
     # so ``_direct_test_candidates`` looks for ``tests.test_cratedigger`` —
     # which does not exist; the module's behavior is split across dozens of

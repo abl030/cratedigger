@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Any
 
 import psycopg2
-from hypothesis import example, given, settings
+from hypothesis import assume, example, given, settings
 from hypothesis import strategies as st
 
 import lib.api_bases
@@ -38,12 +38,14 @@ from tests.fakes import FakeBeetsDB
 from tests.helpers import make_web_runtime
 from tests.test_redis_cache import FakeRedis
 from tests.test_web_dev_server import (
+    StaticParityCase,
     _get_http_outcome,
     _wait_for_blocked_backend,
     assert_live_db_parallel_outcomes,
 )
 from web.routes.browse import get_artist_compare
 from web.runtime import install_runtime, runtime
+from web.static_assets import normalized_request_path
 
 TEST_DSN = os.environ["TEST_DB_DSN"]
 
@@ -514,3 +516,91 @@ class TestMetadataWiringCheckerKnownBad(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- Static-surface parity, generated (#1390 residual 8, review F2) ---
+#
+# `web/static_assets.py` is a shared library function, and
+# `.claude/rules/code-quality.md` is explicit that agreement proven at a
+# shared library function is not agreement at the adapter. The adapters
+# here are `web.server.Handler.do_GET` and
+# `scripts.web_dev_server.DevHandler.do_GET`, and the first draft of that
+# module proved the point: it shared the RULE and not the normalization
+# production applies before asking it, so `/js/main.js/` and an
+# absolute-form request target both served on production and 404d on the
+# dev server. The deterministic table lives in
+# `tests/test_web_dev_server.py::WebDevServerProductionParityTest`; this
+# patrols the space around it.
+
+#: Segments the strategy composes request targets from. Chosen so the
+#: interesting shapes are reachable rather than plausible: both halves of
+#: each rule (`js`, `main.js`, the icon names), each half alone, the near
+#: misses (`jsconfig.json`, `globals.d.ts`, `server.py`), the traversal
+#: forms, and the separators that normalization is about.
+_TARGET_SEGMENTS = (
+    "js", "JS", "main.js", "util.js", "nope.js", "jsconfig.json",
+    "globals.d.ts", "server.py", "classify.py", "routes", "assets",
+    "favicon.ico", "favicon-16x16.png", "apple-touch-icon.png",
+    "index.html", "..", "%2e%2e", ".js", "", "x",
+)
+
+
+#: Whole targets worth drawing directly. Free composition from segments
+#: alone leaves the interesting cells unreachable in practice: measured at
+#: 60 examples, it never once composed a servable path AND a trailing
+#: slash, so the property passed against a dev server with the
+#: normalization removed. That is the entropy-budget miss
+#: `.claude/rules/code-quality.md` describes, and this is the widening it
+#: prescribes rather than leaving the pin to carry the whole guard.
+_BASE_TARGETS = (
+    "/", "/index.html", "/js/main.js", "/js/util.js", "/js/nope.js",
+    "/js/jsconfig.json", "/js/globals.d.ts", "/js/../server.py",
+    "/js/../main.js", "/js/%2e%2e/main.js", "/js", "/JS/main.js",
+    "/favicon.ico", "/favicon-16x16.png", "/favicon-32x32.png",
+    "/apple-touch-icon.png", "/assets/favicon.ico", "/server.py",
+    "/classify.py", "/routes/pipeline.py", "/not-a-route",
+)
+
+
+@st.composite
+def _static_request_targets(draw: st.DrawFn) -> str:
+    """A request target neither server routes as an API call."""
+    base = draw(st.one_of(
+        st.sampled_from(_BASE_TARGETS),
+        st.builds(
+            lambda segments: "/" + "/".join(segments),
+            st.lists(st.sampled_from(_TARGET_SEGMENTS), max_size=4),
+        ),
+    ))
+    return base + draw(st.sampled_from(("", "/", "//", "///")))
+
+
+class TestStaticSurfaceParity(StaticParityCase):
+    """Neither server may answer a static target the other refuses."""
+
+    @settings(max_examples=60, deadline=None)
+    @given(target=_static_request_targets())
+    @example(target="/js/main.js/")
+    @example(target="/js/main.js")
+    @example(target="/favicon.ico/")
+    @example(target="/index.html")
+    @example(target="/js/../server.py")
+    @example(target="/")
+    def test_both_servers_answer_the_same(self, target: str) -> None:
+        # `/api/` is the dev server's own fixture/proxy surface and has
+        # nothing to do with the static rule; production routes it through
+        # a registry this test does not seed.
+        assume(not target.startswith("/api"))
+        assume(not target.startswith("/__dev"))
+        assume(normalized_request_path(target)
+               not in web.server.Handler._FUNC_GET_ROUTES)
+        production, dev = self.both_statuses(target)
+        self.assertEqual(
+            production, dev, f"{target}: production {production}, dev {dev}")
+
+    def test_the_strategy_reaches_both_answers(self) -> None:
+        # A strategy that only ever drew 404-on-both targets would make the
+        # property above unfalsifiable. Prove both answers are producible
+        # by naming one of each that the strategy can compose.
+        self.assertEqual(self.both_statuses("/js/main.js"), (200, 200))
+        self.assertEqual(self.both_statuses("/js/server.py"), (404, 404))

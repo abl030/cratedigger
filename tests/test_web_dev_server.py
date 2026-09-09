@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 import sys
 import threading
 import time
@@ -23,6 +24,7 @@ sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 — bootstraps TEST_DB_DSN for the live-db test
 import psycopg2
 
+import web.server
 from scripts.web_dev_server import (
     DevConfig,
     DevHandler,
@@ -31,10 +33,19 @@ from scripts.web_dev_server import (
     build_parser,
     create_server,
 )
-from tests.fakes import FakeBeetsDB
+from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_web_runtime
 from tests.test_redis_cache import FakeRedis
-from web.runtime import install_runtime, runtime
+from tests.web.test_static_assets import (
+    BROWSER_JS_CONTENT_TYPE,
+    EXPECTED_ICON_ASSETS,
+)
+from web.request_security import BROWSER_CHANNEL, CHANNEL_HEADER
+from web.runtime import WebRuntime, install_runtime, runtime
+from web.static_assets import (
+    WEB_ROOT,
+    resolve_static_file,
+)
 
 INSECURE_AUTH_WARNING_COPY = (
     "Authentication is disabled for this Cratedigger instance."
@@ -1134,3 +1145,263 @@ class ConfigureLiveDbReadOnlyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WebDevServerStaticParityTest(unittest.TestCase):
+    """The dev server's static surface is production's, not a wider one.
+
+    #1390 residual 8. Measured on 2026-09-09 before this class existed, the
+    dev server answered 200 to ``/server.py``, ``/routes/pipeline.py``,
+    ``/classify.py``, ``/js/../server.py``, ``/js/jsconfig.json``,
+    ``/js/globals.d.ts`` and ``/index.html``; ``web/server.py`` 404s every
+    one. It also 204'd ``/favicon.ico`` and 404'd the three PNG icons that
+    production serves out of ``web/assets/``. A dev server that answers a
+    URL production refuses is an instrument reading high, and the browser
+    screenshot loop in ``docs/solutions/ui-dev-server-screenshot-loop.md``
+    is exactly what reads it.
+    """
+
+    def setUp(self) -> None:
+        config = DevConfig(
+            data="fixture",
+            scenario="peers",
+            prod_base_url="https://music.ablz.au",
+            dsn=None,
+            beets_db=None,
+            mb_api=None,
+            discogs_api=None,
+            redis_host=None,
+            redis_port=6379,
+        )
+        self.server = DevHTTPServer(("127.0.0.1", 0), DevHandler, config)
+        self.thread = threading.Thread(
+            target=self.server.serve_forever, daemon=True,
+        )
+        self.thread.start()
+        self.base = f"http://127.0.0.1:{self.server.server_port}"
+        self.addCleanup(self.thread.join, 2)
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+
+    def _status(self, path: str) -> int:
+        try:
+            with urlopen(f"{self.base}{path}", timeout=10) as response:
+                return response.status
+        except HTTPError as exc:
+            with exc:
+                exc.read()
+            return exc.code
+
+    def test_repository_files_outside_the_static_rule_are_404(self) -> None:
+        # Every path here really exists under web/ and really was served.
+        for path in (
+            "/server.py",
+            "/routes/pipeline.py",
+            "/classify.py",
+            "/index.html",
+            "/js/../server.py",
+            "/js/jsconfig.json",
+            "/js/globals.d.ts",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(
+                    (WEB_ROOT / path.lstrip("/")).resolve().is_file(),
+                    "this path must name a real file, or the 404 below "
+                    "proves nothing about the rule",
+                )
+                self.assertEqual(self._status(path), 404)
+
+    def test_the_static_rule_serves_what_production_serves(self) -> None:
+        with urlopen(f"{self.base}/js/main.js", timeout=10) as response:
+            body = response.read()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(
+                response.headers["Content-Type"],
+                BROWSER_JS_CONTENT_TYPE)
+            self.assertEqual(response.headers["Cache-Control"], "no-cache")
+        self.assertEqual(body, (WEB_ROOT / "js" / "main.js").read_bytes())
+
+        for path, (filename, content_type) in EXPECTED_ICON_ASSETS.items():
+            with self.subTest(path=path):
+                with urlopen(f"{self.base}{path}", timeout=10) as response:
+                    icon = response.read()
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(
+                        response.headers["Content-Type"], content_type)
+                    # Production caches icons for a day; this server must
+                    # not, or the screenshot loop reads a stale page.
+                    self.assertEqual(
+                        response.headers["Cache-Control"], "no-cache")
+                self.assertEqual(
+                    icon, (WEB_ROOT / "assets" / filename).read_bytes())
+
+    def test_a_js_path_with_no_file_behind_it_is_404(self) -> None:
+        self.assertEqual(self._status("/js/no-such-module.js"), 404)
+
+    def test_the_index_is_still_served_at_the_root(self) -> None:
+        with urlopen(f"{self.base}/", timeout=10) as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(
+                response.headers["Content-Type"], "text/html; charset=utf-8")
+            self.assertEqual(response.headers["Cache-Control"], "no-cache")
+            self.assertIn("DEV fixture:peers", response.read().decode())
+
+    def test_watched_files_hold_only_what_the_browser_can_fetch(self) -> None:
+        # #1390 residual 8's second half: jsconfig.json and globals.d.ts
+        # change what tsc checks, never what the page loads, so a reload on
+        # either would show the operator nothing. The glob is what keeps
+        # them out; widening it to `*` fails here.
+        watched = self.server.watched_files()
+        self.assertIn(WEB_ROOT / "index.html", watched)
+        js_watched = [p for p in watched if p.parent == WEB_ROOT / "js"]
+        self.assertTrue(js_watched)
+        for path in js_watched:
+            with self.subTest(path=path.name):
+                self.assertIsNotNone(
+                    resolve_static_file(f"/js/{path.name}"),
+                    f"{path.name} is watched for reload but the server "
+                    "will not serve it",
+                )
+
+
+#: Request targets whose static answer both servers must agree on.
+#:
+#: Written as REQUEST TARGETS, not as paths: `urlopen` only ever emits the
+#: origin form, so the absolute form below (legal HTTP/1.1, and what a
+#: proxy sends) needs a socket to produce at all. That is exactly the shape
+#: independent review caught: the first draft of `web/static_assets.py`
+#: shared the rule between the two servers but not the normalization
+#: production applies before asking it, so an absolute-form target's empty
+#: path served the index on one server and 404d on the other. Every pin
+#: that shipped with the rule drove ONE server over origin-form paths, and
+#: none of them could see it.
+STATIC_PARITY_TARGETS: tuple[str, ...] = (
+    "/",
+    "/index.html",
+    "http://127.0.0.1",          # absolute form; parses to an empty path
+    "/js/main.js",
+    "/js/main.js/",              # trailing slash
+    "/js//main.js",
+    "/js/",
+    "/js",
+    "/js/nope.js",
+    "/js/jsconfig.json",
+    "/js/globals.d.ts",
+    "/js/../server.py",
+    "/js/../main.js",
+    "/js/%2e%2e/main.js",
+    "/JS/main.js",
+    "/favicon.ico",
+    "/favicon.ico/",
+    "/favicon-16x16.png",
+    "/favicon-32x32.png",
+    "/apple-touch-icon.png",
+    "/assets/favicon.ico",
+    "/server.py",
+    "/classify.py",
+    "/routes/pipeline.py",
+    "/not-a-route",
+)
+
+
+def raw_request_status(host: str, port: int, target: str) -> int:
+    """Send one literal request target and read back the status code.
+
+    A socket rather than `urlopen`, because the absolute-form target above
+    cannot be expressed through the latter at all.
+    """
+    request = (
+        f"GET {target} HTTP/1.1\r\n"
+        f"Host: {host}:{port}\r\n"
+        f"{CHANNEL_HEADER}: {BROWSER_CHANNEL}\r\n"
+        "Connection: close\r\n\r\n"
+    ).encode()
+    with socket.create_connection((host, port), timeout=10) as sock:
+        sock.sendall(request)
+        chunks = []
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    status_line = b"".join(chunks).split(b"\r\n", 1)[0]
+    return int(status_line.split(b" ")[1])
+
+
+class StaticParityCase(unittest.TestCase):
+    """Both real servers on real sockets, answering the same targets.
+
+    `web/static_assets.py` is a shared library function, and
+    `.claude/rules/code-quality.md` says agreement proven there is not
+    agreement at the adapter. The adapters are `web.server.Handler.do_GET`
+    and `scripts.web_dev_server.DevHandler.do_GET`, and this drives both.
+    """
+
+    prod_server: ThreadingHTTPServer
+    dev_server: DevHTTPServer
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls.enterClassContext(install_runtime(make_web_runtime(
+            WebRuntime(canonical_origin="https://music.ablz.au"),
+            db=FakePipelineDB(),
+            beets=FakeBeetsDB(),
+        )))
+        cls.prod_server = ThreadingHTTPServer(
+            ("127.0.0.1", 0), web.server.Handler)
+        threading.Thread(
+            target=cls.prod_server.serve_forever, daemon=True).start()
+        cls.dev_server = DevHTTPServer(
+            ("127.0.0.1", 0),
+            DevHandler,
+            DevConfig(
+                data="fixture",
+                scenario="peers",
+                prod_base_url="https://music.ablz.au",
+                dsn=None,
+                beets_db=None,
+                mb_api=None,
+                discogs_api=None,
+                redis_host=None,
+                redis_port=6379,
+            ),
+        )
+        threading.Thread(
+            target=cls.dev_server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        for server in (cls.prod_server, cls.dev_server):
+            server.shutdown()
+            server.server_close()
+        super().tearDownClass()
+
+    def both_statuses(self, target: str) -> tuple[int, int]:
+        """(production, dev) status for one request target."""
+        return (
+            raw_request_status(
+                "127.0.0.1", self.prod_server.server_address[1], target),
+            raw_request_status(
+                "127.0.0.1", self.dev_server.server_address[1], target),
+        )
+
+
+class WebDevServerProductionParityTest(StaticParityCase):
+    def test_both_servers_answer_every_static_target_the_same(self) -> None:
+        for target in STATIC_PARITY_TARGETS:
+            with self.subTest(target=target):
+                production, dev = self.both_statuses(target)
+                self.assertEqual(
+                    production, dev,
+                    f"{target}: production {production}, dev {dev}",
+                )
+
+    def test_the_table_is_not_all_404s(self) -> None:
+        # An agreement table both servers answer 404 to everywhere would
+        # pass while serving nothing at all. Name the ones that must be 200.
+        for target in ("/", "/js/main.js", "/js/main.js/", "/favicon.ico",
+                       "http://127.0.0.1"):
+            with self.subTest(target=target):
+                production, dev = self.both_statuses(target)
+                self.assertEqual((production, dev), (200, 200), target)

@@ -12,7 +12,6 @@ import contextlib
 import html
 import json
 import logging
-import mimetypes
 import os
 import secrets
 import sys
@@ -29,7 +28,6 @@ from typing import IO, TYPE_CHECKING
 from urllib.parse import ParseResult, parse_qs, urlparse
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-WEB_ROOT = REPO_ROOT / "web"
 FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "web"
 PROD_BASE_URL = "https://music.ablz.au"
 
@@ -41,6 +39,11 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from web.index_document import (
     render_index_document,
+)
+from web.static_assets import (
+    WEB_ROOT,
+    normalized_request_path,
+    resolve_static_file,
 )
 
 if TYPE_CHECKING:
@@ -259,10 +262,6 @@ class DevHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/"):
             self._serve_api_get(parsed)
             return
-        if path == "/favicon.ico":
-            self.send_response(204)
-            self.end_headers()
-            return
         self._serve_static(path)
 
     def do_POST(self) -> None:
@@ -301,36 +300,41 @@ class DevHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _serve_static(self, path: str) -> None:
-        rel = "index.html" if path in ("", "/") else path.lstrip("/")
-        target = (WEB_ROOT / rel).resolve()
-        try:
-            target.relative_to(WEB_ROOT.resolve())
-        except ValueError:
+        """Serve the index, or whatever `web/static_assets.py` resolves.
+
+        The rule is production's, asked of the same module (#1390 residual
+        8): before that this walked all of `web/` and answered 200 to
+        `web/`'s own Python source. The normalization is production's too,
+        and shipping the rule without it was the first draft's defect:
+        `/js/main.js/` and an absolute-form request target's empty path
+        served there and 404d here. Only the caching differs. Everything
+        here is `no-cache`, because live reload is the point of this
+        server and production's day-long icon caching would defeat it.
+        """
+        path = normalized_request_path(path)
+        if path == "/":
+            self._serve_index()
+            return
+        static = resolve_static_file(path)
+        if static is None or not static.path.is_file():
             self._error("Not found", 404)
             return
-        if not target.is_file():
-            self._error("Not found", 404)
-            return
-
-        if target.name == "index.html":
-            body = render_index_document(
-                target.read_bytes(),
-                insecure=self.server.config.preview_insecure_warning,
-            ).decode("utf-8")
-            body = body.replace("</body>", f"{self._dev_injection()}</body>")
-            self._send_bytes(
-                body.encode("utf-8"),
-                "text/html; charset=utf-8",
-                cache_control="no-cache",
-            )
-            return
-
-        content_type = mimetypes.guess_type(target.name)[0]
-        if target.suffix == ".js":
-            content_type = "application/javascript; charset=utf-8"
         self._send_bytes(
-            target.read_bytes(),
-            content_type or "application/octet-stream",
+            static.path.read_bytes(),
+            static.content_type,
+            cache_control="no-cache",
+        )
+
+    def _serve_index(self) -> None:
+        """Serve `web/index.html` with the dev badge and reload hook."""
+        body = render_index_document(
+            (WEB_ROOT / "index.html").read_bytes(),
+            insecure=self.server.config.preview_insecure_warning,
+        ).decode("utf-8")
+        body = body.replace("</body>", f"{self._dev_injection()}</body>")
+        self._send_bytes(
+            body.encode("utf-8"),
+            "text/html; charset=utf-8",
             cache_control="no-cache",
         )
 

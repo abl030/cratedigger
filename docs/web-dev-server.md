@@ -84,6 +84,31 @@ dev server dispatches neither (both 405, observed in the census button's
 own screenshot round): the buttons render for screenshot verification
 but the actions need the real deployment.
 
+## What it serves
+
+Exactly what production serves, through the same rule
+(`web/static_assets.py`, issue #1390): the index at `/`, JavaScript modules
+at `/js/<name>.js` out of `web/js/`, and the four browser icons out of
+`web/assets/`. Everything else is a 404 here because it is a 404 there.
+Both servers also normalize the request path the same way before asking
+(`normalized_request_path`), so trailing slashes and an absolute-form
+request target's empty path land on the same answer on both. The claim is
+checked rather than asserted: `WebDevServerProductionParityTest` and
+`TestStaticSurfaceParity` stand up both real servers and compare statuses.
+
+That used to be wider. Before #1390 the dev server resolved any path under
+`web/` and served whatever it found, so `GET /server.py`,
+`GET /routes/pipeline.py` and `GET /js/../server.py` all returned module
+source with a 200, and `/js/jsconfig.json` and `/js/globals.d.ts` were
+reachable. Nothing there is secret and the server binds loopback; the cost
+was fidelity, since this is the server an operator screenshots a change on
+before shipping it.
+
+Live reload watches `web/index.html`, `web/js/*.js` and the active
+fixtures. `web/js/jsconfig.json` and `web/js/globals.d.ts` are deliberately
+not watched: they change what `scripts/run_tsc.sh` checks, never what the
+browser loads, so a reload on either would show nothing.
+
 ## Screenshot verification loop
 
 UI changes are verified visually against this dev server (live-db mode)

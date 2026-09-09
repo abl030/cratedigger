@@ -328,6 +328,13 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
         "tests.test_js_suite_audit",
         "tests.test_suite_coordinator",
     ),
+    # The basename probe resolves tests.web.test_static_assets
+    # regardless, masking the loss of the two cross-server parity modules
+    # (#1390 residual 8's review finding).
+    "web/static_assets.py": (
+        "tests.test_web_dev_server",
+        "tests.test_web_dev_server_generated",
+    ),
     # The basename probe resolves tests.test_download regardless,
     # masking the loss of the harvest DB-propagation coverage (#1312).
     "lib/download.py": (
@@ -568,6 +575,16 @@ MASKABLE_RULE_PINS: dict[str, dict[str, tuple[str, ...]]] = {
             "tests.test_verdict_tiers_generated",
         ),
     },
+    # #1390 residual 8 gave web/static_assets.py an EXACT_PATH_NEIGHBOURS
+    # entry (the two dev-server modules own the cross-server parity this
+    # row's own module cannot reach), which is what makes this row's
+    # deletion silent HERE: the entry keeps resolving, so nothing raises
+    # while the module's isolation and production-side coverage quietly
+    # stops being selected. Every other web/ file still reports the
+    # deletion by resolving zero.
+    "basename:web/*.py": {
+        "web/static_assets.py": ("tests.web.test_static_assets",),
+    },
     # Issue #1331's own case, from the other side. Deleting this row makes
     # twelve scripts/ files raise and this one quietly stop selecting
     # tests.test_pyright_checks — a module written for
@@ -703,6 +720,11 @@ def rule_matcher(rule: SelectionRule) -> dict[str, object]:
 MASKABLE_RULE_MATCHERS: dict[str, dict[str, object]] = {
     "basename:lib/*.py": {"root": "lib", "suffixes": (".py",)},
     "basename:scripts/*.py": {"root": "scripts", "suffixes": (".py",)},
+    "basename:web/*.py": {
+        "root": "web",
+        "suffixes": (".py",),
+        "excluded_prefixes": ("web/routes/",),
+    },
     "prefix:lib/pipeline_db/": {"prefixes": ("lib/pipeline_db/",)},
     "prefix:tests/fakes/": {"prefixes": ("tests/fakes/",)},
     "prefix:scripts/phase_parsers/": {"prefixes": ("scripts/phase_parsers/",)},
