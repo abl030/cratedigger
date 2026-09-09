@@ -4,7 +4,7 @@ Global, temporary cooldowns for Soulseek users who consistently fail to deliver 
 
 ## How it works
 
-After a timeout, a beets rejection, an installed-HAVE abort, or a post-import peer denylist, the shared streak evaluator (`PipelineDB._cooldown_streak_verdict`) queries the user's last 5 download outcomes globally (across all albums). If all 5 are failures, a 3-day cooldown is inserted into `user_cooldowns`. During enqueue, cooled-down users are skipped with a distinct "on cooldown" log message.
+After a timeout, any rejection that denylists a peer, an installed-HAVE abort, or a post-import peer denylist, the shared streak evaluator (`PipelineDB._cooldown_streak_verdict`) queries the user's last 5 download outcomes globally (across all albums). If all 5 are failures, a 3-day cooldown is inserted into `user_cooldowns`. During enqueue, cooled-down users are skipped with a distinct "on cooldown" log message.
 
 ## Tunables (`CooldownConfig` in `lib/quality/download_state.py`)
 
@@ -33,10 +33,17 @@ CREATE TABLE user_cooldowns (
 
 ## Data flow
 
-1. **Trigger**: `_timeout_album()` (download.py) calls `db.check_and_apply_cooldown(username)` directly after logging the timeout outcome. It is the only remaining direct caller; every other trigger reaches the SAME streak evaluator (`_cooldown_streak_verdict`, shared by `check_and_apply_cooldown` and the terminal-outcome writer) from inside a transaction bundle:
+1. **Trigger**: `_timeout_album()` (download.py) calls `db.check_and_apply_cooldown(username)` directly after logging the timeout outcome. It is the only remaining direct caller in production. Every other trigger asks for the cooldown on the entry it is already committing, either `TerminalDenylist(..., apply_cooldown=True)` or a bare `TerminalCooldown` when nothing is being denylisted, and the bundle consults the SAME streak evaluator (`_cooldown_streak_verdict`, shared by `check_and_apply_cooldown` and the terminal-outcome writer) inside its own transaction. Five writers do that. Grep `apply_cooldown=True` and `TerminalCooldown(` to re-derive the list:
 
-   - `reject_and_requeue()` (`album_source.py`) and the installed-HAVE abort (`_record_have_analysis_error` in `lib/dispatch/outcome_actions.py`). On their JOB-LESS branch they go through `PipelineDB.persist_request_rejection_outcome` (issue #1355 item 3), which commits the cooldown decision atomically alongside the request transition, `download_log` audit, and denylist writes, rather than as a separate autocommit call after them. `_record_have_analysis_error` used to call `check_and_apply_cooldown` directly after its own commit on this branch, and item 3 folded that into the same transaction. On their job-backed branch they go through the existing `PipelineDB.persist_import_terminal_outcome`.
-   - The post-import denylist writer (`_apply_or_stage_denylists` in `lib/dispatch/post_import.py`), which writes the peer denylist entries the post-import search policy calls for after any dispatch decision, rejected or retained. On its JOB-LESS branch it goes through `PipelineDB.persist_request_policy_outcome` (issue #1355 item A2), a transition-plus-denylist bundle with no audit row and no job, which replaced a per-username `add_denylist` plus `check_and_apply_cooldown` autocommit loop. On its staged (job-backed) branch it appends its entries to the pending `persist_import_terminal_outcome`. The staged branch always sets `TerminalDenylist.apply_cooldown=True`; the job-less branch sets it only when the caller passed a set to collect into (`DispatchRequest.cooled_down_users`), which is how a caller asks for no cooldown write on that batch.
+   - `reject_and_requeue()` (`album_source.py`), reason `beets validation rejected`.
+   - `_reject_request_auto_import` (`lib/download_rejection.py`), reason `auto-import world failure: <scenario>`, the kept-and-banned world failures of issue #1077 D1/D4.
+   - `_reject_import_from_evidence_decision` (`lib/dispatch/outcome_actions.py`), the one quality and folder/audio-integrity reject writer: `downgrade`, `suspect_lossless*`, `lossless_source_locked`, `audio_corrupt`, `bad_audio_hash`, `spectral_reject`, `mixed_source`.
+   - The installed-HAVE abort `_record_have_analysis_error` (same module), which commits a bare `TerminalCooldown` instead of a denylist entry.
+   - The post-import denylist writer `_apply_or_stage_denylists` (`lib/dispatch/post_import.py`), for the peer denylist the post-import search policy calls for after any dispatch decision, rejected or retained.
+
+   The first three reach the bundle through `_record_rejection_and_maybe_requeue`: `PipelineDB.persist_request_rejection_outcome` on the job-less branch (issue #1355 item 3), the owning job's pending `persist_import_terminal_outcome` on the job-backed one. `_record_have_analysis_error` builds those same two shapes itself rather than going through that helper. Either way the cooldown decision commits atomically alongside the request transition, `download_log` audit, and denylist writes, rather than as a separate autocommit call after them. `_record_have_analysis_error` used to call `check_and_apply_cooldown` directly after its own commit on the job-less branch, and item 3 folded that into the same transaction.
+
+   `_apply_or_stage_denylists` has the same two branches but its own job-less bundle, `PipelineDB.persist_request_policy_outcome` (issue #1355 item A2), a transition-plus-denylist commit with no audit row and no job, which replaced a per-username `add_denylist` plus `check_and_apply_cooldown` autocommit loop. It is also the only writer that makes the cooldown conditional: the staged branch always sets `apply_cooldown=True`, the job-less branch only when the caller passed a set to collect into (`DispatchRequest.cooled_down_users`), which is how a caller asks for no cooldown write on that batch. In the four rejection writers above, `cooled_down_users` is only the set the applied usernames are collected into and never gates the write.
 
    Inclusion rule for the list below: every reason the vocabulary can emit is
    named, and the ones that are unreachable by construction are marked — the
@@ -82,7 +89,7 @@ Cooldowns are user-level and remain authoritative before Redis peer-cache lookup
 
 ## Re-cooldown behavior
 
-After the 3-day cooldown expires, the user gets one chance. If they succeed, the success breaks their failure streak. If they fail, `check_and_apply_cooldown` sees 4 old failures + 1 new = 5 failures → immediate re-cooldown.
+After the 3-day cooldown expires, the user gets one chance. If they succeed, the success breaks their failure streak. If they fail, the streak evaluator sees 4 old failures + 1 new = 5 failures → immediate re-cooldown. That holds whichever trigger fires, since all of them read the same window.
 
 ## Diagnostics
 

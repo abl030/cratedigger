@@ -234,6 +234,22 @@ t.section('renderPressingRow() carries the Replace key its caller resolved (issu
   });
   t.contains(keyless, 'releaseGroupId: null',
     'a row the caller resolved no key for carries an explicit null for the picker to lazy-resolve');
+
+  // The standard-mode branch reads the same key and had no assertion
+  // anywhere: nulling it there survived all 29 JS suites (PR #1385
+  // review, survivor M8). Its degradation is soft, since the picker
+  // lazy-resolves via `POST /api/pipeline/<id>/resolve-rg`, but it costs
+  // a round trip and an operator-visible failure mode when that resolve
+  // is the one that goes wrong.
+  const ownedRow = { ...row, pipeline_status: 'wanted', pipeline_id: 1240 };
+  const owned = renderPressingRow(ownedRow, {
+    artistName: 'Hiatus Kaiyote',
+    rgForReplace: '424242',
+    offer: ownOffer,
+    paired: null,
+  });
+  t.contains(owned, 'window.openReplacePicker({sourceRequestId: 1240, releaseGroupId: &quot;424242&quot;',
+    'a row that IS the active request opens the standard picker on the same resolved key');
 }
 
 t.section('addRelease() — processing exists response exposes exact owner recovery');
