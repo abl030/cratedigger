@@ -19,7 +19,7 @@
  */
 
 import { state, toast } from './state.js';
-import { esc, awstDateTime } from './util.js';
+import { esc, awstDate, awstTime, awstDateTime } from './util.js';
 import { isTabName, tabHasAsyncRender } from './tabs.js';
 
 /**
@@ -799,334 +799,796 @@ export function closeSearchPlanDetail() {
 }
 
 /**
- * Render an inspector slot list. Pure / DOM-free.
+ * Fetch the per-request pipeline payload that supplies the detail
+ * page's "In the library now" column.
  *
- * Highlights the slot whose ordinal matches `nextOrdinal`. Everything
- * else is rendered with a flat `.sp-slot` class. Returns the empty
- * string when `items` is not a non-empty array.
+ * Never throws: the search plan is meaningful whether or not Beets is
+ * reachable, so a failure here degrades that one column rather than the
+ * page. `GET /api/pipeline/<id>` answers 503 when the current Beets
+ * authority is unavailable, which is exactly that case.
  *
- * @param {Array<Object>} items
- * @param {number} nextOrdinal
- * @returns {string}
+ * @param {number} requestId
+ * @returns {Promise<Object|null>} Parsed body, or `null` on any failure.
  */
-function renderSlotList(items, nextOrdinal) {
-  if (!Array.isArray(items) || items.length === 0) {
-    return '<div class="sp-slot-list-empty">No slots in plan</div>';
+async function fetchRequestLibrary(requestId) {
+  try {
+    const resp = await fetch(`/api/pipeline/${requestId}`);
+    if (!resp.ok) return null;
+    return await resp.json();
+  } catch (err) {
+    return null;
   }
-  const rows = items.map((item) => {
-    const ordinal = item.ordinal;
-    const current = (typeof ordinal === 'number' && ordinal === nextOrdinal);
-    const cls = current ? 'sp-slot sp-slot-current' : 'sp-slot';
-    const strategy = item.strategy || '?';
-    const query = item.query || '';
-    const cqk = item.canonical_query_key || '';
-    const repeat = item.repeat_group || '';
-    return `<li class="${cls}">
-      <span class="sp-slot-ordinal">${esc(String(ordinal ?? '?'))}</span>
-      <span class="sp-slot-strategy">${esc(strategy)}</span>
-      <span class="sp-slot-query">${esc(query)}</span>
-      <span class="sp-slot-meta">key=${esc(cqk)}${repeat ? ` · group=${esc(repeat)}` : ''}</span>
-    </li>`;
-  }).join('');
-  return `<ol class="sp-slot-list">${rows}</ol>`;
 }
 
 /**
- * Render one row of the plan-aware history table. Pure / DOM-free.
+ * Which Attempts rows the detail page shows: `'interesting'` (the
+ * default) or `'all'`. Module-scoped rather than on `state.js` because
+ * nothing outside this module reads it and it is not part of any
+ * cross-module contract — the detail page owns its own view mode.
  *
- * The candidates JSONB is rendered into a native `<details>` block per
- * row so the operator can inspect the top-N candidates without a
- * dedicated handler.
+ * @type {'interesting'|'all'}
+ */
+let attemptsFilter = 'interesting';
+
+/**
+ * The last painted detail page's inputs, so the Interesting/All toggle
+ * re-renders from memory instead of re-fetching three endpoints.
+ * `searchPlanLoadOlder` appends to `rows` so a toggle after paging back
+ * still sees every loaded row.
+ *
+ * @type {{requestId: number, inspection: Object, rows: Array<Object>, nextBeforeId: number|null, library: Object|null} | null}
+ */
+let detailSnapshot = null;
+
+// --- #811: the detail page --------------------------------------------
+//
+// The page answers one question first — "is the quality override
+// holding?" — and keeps forensics one click away. Section order:
+// header, meta, Searching for (scope + library), Is the override
+// holding?, Plan (slots merged with their tallies), Attempts, Plan
+// health, and the pre-rollout legacy block only when it has rows.
+
+/** The tier ladder chip appended after the configured tiers. */
+const CATCH_ALL_TIER_LABEL = 'any';
+
+/**
+ * Turn a snake_case producer token into readable prose. Mechanical, so
+ * a token no map anticipated still renders as words rather than as a
+ * fallback branch nothing can reach.
+ *
+ * @param {unknown} token
+ * @returns {string}
+ */
+function humanizeToken(token) {
+  return String(token == null ? '' : token).replace(/_/g, ' ').trim();
+}
+
+/**
+ * The first clause of an error message — everything up to the first
+ * sentence-ending `.` or `;`. Grab errors carry a short cause followed
+ * by retry bookkeeping the operator does not need inline.
+ *
+ * @param {unknown} message
+ * @returns {string}
+ */
+function firstClause(message) {
+  const s = String(message == null ? '' : message).trim();
+  if (!s) return '';
+  const cut = s.search(/[;.](\s|$)/);
+  return (cut > 0 ? s.slice(0, cut) : s).trim();
+}
+
+/**
+ * `MM-DD HH:MM` in AWST — the short form the dense tables use.
+ *
+ * @param {string|null|undefined} iso
+ * @returns {string}
+ */
+function shortWhen(iso) {
+  return iso ? awstDateTime(iso).slice(5) : '';
+}
+
+/**
+ * Round a duration to whole seconds with a unit suffix. Non-numeric
+ * input renders as the empty string rather than a dash — an absent
+ * tally is blank in these tables, never a placeholder.
+ *
+ * @param {unknown} value  A duration in seconds.
+ * @returns {string}
+ */
+function wholeSeconds(value) {
+  return (typeof value === 'number' && Number.isFinite(value))
+    ? `${Math.round(value)}s`
+    : '';
+}
+
+/**
+ * A small coloured chip.
+ *
+ * @param {string} text
+ * @param {'good'|'warn'|'bad'|'dim'} tone
+ * @param {string} [title]
+ * @returns {string}
+ */
+function chip(text, tone, title) {
+  const attr = title ? ` title="${esc(title)}"` : '';
+  return `<span class="sp-chip sp-chip-${esc(tone)}"${attr}>${esc(text)}</span>`;
+}
+
+/**
+ * Render the detail page's generator-drift chip.
+ *
+ * The generator id itself is noise on a current plan, so the detail
+ * page never prints it; when the ids disagree the operator needs to
+ * know that and what to regenerate to, so both ids ride in the chip's
+ * `title`. `renderDriftIndicator` keeps its own inline both-ids form
+ * for the summary panel, which is unchanged by issue #811.
+ *
+ * @param {string|null|undefined} planGeneratorId
+ * @param {string|null|undefined} currentGeneratorId
+ * @returns {string}
+ */
+function renderDriftChip(planGeneratorId, currentGeneratorId) {
+  return chip(
+    'plan generator out of date',
+    'warn',
+    `plan generator ${planGeneratorId || '?'} · current generator ${currentGeneratorId || '?'} — regenerate to pick up the current generator`,
+  );
+}
+
+/**
+ * Render the tier-ladder chips for the "Searching for" column.
+ *
+ * Ladder order is `configured_tiers` (the deployment's own ladder), with
+ * any active tier the configuration does not list appended so an
+ * override that names an unconfigured tier is still visible. A chip is
+ * lit when the tier is in `tiers`; the trailing `any` chip is lit iff
+ * `catch_all`.
+ *
+ * @param {Object} scope
+ * @returns {string}
+ */
+function renderTierChips(scope) {
+  const active = Array.isArray(scope.tiers) ? scope.tiers.map(String) : [];
+  const configured = Array.isArray(scope.configured_tiers)
+    ? scope.configured_tiers.map(String)
+    : [];
+  /** @type {string[]} */
+  const ladder = [];
+  for (const tier of configured.concat(active)) {
+    if (!ladder.includes(tier)) ladder.push(tier);
+  }
+  const chips = ladder.map((tier) => (active.includes(tier)
+    ? `<span class="sp-tier sp-tier-on">${esc(tier)}</span>`
+    : `<span class="sp-tier">${esc(tier)}</span>`));
+  chips.push(scope.catch_all === true
+    ? `<span class="sp-tier sp-tier-on">${CATCH_ALL_TIER_LABEL}</span>`
+    : `<span class="sp-tier">${CATCH_ALL_TIER_LABEL}</span>`);
+  return `<div class="sp-tiers">${chips.join('')}</div>`;
+}
+
+/**
+ * Where the effective tier ladder came from — `search_scope.source`.
+ *
+ * @param {unknown} source
+ * @returns {string}
+ */
+function scopeSourceLabel(source) {
+  if (source === 'override') return 'from the request search override';
+  if (source === 'target_format') return 'from the target format';
+  if (source === 'config') return 'the configured default ladder';
+  return humanizeToken(source);
+}
+
+/**
+ * Render the left "Searching for" column: tier chips plus the three
+ * rows the operator opened the page to check.
+ *
+ * @param {Object} scope  `inspection.search_scope`.
+ * @returns {string}
+ */
+function renderScopeColumn(scope) {
+  // An unset `source` contributes nothing rather than an empty clause —
+  // "none set · ; catch-all excluded" is what the naive join produces.
+  const why = [scopeSourceLabel(scope.source), ...(scope.catch_all !== true
+    ? ['catch-all excluded'] : [])].filter((clause) => clause !== '');
+  const overrideValue = scope.override
+    ? `<code>${esc(String(scope.override))}</code>`
+    : '<span class="sp-kv-why">none set</span>';
+  const floorValue = (typeof scope.min_bitrate === 'number')
+    ? `${esc(String(scope.min_bitrate))} kbps`
+    : '<span class="sp-kv-why">none set</span>';
+  const targetValue = scope.target_format
+    ? `<code>${esc(String(scope.target_format))}</code>`
+    : '<span class="sp-kv-why">none set</span>';
+  return `<div class="sp-scope-col">
+    ${renderTierChips(scope)}
+    <dl class="sp-kv">
+      <dt>Override</dt><dd>${overrideValue}${why.length ? ` <span class="sp-kv-why">· ${esc(why.join('; '))}</span>` : ''}</dd>
+      <dt>Bitrate floor</dt><dd>${floorValue}</dd>
+      <dt>Target format</dt><dd>${targetValue}</dd>
+    </dl>
+  </div>`;
+}
+
+/**
+ * Summarize the Beets items of the resolved album into one line of
+ * measured format facts.
+ *
+ * Beets is the library authority (CLAUDE.md), and `beets_tracks` is
+ * what `web/routes/pipeline.py` emits from the resolved album's items:
+ * `{title, track, disc, length, format, bitrate, samplerate, bitdepth}`.
+ * The request row's own `final_format` is NOT a substitute — it is null
+ * on request 986 while every Beets item there reads MP3 / 320000 /
+ * 48000, which is exactly the album the quality override on that
+ * request exists for.
+ *
+ * Codec counts are named whenever an album is not homogeneous
+ * (`MP3 &times;10, FLAC &times;1`), highest count first. The numeric
+ * facts take the MINIMUM across items, ignoring zero and absent
+ * values: the album is only as good as its worst track, and `bitdepth`
+ * is 0 on every codec that does not carry one. `bitrate` is bits per
+ * second on this payload, so it renders as `NNNk`.
+ *
+ * Returns HTML, already escaped — the `&times;` separators are markup.
+ *
+ * @param {Array<Object>} tracks  A non-empty `beets_tracks` array.
+ * @returns {string}
+ */
+function summarizeBeetsTracks(tracks) {
+  /** @type {Map<string, number>} */
+  const byFormat = new Map();
+  /** @type {(current: number|null, raw: unknown) => number|null} */
+  const lower = (currentMin, raw) => {
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value <= 0) return currentMin;
+    return (currentMin === null || value < currentMin) ? value : currentMin;
+  };
+  /** @type {number|null} */ let bitrate = null;
+  /** @type {number|null} */ let samplerate = null;
+  /** @type {number|null} */ let bitdepth = null;
+  for (const item of tracks) {
+    if (!item || typeof item !== 'object') continue;
+    const format = item.format ? String(item.format) : 'unknown';
+    byFormat.set(format, (byFormat.get(format) || 0) + 1);
+    bitrate = lower(bitrate, item.bitrate);
+    samplerate = lower(samplerate, item.samplerate);
+    bitdepth = lower(bitdepth, item.bitdepth);
+  }
+  const formats = Array.from(byFormat.entries())
+    .sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]));
+  /** @type {string[]} */
+  const parts = [];
+  parts.push(formats.length === 1
+    ? esc(formats[0][0])
+    : formats.map(([format, count]) => `${esc(format)} &times;${esc(String(count))}`).join(', '));
+  if (bitrate !== null) parts.push(`${esc(String(Math.round(bitrate / 1000)))}k`);
+  if (samplerate !== null) parts.push(`${esc(String(Math.round(samplerate / 1000)))} kHz`);
+  if (bitdepth !== null) parts.push(`${esc(String(bitdepth))}-bit`);
+  parts.push(`${esc(String(tracks.length))} track${tracks.length === 1 ? '' : 's'}`);
+  return parts.join(' · ');
+}
+
+/**
+ * Render the right "In the library now" column from the per-request
+ * pipeline payload (`GET /api/pipeline/<id>`).
+ *
+ * `library` is `null` when that fetch failed — the column says so and
+ * the rest of the page still renders, because the search plan does not
+ * depend on Beets being reachable.
+ *
+ * @param {Object|null} library
+ * @returns {string}
+ */
+function renderLibraryColumn(library) {
+  const label = '<div class="sp-scope-label">In the library now</div>';
+  if (!library || typeof library !== 'object') {
+    return `<div class="sp-scope-col">${label}
+      <div class="sp-have-unavailable">library state unavailable</div>
+    </div>`;
+  }
+  const current = library.current_library || {};
+  const request = library.request || {};
+  const tracks = Array.isArray(library.beets_tracks) ? library.beets_tracks : [];
+  // `beets_tracks` is the Beets items of the resolved album, and Beets
+  // is the library authority. The route emits it only for a `unique`
+  // resolution, so an absent or empty array and a non-unique state are
+  // the same case: nothing measured, say which state we are in.
+  if (current.state !== 'unique' || tracks.length === 0) {
+    const state = typeof current.state === 'string' ? current.state : 'unknown';
+    return `<div class="sp-scope-col">${label}
+      <div class="sp-have-unavailable">${esc(humanizeToken(state))}</div>
+    </div>`;
+  }
+  const facts = summarizeBeetsTracks(tracks);
+  /** @type {string[]} */
+  const proof = [];
+  if (request.current_spectral_grade) proof.push(String(request.current_spectral_grade));
+  if (request.verified_lossless === true) proof.push('verified lossless');
+  const history = Array.isArray(library.history) ? library.history : [];
+  const imported = history.find((row) => row && row.outcome === 'success') || null;
+  const from = imported
+    ? `${esc(String(imported.soulseek_username || 'unknown peer'))} · imported ${esc(awstDate(imported.created_at))}`
+    : '<span class="sp-kv-why">no recorded import</span>';
+  const scenario = request.beets_scenario
+    ? `<div class="sp-have-scenario">beets match ${esc(String(request.beets_scenario))}</div>`
+    : '';
+  // The path gets its own full-width row rather than a third grid
+  // column: a library path is long enough to shear a max-content column
+  // into a six-line ribbon beside two short labels.
+  return `<div class="sp-scope-col">${label}
+    <div class="sp-have">
+      <span class="sp-have-tag">HAVE</span>
+      <span class="sp-have-fmt">${facts}${proof.length ? ` <span class="sp-have-spec">${esc(proof.join(' · '))}</span>` : ''}</span>
+      <span class="sp-have-tag">FROM</span>
+      <span class="sp-have-fmt">${from}</span>
+    </div>
+    <div class="sp-have-path">${esc(String(current.path || ''))}</div>
+    ${scenario}
+  </div>`;
+}
+
+/**
+ * One row of the "Is the override holding?" block.
+ *
+ * @param {boolean} ok
+ * @param {string} bodyHtml  Pre-escaped inner HTML.
+ * @returns {string}
+ */
+function checkRow(ok, bodyHtml) {
+  const cls = ok ? 'sp-check sp-check-ok' : 'sp-check sp-check-att';
+  return `<div class="${cls}"><span class="sp-check-mark">${ok ? '✓' : '!'}</span><span>${bodyHtml}</span></div>`;
+}
+
+/**
+ * Render the "Is the override holding?" block from `acquisition`.
+ *
+ * Every row whose data is absent or empty is omitted rather than
+ * rendered as a dash, and the whole block disappears when no row
+ * survives — an empty checklist says nothing an operator can act on.
+ *
+ * @param {Object|null|undefined} acquisition
+ * @param {Object} scope  `inspection.search_scope`, for naming the
+ *   tiers a candidate landed on that the scope excludes.
+ * @returns {string}
+ */
+function renderOverrideChecks(acquisition, scope) {
+  if (!acquisition || typeof acquisition !== 'object') return '';
+  /** @type {string[]} */
+  const rows = [];
+
+  const candidateTiers = Array.isArray(acquisition.candidate_tiers)
+    ? acquisition.candidate_tiers
+    : [];
+  if (candidateTiers.length > 0) {
+    const total = candidateTiers.reduce(
+      (sum, entry) => sum + (Number(entry && entry.count) || 0), 0);
+    const outside = Number(acquisition.candidates_outside_scope) || 0;
+    const inScope = Array.isArray(scope.tiers) ? scope.tiers.map(String) : [];
+    const offending = candidateTiers
+      .map((entry) => String(entry && entry.tier))
+      .filter((tier) => !inScope.includes(tier));
+    const tally = candidateTiers
+      .map((entry) => `${Number(entry && entry.count) || 0} ${esc(String(entry && entry.tier))}`)
+      .join(' · ');
+    rows.push(outside === 0
+      ? checkRow(true,
+        `<strong>${esc(String(total))}</strong> candidates scored · ${tally} · every scored folder was in scope`)
+      : checkRow(false,
+        `<strong>${esc(String(outside))}</strong> of <strong>${esc(String(total))}</strong> candidates scored outside the scope · ${tally}${offending.length ? ` · off-scope: ${offending.map(esc).join(', ')}` : ''}`));
+  }
+
+  const grabs = Array.isArray(acquisition.grabs) ? acquisition.grabs : [];
+  if (grabs.length > 0) {
+    const total = (typeof acquisition.grabs_total === 'number')
+      ? acquisition.grabs_total
+      : grabs.reduce((sum, g) => sum + (Number(g && g.count) || 0), 0);
+    const allSucceeded = grabs.every((g) => g && g.last_outcome === 'success');
+    const tally = grabs.map((g) => {
+      const outcome = g && g.last_outcome
+        ? ` (last ${esc(humanizeToken(g.last_outcome))}${g.last_at ? ` ${esc(shortWhen(g.last_at))}` : ''})`
+        : '';
+      return `<strong>${esc(String(Number(g && g.count) || 0))}</strong> ${esc(String(g && g.filetype))}${outcome}`;
+    }).join(' · ');
+    rows.push(checkRow(allSucceeded,
+      `<strong>${esc(String(total))}</strong> grabs · ${tally}`));
+  }
+
+  const lastFound = acquisition.last_found;
+  if (lastFound && typeof lastFound === 'object') {
+    const grab = lastFound.grab;
+    const grabOk = !!(grab && grab.outcome === 'success');
+    const grabText = grab
+      ? ` → grab ${esc(humanizeToken(grab.outcome))}${grab.error_message ? ` · ${esc(firstClause(grab.error_message))}` : ''}`
+      : ' → no linked grab';
+    rows.push(checkRow(grabOk,
+      `Last found: <span class="sp-check-peer">${esc(String(lastFound.username || '?'))}</span> `
+      + `${esc(String(lastFound.tier || '?'))} `
+      + `<strong>${esc(String(lastFound.matched_tracks ?? '?'))}/${esc(String(lastFound.total_tracks ?? '?'))}</strong> `
+      + `via ${esc(String(lastFound.strategy || '?'))} `
+      + `<span class="sp-check-when">${esc(shortWhen(lastFound.at))}</span>${grabText}`));
+  }
+
+  const peers = Array.isArray(acquisition.peers) ? acquisition.peers : [];
+  if (peers.length > 0) {
+    const line = peers.map((peer) => (
+      `<span class="sp-check-peer">${esc(String(peer && peer.username))}</span> `
+      + `${esc(String((peer && peer.tier) || '?'))} `
+      + `${esc(String((peer && peer.best_matched_tracks) ?? '?'))}/${esc(String((peer && peer.total_tracks) ?? '?'))} `
+      + `<span class="sp-check-when">×${esc(String((peer && peer.attempts) ?? '?'))}</span>`
+    )).join(' · ');
+    rows.push(checkRow(true, `Peers seen: ${line}`));
+  }
+
+  if (rows.length === 0) return '';
+  const since = (acquisition.since && acquisition.since_reason === 'last_import')
+    ? `since import ${esc(awstDate(acquisition.since))}`
+    : 'all history';
+  return `<div class="sp-detail-section">
+    <div class="sp-section-label">Is the override holding? <span class="sp-section-sub">${since}</span></div>
+    <div class="sp-checks">${rows.join('')}</div>
+  </div>`;
+}
+
+/**
+ * Render the Plan table: every slot of the active plan with its own
+ * tallies merged in.
+ *
+ * Stats are matched to a slot on the production identity keys —
+ * `identity.plan_id` and `identity.ordinal`. The pre-#811 renderer read
+ * `identity.plan_ordinal`, a key no producer writes, so every tally
+ * showed as a dash. A slot with no stats yet renders with blank
+ * tallies; the `plan_id` half of the match keeps a superseded plan's
+ * bucket out of the active plan's rows.
+ *
+ * @param {{items: Array<Object>, statsSlots: Array<Object>, nextOrdinal: number, planId: unknown}} args
+ * @returns {string}
+ */
+function renderPlanTable(args) {
+  const items = Array.isArray(args.items) ? args.items : [];
+  if (items.length === 0) {
+    return '<div class="sp-attempts-empty">No slots in plan</div>';
+  }
+  const statsSlots = Array.isArray(args.statsSlots) ? args.statsSlots : [];
+  const rows = items.map((item) => {
+    const ordinal = item.ordinal;
+    const slot = statsSlots.find((candidate) => {
+      const identity = (candidate && candidate.identity) || {};
+      return identity.plan_id === args.planId && identity.ordinal === ordinal;
+    }) || null;
+    const counts = (slot && slot.outcome_counts) || {};
+    const tally = (value) => (slot ? `<td class="sp-n">${esc(String(Number(value) || 0))}</td>` : '<td class="sp-n"></td>');
+    const found = Number(counts.found) || 0;
+    const foundCell = slot
+      ? `<td class="sp-n ${found > 0 ? 'sp-plan-found' : 'sp-plan-zero'}">${esc(String(found))}</td>`
+      : '<td class="sp-n"></td>';
+    const cls = (typeof ordinal === 'number' && ordinal === args.nextOrdinal)
+      ? 'sp-plan-current'
+      : '';
+    return `<tr class="${cls}">
+      <td class="sp-plan-ord">${esc(String(ordinal ?? '?'))}</td>
+      <td class="sp-plan-strat">${esc(String(item.strategy || '?'))}</td>
+      <td class="sp-plan-q">${esc(String(item.query || ''))}</td>
+      ${tally(slot && slot.attempts)}
+      ${foundCell}
+      ${tally(counts.no_match)}
+      ${tally(counts.no_results)}
+      <td class="sp-n">${esc(slot ? wholeSeconds(slot.elapsed_s_mean) : '')}</td>
+      <td class="sp-att-when">${esc(slot ? shortWhen(slot.last_seen_at) : '')}</td>
+    </tr>`;
+  }).join('');
+  return `<div class="sp-tablewrap"><table class="sp-plan-table">
+    <thead><tr>
+      <th>#</th><th>Strategy</th><th>Query</th>
+      <th class="sp-n">Tried</th><th class="sp-n">Found</th>
+      <th class="sp-n">No match</th><th class="sp-n">Empty</th>
+      <th class="sp-n">Avg</th><th>Last</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table></div>`;
+}
+
+/**
+ * Whether one attempt row is worth showing in the default Attempts view.
+ *
+ * The unfiltered history is dominated by `no_match` / `no_results` rows
+ * that scored nothing — 300 of them can sit between the operator and
+ * the handful of attempts that actually found a folder. A row is
+ * interesting when it found something, scored any candidate the
+ * pre-filter did not skip, ended on any other outcome, went stale, or
+ * did not consume its plan slot.
+ *
+ * @param {Object|null|undefined} row  One `search_log` row.
+ * @returns {boolean}
+ */
+export function isInterestingAttempt(row) {
+  if (!row || typeof row !== 'object') return false;
+  const outcome = typeof row.outcome === 'string' ? row.outcome : '';
+  if (outcome === 'found') return true;
+  if (outcome !== 'no_match' && outcome !== 'no_results') return true;
+  if (Array.isArray(row.candidates)
+    && row.candidates.some((c) => c && c.pre_filter_skip !== true)) {
+    return true;
+  }
+  if (row.cursor_update_status === 'stale') return true;
+  if (typeof row.stale_reason === 'string' && row.stale_reason !== '') return true;
+  if (row.attempt_consumed === false) return true;
+  return false;
+}
+
+/**
+ * Pick the candidate worth naming in an attempt's Candidates cell: the
+ * best-matched folder the pre-filter actually scored.
+ *
+ * @param {Array<Object>} candidates
+ * @returns {Object|null}
+ */
+function bestScoredCandidate(candidates) {
+  /** @type {Object|null} */
+  let best = null;
+  for (const candidate of candidates) {
+    if (!candidate || candidate.pre_filter_skip === true) continue;
+    if (best === null) { best = candidate; continue; }
+    const lhs = [Number(candidate.matched_tracks) || 0, Number(candidate.avg_ratio) || 0];
+    const rhs = [Number(best.matched_tracks) || 0, Number(best.avg_ratio) || 0];
+    if (lhs[0] > rhs[0] || (lhs[0] === rhs[0] && lhs[1] > rhs[1])) best = candidate;
+  }
+  return best;
+}
+
+/**
+ * Render the Candidates cell of one attempt row: the best scored
+ * folder, why it was rejected, and — when the search is linked to a
+ * download — what the grab it produced actually did.
  *
  * @param {Object} row
  * @returns {string}
  */
-function renderHistoryRow(row) {
-  const isLegacy = row.plan_id == null;
-  const cls = isLegacy ? 'sp-history-row legacy' : 'sp-history-row';
-  const isStale = row.cursor_update_status === 'stale' || (row.stale_reason != null && row.stale_reason !== '');
-  const staleCls = isStale ? ' sp-history-row-stale' : '';
-  const created = row.created_at ? awstDateTime(row.created_at) : '';
-  const candidatesRaw = row.candidates;
+function renderAttemptCandidates(row) {
+  const candidates = Array.isArray(row.candidates) ? row.candidates : [];
+  const scored = candidates.filter((c) => c && c.pre_filter_skip !== true);
+  const best = bestScoredCandidate(candidates);
+  /** @type {string[]} */
+  const parts = [];
+  if (best) {
+    const repeats = scored.filter((c) => c.username === best.username).length;
+    const ratio = Number(best.avg_ratio) || 0;
+    parts.push(
+      `<span class="sp-att-peer">${esc(String(best.username || '?'))}</span> `
+      + `${esc(String(best.filetype || '?'))} `
+      + `${esc(String(best.matched_tracks ?? '?'))}/${esc(String(best.total_tracks ?? '?'))}`
+      + (ratio > 0 ? ` · ratio ${esc(ratio.toFixed(2))}` : '')
+      + (repeats > 1 ? ` &times;${esc(String(repeats))}` : ''));
+  }
+  if (row.rejection_reason) {
+    parts.push(`<span class="sp-att-rej">${esc(humanizeToken(row.rejection_reason))}</span>`);
+  }
+  if (typeof row.grab_outcome === 'string' && row.grab_outcome !== '') {
+    const ok = row.grab_outcome === 'success';
+    const detail = firstClause(row.grab_error_message);
+    parts.push(`<span class="sp-att-arrow">→</span> `
+      + `<span class="sp-att-grab${ok ? ' sp-att-grab-ok' : ''}">`
+      + `grab ${esc(humanizeToken(row.grab_outcome))}${detail ? ` · ${esc(detail)}` : ''}</span>`);
+  }
+  return parts.join(' ');
+}
+
+/**
+ * Render one attempt row. Abnormal facts are chips on the line; every
+ * other telemetry column the pre-#811 table clipped off the right edge
+ * lives behind the row's own `raw` expander.
+ *
+ * @param {Object} row
+ * @returns {string}
+ */
+function renderAttemptRow(row) {
+  const outcome = typeof row.outcome === 'string' ? row.outcome : '?';
+  const found = outcome === 'found';
+  const isStale = row.cursor_update_status === 'stale'
+    || (typeof row.stale_reason === 'string' && row.stale_reason !== '');
+  const finalState = typeof row.final_state === 'string' ? row.final_state : '';
+  /** @type {string[]} */
+  const abnormal = [];
+  if (isStale) abnormal.push(chip('stale', 'warn', row.stale_reason || 'cursor update was stale'));
+  if (row.attempt_consumed === false) abnormal.push(chip('not consumed', 'warn'));
+  if (finalState && !finalState.startsWith('Completed')) {
+    abnormal.push(chip(finalState, 'warn'));
+  }
+  const rawLines = [
+    `query: ${row.query || ''}`,
+    `cycle: ${row.plan_cycle_snapshot ?? ''}`,
+    `cursor status: ${row.cursor_update_status || ''}`,
+    `stale reason: ${row.stale_reason || ''}`,
+    `consumed: ${row.attempt_consumed}`,
+    `final state: ${finalState}`,
+    `peers browsed: ${(Number(row.peers_browsed) || 0) + (Number(row.peers_browsed_lazy) || 0)}`,
+    `fanout waves: ${row.fanout_waves ?? ''}`,
+    `grab: ${row.grab_download_log_id ?? '—'} ${row.grab_outcome || ''} ${row.grab_filetype || ''} ${row.grab_soulseek_username || ''}`,
+  ].join('\n');
   let candidatesJson = '';
   try {
-    candidatesJson = candidatesRaw == null
+    candidatesJson = row.candidates == null
       ? ''
-      : JSON.stringify(candidatesRaw, null, 2);
+      : JSON.stringify(row.candidates, null, 2);
   } catch (err) {
-    candidatesJson = String(candidatesRaw);
+    candidatesJson = String(row.candidates);
   }
-  const elapsed = (typeof row.elapsed_s === 'number')
-    ? row.elapsed_s.toFixed(2) + 's'
-    : '—';
-  const peers = (typeof row.peers_browsed === 'number')
-    ? String(row.peers_browsed + (row.peers_browsed_lazy || 0))
-    : '—';
-  const fanout = (typeof row.fanout_waves === 'number')
-    ? String(row.fanout_waves)
-    : '—';
-  const ordinal = (row.plan_ordinal == null) ? '—' : String(row.plan_ordinal);
-  const strategy = row.plan_strategy || (isLegacy ? '(legacy)' : '—');
-  const cycle = (row.plan_cycle_snapshot == null) ? '—' : String(row.plan_cycle_snapshot);
-  const consumed = (row.attempt_consumed == null)
-    ? '—'
-    : (row.attempt_consumed ? 'yes' : 'no');
-  return `<tr class="${cls}${staleCls}">
-    <td class="sp-history-when">${esc(created)}</td>
-    <td class="sp-history-outcome">${esc(row.outcome || '?')}</td>
-    <td class="sp-history-strategy">${esc(strategy)}</td>
-    <td class="sp-history-ordinal">${esc(ordinal)}</td>
-    <td class="sp-history-query"><code>${esc(row.query || '')}</code></td>
-    <td class="sp-history-result-count">${esc(String(row.result_count ?? '—'))}</td>
-    <td class="sp-history-elapsed">${esc(elapsed)}</td>
-    <td class="sp-history-final-state">${esc(row.final_state || '—')}</td>
-    <td class="sp-history-cursor-status">${esc(row.cursor_update_status || '—')}</td>
-    <td class="sp-history-stale-reason">${esc(row.stale_reason || '—')}</td>
-    <td class="sp-history-consumed">${esc(consumed)}</td>
-    <td class="sp-history-cycle">${esc(cycle)}</td>
-    <td class="sp-history-peers">${esc(peers)}</td>
-    <td class="sp-history-fanout">${esc(fanout)}</td>
-    <td class="sp-history-candidates">
-      ${candidatesJson ? `<details class="sp-candidate-forensics"><summary>candidates</summary><pre>${esc(candidatesJson)}</pre></details>` : '—'}
-    </td>
+  return `<tr class="${found ? 'sp-att-found' : ''}">
+    <td class="sp-att-when">${esc(shortWhen(row.created_at))}</td>
+    <td>${chip(humanizeToken(outcome), found ? 'good' : 'dim')}</td>
+    <td class="sp-att-strat">${esc(String(row.plan_strategy || row.variant || '?'))}${abnormal.join('')}</td>
+    <td class="sp-n">${esc(String(row.result_count ?? ''))}</td>
+    <td class="sp-att-cands">${renderAttemptCandidates(row)}</td>
+    <td class="sp-n">${esc(wholeSeconds(row.elapsed_s))}</td>
+    <td><details class="sp-att-raw"><summary>raw</summary><pre>${esc(rawLines)}${candidatesJson ? `\n\ncandidates: ${esc(candidatesJson)}` : ''}</pre></details></td>
   </tr>`;
 }
 
 /**
- * Render the plan-aware history table including the optional "Load
- * older" affordance. Pure / DOM-free.
+ * Render the Attempts section: the Interesting/All toggle, the filtered
+ * rows, and the Load-older affordance.
  *
- * @param {{rows: Array<Object>, nextBeforeId: number|null, requestId: number}} args
+ * @param {{rows: Array<Object>, nextBeforeId: number|null, requestId: number, filter: string}} args
  * @returns {string}
  */
-function renderHistoryTable(args) {
+function renderAttemptsSection(args) {
   const rows = Array.isArray(args.rows) ? args.rows : [];
+  const interesting = args.filter !== 'all';
+  const shown = interesting ? rows.filter(isInterestingAttempt) : rows;
+  const button = (mode, label) => {
+    const on = (mode === 'all') === (args.filter === 'all');
+    return `<button class="sp-filter-button${on ? ' sp-filter-button-on' : ''}" type="button" onclick="event.stopPropagation(); window.searchPlanSetAttemptsFilter(${args.requestId}, '${mode}')">${label}</button>`;
+  };
+  const filters = `<span class="sp-filters">${button('interesting', 'Interesting')}${button('all', 'All')}</span>`;
+  const label = `<div class="sp-section-label">Attempts <span class="sp-section-sub">${esc(String(shown.length))} of ${esc(String(rows.length))} loaded</span>${filters}</div>`;
   if (rows.length === 0) {
-    return '<div class="sp-history-empty">No plan-aware attempts yet</div>';
+    return `<div class="sp-detail-section sp-attempts-section">${label}
+      <div class="sp-attempts-empty">No attempts yet</div>
+    </div>`;
   }
-  const body = rows.map(renderHistoryRow).join('');
+  const body = shown.map(renderAttemptRow).join('');
   const loader = (args.nextBeforeId != null)
     ? `<div class="sp-load-older-wrap">
         <button class="sp-load-older-button" type="button" onclick="event.stopPropagation(); window.searchPlanLoadOlder(${args.requestId}, ${args.nextBeforeId})">Load older</button>
       </div>`
     : '';
-  return `<table class="sp-history-table" data-request-id="${args.requestId}">
-    <thead>
-      <tr>
-        <th>When</th>
-        <th>Outcome</th>
-        <th>Strategy</th>
-        <th>Ord</th>
-        <th>Query</th>
-        <th>#</th>
-        <th>Elapsed</th>
-        <th>Final state</th>
-        <th>Cursor</th>
-        <th>Stale</th>
-        <th>Consumed</th>
-        <th>Cycle</th>
-        <th>Peers</th>
-        <th>Fanout</th>
-        <th>Forensics</th>
-      </tr>
-    </thead>
-    <tbody class="sp-history-tbody">${body}</tbody>
-  </table>${loader}`;
-}
-
-/**
- * Render the per-slot stats table from the inspection's
- * `stats.current.slots` array. Pure / DOM-free. Always labels the cache
- * attribution as "cycle-level" (origin R11 / AE6) — that label is the
- * only level the current stats tracker emits.
- *
- * @param {Object} stats
- * @returns {string}
- */
-function renderSlotStats(stats) {
-  if (!stats || typeof stats !== 'object') {
-    return '<div class="sp-stats-empty">No stats yet</div>';
-  }
-  const current = stats.current || {};
-  const slots = Array.isArray(current.slots) ? current.slots : [];
-  if (slots.length === 0) {
-    return '<div class="sp-stats-empty">No per-slot stats yet</div>';
-  }
-  const rows = slots.map((slot) => {
-    const id = slot.identity || {};
-    const ordinal = (id.plan_ordinal != null) ? id.plan_ordinal : '—';
-    const strategy = id.plan_strategy || '?';
-    const attempts = slot.attempts ?? 0;
-    const counts = slot.outcome_counts || {};
-    const found = Number(counts.found || 0);
-    const noMatch = Number(counts.no_match || 0);
-    const noResults = Number(counts.no_results || 0);
-    const errors = Number(counts.error || 0);
-    const consumed = slot.consumed_attempts ?? 0;
-    const elapsedMean = (typeof slot.elapsed_s_mean === 'number')
-      ? slot.elapsed_s_mean.toFixed(2) + 's'
-      : '—';
-    const elapsedP95 = (typeof slot.elapsed_s_p95 === 'number')
-      ? slot.elapsed_s_p95.toFixed(2) + 's'
-      : '—';
-    const foundRate = attempts ? (found / attempts) : 0;
-    const noMatchRate = attempts ? (noMatch / attempts) : 0;
-    return `<tr class="sp-stats-row">
-      <td>${esc(String(ordinal))}</td>
-      <td>${esc(strategy)}</td>
-      <td>${esc(String(attempts))}</td>
-      <td>${esc(String(consumed))}</td>
-      <td>${esc((foundRate * 100).toFixed(1))}%</td>
-      <td>${esc((noMatchRate * 100).toFixed(1))}%</td>
-      <td>${esc(String(noResults))}</td>
-      <td>${esc(String(errors))}</td>
-      <td>${esc(elapsedMean)}</td>
-      <td>${esc(elapsedP95)}</td>
-    </tr>`;
-  }).join('');
-  // Origin R11 / AE6: every cache stat label must read "cycle-level".
-  // The stats tracker only emits cycle-level cache attribution; the
-  // label is hardcoded to make the policy visible.
-  const cacheLabel = current.cache_attribution_level || 'cycle-level';
-  return `<div class="sp-stats-cache-label">Cache attribution: cycle-level (raw=${esc(cacheLabel)})</div>
-  <table class="sp-stats-table">
-    <thead>
-      <tr>
-        <th>Ord</th>
-        <th>Strategy</th>
-        <th>Attempts</th>
-        <th>Consumed</th>
-        <th>Found rate</th>
-        <th>No-match rate</th>
-        <th>No-results</th>
-        <th>Errors</th>
-        <th>Elapsed mean</th>
-        <th>Elapsed p95</th>
-      </tr>
-    </thead>
-    <tbody>${rows}</tbody>
-  </table>`;
-}
-
-/**
- * Render the plan-health deep block — failure class, sanitised error,
- * and the active plan's provenance metadata. Pure / DOM-free.
- *
- * @param {Object} inspection
- * @returns {string}
- */
-function renderPlanHealth(inspection) {
-  const failedDet = inspection.latest_failed_deterministic;
-  const failedTrans = inspection.latest_failed_transient;
-  const activePlan = inspection.active_plan;
-  const provenance = (activePlan && activePlan.plan && activePlan.plan.provenance)
-    ? activePlan.plan.provenance
-    : {};
-
-  // `failure` is the flat plan dict produced by
-  // `lib/search_plan_inspection.py::_plan_to_dict` — read it directly.
-  const renderFailure = (failure, label) => {
-    if (!failure) return '';
-    const klass = failure.failure_class || 'unknown';
-    const errMsg = failure.error_message || '';
-    const ts = failure.created_at ? awstDateTime(failure.created_at) : '';
-    return `<div class="sp-health-failure">
-      <div class="sp-health-failure-label">${esc(label)} <span class="sp-health-failure-class">${esc(klass)}</span></div>
-      ${ts ? `<div class="sp-health-failure-when">${esc(ts)}</div>` : ''}
-      ${errMsg ? `<pre class="sp-health-failure-error">${esc(errMsg)}</pre>` : ''}
-    </div>`;
-  };
-
-  // Provenance — show omitted candidates, deduped losers, dropped
-  // low-entropy tokens so the operator can see why the active plan
-  // ended up the size it is.
-  const provKeys = ['omitted_candidates', 'deduped_losers', 'dropped_low_entropy_tokens'];
-  /** @type {string[]} */
-  const provLines = [];
-  for (const key of provKeys) {
-    const val = provenance[key];
-    if (val == null) continue;
-    let rendered;
-    try {
-      rendered = JSON.stringify(val, null, 2);
-    } catch (err) {
-      rendered = String(val);
-    }
-    provLines.push(`<div class="sp-health-prov-row">
-      <span class="sp-health-prov-key">${esc(key)}</span>
-      <pre class="sp-health-prov-val">${esc(rendered)}</pre>
-    </div>`);
-  }
-  const provHtml = provLines.length
-    ? `<div class="sp-health-provenance">${provLines.join('')}</div>`
-    : '<div class="sp-health-provenance-empty">No provenance flags recorded</div>';
-
-  const detHtml = renderFailure(failedDet, 'Deterministic failure');
-  const transHtml = renderFailure(failedTrans, 'Transient failure');
-  const failureBlock = (detHtml || transHtml)
-    ? `<div class="sp-health-failures">${detHtml}${transHtml}</div>`
-    : '<div class="sp-health-failures-empty">No recent failures</div>';
-
-  return `<div class="sp-detail-section sp-health">
-    <div class="sp-section-label">Plan health</div>
-    ${failureBlock}
-    <div class="sp-health-prov-label">Active plan provenance</div>
-    ${provHtml}
+  return `<div class="sp-detail-section sp-attempts-section">${label}
+    <div class="sp-tablewrap"><table class="sp-attempts-table" data-request-id="${args.requestId}">
+      <thead><tr>
+        <th>When</th><th>Outcome</th><th>Strategy</th>
+        <th class="sp-n">Results</th><th>Candidates</th>
+        <th class="sp-n">Took</th><th></th>
+      </tr></thead>
+      <tbody class="sp-attempts-tbody">${body}</tbody>
+    </table></div>${loader}
   </div>`;
 }
 
 /**
- * Render the legacy `plan_id IS NULL` history collapsed by default.
- * Pure / DOM-free.
+ * Render the active plan's provenance as one sentence: what the
+ * generator left out, grouped by reason, plus any low-entropy tokens it
+ * dropped. Grouping is mechanical over whatever reasons the generator
+ * actually wrote, so a new reason renders as words rather than falling
+ * into a branch that names it wrongly.
+ *
+ * @param {Object} provenance
+ * @returns {string}
+ */
+function renderProvenanceSentence(provenance) {
+  /** @type {string[]} */
+  const clauses = [];
+  const omitted = Array.isArray(provenance.omitted_candidates)
+    ? provenance.omitted_candidates
+    : [];
+  if (omitted.length > 0) {
+    /** @type {Map<string, number>} */
+    const byReason = new Map();
+    for (const entry of omitted) {
+      const reason = humanizeToken((entry && entry.reason) || 'unspecified');
+      byReason.set(reason, (byReason.get(reason) || 0) + 1);
+    }
+    const groups = Array.from(byReason.entries())
+      .map(([reason, count]) => `${count} ${reason}`);
+    clauses.push(`Left out: ${esc(groups.join(', '))}.`);
+  }
+  const dropped = Array.isArray(provenance.dropped_low_entropy_tokens)
+    ? provenance.dropped_low_entropy_tokens
+    : [];
+  if (dropped.length > 0) {
+    clauses.push(`Dropped low-entropy tokens: ${esc(dropped.map(String).join(', '))}.`);
+  }
+  return clauses.length ? `<span>${clauses.join(' ')}</span>` : '';
+}
+
+/**
+ * Render the Plan health block: one quiet line, the provenance
+ * sentence, and the raw provenance behind an expander.
+ *
+ * @param {Object} inspection
+ * @param {string} driftHtml  The drift chip, or `''` when current.
+ * @returns {string}
+ */
+function renderPlanHealth(inspection, driftHtml) {
+  const activePlan = inspection.active_plan;
+  const provenance = (activePlan && activePlan.plan && activePlan.plan.provenance)
+    ? activePlan.plan.provenance
+    : {};
+  /** @type {string[]} */
+  const facts = [];
+  const failures = [
+    ['Deterministic failure', inspection.latest_failed_deterministic],
+    ['Transient failure', inspection.latest_failed_transient],
+  ];
+  for (const [label, failure] of failures) {
+    if (!failure) continue;
+    const klass = failure.failure_class || 'unknown';
+    const detail = failure.error_message ? ` — ${esc(String(failure.error_message))}` : '';
+    const when = failure.created_at ? ` (${esc(awstDateTime(failure.created_at))})` : '';
+    facts.push(`<span class="sp-health-bad">${esc(String(label))}: ${esc(String(klass))}${detail}${when}</span>`);
+  }
+  if (facts.length === 0) {
+    facts.push('<span class="sp-health-ok">No plan failures</span>');
+  }
+  facts.push(driftHtml || 'generator current');
+  const superseded = (typeof inspection.superseded_count === 'number')
+    ? inspection.superseded_count
+    : 0;
+  facts.push(`${esc(String(superseded))} superseded plan${superseded === 1 ? '' : 's'}`);
+
+  let provenanceJson = '';
+  try {
+    provenanceJson = JSON.stringify(provenance, null, 2);
+  } catch (err) {
+    provenanceJson = String(provenance);
+  }
+  return `<div class="sp-detail-section">
+    <div class="sp-section-label">Plan health</div>
+    <div class="sp-health">
+      <div class="sp-health-line">${facts.join(' · ')}</div>
+      ${renderProvenanceSentence(provenance)}
+      <details class="sp-att-raw"><summary>raw provenance</summary><pre>${esc(provenanceJson)}</pre></details>
+    </div>
+  </div>`;
+}
+
+/**
+ * Render the pre-rollout (`plan_id IS NULL`) history, collapsed.
+ * Returns the empty string when there are no legacy rows at all — an
+ * empty collapsed section is pure noise on a page that exists to make
+ * one question findable.
  *
  * @param {Object|null|undefined} legacyLogs
  * @returns {string}
  */
 function renderLegacyHistory(legacyLogs) {
   const head = (legacyLogs && Array.isArray(legacyLogs.head)) ? legacyLogs.head : [];
-  const count = (legacyLogs && typeof legacyLogs.count === 'number') ? legacyLogs.count : head.length;
-  if (head.length === 0 && count === 0) {
-    return `<div class="sp-detail-section sp-history-legacy-section">
-      <div class="sp-section-label">Pre-rollout history (legacy)</div>
-      <div class="sp-history-empty">No legacy attempts</div>
-    </div>`;
-  }
-  // Legacy rows have a slim shape — outcome, variant, query, result count,
-  // elapsed, final state. Render in the same table structure as plan-aware
-  // rows but mark each row .legacy so CSS can dim them.
+  const count = (legacyLogs && typeof legacyLogs.count === 'number')
+    ? legacyLogs.count
+    : head.length;
+  if (count === 0 && head.length === 0) return '';
   const rows = head.map((row) => {
     const created = row.created_at ? awstDateTime(row.created_at) : '';
-    const elapsed = (typeof row.elapsed_s === 'number')
-      ? row.elapsed_s.toFixed(2) + 's'
-      : '—';
     return `<tr class="sp-history-row legacy">
-      <td class="sp-history-when">${esc(created)}</td>
-      <td class="sp-history-outcome">${esc(row.outcome || '?')}</td>
-      <td class="sp-history-strategy">${esc(row.variant || '(legacy)')}</td>
-      <td class="sp-history-query"><code>${esc(row.query || '')}</code></td>
-      <td class="sp-history-result-count">${esc(String(row.result_count ?? '—'))}</td>
-      <td class="sp-history-elapsed">${esc(elapsed)}</td>
-      <td class="sp-history-final-state">${esc(row.final_state || '—')}</td>
+      <td class="sp-att-when">${esc(created)}</td>
+      <td>${esc(row.outcome || '?')}</td>
+      <td>${esc(row.variant || '(legacy)')}</td>
+      <td><code>${esc(row.query || '')}</code></td>
+      <td class="sp-n">${esc(String(row.result_count ?? ''))}</td>
+      <td class="sp-n">${esc(wholeSeconds(row.elapsed_s))}</td>
+      <td>${esc(row.final_state || '')}</td>
     </tr>`;
   }).join('');
   const summary = `Pre-rollout history (${count} row${count === 1 ? '' : 's'}; showing ${head.length})`;
   return `<div class="sp-detail-section sp-history-legacy-section">
     <details class="sp-history-legacy">
       <summary class="sp-section-label">${esc(summary)}</summary>
-      <table class="sp-history-table sp-history-table-legacy">
-        <thead>
-          <tr>
-            <th>When</th>
-            <th>Outcome</th>
-            <th>Variant</th>
-            <th>Query</th>
-            <th>#</th>
-            <th>Elapsed</th>
-            <th>Final state</th>
-          </tr>
-        </thead>
+      <div class="sp-tablewrap"><table class="sp-history-table sp-history-table-legacy">
+        <thead><tr>
+          <th>When</th><th>Outcome</th><th>Variant</th><th>Query</th>
+          <th class="sp-n">#</th><th class="sp-n">Elapsed</th><th>Final state</th>
+        </tr></thead>
         <tbody>${rows}</tbody>
-      </table>
+      </table></div>
     </details>
   </div>`;
 }
@@ -1135,110 +1597,117 @@ function renderLegacyHistory(legacyLogs) {
  * Pure HTML producer for the per-request detail page.
  *
  * Inputs:
- *   * `inspection` — `GET /search-plan` payload (plan + items + cursor +
- *     stats + legacy_logs head + currentness + failure summary).
- *   * `history` — array of newest-first `search_log` rows from
- *     `GET /search-plan/history` (plan-aware shape).
- *   * `nextBeforeId` — cursor seed for "Load older"; `null` when
- *     exhausted.
+ *   * `inspection` — `GET /api/pipeline/<id>/search-plan`.
+ *   * `history` — newest-first plan-aware `search_log` rows.
+ *   * `nextBeforeId` — Load-older cursor; `null` when exhausted.
+ *   * `library` — `GET /api/pipeline/<id>`, or `null` when that fetch
+ *     failed. Supplies the "In the library now" column only.
  *
- * Sections in order:
- *   1. Header (back, title, status, drift, cursor, cycle, refresh)
- *   2. Plan slot list
- *   3. Plan-aware history table + Load-older button
- *   4. Per-slot stats
- *   5. Plan health (failure classes + provenance)
- *   6. Pre-rollout history (collapsed)
+ * Sections, in order: header, meta, Searching for (scope + library),
+ * Is the override holding?, Plan, Attempts, Plan health, pre-rollout
+ * legacy history (omitted at zero rows).
  *
- * @param {{inspection: Object, history: Array<Object>, nextBeforeId: number|null}} args
+ * Reads one piece of module state, {@link attemptsFilter}, so the
+ * Interesting/All toggle can repaint the whole page without threading a
+ * view mode through every caller.
+ *
+ * @param {{inspection: Object, history: Array<Object>, nextBeforeId: number|null, library?: Object|null}} args
  * @returns {string}
  */
 export function renderDetailPage(args) {
   const inspection = args.inspection || {};
   const history = Array.isArray(args.history) ? args.history : [];
   const nextBeforeId = args.nextBeforeId == null ? null : args.nextBeforeId;
+  const library = args.library == null ? null : args.library;
   const requestId = inspection.request_id;
-  const reqIdAttr = (typeof requestId === 'number' && requestId > 0)
-    ? requestId
-    : 0;
+  const reqIdAttr = (typeof requestId === 'number' && requestId > 0) ? requestId : 0;
   const request = inspection.request || {};
   const currentness = inspection.currentness || {};
   const activePlan = inspection.active_plan;
-  const currentGeneratorId = inspection.current_generator_id;
+  const scope = inspection.search_scope || {};
 
   const titleLine = `${esc(request.artist_name || '?')} — ${esc(request.album_title || '?')} <span class="sp-ref">#${esc(String(requestId ?? '?'))}</span>`;
+  const statusChip = request.status
+    ? `<span class="sp-status sp-status-${esc(String(request.status))}">${esc(String(request.status))}</span>`
+    : '';
 
   const plan = (activePlan && activePlan.plan) ? activePlan.plan : {};
   const items = (activePlan && Array.isArray(activePlan.items)) ? activePlan.items : [];
-  const totalSlots = items.length;
   const nextOrdinal = (activePlan && typeof activePlan.next_ordinal === 'number')
     ? activePlan.next_ordinal
     : 0;
   const cycleCount = (activePlan && typeof activePlan.cycle_count === 'number')
     ? activePlan.cycle_count
     : 0;
-  const planGeneratorId = plan.generator_id;
-  const planStatus = plan.status || (activePlan ? 'active' : '—');
-
   const drift = (currentness.generator_id_mismatch === true)
-    ? renderDriftIndicator(planGeneratorId, currentGeneratorId)
+    ? renderDriftChip(plan.generator_id, inspection.current_generator_id)
     : '';
 
-  const headerActions = `
-    <div class="sp-detail-header-actions">
-      <button class="sp-back-button" type="button" onclick="event.stopPropagation(); window.closeSearchPlanDetail()">← Back</button>
-      <button class="sp-action-button" type="button" onclick="event.stopPropagation(); window.searchPlanRefreshDetail(${reqIdAttr})">Refresh</button>
-      <button class="sp-action-button" type="button" onclick="event.stopPropagation(); window.searchPlanAdvance(${reqIdAttr}, {})">Advance</button>
-      <button class="sp-action-button sp-action-button-destructive" type="button" onclick="event.stopPropagation(); window.searchPlanRegenerate(${reqIdAttr})">Regenerate</button>
-    </div>`;
+  /** @type {string[]} */
+  const meta = [];
+  meta.push(`<span class="sp-summary-meta-item">plan ${planStatusBadge(plan.status || (activePlan ? 'active' : 'none'))}</span>`);
+  if (activePlan) {
+    meta.push(`<span class="sp-summary-meta-item">cursor <strong>${esc(String(nextOrdinal))}/${esc(String(items.length))}</strong></span>`);
+    meta.push(`<span class="sp-summary-meta-item">cycle <strong>${esc(String(cycleCount))}</strong></span>`);
+  }
+  if (typeof request.search_attempts === 'number') {
+    const since = request.created_at ? ` since ${esc(awstDate(request.created_at))}` : '';
+    meta.push(`<span class="sp-summary-meta-item"><strong>${esc(String(request.search_attempts))}</strong> attempts${since}</span>`);
+  }
+  if (request.last_attempt_at) {
+    meta.push(`<span class="sp-summary-meta-item">last search <strong>${esc(awstDateTime(request.last_attempt_at))}</strong></span>`);
+  }
+  if (request.next_retry_after) {
+    meta.push(`<span class="sp-summary-meta-item">next eligible <strong>${esc(awstTime(request.next_retry_after))}</strong></span>`);
+  }
+  if (drift) meta.push(drift);
 
-  const headerMeta = activePlan
-    ? `<div class="sp-detail-meta">
-        <span class="sp-summary-meta-item">${planStatusBadge(planStatus)}</span>
-        <span class="sp-summary-meta-item">generator ${esc(String(planGeneratorId ?? '?'))}</span>
-        ${drift}
-        <span class="sp-summary-meta-item">cursor <strong>${esc(String(nextOrdinal))}/${esc(String(totalSlots))}</strong></span>
-        <span class="sp-summary-meta-item">cycle <strong>${esc(String(cycleCount))}</strong></span>
-      </div>`
-    : `<div class="sp-detail-meta">
-        <span class="sp-summary-meta-item sp-status sp-status-failed_deterministic">no active plan</span>
-        ${drift}
-      </div>`;
+  const scopeSection = `<div class="sp-detail-section">
+    <div class="sp-section-label">Searching for</div>
+    <div class="sp-scope">
+      ${renderScopeColumn(scope)}
+      ${renderLibraryColumn(library)}
+    </div>
+  </div>`;
 
-  const slotSection = activePlan
+  const statsSlots = (inspection.stats
+    && inspection.stats.current
+    && Array.isArray(inspection.stats.current.slots))
+    ? inspection.stats.current.slots
+    : [];
+
+  const planSection = activePlan
     ? `<div class="sp-detail-section">
-        <div class="sp-section-label">Plan slots (${totalSlots})</div>
-        ${renderSlotList(items, nextOrdinal)}
+        <div class="sp-section-label">Plan <span class="sp-section-sub">${esc(String(items.length))} slots · current slot highlighted · tallies for this plan only</span></div>
+        ${renderPlanTable({ items, statsSlots, nextOrdinal, planId: plan.id })}
       </div>`
     : '';
-
-  const historySection = `<div class="sp-detail-section">
-    <div class="sp-section-label">Plan-aware attempts (${history.length})</div>
-    ${renderHistoryTable({ rows: history, nextBeforeId, requestId: reqIdAttr })}
-  </div>`;
-
-  const statsSection = `<div class="sp-detail-section">
-    <div class="sp-section-label">Per-slot stats</div>
-    ${renderSlotStats(inspection.stats || {})}
-  </div>`;
-
-  const healthSection = renderPlanHealth(inspection);
-  const legacySection = renderLegacyHistory(inspection.legacy_logs);
 
   return `<div class="sp-detail" data-request-id="${reqIdAttr}">
     <div class="sp-detail-header">
       <div class="sp-detail-header-left">
         <button class="sp-back-button" type="button" onclick="event.stopPropagation(); window.closeSearchPlanDetail()">← Back</button>
-        <div class="sp-detail-title">${titleLine}</div>
+        <span class="sp-detail-title">${titleLine}</span>
+        ${statusChip}
       </div>
-      ${headerActions}
+      <div class="sp-detail-header-actions">
+        <button class="sp-action-button" type="button" onclick="event.stopPropagation(); window.searchPlanRefreshDetail(${reqIdAttr})">Refresh</button>
+        <button class="sp-action-button" type="button" onclick="event.stopPropagation(); window.searchPlanAdvance(${reqIdAttr}, {})">Advance</button>
+        <button class="sp-action-button sp-action-button-destructive" type="button" onclick="event.stopPropagation(); window.searchPlanRegenerate(${reqIdAttr})">Regenerate</button>
+      </div>
     </div>
-    ${headerMeta}
-    ${slotSection}
-    ${historySection}
-    ${statsSection}
-    ${healthSection}
-    ${legacySection}
+    <div class="sp-detail-meta">${meta.join('')}</div>
+    ${scopeSection}
+    ${renderOverrideChecks(inspection.acquisition, scope)}
+    ${planSection}
+    ${renderAttemptsSection({
+      rows: history,
+      nextBeforeId,
+      requestId: reqIdAttr,
+      filter: attemptsFilter,
+    })}
+    ${renderPlanHealth(inspection, drift)}
+    ${renderLegacyHistory(inspection.legacy_logs)}
   </div>`;
 }
 
@@ -1284,9 +1753,10 @@ export async function renderSearchPlanDetail(requestId) {
     el.innerHTML = '<div class="sp-detail-loading">Loading search-plan…</div>';
   }
   try {
-    const [inspection, historyPayload] = await Promise.all([
+    const [inspection, historyPayload, library] = await Promise.all([
       fetchInspection(requestId),
       fetchHistoryPage(requestId, { limit: HISTORY_PAGE_DEFAULT_LIMIT }),
+      fetchRequestLibrary(requestId),
     ]);
     if (gen !== detailGeneration) return;
     const rows = Array.isArray(historyPayload.rows) ? historyPayload.rows : [];
@@ -1298,7 +1768,10 @@ export async function renderSearchPlanDetail(requestId) {
       historyHead: rows.slice(0, 3),
       fetchedAt: Date.now(),
     });
-    const html = renderDetailPage({ inspection, history: rows, nextBeforeId });
+    detailSnapshot = { requestId, inspection, rows, nextBeforeId, library };
+    const html = renderDetailPage({
+      inspection, history: rows, nextBeforeId, library,
+    });
     if (el) el.innerHTML = html;
   } catch (err) {
     if (gen !== detailGeneration) return;
@@ -1307,6 +1780,35 @@ export async function renderSearchPlanDetail(requestId) {
       el.innerHTML = `<div class="sp-detail-loading">Failed to load search-plan: ${esc(msg)}</div>`;
     }
   }
+}
+
+/**
+ * Interesting/All toggle for the Attempts table. Bound to
+ * `window.searchPlanSetAttemptsFilter` in `main.js`.
+ *
+ * Repaints from {@link detailSnapshot} — deliberately no fetch: the
+ * rows are already loaded, and re-fetching would lose whatever the
+ * operator paged in with Load older.
+ *
+ * @param {number} requestId
+ * @param {string} mode  `'interesting'` or `'all'`.
+ * @returns {void}
+ */
+export function searchPlanSetAttemptsFilter(requestId, mode) {
+  if (mode !== 'interesting' && mode !== 'all') return;
+  attemptsFilter = mode;
+  const snapshot = detailSnapshot;
+  if (!snapshot || snapshot.requestId !== requestId) return;
+  if (typeof document === 'undefined') return;
+  const el = /** @type {HTMLElement|null} */ (
+    document.getElementById('pipeline-content'));
+  if (!el) return;
+  el.innerHTML = renderDetailPage({
+    inspection: snapshot.inspection,
+    history: snapshot.rows,
+    nextBeforeId: snapshot.nextBeforeId,
+    library: snapshot.library,
+  });
 }
 
 /**
@@ -1354,10 +1856,10 @@ export async function searchPlanLoadOlder(requestId, beforeId) {
   }
   if (typeof document === 'undefined') return;
   const tbody = /** @type {HTMLElement|null} */ (
-    document.querySelector(`.sp-history-table[data-request-id="${requestId}"] .sp-history-tbody`));
+    document.querySelector(`.sp-attempts-table[data-request-id="${requestId}"] .sp-attempts-tbody`));
   if (!tbody) return;
   const wrap = /** @type {HTMLElement|null} */ (
-    document.querySelector(`.sp-history-table[data-request-id="${requestId}"] ~ .sp-load-older-wrap`)
+    document.querySelector(`.sp-attempts-table[data-request-id="${requestId}"] ~ .sp-load-older-wrap`)
     || tbody.closest('.sp-detail')?.querySelector('.sp-load-older-wrap')
     || null);
   // Double-click guard: synchronously disable the button so a rapid
@@ -1377,11 +1879,20 @@ export async function searchPlanLoadOlder(requestId, beforeId) {
       beforeId,
     });
     const rows = Array.isArray(page.rows) ? page.rows : [];
-    if (rows.length > 0) {
-      const html = rows.map(renderHistoryRow).join('');
-      tbody.insertAdjacentHTML('beforeend', html);
+    // Appended rows respect the active filter, and the snapshot keeps
+    // every loaded row so switching to All later shows them without a
+    // second fetch.
+    const visible = attemptsFilter === 'all'
+      ? rows
+      : rows.filter(isInterestingAttempt);
+    if (visible.length > 0) {
+      tbody.insertAdjacentHTML('beforeend', visible.map(renderAttemptRow).join(''));
     }
     const nextBeforeId = page.next_before_id == null ? null : page.next_before_id;
+    if (detailSnapshot && detailSnapshot.requestId === requestId) {
+      detailSnapshot.rows = detailSnapshot.rows.concat(rows);
+      detailSnapshot.nextBeforeId = nextBeforeId;
+    }
     if (wrap) {
       if (nextBeforeId == null) {
         wrap.remove();

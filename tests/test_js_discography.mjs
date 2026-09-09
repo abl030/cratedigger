@@ -28,6 +28,7 @@ import {
 } from '../web/js/discography.js';
 import { renderYoutubeRescueControl } from '../web/js/youtube_rescue_control.js';
 import { invalidateActiveRgs } from '../web/js/active_rgs.js';
+import { replaceOfferState } from '../web/js/replace_offer.js';
 import { state } from '../web/js/state.js';
 
 import { element, stubGlobals, suite } from './js_harness.mjs';
@@ -130,7 +131,7 @@ t.section('synthesizeMasterlessRow() — exact processing owner survives synthes
   t.equal(row.processing_owner, owner, 'processing_owner object is forwarded unchanged');
   const html = renderPressingRow(row, {
     artistName: 'Deloris',
-    parentRgId: null,
+    rgForReplace: null,
     canReplace: true,
   });
   t.contains(html, 'previewing', 'pressing action consumes canonical owner label');
@@ -170,7 +171,7 @@ t.section('Convergence signal — exact pressing badge without duplicate detail 
   };
   const pressingHtml = renderPressingRow(row, {
     artistName: 'Iron & Wine',
-    parentRgId: 'release-group',
+    rgForReplace: 'release-group',
     canReplace: true,
   });
   t.contains(pressingHtml, 'search converged', 'exact pressing carries the distinct badge');
@@ -181,6 +182,74 @@ t.section('Convergence signal — exact pressing badge without duplicate detail 
     'Browse release detail does not duplicate the Library/Recents prompt');
   t.excludes(target.innerHTML, 'window.stopConvergedSearch',
     'Browse release detail has no second stop action');
+}
+
+t.section('renderPressingRow() carries the Replace key its caller resolved (issue #1355 Batch D residual)');
+{
+  // ``loadReleaseGroup`` resolves one key per row
+  // (``rel.release_group_id || parentRgId``) and hands the SAME value to
+  // ``replaceOfferState`` and to this renderer, so the key the offer was
+  // decided from is the key the button carries. Recomputing it here from
+  // a parent id was the duplication the Batch D residual recorded: one
+  // formula spelled twice inside one closure. A future edit to either
+  // site alone would split them silently, taking the enabled/disabled
+  // decision on one key while the picker opens on another.
+  const row = {
+    id: '999999',
+    title: 'Everything Is Alive',
+    status: 'Official',
+    country: 'AU',
+    date: '2011-05-01',
+    format: 'CD',
+    track_count: 10,
+  };
+  const ownOffer = replaceOfferState({
+    ownKey: '424242', ownActive: true, lookupFailed: false,
+    pairing: 'none', pair: null, pairActive: false, rowSource: 'discogs',
+  });
+  const html = renderPressingRow(row, {
+    artistName: 'Hiatus Kaiyote',
+    rgForReplace: '424242',
+    offer: ownOffer,
+    paired: null,
+  });
+  t.contains(html, 'releaseGroupId: &quot;424242&quot;',
+    'the inverted Replace button opens the picker on the exact key the caller resolved');
+
+  // A masterless Discogs release has no key of its own and reaches an
+  // enabled offer only through its pair; the picker then lazy-resolves
+  // from an explicit null. Same producer, a world it really emits.
+  const paired = { id: 'rg-mb', kind: 'work', source: 'mb', label: 'Choose Your Weapon' };
+  const pairedOffer = replaceOfferState({
+    ownKey: null, ownActive: false, lookupFailed: false,
+    pairing: 'checked', pair: paired, pairActive: true, rowSource: 'discogs',
+  });
+  t.equal(pairedOffer.enabled, true,
+    'the paired world really does produce an enabled offer for a keyless row');
+  const keyless = renderPressingRow(row, {
+    artistName: 'Hiatus Kaiyote',
+    rgForReplace: null,
+    offer: pairedOffer,
+    paired,
+  });
+  t.contains(keyless, 'releaseGroupId: null',
+    'a row the caller resolved no key for carries an explicit null for the picker to lazy-resolve');
+
+  // The standard-mode branch reads the same key and had no assertion
+  // anywhere: nulling it there survived all 29 JS suites (PR #1385
+  // review, survivor M8). Its degradation is soft, since the picker
+  // lazy-resolves via `POST /api/pipeline/<id>/resolve-rg`, but it costs
+  // a round trip and an operator-visible failure mode when that resolve
+  // is the one that goes wrong.
+  const ownedRow = { ...row, pipeline_status: 'wanted', pipeline_id: 1240 };
+  const owned = renderPressingRow(ownedRow, {
+    artistName: 'Hiatus Kaiyote',
+    rgForReplace: '424242',
+    offer: ownOffer,
+    paired: null,
+  });
+  t.contains(owned, 'window.openReplacePicker({sourceRequestId: 1240, releaseGroupId: &quot;424242&quot;',
+    'a row that IS the active request opens the standard picker on the same resolved key');
 }
 
 t.section('addRelease() — processing exists response exposes exact owner recovery');
@@ -313,7 +382,7 @@ t.section('synthesizeMasterlessRow() — in-library payload keeps quality fields
 
   const html = renderPressingRow(row, {
     artistName: 'Artist',
-    parentRgId: null,
+    rgForReplace: null,
     canReplace: false,
   });
   t.contains(html, '>in library</span>', 'masterless row renders current holding');
@@ -460,7 +529,7 @@ t.section('splitPressings() — a replaced-only pipeline row does not pin (visib
 
   const replacedHtml = renderPressingRow(rows[0], {
     artistName: 'Artist',
-    parentRgId: null,
+    rgForReplace: null,
     canReplace: false,
   });
   t.contains(replacedHtml, '>replaced<', 'collapsed row explains its frozen request history');
@@ -508,7 +577,7 @@ t.section('Release-id onclick arguments — adversarial deterministic pin');
     date: '2003',
     format: 'CD',
     track_count: 13,
-  }, { artistName: 'The Wrens', parentRgId: 'parent', canReplace: false });
+  }, { artistName: 'The Wrens', rgForReplace: 'parent', canReplace: false });
 
   t.contains(rgHtml, `window.loadReleaseGroup(${arg}, this`, 'RG click passes one encoded JS string argument');
   t.excludes(rgHtml, `window.loadReleaseGroup('${id}'`, 'known-bad raw single-quoted RG interpolation is absent');
@@ -542,7 +611,7 @@ t.section('Release-id onclick arguments — generated critical-character propert
       date: '2000',
       format: 'CD',
       track_count: 10,
-    }, { artistName: 'Artist', parentRgId: 'parent', canReplace: true });
+    }, { artistName: 'Artist', rgForReplace: 'parent', canReplace: true });
     t.contains(rgHtml, `window.loadReleaseGroup(${arg}, this`, `RG id round-trips safely: ${JSON.stringify(id)}`);
     t.contains(pressingHtml, `window.toggleReleaseDetail(${arg})`, `pressing id round-trips safely: ${JSON.stringify(id)}`);
     t.contains(pressingHtml, 'window.confirmDeleteBeets(42', `owned removal survives: ${JSON.stringify(id)}`);
@@ -567,7 +636,7 @@ t.section('Pressing metadata — hostile catalogue values stay text at the calle
     status: 'Official',
     in_library: false,
     pipeline_status: null,
-  }, { artistName: 'Artist', parentRgId: 'parent', canReplace: false });
+  }, { artistName: 'Artist', rgForReplace: 'parent', canReplace: false });
   t.contains(ordinary, 'Australia 2003-06-00 - CD - 13t - Official',
     'ordinary pressing metadata presentation is unchanged');
 
@@ -582,7 +651,7 @@ t.section('Pressing metadata — hostile catalogue values stay text at the calle
     status: hostile,
     in_library: false,
     pipeline_status: null,
-  }, { artistName: 'Artist', parentRgId: 'parent', canReplace: false });
+  }, { artistName: 'Artist', rgForReplace: 'parent', canReplace: false });
   const escaped = '&lt;img src=x onerror=alert(1)&gt;';
   const metaStart = pressingHtml.indexOf('<div class="release-meta"');
   const metaEnd = pressingHtml.indexOf('</div>', metaStart);
@@ -611,7 +680,7 @@ t.section('Pressing metadata — generated critical-character property sweep');
         ...metadata,
         in_library: false,
         pipeline_status: null,
-      }, { artistName: 'Artist', parentRgId: 'parent', canReplace: false });
+      }, { artistName: 'Artist', rgForReplace: 'parent', canReplace: false });
       const expectedMeta = `${expectedEsc(metadata.country)} ${expectedEsc(metadata.date)} - ${expectedEsc(metadata.format)} - ${expectedEsc(metadata.track_count)}t - ${expectedEsc(metadata.status)}`;
       t.contains(pressingHtml, expectedMeta,
         `${field} remains escaped text: ${JSON.stringify(value)}`);
