@@ -13,9 +13,9 @@ from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers suite/fuzz
-from tests.helpers import cold_ffmpeg_version_cache
 from lib.quality import AudioValidationReport, AudioValidationResult
 from lib.util import _ffmpeg_version, validate_audio
+from tests.helpers import cold_ffmpeg_version_cache
 
 
 def _first_flac_frame(data: bytes) -> int:
