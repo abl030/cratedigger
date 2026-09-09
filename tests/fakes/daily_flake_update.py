@@ -33,9 +33,9 @@ def main():
         args = sys.argv[1:]
 
         def save():
-            # Rename-into-place, never a truncating write. Three poll loops
-            # in tests/test_daily_flake_update.py read this file WITHOUT the
-            # lock while this process holds it, so a plain write_text left a
+            # Rename-into-place, never a truncating write. The stage-marker
+            # wait in tests/test_daily_flake_update.py reads this file WITHOUT
+            # the lock while this process holds it, so a plain write_text left a
             # window in which the path existed and was empty: open(mode="w")
             # truncates before anything is written, and the reader's
             # json.loads raised "Expecting value: line 1 column 1 (char 0)".
@@ -296,8 +296,8 @@ class FakeDailyFlakeUpdateCommands:
 
         Deliberately lock-free. The shim holds ``state.lock`` across its
         hold sleep (`_SHIM_MODULE`'s ``time.sleep`` sits inside the ``with``
-        that takes it), so a locking reader would block the poll loops in
-        tests/test_daily_flake_update.py for the whole hold -- 30 seconds in
+        that takes it), so a locking reader would block the stage-marker wait
+        in tests/test_daily_flake_update.py for the whole hold -- 30 seconds in
         the process-group-term test, whose entire premise is signalling
         DURING the hold. Correctness comes from the writers renaming into
         place instead, so this read can never observe a half-published file.
