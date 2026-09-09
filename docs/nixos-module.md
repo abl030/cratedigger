@@ -906,12 +906,13 @@ the migration completes before the `Requires=` workers come back up.
   guarantees the dependency is **active**, which for a `RemainAfterExit`
   oneshot can mean "succeeded days ago". It blocks startup on a failed
   migration, never on a skipped one.
-- When verifying a deploy, compare the migrate unit's `InvocationID` against a
-  value captured before the switch. `ActiveState` / `SubState` / `Result` on a
-  `RemainAfterExit` oneshot cannot distinguish a fresh run from a stale one.
-  `scripts/verify_cratedigger_cycle.sh` implements exactly that check through
-  its `capture-migrate` and `verify-migrate-ran <pre-switch-invocation>`
-  subcommands.
+- If you ever need to prove the migrate unit ran for a particular switch,
+  compare its `InvocationID` against a value captured before the switch.
+  `ActiveState` / `SubState` / `Result` on a `RemainAfterExit` oneshot cannot
+  distinguish a fresh run from a stale one. The ordinary deploy does not
+  check this: `stopIfChanged = false` is what makes the re-run
+  unskippable, and `scripts/deploy.sh` proves only that doc2 activated the
+  pushed nixosconfig commit.
 
 `nix/tests/module-vm.nix` pins the rendered `X-StopIfChanged=false` and the
 behaviour pair it depends on (a plain `start` is a silent no-op on the active

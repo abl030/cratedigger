@@ -260,8 +260,8 @@ class TestFormatCycleSummary(unittest.TestCase):
 
     def test_summary_preserves_human_prefix(self):
         """Log scrapers match 'Cratedigger cycle complete' and nothing else
-        (scripts/verify_cratedigger_cycle.sh, docs/nixos-module.md), so the
-        prefix is a harder contract than the tokens after it."""
+        (the operator notes in docs/nixos-module.md), so the prefix is a
+        harder contract than the tokens after it."""
         line = format_cycle_summary(CycleCounters(), elapsed_s=1.0)
         self.assertTrue(
             line.startswith("Cratedigger cycle complete"),

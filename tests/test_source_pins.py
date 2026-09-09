@@ -177,16 +177,16 @@ class TestAgainstTheRealDeployRunbook(unittest.TestCase):
     """End-to-end over the real file, driving the exact #1186 mutant."""
 
     def test_commenting_out_a_runbook_step_defeats_its_pin(self) -> None:
-        """`test_skill_calls_tracked_verifier_for_successor_cycle` pins this
-        step. Deleting it goes RED; commenting it out inside the fence left the
-        pin GREEN, which is #1186's founding measurement."""
-        step = 'verify-migrate-ran "$PRE_SWITCH_MIGRATE_INVOCATION"'
+        """`tests.test_deploy` pins the skill's one fenced command. Deleting
+        it goes RED; commenting it out inside the fence left the pin GREEN,
+        which is #1186's founding measurement."""
+        step = "scripts/deploy.sh"
         raw = DEPLOY_SKILL.read_text(encoding="utf-8")
-        # The runbook invokes it twice (ordinary and strict-held deploys), and
-        # a pin is only defeated once EVERY occurrence is disabled.
-        self.assertEqual(raw.count(step), 2)
+        # The runbook is that one command, so a pin is defeated the moment
+        # its only occurrence is disabled.
+        self.assertEqual(raw.count(step), 1)
 
-        commented = raw.replace(f"  {step}", f"  # {step}")
+        commented = raw.replace(f"\n{step}", f"\n# {step}")
         # The defect: still present, as comment text.
         self.assertIn(step, commented)
         # The fix: absent from what the pin actually reads.
@@ -196,9 +196,8 @@ class TestAgainstTheRealDeployRunbook(unittest.TestCase):
         """A must-still-work guard: the stripper must not fail closed on the
         real document by eating headings or live commands."""
         stripped = pinned_source(DEPLOY_SKILL)
-        self.assertIn("## Database migrations", stripped)
-        self.assertIn("env -u SSH_AUTH_SOCK fleet-deploy doc2", stripped)
-        self.assertIn("scripts/verify_cratedigger_cycle.sh", stripped)
+        self.assertIn("# Deploy to doc2", stripped)
+        self.assertIn("scripts/deploy.sh", stripped)
 
 
 if __name__ == "__main__":

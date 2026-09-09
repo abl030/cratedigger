@@ -160,12 +160,17 @@ def _evaluate_mode_worlds() -> dict[str, dict[str, object]]:
     module's ~20s real wall time with all sixteen worlds, but real, not
     "nothing else is affected".
 
-    Residual, out of scope here: ``tests/test_nix_module.py`` has FOUR more
-    call sites using the identical ``getFlake (toString ./.)`` shape
-    (lines 410, 631, 1071, and 1774, as of this writing), unfixed by this
-    change -- and that file is ~97% of the nix phase's wall time (issue
-    #1226), so the false-red generator this fix closes here remains live
-    on the heaviest consumer.
+    The four ``tests/test_nix_module.py`` preambles that used the identical
+    ``getFlake (toString ./.)`` shape were fixed in #1378's deploy-trim PR
+    after the same race fired there on a different churning path
+    (``tests/test_js_harness.mjs``'s transient in-repo fixture under
+    ``tests/_harness_fixtures``): they load the flake as
+    ``git+file://<root>``, whose snapshot carries every tracked file's
+    working-tree content (uncommitted edits included, measured) and no
+    untracked path at all, and take the module's default ``src`` instead
+    of ``./.``. That closes the wider untracked-churn surface this
+    ``__pycache__``-only filter leaves open; this module keeps its filter
+    because ``repoSource`` is also what its own ``src`` reads.
     """
     worlds = "\n            ".join(
         f"{world.key} = evaluate {{ {_nix_web_attrs(world)} }};"

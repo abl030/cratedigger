@@ -1,12 +1,11 @@
 """The environment a fake-command fixture hands its subprocesses.
 
-Three fixtures here put a directory of fake commands on ``PATH`` and let a
+Two fixtures here put a directory of fake commands on ``PATH`` and let a
 real Bash entrypoint drive them: ``daily_flake_update`` (fake
 ``git``/``nix``/``nix-shell``, driving both
-``scripts/daily_flake_update.sh`` and ``scripts/daily_beets_tip_update.sh``),
-``deploy_pin`` (fake ``git``/``nix``/``hostname`` for
-``scripts/pin_nixosconfig.sh``), and ``deploy_cycle`` (a fake ``ssh`` for
-``scripts/verify_cratedigger_cycle.sh``). Each fake command is a two-line
+``scripts/daily_flake_update.sh`` and ``scripts/daily_beets_tip_update.sh``)
+and ``deploy`` (fake ``hostname``/``nix``/``ssh``/``fleet-deploy`` around
+real git for ``scripts/deploy.sh``). Each fake command is a two-line
 Python stub importing one shared ``_shim`` module, so CPython caches the
 shim's bytecode once and reuses it for every later invocation (issue #1156
 items 4 and 5). That caching is what keeps a runner test firing dozens of

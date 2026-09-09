@@ -484,28 +484,18 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
         "tests.test_daily_flake_update",
         "tests.test_daily_beets_tip_update",
     ),
-    "tests/fakes/deploy_cycle.py": (
-        "tests.test_deploy_cycle_verifier",
-        "tests.test_deploy_cycle_verifier_generated",
-    ),
-    "tests/fakes/deploy_hold.py": (
-        "tests.test_deploy_hold",
-        "tests.test_deploy_hold_generated",
-    ),
-    "tests/fakes/deploy_pin.py": (
-        "tests.test_deploy_pin_script",
-        "tests.test_deploy_pin_generated",
+    "tests/fakes/deploy.py": (
+        "tests.test_deploy",
+        "tests.test_deploy_generated",
     ),
     # Same prefix rule, one layer up: it resolves tests.test_fakes and the
-    # derived tests.test_fakes_subprocess_env, masking the loss of the three
+    # derived tests.test_fakes_subprocess_env, masking the loss of the two
     # fixtures whose subprocess environment this module decides.
     "tests/fakes/subprocess_env.py": (
         "tests.test_daily_flake_update",
         "tests.test_daily_beets_tip_update",
-        "tests.test_deploy_cycle_verifier",
-        "tests.test_deploy_cycle_verifier_generated",
-        "tests.test_deploy_pin_script",
-        "tests.test_deploy_pin_generated",
+        "tests.test_deploy",
+        "tests.test_deploy_generated",
     ),
     # The basename probe still resolves tests.web.test_runtime, masking
     # the loss of the two HTTP-boundary modules.

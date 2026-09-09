@@ -599,8 +599,10 @@ cd ~/nixosconfig
 $EDITOR hosts/doc2/configuration.nix          # tweak services.cratedigger.qualityRanks.*
 git add hosts/doc2/configuration.nix
 git commit -S -m "fix(cratedigger): retune <what>"
-# Push the signed commit to the Forgejo deployment root, then:
-env -u SSH_AUTH_SOCK fleet-deploy doc2
+# Push the signed commit to the Forgejo deployment root, then deploy doc2
+# (a nixosconfig-only change: the script finds cratedigger already pinned
+# and just triggers the rebuild and waits for it):
+cd ~/cratedigger && scripts/deploy.sh
 ```
 
 ### How to verify the new config is live

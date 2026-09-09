@@ -46,8 +46,8 @@ exactly these absolute (`level == 0`) shapes:
   no `tests.` prefix at all. This is not a hypothetical shape — it is the
   repository's own sanctioned convention: `tests/test_mock_audit.py`'s
   `TestSysPathAudit` is the policy that allows appending a `tests/` (sub)dir
-  to `sys.path`, 24 existing test files already do it (e.g.
-  `tests/test_deploy_hold.py`'s `sys.path.append(os.path.dirname(__file__))`
+  to `sys.path`, a couple of dozen existing test files already do it (e.g.
+  `tests/test_album_source.py`'s `sys.path.append(os.path.dirname(__file__))`
   + bare `import conftest`), and `tests/ephemeral_slskd.py`'s own docstring
   documents `from ephemeral_slskd import EphemeralSlskd` as ITS usage. A
   grammar that only matched fully-dotted forms would report a registered
@@ -508,8 +508,9 @@ class TestNegativeCoverageCheckerTripsOnViolations(unittest.TestCase):
 
     def test_bare_import_of_leaf_trips(self) -> None:
         """``sys.path.append(os.path.dirname(__file__)); import leaf_target``
-        — the convention 24 existing files use (e.g. tests/test_deploy_hold.py
-        + bare ``import conftest``) and tests/ephemeral_slskd.py's own
+        — the convention a couple of dozen existing files use (e.g.
+        tests/test_album_source.py + bare ``import conftest``) and
+        tests/ephemeral_slskd.py's own
         docstring documents as ITS usage. This was the MUST-FIX gap: the
         prior dotted-only grammar reported 0 violations for this real shape."""
         with tempfile.TemporaryDirectory() as tmp:

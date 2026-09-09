@@ -1,8 +1,39 @@
 # Deployment Rules
 
-- All code deploys via Nix flake: push cratedigger (GitHub) → `scripts/pin_nixosconfig.sh` pins nixosconfig's `cratedigger-src` input to that exact revision on doc1 (a `nix flake update --override-input` pin, never a bare `nix flake update`, which only ever follows the input's branch tip — #1203) → commit (SSH-signed) + push nixosconfig to **Forgejo** → from doc1 run `fleet-deploy doc2` through the locked-sibling forced-command boundary, then poll and verify the asynchronous update.
-- **Since the Forgejo cutover (2026-06-10), nixosconfig deploys come from Forgejo (`git.ablz.au`), NEVER `github:abl030/nixosconfig` — GitHub is a frozen, stale fallback.** The cratedigger repo itself still lives on GitHub; only the nixosconfig leg changed.
-- The Forgejo push needs a token header (gh's credential helper is github.com-only). Configure it through `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_0`, and `GIT_CONFIG_VALUE_0` in the environment, never a `git -c` argv value or remote URL. Never echo the token. The exact example is in `.claude/skills/deploy/SKILL.md`.
+- Merged `main` is production tomorrow morning. doc1's nightly rolling flake
+  update (`rolling-flake-update.service`, 23:00) pins nixosconfig's
+  `cratedigger-src` to the branch tip and pushes a signed commit to
+  **Forgejo** (`git.ablz.au`); doc2's `nixos-upgrade.timer` (04:00, up to an
+  hour of jitter) pulls, verifies every commit's SSH signature against
+  `hosts.nix`, builds from its root-owned clone, and switches, migrations
+  included. The daily Cratedigger gate on doc1 (05:05) then runs against that
+  same pinned source and pages on red. Leave `main` green when you merge;
+  nothing re-gates it before it ships.
+- Deploy by hand only when a change must be live now. The whole runbook is
+  `scripts/deploy.sh`, run from the shared checkout on doc1: it pins
+  `cratedigger-src` to `origin/main` (or a given SHA on it) with
+  `nix flake update --override-input`, never a bare `nix flake update`, which
+  only follows the branch tip (#1203); commits the one-file change, refuses
+  to push it unless `git log --format=%G?` reports a verified SSH signature
+  (doc2 would refuse it, and so would every other host's nightly update
+  until master was fixed); pushes and reads back through nixosconfig's own
+  `~/nixosconfig/scripts/forgejo-auth.sh`, so the token travels as a Git config header in
+  that helper's sanitized environment and never in argv, a URL, or a trace;
+  triggers `fleet-deploy doc2`; waits for that `nixos-upgrade.service`
+  invocation to finish; and requires `/var/lib/fleet-update/last-verified-rev`
+  to equal the commit it pushed. That last check is the one that caught the
+  2026-06-11 incident where the unit went green after rebuilding the frozen
+  GitHub revision. Everything else that used to be verified by hand (migrate
+  invocation, service states, the deployed store path, one or two timer
+  cycles) is not: check the change you shipped through the real CLI, API, or
+  UI instead. The deploy skill is that one command plus that sentence.
+- **Since the Forgejo cutover (2026-06-10), nixosconfig deploys come from Forgejo, NEVER `github:abl030/nixosconfig` — GitHub is a frozen, stale fallback.** The cratedigger repo itself still lives on GitHub; only the nixosconfig leg changed.
+- The fleet trigger key is forced-command authority, never an operator SSH
+  identity. `scripts/deploy.sh` unsets `SSH_AUTH_SOCK` for its whole run so
+  the key it selects explicitly is never cached into the shared agent (and
+  so a wedged forwarded agent cannot hang commit signing). Do not add
+  `fleet-deploy` or deploy-side `ssh` calls outside the script. Direct
+  `fleet-update` on doc2 is not the normal deployment path.
 - **Never pipe a result-bearing command through any downstream pipe target
   inside an `&&` chain unless `pipefail` is explicitly active** —
   `tail`/`head`/`grep` are common examples. This covers gate commands (test
@@ -15,118 +46,25 @@
   monitoring surface read "completed, exit 0, empty output" — triggering a
   redundant second burst mid-deploy. For pushes specifically: check each
   push's exit status directly, then verify the expected remote ref resolves
-  to the pushed commit before any dependent action such as `gh pr merge` or
-  `fleet-deploy`.
-- `fleet-deploy doc2` asynchronously triggers doc2's `nixos-upgrade.service`; the underlying verified update checks every commit in range against the SSH signing keys in `hosts.nix`, then builds from its root-owned clone at `/var/lib/fleet-update/repo`. Capture `InvocationID` before triggering, wait within a bounded timeout for a different nonempty invocation, poll that same invocation's keyed `ActiveState`/`SubState`/`Result` to inactive/dead/success, and require `/var/lib/fleet-update/last-verified-rev` to equal the signed Forgejo commit before declaring success. Direct `fleet-update` on doc2 is not the normal deployment path.
-- The fleet trigger key is forced-command authority, never an operator SSH identity. Run `fleet-deploy` and every deploy-runbook `ssh` command through `env -u SSH_AUTH_SOCK`; the explicit trigger key still works, cannot be cached into the shared agent, and a previously cached trigger key cannot consume an operator command. `scripts/verify_cratedigger_cycle.sh` independently enforces `IdentityAgent=none` on every SSH call. This boundary prevents a verification read from silently retriggering `nixos-upgrade.service` (#837).
+  to the pushed commit before any dependent action such as `gh pr merge`.
 - The NixOS module lives in this repo at `nix/module.nix` (exposed as `nixosModules.default`). The downstream wrapper at `~/nixosconfig/modules/nixos/services/cratedigger.nix` imports it via `inputs.cratedigger-src.nixosModules.default`.
-- Flake updates MUST happen on doc1 (has the Forgejo token + signing key). NEVER from doc2.
-- `restartIfChanged = false` on the cratedigger service — deploys don't restart it. The timer (`OnUnitInactiveSec`, back-to-back cycles) picks up new code on the next cycle. `cratedigger-web` and `cratedigger-db-migrate` use the systemd default and DO restart on switch. `cratedigger-importer.service` DOES restart on switch (`restartIfChanged = true`) and, since issue #1089, drains gracefully rather than dying mid-import — `KillMode = "mixed"` bounds that drain to `TimeoutStopSec = "10min"` worst case before falling back to a cgroup-wide SIGKILL, well inside the deploy skill's own 30-minute `nixos-upgrade.service` wait.
-- Post-switch pipeline verification first derives and checks the exact active
-  source store, then captures the tail cursor of `cratedigger.service`'s
-  journal as a fresh baseline. It enumerates ordered systemd start records
-  after that cursor and captures the first invocation whose invocation-scoped
-  journal names that source, then requires that same
-  invocation's application cycle-complete record and systemd successful
-  deactivation/finished-job records. Journal ordering prevents a short-lived
-  failed target from disappearing between state polls. This post-switch
-  observation boundary is required even for same-source, same-revision
-  retries; a pre-trigger
-  invocation ID is audit evidence only because cycles can roll during the
-  asynchronous build. A later timer invocation replacing the unit's current
-  `InvocationID` is neither success nor failure evidence for the captured
-  target; verify the target itself with `journalctl --invocation=<ID>`.
-- Strict migration holds use `scripts/cratedigger_deploy_hold.py`, never
-  `systemctl mask --runtime`: NixOS `/etc/systemd/system` units outrank the
-  ordinary `/run/systemd/system` mask location, and timer masking does not
-  cancel already-queued service starts. The helper owns exact
-  `/run/systemd/system.control` timer links plus a root-only receipt, drains
-  exact waiting/running jobs without ever masking a service, and releases in
-  controlled-cycle then ordinary-successor stages. Invocation proof remains
-  owned by `scripts/verify_cratedigger_cycle.sh`.
-- **`acquire` masks the three timers and drains `TIMER_DRIVEN_PRODUCER_UNITS`
-  (main, unfindable, watchdog) — letting any in-flight main cycle finish and,
-  bounded by its own shorter timeout, waiting for the still-running
-  importer/preview to drain the automation queue — before it ever takes the
-  metadata-gate manual hold that stops the controlled workers (#1078).**
-  Taking the hold first would stop the very workers that drain the queue,
-  deadlocking against the old-lifecycle preflight this hold exists to prove
-  clean. `active_automation_jobs`/`dirty_downloading_rows` are drainable this
-  way; `recovery_required_jobs`/`malformed_enqueued_at_rows` are anomalies
-  nothing drains (and `recovery_required_jobs` is itself counted inside
-  `active_automation_jobs`'s own SQL), so the wait stops the moment either is
-  dirty and fails fast with the full field dict once the hold is taken,
-  rather than timing out with a misleading diagnosis. `cratedigger-youtube-ingest`
-  is `Type=simple`/`wantedBy=multi-user.target`/`Restart=on-failure` with no
-  timer at all — an always-on daemon nothing before the gate hold ever asks
-  to stop — so it is deliberately drained *after* the hold (alongside the
-  controlled workers, `GATE_STOPPED_UNITS`), never in the pre-hold producer
-  drain; draining it there would wait the full service-drain timeout for
-  nothing. The pre-hold window owns no start inhibitor at all: masking
-  already blocks a fresh *timer* trigger (though not an unrelated hold's
-  own resume-if-clear, which starts `cratedigger.service` directly via the
-  gate's `resume_units` regardless of the timer's mask state), and YouTube
-  is not waited on there, so there is no persistent `/var/lib` artifact to
-  orphan across a reboot.
-- **`abort` releases every object the receipt owns and removes the
-  receipt, returning to ordinary (unheld) operation — the only way out of an
-  acquire that cannot or will never reach HELD** (an anomaly preflight field,
-  a stale controlled-start contract, or a SIGINT/dropped SSH that left the
-  receipt stranded while the host stayed up). Every ownership class is
-  validated before any mutation, so a refusal never leaves the boundary half
-  torn down; every owned object it removes is removed first, then a restarted
-  unit is proven active (`_wait_controlled_workers_active`, the same check
-  `prepare_controlled` uses — a foreign gate hold, e.g. the monthly
-  discogs-import hold, now fails loudly instead of a silent exit-0 no-op)
-  before that object is disowned — except `cratedigger.service`, a
-  `Type=oneshot` that never reaches active/running, which `abort` restarts
-  unproven and disowns without waiting, mirroring `prepare_controlled`'s own
-  main-service handling — so an interrupted retry never sees "nothing owned"
-  while an underlying controlled/YouTube unit is still down. It is
-  safe from every known receipt phase and never touches an object it did not
-  own. **A host reboot clears `/run` — the receipt and every tmpfs
-  ownership marker — but the manual gate hold and the producer start
-  inhibitors under `/var/lib/cratedigger-metadata-gate` are real disk state
-  and can outlive the receipt that took them (#1096).** Each carries its own
-  persistent sibling marker (`deploy-hold-owned-manual`,
-  `deploy-hold-owned-inhibit-<unit>`), written before the object itself and
-  removed only after it, so a receiptless `abort` proves which surviving
-  objects are ours and adopts exactly those — removing every marked
-  inhibitor file first, then releasing a marked manual hold, then restarting
-  once and proving active whatever they blocked (except `cratedigger.service`,
-  restarted unproven and never waited on, the same oneshot exception as the
-  receipt-owned path above), then clearing the markers — ending at the same
-  ordinary, unheld operation every other path through `abort` reaches.
-  Removing the inhibitor files before releasing the hold, rather than the
-  reverse, is what stops a still-present inhibitor from condition-skipping a
-  unit's restart out from under a hold this same call already released
-  (#1096 correction round). It never re-establishes a receipt or a phase:
-  after a reboot there is nothing to recover TO, only ordinary operation to
-  restore. A foreign hold or an unmarked inhibitor is refused exactly as it
-  is under a live receipt, with every marker retained for a rerun once the
-  conflict clears; with no receipt and no persistent marker at all — an
-  ordinary clean boot — `abort` still refuses, so a boot with no prior
-  deploy hold can never turn into a mass restart. `acquire`'s own refusal
-  for an object carrying one of these markers names `abort` as the way out.
-  `recover-held` remains the tool for re-establishing the strict boundary
-  after a failed *release* phase when the receipt survives; it still
-  requires a receipt (the phase knowledge a reboot destroys is exactly what
-  it exists to resume) and does not get you out of a hold that should never
-  have been acquired in the first place, or out of a reboot — the supported
-  reboot recovery is always `abort` followed by a fresh `acquire`. Do not
-  remove `/run/cratedigger-deploy-hold`, its `system.control` links, or the
-  persistent markers under `/var/lib/cratedigger-metadata-gate` by hand —
-  `abort` is the documented alternative for all of them.
-- Always derive the active cratedigger wrapper from `systemctl show cratedigger.service --property=ExecStart --value`, extract its exact `*-source` path from the wrapper, and verify the unique source string there; never glob historical store generations, which can produce a false positive. For module changes, inspect `systemctl cat cratedigger.service` and the wrapper's exact immutable `--config` store path.
+- nixosconfig changes and pins MUST happen on doc1 (has the Forgejo token +
+  signing key). NEVER from doc2.
+- `restartIfChanged = false` on the cratedigger service — deploys don't restart it. The timer (`OnUnitInactiveSec`, back-to-back cycles) picks up new code on the next cycle. `cratedigger-web` and `cratedigger-db-migrate` use the systemd default and DO restart on switch. `cratedigger-importer.service` DOES restart on switch (`restartIfChanged = true`) and, since issue #1089, drains gracefully rather than dying mid-import — `KillMode = "mixed"` bounds that drain to `TimeoutStopSec = "10min"` worst case before falling back to a cgroup-wide SIGKILL.
+- To derive what doc2 is actually running, read the active wrapper from
+  `systemctl show cratedigger.service --property=ExecStart --value` and the
+  exact `*-source` and `--config` store paths inside it; never glob
+  historical store generations, which can produce a false positive, and
+  never read `/var/lib/cratedigger/config.ini`, which no longer exists
+  (#1276).
 - Before deploying changes to `nix/module.nix`, run the VM check: `nix build .#checks.x86_64-linux.moduleVm`.
 - **Every `nix flake update nixpkgs` in cratedigger must re-run the real-beets drift gate** (`tests/test_harness_beets2_contract.py` inside the re-pinned shell, plus the full suite): the repository lock is Cratedigger's last verified standalone reference snapshot. `scripts/daily_flake_update.sh` updates only that node. `scripts/daily_beets_tip_update.sh` separately updates only the checks-only tip node under the same state lock; neither runner supplies the deployment-owned Beets runtime package.
 - Deployment consumes the pushed revision's final pre-push confirmation. Do not
   replay those checks during deploy when the revision is unchanged.
-- Use the `/deploy` command for the full sequence.
 
 ## Post-ship reflection (after live verification, before ending the session)
 
-The end of a shipped series is the only moment its debt is cheap to see — the session context still holds what reviews caught by hand, what got fixed twice, and what scar tissue the work itself introduced. Once the session ends, that knowledge is gone and the next reviewer pays for it again. So, after live verification of a non-trivial series (skip for typo-level deploys):
+The end of a shipped series is the only moment its debt is cheap to see — the session context still holds what reviews caught by hand, what got fixed twice, and what scar tissue the work itself introduced. Once the session ends, that knowledge is gone and the next reviewer pays for it again. So, after a non-trivial series has merged (skip for typo-level changes):
 
 1. **Reflect in your own context**, mining: review findings that were deferred as non-blocking; anything you fixed more than once or in more than one place; duplication or boilerplate the series itself added; "would a structural audit have caught this for free?"; process failures worth encoding as rules.
 2. **Rank by value-for-effort, then de-dupe against open issues** (`gh issue list` — read the bodies of the open refactor issues, not just titles). De-dupe is mandatory; a duplicate covering issue is worse than none.
@@ -145,24 +83,36 @@ The end of a shipped series is the only moment its debt is cheap to see — the 
   there leaves `/run/cratedigger-secrets` stale after a sops rotation. Apply it
   when writing such a unit, not after finding the second ingredient.
 - **`Requires=` on a `RemainAfterExit` oneshot cannot force a re-run.** It is satisfied by the unit merely being active, so the four workers' `requires` edge protects against a migration that FAILED, never against one that never ran. Their only real protection is that the migration now cannot be skipped.
-- **Post-switch verification must prove the migrate unit ran FOR THIS SWITCH.** `ActiveState=active`/`SubState=exited`/`Result=success` are satisfied by a run from days ago. Run `scripts/verify_cratedigger_cycle.sh`'s `capture-migrate` before `fleet-deploy` and assert with its `verify-migrate-ran <pre-switch-invocation>` after; it compares `InvocationID` and only then checks the state triple. The metadata gate hold never stops the migrate unit, so this check applies to ordinary and strict-held deploys alike. `cratedigger.service` and `cratedigger-unfindable.service` deliberately do NOT `requires` it (only `wants`+`after`): both are timer-driven with `restartIfChanged = false`, and the migrate unit's `ExecStart` store path changes on every deploy, so a `requires` edge would propagate the migrate unit's every-switch restart as a SIGTERM to a mid-flight cycle. Those two instead gate on schema currency themselves at startup (`lib/migrator.py::assert_schema_current`, called from `cratedigger.py::main()` / `scripts/run_unfindable_detection.py::main()`) — a behind/missing schema still aborts them before any work runs.
+- Nothing in the ordinary deploy proves the migrate unit ran for a given
+  switch; `stopIfChanged = false` is the protection, and `ActiveState=active`
+  / `SubState=exited` / `Result=success` are satisfied by a run from days
+  ago. If you ever need that proof, compare the unit's `InvocationID` against
+  a value captured before the switch. `cratedigger.service` and
+  `cratedigger-unfindable.service` deliberately do NOT `requires` the migrate
+  unit (only `wants`+`after`): both are timer-driven with
+  `restartIfChanged = false`, and the migrate unit's `ExecStart` store path
+  changes on every deploy, so a `requires` edge would propagate its
+  every-switch restart as a SIGTERM to a mid-flight cycle. Those two instead
+  gate on schema currency themselves at startup
+  (`lib/migrator.py::assert_schema_current`, called from
+  `cratedigger.py::main()` / `scripts/run_unfindable_detection.py::main()`) —
+  a behind/missing schema still aborts them before any work runs.
 - To add a schema change: drop a new numbered SQL file in `migrations/`. The next deploy applies it. No manual psql, no out-of-band steps. See `.claude/rules/pipeline-db.md` for the full workflow.
-- Backup before any destructive migration: `env -u SSH_AUTH_SOCK ssh doc2 'pg_dump -h 10.20.0.11 -U cratedigger cratedigger' > /tmp/cratedigger_backup_$(date +%Y%m%d_%H%M%S).sql`
-- After deploy, verify the migration ran with `pipeline-cli query` on doc2 after exporting `PGPASSWORD` from `/run/secrets/cratedigger-pgpass`, passing the SQL through stdin as shown in `.claude/skills/deploy/SKILL.md`; never print the password or pass it from another host.
-- If a migration fails, check `env -u SSH_AUTH_SOCK ssh doc2 'sudo journalctl -u cratedigger-db-migrate.service'` for the error.
+- Deploys are unattended, so a migration must apply against a running world:
+  the main cycle may be mid-flight (its `restartIfChanged = false`) while the
+  four workers are stopped for the switch. Write constraints over live
+  lifecycle rows so they hold on whatever the running pipeline can leave
+  behind, or stage them (`NOT VALID` then `VALIDATE`). There is no quiesce
+  hold; the strict-hold helper that once masked the timers and drained the
+  queue around migration 066 was deleted in #1378 along with the ceremony it
+  served.
+- Backup before any destructive migration: `ssh doc2 'pg_dump -h 10.20.0.11 -U cratedigger cratedigger' > "$CLAUDE_JOB_DIR/tmp/cratedigger_backup_$(date +%Y%m%d_%H%M%S).sql"`
+- After a deploy that carried a migration, confirm it applied with `pipeline-cli query` on doc2 (`SELECT version, name, applied_at FROM schema_migrations ORDER BY version DESC LIMIT 5;`), exporting `PGPASSWORD` from `/run/secrets/cratedigger-pgpass` on doc2 and passing the SQL through stdin; never print the password or pass it from another host.
+- If a migration fails, check `ssh doc2 'sudo journalctl -u cratedigger-db-migrate.service'` for the error.
 - **Migration 066 (processing ownership, #898) is a hard forward-only boundary.**
   Once applied, never repin cratedigger to a pre-#898 source — not even at zero
   `processing` rows. 066 installs the `processing` status, the
   `active_automation_import_job_id` owner equivalence CHECK, a partial unique
   index over active `automation_import` jobs, deferred constraint triggers, and
   the `processing_cleanup_journal` table; a repinned pre-#898 writer violates
-  them at COMMIT rather than failing cleanly. Forward-fix only. The
-  quiesce/hold preconditions the migration depends on are proven by
-  `scripts/cratedigger_deploy_hold.py::lifecycle_preflight`, which blocks
-  `acquire` unless active automation jobs, `recovery_required` jobs, and dirty
-  `downloading` rows are all zero.
-- `TIMER_UNITS` in `scripts/cratedigger_deploy_hold.py` deliberately excludes
-  `cratedigger-retag-census.timer` (#1142): that daily census oneshot has no
-  pipeline-DB dependency and never mutates Beets — it only reads Beets and
-  writes its own unrelated JSON snapshot file — so it touches nothing a
-  migration hold exists to quiesce and is safe to leave running through one.
+  them at COMMIT rather than failing cleanly. Forward-fix only.

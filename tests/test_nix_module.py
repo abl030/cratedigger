@@ -251,6 +251,21 @@ class TestDecisionDifferentialWrapperContract(unittest.TestCase):
 #: nix eval to detect, not one per consumer.
 _NIX_EVAL_CACHE: dict[str, dict[str, object] | Exception] = {}
 
+#: No expression below ever hands Nix the live repository tree. The
+#: JavaScript phase runs concurrently with this one, and
+#: ``tests/test_js_harness.mjs`` writes a transient in-repo fixture under
+#: ``tests/_harness_fixtures`` for the length of one child process; an
+#: eval whose store copy of ``./.`` began while that directory existed
+#: died with "path .../tests/_harness_fixtures does not exist"
+#: (2026-09-09, #1378). Two halves close that: the preambles load the
+#: flake as ``git+file://<root>``, whose snapshot carries every tracked
+#: file's working-tree content (uncommitted edits included, measured) but
+#: no untracked path, and every world takes the flake module's default
+#: ``src`` (the ``runtimeSrc`` fileset, computed inside that snapshot)
+#: instead of overriding it with ``./.``, which was a second full walk of
+#: the live tree per world. A brand-new file must be ``git add``ed before
+#: these worlds can see it, which fails loudly rather than silently.
+
 
 def _cached_nix_eval_json(expression: str) -> dict[str, object]:
     """Run one ``nix eval --json`` at most once per process per expression."""
@@ -407,7 +422,7 @@ def _shared_module_worlds_web_auth_matrix_part1() -> dict[str, object]:
     """
     expression = r'''
       let
-        f = builtins.getFlake (toString ./.);
+        f = builtins.getFlake ("git+file://" + toString ./.);
         lib = f.inputs.nixpkgs.lib;
         modulePkgs = import f.inputs.nixpkgs {
           system = builtins.currentSystem;
@@ -426,7 +441,6 @@ def _shared_module_worlds_web_auth_matrix_part1() -> dict[str, object]:
                     ({ ... }: {
                       services.cratedigger = {
                         enable = true;
-                        src = ./.;
                         slskd.apiKeyFile = "/run/secrets/slskd-key";
                         slskd.downloadDir = "/srv/slskd";
                         pipelineDb.createLocally = true;
@@ -628,7 +642,7 @@ def _shared_module_worlds_web_auth_matrix_part2() -> dict[str, object]:
     """
     expression = r'''
       let
-        f = builtins.getFlake (toString ./.);
+        f = builtins.getFlake ("git+file://" + toString ./.);
         lib = f.inputs.nixpkgs.lib;
         modulePkgs = import f.inputs.nixpkgs {
           system = builtins.currentSystem;
@@ -647,7 +661,6 @@ def _shared_module_worlds_web_auth_matrix_part2() -> dict[str, object]:
                     ({ ... }: {
                       services.cratedigger = {
                         enable = true;
-                        src = ./.;
                         slskd.apiKeyFile = "/run/secrets/slskd-key";
                         slskd.downloadDir = "/srv/slskd";
                         pipelineDb.createLocally = true;
@@ -1068,7 +1081,7 @@ def _shared_module_worlds_rest() -> dict[str, object]:
     """
     expression = r'''
       let
-        f = builtins.getFlake (toString ./.);
+        f = builtins.getFlake ("git+file://" + toString ./.);
         lib = f.inputs.nixpkgs.lib;
         modulePkgs = import f.inputs.nixpkgs {
           system = builtins.currentSystem;
@@ -1085,7 +1098,6 @@ def _shared_module_worlds_rest() -> dict[str, object]:
                 ({ ... }: {
                   services.cratedigger = {
                     enable = true;
-                    src = ./.;
                     slskd.apiKeyFile = "/run/secrets/slskd-key";
                     slskd.downloadDir = "/srv/slskd";
                     pipelineDb.createLocally = true;
@@ -1128,7 +1140,6 @@ def _shared_module_worlds_rest() -> dict[str, object]:
                       networking.enableIPv6 = enableIPv6;
                       services.cratedigger = {
                         enable = true;
-                        src = ./.;
                         user = "cratedigger";
                         group = "cratedigger";
                         slskd.apiKeyFile = "/run/secrets/slskd-key";
@@ -1260,7 +1271,6 @@ def _shared_module_worlds_rest() -> dict[str, object]:
                   ({ ... }: {
                     services.cratedigger = {
                       enable = true;
-                      src = ./.;
                       packageSet = modulePkgs;
                       slskd.apiKeyFile = "/run/secrets/slskd-key";
                       slskd.downloadDir = "/srv/slskd";
@@ -1294,7 +1304,6 @@ def _shared_module_worlds_rest() -> dict[str, object]:
                   ({ ... }: {
                     services.cratedigger = {
                       enable = true;
-                      src = ./.;
                       packageSet = modulePkgs;
                       inherit user group;
                       slskd.apiKeyFile = "/run/secrets/slskd-key";
@@ -1323,7 +1332,6 @@ def _shared_module_worlds_rest() -> dict[str, object]:
                 ({ ... }: {
                   services.cratedigger = {
                     enable = true;
-                    src = ./.;
                     packageSet = modulePkgs;
                     slskd.apiKeyFile = "/run/secrets/slskd-key";
                     slskd.downloadDir = "/srv/slskd";
@@ -1412,7 +1420,6 @@ def _shared_module_worlds_rest() -> dict[str, object]:
                 ({ ... }: {
                   services.cratedigger = {
                     enable = true;
-                    src = ./.;
                     packageSet = modulePkgs;
                     slskd.apiKeyFile = "/run/secrets/slskd-key";
                     slskd.downloadDir = "/srv/slskd";
@@ -1475,7 +1482,6 @@ def _shared_module_worlds_rest() -> dict[str, object]:
                     ({ ... }: {
                       services.cratedigger = {
                         enable = true;
-                        src = ./.;
                         slskd.apiKeyFile = "/run/secrets/slskd-key";
                         slskd.downloadDir = "/srv/slskd";
                         pipelineDb.createLocally = true;
@@ -1565,7 +1571,6 @@ def _shared_module_worlds_rest() -> dict[str, object]:
                     ({ ... }: {
                       services.cratedigger = {
                         enable = true;
-                        src = ./.;
                         slskd.apiKeyFile = "/run/secrets/slskd-key";
                         slskd.downloadDir = "/srv/slskd";
                         pipelineDb.createLocally = true;
@@ -1875,7 +1880,7 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
     def test_injected_basic_path_cannot_render_toplevel(self) -> None:
         expression = r'''
           let
-            f = builtins.getFlake (toString ./.);
+            f = builtins.getFlake ("git+file://" + toString ./.);
             modulePkgs = import f.inputs.nixpkgs {
               system = builtins.currentSystem;
             };
@@ -1888,7 +1893,6 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
                 ({ ... }: {
                   services.cratedigger = {
                     enable = true;
-                    src = ./.;
                     user = "cratedigger";
                     group = "cratedigger";
                     slskd.apiKeyFile = "/run/secrets/slskd-key";
