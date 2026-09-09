@@ -6,9 +6,10 @@
   **Forgejo** (`git.ablz.au`); doc2's `nixos-upgrade.timer` (04:00, up to an
   hour of jitter) pulls, verifies every commit's SSH signature against
   `hosts.nix`, builds from its root-owned clone, and switches, migrations
-  included. The daily Cratedigger gate on doc1 (05:05) then runs against that
-  same pinned source and pages on red. Leave `main` green when you merge;
-  nothing re-gates it before it ships.
+  included. The daily Cratedigger gate on doc1 (05:05) clones `main`'s tip
+  into a fresh checkout and tests it against current nixpkgs unstable,
+  paging on red; it neither reads the pin nor runs before the switch. Leave
+  `main` green when you merge; nothing re-gates it before it ships.
 - Deploy by hand only when a change must be live now. The whole runbook is
   `scripts/deploy.sh`, run from the shared checkout on doc1: it pins
   `cratedigger-src` to `origin/main` (or a given SHA on it) with

@@ -264,7 +264,11 @@ _NIX_EVAL_CACHE: dict[str, dict[str, object] | Exception] = {}
 #: ``src`` (the ``runtimeSrc`` fileset, computed inside that snapshot)
 #: instead of overriding it with ``./.``, which was a second full walk of
 #: the live tree per world. A brand-new file must be ``git add``ed before
-#: these worlds can see it, which fails loudly rather than silently.
+#: these worlds can see it, which fails loudly rather than silently. A tree
+#: with no ``.git`` at all (a ``git archive`` snapshot, which is where the
+#: mutant runner works) cannot be fetched as ``git+file``, so the preamble
+#: falls back to the plain path there: no concurrent phase runs in such a
+#: snapshot, so the race this guards against cannot occur in it.
 
 
 def _cached_nix_eval_json(expression: str) -> dict[str, object]:
@@ -422,7 +426,11 @@ def _shared_module_worlds_web_auth_matrix_part1() -> dict[str, object]:
     """
     expression = r'''
       let
-        f = builtins.getFlake ("git+file://" + toString ./.);
+        f = builtins.getFlake (
+          if builtins.pathExists ./.git
+          then "git+file://" + toString ./.
+          else toString ./.
+        );
         lib = f.inputs.nixpkgs.lib;
         modulePkgs = import f.inputs.nixpkgs {
           system = builtins.currentSystem;
@@ -642,7 +650,11 @@ def _shared_module_worlds_web_auth_matrix_part2() -> dict[str, object]:
     """
     expression = r'''
       let
-        f = builtins.getFlake ("git+file://" + toString ./.);
+        f = builtins.getFlake (
+          if builtins.pathExists ./.git
+          then "git+file://" + toString ./.
+          else toString ./.
+        );
         lib = f.inputs.nixpkgs.lib;
         modulePkgs = import f.inputs.nixpkgs {
           system = builtins.currentSystem;
@@ -1081,7 +1093,11 @@ def _shared_module_worlds_rest() -> dict[str, object]:
     """
     expression = r'''
       let
-        f = builtins.getFlake ("git+file://" + toString ./.);
+        f = builtins.getFlake (
+          if builtins.pathExists ./.git
+          then "git+file://" + toString ./.
+          else toString ./.
+        );
         lib = f.inputs.nixpkgs.lib;
         modulePkgs = import f.inputs.nixpkgs {
           system = builtins.currentSystem;
@@ -1880,7 +1896,11 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
     def test_injected_basic_path_cannot_render_toplevel(self) -> None:
         expression = r'''
           let
-            f = builtins.getFlake ("git+file://" + toString ./.);
+            f = builtins.getFlake (
+          if builtins.pathExists ./.git
+          then "git+file://" + toString ./.
+          else toString ./.
+        );
             modulePkgs = import f.inputs.nixpkgs {
               system = builtins.currentSystem;
             };

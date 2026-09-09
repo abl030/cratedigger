@@ -746,8 +746,9 @@ pkgs.testers.nixosTest {
       # never invokes yt-dlp (empty queue), so this is exercised only at
       # the wrapper-render seam: we assert the flag lands in the ExecStart.
       youtubeIngest.sourceAddress = "10.0.2.15";
-      # Render the real NixOS-managed timer while keeping it far from firing.
-      # Later scenarios inspect the actual /etc unit path.
+      # Render the real NixOS-managed timer while keeping it far from firing:
+      # the module's timer wiring is exercised, and no scenario below wants
+      # a cycle starting on its own.
       timer = {
         enable = true;
         onBootSec = "1d";
@@ -1275,10 +1276,17 @@ pkgs.testers.nixosTest {
     # The synthetic first-boot config hold condition-skipped every held
     # application unit at boot, and systemd never retries a condition-
     # skipped start on its own. Release the hold, bring the long-running
-    # workers up, and run one main cycle to completion -- the exact unit
-    # starts the downstream release used to perform here -- before the
-    # scenarios below reason about lifecycles and count admissions since
-    # boot.
+    # workers up, then start one main cycle and wait for it to leave
+    # activating: the same unit starts, in the same order, that the deleted
+    # deploy-hold release performed here (its start_unit for the three
+    # controlled workers, then `systemctl start --no-block
+    # cratedigger.service`, then a producer drain). That cycle reaches its
+    # Beets admission line (measured: exactly one main admission since boot
+    # once it has finished), which is the single main admission the
+    # since-boot counts further down expect, exactly as the release's own
+    # cycle supplied it before the hold was removed. The later fresh-start
+    # scenario's `grep -q` for the same line is therefore satisfied by this
+    # one; the count assertion is what actually holds the total.
     machine.succeed("rm /run/cratedigger-test-config-hold")
     machine.succeed(
         "systemctl start cratedigger-web.service "
@@ -1299,6 +1307,11 @@ pkgs.testers.nixosTest {
         "&& systemctl show cratedigger.service --property=ActiveState --value "
         "| grep -Eqx 'inactive|failed'"
     )
+    admissions_after_release_cycle = machine.succeed(
+        "journalctl -b -u cratedigger.service -o cat "
+        "| grep -c 'Beets configuration admitted for main' || true"
+    ).strip()
+    assert admissions_after_release_cycle == "1", admissions_after_release_cycle
 
     # The timer-owned main service must survive both a healthy restart and a
     # failed restart of an external readiness producer. Hold one live

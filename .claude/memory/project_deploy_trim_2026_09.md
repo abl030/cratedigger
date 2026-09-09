@@ -15,7 +15,8 @@ we do deploy we don't need to baby it at all". Both deletions were confirmed:
 Merged `main` is production the next morning: doc1's `rolling-flake-update`
 (23:00) pins `cratedigger-src` to the tip and pushes a signed commit to Forgejo,
 doc2's `nixos-upgrade.timer` (04:00, up to 1h jitter) applies it, migrations
-included, and the daily gate (05:05) runs against that pinned source. To ship
+included; the daily gate (05:05) then tests main's tip against nixpkgs
+unstable, after the fact, never the pin itself. To ship
 sooner, `scripts/deploy.sh` from the shared checkout on doc1 is the whole
 runbook; then check the change itself. Deleted with the ceremony:
 `scripts/cratedigger_deploy_hold.py`, `scripts/verify_cratedigger_cycle.sh`,

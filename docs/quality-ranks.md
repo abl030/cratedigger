@@ -594,14 +594,19 @@ sudo nixos-rebuild switch --flake .
 For the abl030 homelab (this project's reference deployment):
 
 ```bash
-# On doc1 — has git push credentials for nixosconfig
+# On doc1 — has the Forgejo token and the signing key
 cd ~/nixosconfig
 $EDITOR hosts/doc2/configuration.nix          # tweak services.cratedigger.qualityRanks.*
 git add hosts/doc2/configuration.nix
 git commit -S -m "fix(cratedigger): retune <what>"
-# Push the signed commit to the Forgejo deployment root, then deploy doc2
-# (a nixosconfig-only change: the script finds cratedigger already pinned
-# and just triggers the rebuild and waits for it):
+# Push the signed commit to Forgejo master through the token boundary
+# (never a bare git push: the token travels as a header, not in argv or a URL).
+~/nixosconfig/scripts/forgejo-auth.sh git-push --repo ~/nixosconfig --remote origin \
+  --expected-fetch-url https://git.ablz.au/abl030/nixosconfig.git \
+  --expected-push-url https://git.ablz.au/abl030/nixosconfig.git \
+  --token-file /run/secrets/forgejo/nixbot-token --refspec HEAD:refs/heads/master
+# Deploy doc2. The script also pins cratedigger's current origin/main, which
+# is what the nightly roll would ship anyway, then triggers and waits.
 cd ~/cratedigger && scripts/deploy.sh
 ```
 

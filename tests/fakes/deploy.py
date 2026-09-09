@@ -97,7 +97,10 @@ def main(command):
             fail(path, state, f"unexpected flake ref: {ref!r}", 2)
         lock_path = Path.cwd() / "flake.lock"
         lock = json.loads(lock_path.read_text(encoding="utf-8"))
-        lock["nodes"]["cratedigger-src"]["locked"]["rev"] = ref[len(prefix):]
+        pinned = ref[len(prefix):]
+        if state["fault"] == "nix_wrong_rev":
+            pinned = "e" * 40
+        lock["nodes"]["cratedigger-src"]["locked"]["rev"] = pinned
         lock_path.write_text(json.dumps(lock, indent=2, sort_keys=True) + "\n",
                              encoding="utf-8")
         if state["fault"] == "nix_extra_file":
@@ -107,7 +110,14 @@ def main(command):
         record(state, "ssh", host, remote)
         if state["fault"] == "ssh":
             fail(path, state, "ssh: connect to host doc2: fake failure", 255)
-        if "systemctl show nixos-upgrade.service" in remote and "--value" in remote:
+        if ("systemctl show nixos-upgrade.service" in remote
+                and "--property=ActiveState --value" in remote):
+            states = state["previous_active_states"]
+            index = min(state["previous_active_index"], len(states) - 1)
+            state["previous_active_index"] += 1
+            print(states[index])
+        elif ("systemctl show nixos-upgrade.service" in remote
+                and "--property=InvocationID --value" in remote):
             print(state["previous_invocation"])
         elif "systemctl show nixos-upgrade.service" in remote:
             states = state["upgrade_states"]
@@ -154,6 +164,10 @@ def main(command):
             os.execvp("git", ["git", "-C", repo, "push", "--quiet", remote,
                               "--", options["--refspec"]])
         elif sub == "git-ls-remote":
+            if state["fault"] == "readback_stale":
+                print("d" * 40 + "\t" + options["--ref"])
+                save(path, state)
+                raise SystemExit(0)
             save(path, state)
             os.execvp("git", ["git", "-C", repo, "ls-remote", "--exit-code",
                               "--refs", remote, options["--ref"]])
@@ -235,6 +249,8 @@ class FakeDeployWorld:
             "events": [],
             "fault": None,
             "previous_invocation": PREVIOUS_INVOCATION,
+            "previous_active_states": ["inactive"],
+            "previous_active_index": 0,
             "upgrade_states": successful_upgrade_states(),
             "upgrade_state_index": 0,
             "anchor": None,
@@ -330,7 +346,7 @@ class FakeDeployWorld:
         self.git(self.nixosconfig, "push", "--quiet", "-u", "origin", "master")
         return self.git(self.nixosconfig, "rev-parse", "HEAD")
 
-    def write_lock(self, revision: str) -> None:
+    def write_lock(self, revision: str, *, input_type: str = "github") -> None:
         lock = {
             "nodes": {
                 "cratedigger-src": {
@@ -340,12 +356,12 @@ class FakeDeployWorld:
                         "owner": "abl030",
                         "repo": "cratedigger",
                         "rev": revision,
-                        "type": "github",
+                        "type": input_type,
                     },
                     "original": {
                         "owner": "abl030",
                         "repo": "cratedigger",
-                        "type": "github",
+                        "type": input_type,
                     },
                 },
                 "root": {"inputs": {"cratedigger-src": "cratedigger-src"}},
@@ -357,14 +373,17 @@ class FakeDeployWorld:
             json.dumps(lock, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
 
+    def commit_forgejo_master(self, message: str) -> str:
+        """Commit the clone's current ``flake.lock`` signed and push it."""
+        self.git(self.nixosconfig, "add", "flake.lock")
+        self.git(self.nixosconfig, "commit", "--quiet", "-m", message)
+        self.git(self.nixosconfig, "push", "--quiet", "origin", "master")
+        return self.git(self.nixosconfig, "rev-parse", "HEAD")
+
     def pin_forgejo_master(self, revision: str) -> str:
         """Advance the fixture's Forgejo master to a signed pin of ``revision``."""
         self.write_lock(revision)
-        self.git(self.nixosconfig, "add", "flake.lock")
-        self.git(self.nixosconfig, "commit", "--quiet", "-m",
-                 f"cratedigger: fixture pin {revision[:12]}")
-        self.git(self.nixosconfig, "push", "--quiet", "origin", "master")
-        return self.git(self.nixosconfig, "rev-parse", "HEAD")
+        return self.commit_forgejo_master(f"cratedigger: fixture pin {revision[:12]}")
 
     # -- state ---------------------------------------------------------------
 

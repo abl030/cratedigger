@@ -1,5 +1,9 @@
 # Authoritative systemd deploy holds on NixOS
 
+> Superseded 2026-09-09 (#1378): the deploy-hold helper and cycle verifier
+> this records were deleted along with the by-hand deploy ceremony. Kept as
+> the history of why `system.control` masks and receipts were needed.
+
 Issue [#750](https://github.com/abl030/cratedigger/issues/750) records two
 separate systemd races that made the former strict-deploy recipe unsafe.
 

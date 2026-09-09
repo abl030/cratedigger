@@ -22,13 +22,16 @@ SKILL = REPO_ROOT / ".claude" / "skills" / "deploy" / "SKILL.md"
 
 class TestDeployShellContract(unittest.TestCase):
     def test_entrypoint_is_explicit_bash_and_clean(self) -> None:
-        source = SCRIPT.read_text(encoding="utf-8")
-        self.assertEqual(source.splitlines()[0], "#!/usr/bin/env bash")
-        self.assertEqual(find_shell_contract_violations(source), ())
-        self.assertIn("set -euo pipefail", source)
+        raw = SCRIPT.read_text(encoding="utf-8")
+        self.assertEqual(raw.splitlines()[0], "#!/usr/bin/env bash")
+        self.assertEqual(find_shell_contract_violations(raw), ())
+        # Presence is asserted on the comment-stripped source (#1172/#1186):
+        # a commented-out line must not satisfy the pin.
+        live = pinned_source(SCRIPT)
+        self.assertIn("set -euo pipefail", live)
         # The fleet trigger key must never reach the shared agent, and a
         # wedged forwarded agent hangs commit signing.
-        self.assertIn("unset SSH_AUTH_SOCK", source)
+        self.assertIn("unset SSH_AUTH_SOCK", live)
 
     def test_real_unquoted_git_format_shape_is_rejected(self) -> None:
         bad = 'test "$(git log -1 --format=%G?)" = G\n'
@@ -41,8 +44,10 @@ class TestDeployShellContract(unittest.TestCase):
     def test_skill_runs_the_script_and_carries_no_runbook(self) -> None:
         """The skill invokes the one entrypoint; the state machine lives in
         the script, never copied back into prose an agent re-narrates."""
-        source = pinned_source(SKILL)
-        self.assertIn("scripts/deploy.sh", source)
+        self.assertIn("scripts/deploy.sh", pinned_source(SKILL))
+        # Absence is asserted on the raw text: a copied step hiding behind a
+        # comment marker is still a copied step.
+        raw = SKILL.read_text(encoding="utf-8")
         for copied_step in (
             "worktree add",
             "GIT_CONFIG_VALUE_0",
@@ -50,7 +55,7 @@ class TestDeployShellContract(unittest.TestCase):
             "verify-migrate-ran",
             "last-verified-rev",
         ):
-            self.assertNotIn(copied_step, source)
+            self.assertNotIn(copied_step, raw)
 
 
 class TestDeployScript(unittest.TestCase):
@@ -133,6 +138,70 @@ class TestDeployScript(unittest.TestCase):
         self.assertNotIn("forgejo-auth", self._event_names())
         self.assertEqual(self._event_names().count("fleet-deploy"), 1)
         self.assertIn(f"doc2 activated nixosconfig {pinned}", proc.stdout)
+
+    def test_in_flight_upgrade_is_waited_out_before_the_trigger(self) -> None:
+        """A running upgrade absorbs a trigger into its own job; the script
+        lets it finish so the trigger mints a fresh invocation."""
+        self.world.update_state(
+            previous_active_states=["activating", "active", "inactive"],
+        )
+
+        proc = self.world.run()
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("already running on doc2; waiting", proc.stdout)
+        names = self._event_names()
+        active_reads = [
+            index for index, event in enumerate(self.world.events())
+            if event[0] == "ssh" and "--property=ActiveState --value" in str(event[2])
+        ]
+        self.assertGreaterEqual(len(active_reads), 3)
+        self.assertLess(active_reads[-1], names.index("fleet-deploy"))
+        self.assertIn("doc2 activated nixosconfig", proc.stdout)
+
+    def test_in_flight_upgrade_that_never_finishes_times_out(self) -> None:
+        self.world.update_state(previous_active_states=["active"])
+
+        proc = self.world.run(extra_env={"CRATEDIGGER_DEPLOY_TIMEOUT_SECONDS": "1"})
+
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("in-flight nixos-upgrade on doc2 to finish", proc.stderr)
+        self.assertNotIn("fleet-deploy", self._event_names())
+
+    def test_non_github_flake_input_is_refused_before_any_update(self) -> None:
+        self.world.write_lock(self.world.old_target, input_type="git")
+        base = self.world.commit_forgejo_master("fixture: git-typed input")
+
+        proc = self.world.run()
+
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("not a github flake input", proc.stderr)
+        self.assertNotIn("nix", self._event_names())
+        self.assertNotIn("forgejo-auth", self._event_names())
+        self.assertEqual(self.world.forgejo_master(), base)
+        self.assertEqual(len(self.world.nixosconfig_worktrees()), 1)
+
+    def test_update_that_pins_the_wrong_revision_is_refused(self) -> None:
+        self.world.update_state(fault="nix_wrong_rev")
+
+        proc = self.world.run()
+
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("does not pin", proc.stderr)
+        self.assertNotIn("forgejo-auth", self._event_names())
+        self.assertEqual(self.world.forgejo_master(), self.world.nixosconfig_base)
+
+    def test_stale_readback_after_push_is_a_failed_deploy(self) -> None:
+        """The push landed but Forgejo answered with another master: no
+        trigger, and the retry simply finds the pin already there."""
+        self.world.update_state(fault="readback_stale")
+
+        proc = self.world.run()
+
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("Forgejo master is " + "d" * 40, proc.stderr)
+        self.assertNotIn("fleet-deploy", self._event_names())
+        self.assertEqual(self.world.forgejo_master_pins(), self.world.main_tip)
 
     def test_wrong_host_refuses_before_touching_anything(self) -> None:
         self.world.update_state(hostname="doc2")

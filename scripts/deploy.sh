@@ -52,6 +52,9 @@ die() {
 }
 
 cleanup() {
+  # The pin worktree is private and dirty by construction (a detached HEAD
+  # carrying the pin commit), so --force is the only way to remove it;
+  # nothing in it is ever the operator's work.
   if [[ -n "$worktree" ]]; then
     git -C "$NIXOSCONFIG_REPO" worktree remove --force "$worktree" \
       >/dev/null 2>&1 || rm -rf "$worktree"
@@ -131,6 +134,29 @@ else
 fi
 
 # --- trigger doc2 and wait for that run -------------------------------------
+
+# An upgrade already running (the nightly window, or a trigger someone else
+# sent) absorbs a new trigger into its own job and never mints a fresh
+# invocation, so the wait below would burn its whole deadline on nothing.
+# Let it finish first; it may even be shipping this very pin.
+deadline=$((SECONDS + TIMEOUT_SECONDS))
+announced=0
+while :; do
+  active=$(ssh "$DEPLOY_HOST" \
+    'systemctl show nixos-upgrade.service --property=ActiveState --value') \
+    || die "could not read nixos-upgrade state on $DEPLOY_HOST"
+  case "$active" in
+    activating|active|reloading|deactivating) ;;
+    *) break ;;
+  esac
+  ((SECONDS < deadline)) \
+    || die "timed out after ${TIMEOUT_SECONDS}s waiting for an in-flight nixos-upgrade on $DEPLOY_HOST to finish"
+  if ((announced == 0)); then
+    stage "nixos-upgrade already running on $DEPLOY_HOST; waiting for it to finish"
+    announced=1
+  fi
+  sleep "$POLL_SECONDS"
+done
 
 previous=$(ssh "$DEPLOY_HOST" \
   'systemctl show nixos-upgrade.service --property=InvocationID --value') \

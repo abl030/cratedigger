@@ -110,7 +110,7 @@ The race was lost by about one second: the reconciler's start landed at
    unit state — including starting workers on pre-daemon-reload unit
    definitions.
 3. **Deploy verification compares `InvocationID`**
-   (`scripts/verify_cratedigger_cycle.sh capture-migrate` /
+   (the since-deleted `scripts/verify_cratedigger_cycle.sh capture-migrate` /
    `verify-migrate-ran`), the same discipline already applied to
    `nixos-upgrade.service` and `cratedigger.service`.
 
