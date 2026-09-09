@@ -511,9 +511,13 @@ class TestUnusedImportAudit(unittest.TestCase):
         self.assertGreaterEqual(version, (0, 16, 0))
         self.assertEqual(config["required-version"], ">=0.16.0")
         self.assertEqual(config["target-version"], "py313")
+        # Issue #1322: the three correctness families measured at zero
+        # present-day findings and kept as legislation; the style families
+        # were rejected there with numbers, so a fourth entry needs a new
+        # measurement, not just a wish.
         self.assertEqual(
             config["lint"]["extend-select"],
-            ["B905", "TID251"],
+            ["B", "BLE001", "DTZ", "TID251"],
         )
         self.assertNotIn("ignore", config["lint"])
         self.assertEqual(

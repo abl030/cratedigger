@@ -270,7 +270,7 @@ class _CoreMixin(_PipelineDBBase):
             else:
                 cur.execute(sql)
             return cur
-        except (psycopg2.OperationalError, psycopg2.InterfaceError):
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as exc:
             # If libpq has just discovered the socket is dead (server-side
             # close while the connection sat idle between statements), the
             # error leaves ``conn.closed != 0``. Reconnect once and retry
@@ -286,7 +286,7 @@ class _CoreMixin(_PipelineDBBase):
                 )
                 raise OwnerSessionLost(
                     "pinned owner session was lost; statement was not replayed"
-                )
+                ) from exc
             # The reconnect below returns a fresh ``autocommit=True``
             # connection (see ``_connect``). That heal is only safe OUTSIDE a
             # transaction. If we are mid-transaction (``autocommit=False`` —

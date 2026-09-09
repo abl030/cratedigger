@@ -83,7 +83,7 @@ def _insert_album(path: str, album_id: int, mbid: str,
         vals.append(v)
     placeholders = ", ".join(["?"] * len(vals))
     conn.execute(f"INSERT INTO albums ({cols}) VALUES ({placeholders})", vals)
-    for i, (bitrate, track_path) in enumerate(tracks):
+    for _i, (bitrate, track_path) in enumerate(tracks):
         conn.execute(
             "INSERT INTO items (album_id, bitrate, path, format) "
             "VALUES (?, ?, ?, ?)",

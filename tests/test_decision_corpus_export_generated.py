@@ -591,7 +591,7 @@ class TestDecisionCorpusExportGenerated(unittest.TestCase):
                 db.set_download_log_candidate_evidence(log_id, evidence_id)
 
             operations: list[tuple[str, int | None, int]] = []
-            for ordinal in range(multiplicity):
+            for _ordinal in range(multiplicity):
                 operations.extend(
                     [
                         ("import", paired_request, paired_id),
