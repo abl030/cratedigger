@@ -110,6 +110,8 @@ from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
     REQUEST_CASCADE_RESET_TABLES,
     delete_all_rows,
+    make_download_file,
+    make_grab_list_entry,
     make_request_row,
 )
 
@@ -6432,6 +6434,190 @@ class TestGetSearchHistoryPage(unittest.TestCase):
                     "cursor_update_status", "stale_reason",
                     "plan_cycle_snapshot", "created_at"):
             self.assertIn(col, row, f"missing column {col!r}")
+
+
+@requires_postgres
+class TestSearchToGrabLinkReads(unittest.TestCase):
+    """Issue #811: the reads that surface ``download_log.search_log_id``.
+
+    Covers ``log_download``'s own round trip (test-fidelity Rule A), the
+    history page's ``grab_*`` LEFT JOIN LATERAL, and the acquisition
+    summary over a world shaped like live request 986 — one successful
+    import, then a run of ``found`` searches each followed by a timeout
+    from the same peer.
+    """
+
+    def setUp(self):
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="grab-link-mbid",
+            artist_name="Dallas Crane", album_title="Twenty Four Seven",
+            source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def _search(self, outcome: str, candidates=None, **kwargs) -> int:
+        self.db.log_search(
+            self.req_id, query="q", outcome=outcome,
+            candidates=candidates, **kwargs)
+        newest = self.db.get_search_history(self.req_id)[0]["id"]
+        assert isinstance(newest, int)
+        return newest
+
+    def _candidate(self, **overrides):
+        from lib.quality import CandidateScore
+        base = {
+            "username": "anjingpaeh", "dir": "/music/album",
+            "filetype": "lossless", "matched_tracks": 11,
+            "total_tracks": 11, "avg_ratio": 0.98,
+            "missing_titles": [], "file_count": 11,
+        }
+        base.update(overrides)
+        return CandidateScore(**base)
+
+    def test_log_download_round_trips_the_search_log_link(self):
+        search_log_id = self._search("found")
+        log_id = self.db.log_download(
+            self.req_id, soulseek_username="anjingpaeh", filetype="flac",
+            outcome="timeout", search_log_id=search_log_id,
+        )
+        row = self.db.get_download_log_entry(log_id)
+        assert row is not None
+        self.assertEqual(row["search_log_id"], search_log_id)
+
+    def test_an_unlinked_download_log_row_keeps_a_null_link(self):
+        log_id = self.db.log_download(
+            self.req_id, soulseek_username="offline-peer",
+            outcome="user_offline",
+        )
+        row = self.db.get_download_log_entry(log_id)
+        assert row is not None
+        self.assertIsNone(row["search_log_id"])
+
+    def test_history_page_exposes_the_grab_for_a_linked_row(self):
+        linked = self._search("found")
+        log_id = self.db.log_download(
+            self.req_id, soulseek_username="anjingpaeh", filetype="flac",
+            outcome="timeout", error_message="remote queue timeout",
+            search_log_id=linked,
+        )
+        unlinked = self._search("no_match")
+
+        page = self.db.get_search_history_page(self.req_id, limit=10)
+        by_id = {row["id"]: row for row in page.rows}
+        self.assertEqual(by_id[linked]["grab_download_log_id"], log_id)
+        self.assertEqual(by_id[linked]["grab_outcome"], "timeout")
+        self.assertEqual(by_id[linked]["grab_filetype"], "flac")
+        self.assertEqual(
+            by_id[linked]["grab_soulseek_username"], "anjingpaeh")
+        self.assertEqual(
+            by_id[linked]["grab_error_message"], "remote queue timeout")
+        self.assertIsNotNone(by_id[linked]["grab_at"])
+        for column in ("grab_download_log_id", "grab_outcome",
+                       "grab_filetype", "grab_soulseek_username",
+                       "grab_error_message", "grab_at"):
+            self.assertIsNone(by_id[unlinked][column], column)
+
+    def test_history_page_reports_the_newest_row_of_a_multi_row_grab(self):
+        """One grab writes several audit rows; the freshest is the answer."""
+        linked = self._search("found")
+        self.db.log_download(
+            self.req_id, soulseek_username="anjingpaeh", filetype="flac",
+            outcome="timeout", search_log_id=linked)
+        newest = self.db.log_download(
+            self.req_id, soulseek_username="anjingpaeh", filetype="flac",
+            outcome="rejected", search_log_id=linked)
+        page = self.db.get_search_history_page(self.req_id, limit=10)
+        row = next(r for r in page.rows if r["id"] == linked)
+        self.assertEqual(row["grab_download_log_id"], newest)
+        self.assertEqual(row["grab_outcome"], "rejected")
+
+    def test_acquisition_summary_windows_on_the_last_successful_import(self):
+        # Pre-import history: a different peer, a different tier, a grab.
+        self._search("found", candidates=[self._candidate(
+            username="BigGray", filetype="mp3 320", matched_tracks=11)])
+        self.db.log_download(
+            self.req_id, soulseek_username="BigGray", filetype="mp3",
+            outcome="success")
+        self.db._execute(
+            "UPDATE download_log SET created_at = NOW() - INTERVAL '60 days' "
+            "WHERE id = (SELECT MAX(id) FROM download_log)")
+        self.db._execute(
+            "UPDATE search_log SET created_at = NOW() - INTERVAL '90 days' "
+            "WHERE request_id = %s", (self.req_id,))
+
+        # Post-import: three found searches, each followed by a timeout.
+        found_ids = []
+        for _ in range(3):
+            found_ids.append(self._search("found", candidates=[
+                self._candidate(),
+                self._candidate(
+                    username="second_peer", dir="/second/album",
+                    filetype="mp3 320", matched_tracks=7, avg_ratio=0.61),
+            ]))
+            self.db.log_download(
+                self.req_id, soulseek_username="anjingpaeh", filetype="flac",
+                outcome="timeout", error_message="remote queue timeout",
+                search_log_id=found_ids[-1])
+
+        summary = self.db.get_search_acquisition_summary(self.req_id)
+
+        self.assertIsNotNone(summary.since)
+        self.assertEqual(summary.since_reason, "last_import")
+        # The pre-import peer/tier are outside the window entirely.
+        self.assertEqual(
+            [(t.tier, t.count) for t in summary.candidate_tiers],
+            [("lossless", 3), ("mp3 320", 3)])
+        self.assertEqual(
+            [(g.filetype, g.count, g.last_outcome) for g in summary.grabs],
+            [("flac", 3, "timeout")])
+        self.assertEqual(summary.grabs_total, 3)
+        self.assertEqual(
+            [p.username for p in summary.peers],
+            ["anjingpaeh", "second_peer"])
+        self.assertEqual(summary.peers[0].best_matched_tracks, 11)
+        self.assertEqual(summary.peers[0].tier, "lossless")
+        self.assertEqual(summary.peers[0].attempts, 3)
+
+        assert summary.last_found is not None
+        self.assertEqual(summary.last_found.search_log_id, found_ids[-1])
+        self.assertEqual(summary.last_found.username, "anjingpaeh")
+        self.assertEqual(summary.last_found.tier, "lossless")
+        self.assertEqual(summary.last_found.matched_tracks, 11)
+        self.assertEqual(summary.last_found.total_tracks, 11)
+        assert summary.last_found.grab is not None
+        self.assertEqual(summary.last_found.grab.outcome, "timeout")
+        self.assertEqual(
+            summary.last_found.grab.error_message, "remote queue timeout")
+
+    def test_acquisition_summary_covers_all_history_without_an_import(self):
+        self._search("found", candidates=[self._candidate()])
+        summary = self.db.get_search_acquisition_summary(self.req_id)
+        self.assertIsNone(summary.since)
+        self.assertEqual(summary.since_reason, "request_created")
+        self.assertEqual(
+            [(t.tier, t.count) for t in summary.candidate_tiers],
+            [("lossless", 1)])
+
+    def test_acquisition_summary_ignores_pre_filter_skipped_candidates(self):
+        self._search("no_match", candidates=[
+            self._candidate(
+                username="noisy", dir="/noisy/album", filetype="mp3 320",
+                matched_tracks=0, avg_ratio=0.0, file_count=400,
+                pre_filter_skip=True),
+        ])
+        summary = self.db.get_search_acquisition_summary(self.req_id)
+        self.assertEqual(summary.candidate_tiers, [])
+        self.assertEqual(summary.peers, [])
+
+    def test_acquisition_summary_tolerates_a_null_candidates_column(self):
+        """Error rows write SQL NULL there; the unnest must not raise."""
+        self._search("error")
+        summary = self.db.get_search_acquisition_summary(self.req_id)
+        self.assertEqual(summary.candidate_tiers, [])
+        self.assertIsNone(summary.last_found)
 
 
 class TestDashboardRowSerializers(unittest.TestCase):
@@ -14667,6 +14853,201 @@ class TestRecordConsumedSearchAttempt(unittest.TestCase):
                 req = self.db.get_request(self.req_id)
                 assert req is not None
                 self.assertEqual(req["failure_class"], fc)
+
+
+@requires_postgres
+class TestConsumedAttemptStampsDownloadState(unittest.TestCase):
+    """Issue #811: the search-to-grab link, written inside the search
+    transaction and guarded on the exact attempt it names.
+
+    The invariants, in the order the guard applies them:
+
+      * a stamp lands only on a row that is ``downloading`` with an
+        ``attempt_fingerprint`` equal to the caller's;
+      * a stamp writes ``search_log_id`` and nothing else;
+      * the ``search_log`` row is written whether or not the stamp lands.
+    """
+
+    FINGERPRINT = "abcd1234"
+
+    def setUp(self):
+        from lib.pipeline_db import ConsumedAttemptInput, SearchPlanItemInput
+        self.ConsumedAttemptInput = ConsumedAttemptInput
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="stamp-mbid",
+            artist_name="A", album_title="B", source="request",
+        )
+        self.plan_id = self.db.create_successful_search_plan(
+            request_id=self.req_id,
+            generator_id="g1",
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="Q0",
+                canonical_query_key="q0")],
+        )
+        active = self.db.get_active_search_plan(self.req_id)
+        assert active is not None
+        self.active = active
+
+    def tearDown(self):
+        self.db.close()
+
+    def _state_json(self, fingerprint: str | None) -> str:
+        """A persisted download state through the production writer.
+
+        Built by ``build_active_download_state`` from a real
+        ``GrabListEntry``, not hand-spelled JSON, so the fingerprint the
+        guard compares is the one production would actually have written
+        (test-fidelity Rule C).
+        """
+        from lib.download import build_active_download_state
+        entry = make_grab_list_entry(
+            album_id=self.req_id,
+            files=[make_download_file(
+                filename="Music\\Album\\01.flac", username="peer")],
+        )
+        state = build_active_download_state(
+            entry, enqueued_at="2026-09-01T00:00:00+00:00")
+        return msgspec.structs.replace(
+            state, attempt_fingerprint=fingerprint).to_json()
+
+    def _claim(self, fingerprint: str | None) -> None:
+        assert self.db.set_downloading(
+            self.req_id, self._state_json(fingerprint),
+            expected_status="wanted",
+        )
+
+    def _attempt(self, **overrides: object):
+        base = self.ConsumedAttemptInput(
+            request_id=self.req_id,
+            plan_id=self.plan_id,
+            plan_item_id=self.active.items[0].id,
+            plan_ordinal=0,
+            plan_strategy="default",
+            plan_canonical_query_key="q0",
+            plan_repeat_group=None,
+            plan_generator_id="g1",
+            query="Q0",
+            outcome="found",
+            plan_item_count=1,
+            grab_attempt_fingerprint=self.FINGERPRINT,
+        )
+        return dataclasses.replace(base, **overrides)
+
+    def _state(self) -> dict[str, Any]:
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        state = req["active_download_state"]
+        assert isinstance(state, dict)
+        return cast("dict[str, Any]", state)
+
+    def test_matching_fingerprint_on_downloading_row_stamps_the_link(self):
+        self._claim(self.FINGERPRINT)
+        result = self.db.record_consumed_search_attempt(self._attempt())
+        self.assertTrue(result.download_state_stamped)
+        self.assertEqual(
+            self._state()["search_log_id"], result.search_log_id)
+
+    def test_mismatched_fingerprint_leaves_the_state_untouched(self):
+        self._claim("different")
+        before = self._state()
+        result = self.db.record_consumed_search_attempt(self._attempt())
+        self.assertFalse(result.download_state_stamped)
+        self.assertEqual(self._state(), before)
+        self.assertNotIn("search_log_id", self._state())
+
+    def test_non_downloading_row_is_never_stamped(self):
+        # A request that never claimed: still ``wanted``, no state at all.
+        result = self.db.record_consumed_search_attempt(self._attempt())
+        self.assertFalse(result.download_state_stamped)
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertIsNone(req["active_download_state"])
+
+    def test_attempt_without_a_fingerprint_never_stamps(self):
+        self._claim(self.FINGERPRINT)
+        before = self._state()
+        result = self.db.record_consumed_search_attempt(
+            self._attempt(grab_attempt_fingerprint=None))
+        self.assertFalse(result.download_state_stamped)
+        self.assertEqual(self._state(), before)
+
+    def test_the_search_row_is_written_in_every_case(self):
+        cases = [
+            ("matching", self.FINGERPRINT, self.FINGERPRINT),
+            ("mismatched", "different", self.FINGERPRINT),
+            ("no fingerprint supplied", self.FINGERPRINT, None),
+        ]
+        for label, claimed, supplied in cases:
+            with self.subTest(case=label):
+                db = make_db()
+                self.addCleanup(db.close)
+                req_id = db.add_request(
+                    mb_release_id=f"stamp-written-{label}",
+                    artist_name="A", album_title="B", source="request",
+                )
+                plan_id = db.create_successful_search_plan(
+                    request_id=req_id, generator_id="g1",
+                    items=[SearchPlanItemInput(
+                        ordinal=0, strategy="default", query="Q0")],
+                )
+                active = db.get_active_search_plan(req_id)
+                assert active is not None
+                from lib.download import build_active_download_state
+                entry = make_grab_list_entry(
+                    album_id=req_id,
+                    files=[make_download_file(
+                        filename="Music\\Album\\01.flac", username="peer")],
+                )
+                state = msgspec.structs.replace(
+                    build_active_download_state(
+                        entry, enqueued_at="2026-09-01T00:00:00+00:00"),
+                    attempt_fingerprint=claimed)
+                assert db.set_downloading(
+                    req_id, state.to_json(), expected_status="wanted")
+                result = db.record_consumed_search_attempt(
+                    self.ConsumedAttemptInput(
+                        request_id=req_id, plan_id=plan_id,
+                        plan_item_id=active.items[0].id, plan_ordinal=0,
+                        plan_strategy="default",
+                        plan_canonical_query_key=None,
+                        plan_repeat_group=None, plan_generator_id="g1",
+                        query="Q0", outcome="found", plan_item_count=1,
+                        grab_attempt_fingerprint=supplied,
+                    ))
+                rows = db.get_search_history(req_id)
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["id"], result.search_log_id)
+
+    def test_a_stale_completion_still_stamps_the_grab_it_produced(self):
+        """Cursor staleness is about the CURSOR, not about the grab.
+
+        The plan is regenerated mid-flight, so the completion is stale and
+        the cursor is left alone — but the download really did happen and
+        its state still names this attempt, so the link must land.
+        """
+        self._claim(self.FINGERPRINT)
+        self.db.supersede_search_plan_with_replacement(
+            request_id=self.req_id, generator_id="g2",
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="Qnew")],
+        )
+        result = self.db.record_consumed_search_attempt(self._attempt())
+        self.assertTrue(result.is_stale)
+        self.assertTrue(result.download_state_stamped)
+        self.assertEqual(
+            self._state()["search_log_id"], result.search_log_id)
+
+    def test_a_stamp_rewrites_no_other_state_field(self):
+        self._claim(self.FINGERPRINT)
+        before = self._state()
+        result = self.db.record_consumed_search_attempt(self._attempt())
+        self.assertTrue(result.download_state_stamped)
+        after = self._state()
+        self.assertEqual(
+            {k: v for k, v in after.items() if k != "search_log_id"},
+            before,
+        )
 
 
 @requires_postgres
