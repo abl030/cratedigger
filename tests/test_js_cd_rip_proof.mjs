@@ -5,6 +5,7 @@ import {
   validAccurateRipProof,
   validCtdbProof,
   validDualProviderProof,
+  validShiftedTocCtdbProof,
 } from './fixtures/cd_rip_proof.mjs';
 
 import { suite } from './js_harness.mjs';
@@ -27,6 +28,28 @@ t.section('cdRipProofPresentation() renders conservative AccurateRip confidence'
     'CD bit-verified · AccurateRip min confidence 1',
     'AccurateRip proof reports the minimum across every track',
   );
+}
+
+t.section('cdRipProofPresentation() subtracts the CTDB response TOC shift');
+{
+  // Zero shift is the one value where `sector - shift` and `sector + shift`
+  // agree, and every other fixture carries zero — so the verifier's sign
+  // was unconstrained and a planted flip survived the whole suite (issue
+  // #1390 review, mutant J7). This is the world that decides it.
+  const shifted = validShiftedTocCtdbProof();
+  t.equal(shifted.ctdb.response_toc_shift_sectors, 32,
+    'the deciding fixture really carries a nonzero shift');
+
+  t.equal(
+    cdRipProofPresentation(shifted)?.text,
+    'CD bit-verified · CTDB confidence 18',
+    'a shifted response TOC that normalizes onto the disc still verifies',
+  );
+
+  const unshifted = validShiftedTocCtdbProof();
+  unshifted.ctdb.response_toc_shift_sectors = 0;
+  t.equal(cdRipProofPresentation(unshifted), null,
+    'the same sectors without their shift no longer match the disc');
 }
 
 t.section('cdRipProofPresentation() is positive-only and fail-closed');

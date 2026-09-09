@@ -24,3 +24,13 @@ export function validAccurateRipProof() {
 export function validDualProviderProof() {
   return cloneFixture('ctdb_11_accuraterip_min_3');
 }
+
+/**
+ * The one fixture whose CTDB response TOC is offset from the disc's own
+ * sectors (`response_toc_shift_sectors: 32`). Zero, which every other
+ * fixture carries, is the single value where subtracting the shift and
+ * adding it agree, so only this world can decide the verifier's sign.
+ */
+export function validShiftedTocCtdbProof() {
+  return cloneFixture('ctdb_18_shifted_toc');
+}

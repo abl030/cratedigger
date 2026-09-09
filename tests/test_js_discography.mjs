@@ -16,6 +16,7 @@ import {
   addRelease,
   applySearchTargetAfterDiscography,
   catalogueDomId,
+  loadReleaseGroup,
   releaseGroupRequestPath,
   renderPressingRow,
   renderReleaseDetail,
@@ -31,7 +32,7 @@ import { invalidateActiveRgs } from '../web/js/active_rgs.js';
 import { replaceOfferState } from '../web/js/replace_offer.js';
 import { state } from '../web/js/state.js';
 
-import { element, stubGlobals, suite } from './js_harness.mjs';
+import { domStub, element, stubGlobals, suite } from './js_harness.mjs';
 
 const t = suite(import.meta.url);
 
@@ -773,7 +774,28 @@ t.section('applySearchTargetAfterDiscography() — a search-by-ID expansion read
     },
     querySelector: (sel) => (sel === '.releases' ? inner : null),
   };
-  const rgEl = { querySelectorAll: (sel) => (sel === '.rg' ? [row] : []) };
+  // Decoys ahead of the target, one per clause of the row predicate. With
+  // a single matching row in the world, `rows.find(...)` and `rows[0]` are
+  // indistinguishable and every clause could be deleted unnoticed (issue
+  // #1390 review, mutants J17/J18). Each decoy carries an `inner` of its
+  // own, asserted empty below, so picking one is visible.
+  const decoyInners = [];
+  const decoy = (dataset) => {
+    const own = { innerHTML: '', parentElement: null };
+    decoyInners.push(own);
+    return {
+      dataset,
+      querySelector: (sel) => (sel === '.releases' ? own : null),
+    };
+  };
+  const decoys = [
+    decoy({ catalogueSource: 'discogs', identityKind: 'work', catalogueId: RG }),
+    decoy({ catalogueSource: 'mb', identityKind: 'release', catalogueId: RG }),
+    decoy({ catalogueSource: 'mb', identityKind: 'work', catalogueId: 'another-rg' }),
+  ];
+  const rgEl = {
+    querySelectorAll: (sel) => (sel === '.rg' ? [...decoys, row] : []),
+  };
   invalidateActiveRgs();
   stubGlobals({
     fetch: async (url) => {
@@ -792,10 +814,52 @@ t.section('applySearchTargetAfterDiscography() — a search-by-ID expansion read
     'the programmatic expansion carries the row\'s pair to the picker, exactly as a click would');
   t.excludes(inner.innerHTML, 'disabled', 'and the paired master holding a request enables Replace');
   t.excludes(inner.innerHTML, 'could not be checked', 'a checked row is never described as pending');
+  const wrongSource = ['source', 'identity kind', 'catalogue id'];
+  decoyInners.forEach((own, index) => {
+    t.equal(own.innerHTML, '',
+      `the decoy with the wrong ${wrongSource[index]} is never expanded`);
+  });
   state.searchTargetExpandId = saved.expandId;
   state.searchTargetSource = saved.source;
   state.searchTargetIdentityKind = saved.kind;
   state.browseSource = saved.browseSource;
+}
+
+t.section('loadReleaseGroup() falls back to the clicked row\'s next sibling');
+{
+  // The middle link of the `relEl` chain: no `opts.targetEl`, so the
+  // expansion lands in the sibling `<div>` a rendered row carries. Deleting
+  // that link survived every assertion in this suite before #1390, because
+  // every other call passes `targetEl` explicitly and `el` is null.
+  const sibling = element();
+  const clicked = { nextElementSibling: sibling };
+  const byId = element();
+  invalidateActiveRgs();
+  stubGlobals({
+    document: domStub({ [catalogueDomId('mb', 'work', 'rg-sibling')]: byId }),
+    fetch: async (url) => ({
+      ok: true,
+      status: 200,
+      json: async () => (String(url).includes('/api/pipeline/active-rgs')
+        ? { release_group_ids: [], groupless_release_ids: [] }
+        : { releases: [{
+          id: 'rel-sibling',
+          title: 'SIBLINGSENTINEL',
+          status: 'Official',
+          country: 'AU',
+          date: '2011-05-01',
+          format: 'CD',
+          track_count: 10,
+        }] }),
+    }),
+  });
+
+  await loadReleaseGroup('rg-sibling', clicked, { source: 'mb' });
+
+  t.contains(sibling.innerHTML, 'SIBLINGSENTINEL',
+    'the sibling of the clicked row receives the expansion');
+  t.equal(byId.innerHTML, '',
+    'and the namespaced fallback element is left untouched');
 }
 
 t.done();

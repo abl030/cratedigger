@@ -125,6 +125,11 @@ t.equal(esc("it\\'s"), 'it&#92;&#39;s', 'escapes backslash+quote combo');
 t.equal(esc(''), '', 'empty string');
 t.equal(esc(null), '', 'null returns empty');
 t.equal(esc(undefined), '', 'undefined returns empty');
+// Numbers are in the declared domain: bitrates, counts and track numbers
+// reach `esc` straight off a payload, and until #1390 nothing asserted the
+// `String(s)` that carries them (mutant J11 survived removing it).
+t.equal(esc(320), '320', 'a number is coerced, not returned as a number');
+t.equal(esc(0), '0', 'zero coerces rather than reading as absent');
 
 // --- overrideToIntent tests ---
 t.section('overrideToIntent()');

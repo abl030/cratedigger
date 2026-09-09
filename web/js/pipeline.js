@@ -596,12 +596,13 @@ export async function toggleDetail(elId, requestId) {
     if (req.status !== 'replaced') {
       html += renderReplaceButton({
         mode: 'standard',
-        // `id` is `requestId || elId`, and every caller that passes a
-        // string elId ('dl-<n>', 'acquisition-<n>') also passes the
-        // numeric requestId, so this is a number on every reachable
-        // path. Where it somehow is not, renderReplaceButton drops the
-        // button rather than interpolating a string into its onclick.
-        sourceRequestId: typeof id === 'number' ? id : undefined,
+        // Same `Number(id)` the action state above already applies to the
+        // same value. `id` is `requestId || elId` and is a number on every
+        // reachable path — every caller passing a string elId ('dl-<n>',
+        // 'acquisition-<n>') also passes the numeric requestId — but where
+        // it is not, NaN drops the button rather than interpolating a
+        // string into its onclick, and Bad Rip drops with it.
+        sourceRequestId: Number(id),
         releaseGroupId: req.mb_release_group_id || null,
         sourceLabel: `${req.artist_name || ''} — ${req.album_title || ''}`,
         processingState: actionState,
