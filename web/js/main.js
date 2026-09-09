@@ -17,7 +17,7 @@ import { toggleLibDetail, toggleReleaseLibDetail, banSource, setLibQuality, upgr
 import { disambRemove } from './analysis.js';
 import { loadWrongMatches, toggleWrongMatchGroup, toggleWrongMatchEntry, reloadWrongMatchExplorer, maybeLoadWrongMatchExplorer, refreshWrongMatches, forceImportWrongMatch, deleteWrongMatch, deleteWrongMatchGroup, bulkTriageWrongMatches, stopWrongMatchTriage, convergeWrongMatches, setWrongMatchConvergeThreshold, toggleWrongMatchesReplacedFilter } from './wrong-matches.js';
 import { openLabelDetail, openLabelDetailFromList, closeLabelDetail, onLabelFilterChange, onLabelYearFilterInput, toggleLabelIncludeSublabels, goToLabelPage } from './labels.js';
-import { toggleSearchPlanSummary, openSearchPlanDetail, closeSearchPlanDetail, searchPlanRegenerate, searchPlanAdvance, searchPlanLoadOlder, searchPlanRefreshDetail, searchPlanSubmitAdvance, searchPlanCancelAdvance } from './search_plan.js';
+import { toggleSearchPlanSummary, openSearchPlanDetail, closeSearchPlanDetail, searchPlanRegenerate, searchPlanAdvance, searchPlanLoadOlder, searchPlanRefreshDetail, searchPlanSubmitAdvance, searchPlanCancelAdvance, searchPlanSetAttemptsFilter } from './search_plan.js';
 import { dispatchTabShown } from './tabs.js';
 import { openReplacePicker } from './replace_picker.js';
 import { invalidateActiveRgs } from './active_rgs.js';
@@ -251,6 +251,7 @@ Object.assign(window, {
   searchPlanRefreshDetail,
   searchPlanSubmitAdvance,
   searchPlanCancelAdvance,
+  searchPlanSetAttemptsFilter,
   // Replace operator action — U9 binding so cross-module onclick
   // handlers in `release_actions.js` can call into the picker.
   openReplacePicker: openReplacePickerAndHandle,

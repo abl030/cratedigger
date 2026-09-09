@@ -24,6 +24,8 @@ import {
   renderSearchPlanButton,
   renderSummaryPanel,
   renderDetailPage,
+  isInterestingAttempt,
+  searchPlanSetAttemptsFilter,
   renderSearchPlanDetail,
   closeSearchPlanDetail,
   consumePendingScrollRestore,
@@ -489,35 +491,42 @@ function makeInspection(overrides = {}) {
 
 // --- renderDetailPage / closeSearchPlanDetail / pagination -----------
 //
-// U4 scenarios. All DOM-free string-match assertions on the HTML
-// returned by `renderDetailPage`, plus pure assertions on the back-
-// button restore logic via tiny window/document shims (no jsdom).
+// Issue #811 rewrite. The detail page is one composed entry
+// (`renderDetailPage`) over four inputs — the inspection payload, the
+// loaded history rows, the pagination cursor, and the per-request
+// pipeline payload that supplies the library column. Every test below
+// drives that entry, never a leaf, so the composition (section order,
+// which payload field feeds which fragment) is what is under test.
 t.section('renderDetailPage()');
 
 /**
- * Build a slot-stats bucket for the inspection.stats.current.slots block.
+ * Per-slot stats bucket keyed the way the production payload keys it:
+ * `identity = {plan_id, ordinal, strategy}`. The pre-#811 renderer read
+ * `identity.plan_ordinal` / `identity.plan_strategy`, which no producer
+ * has ever written — measured live on request 986, 2026-09-09.
  */
-function makeSlotStats() {
+function makeSlotStats(overrides = {}) {
+  const planId = overrides.plan_id ?? 583;
   return {
     request_id: 2566,
     current: {
       slots: [
         {
-          identity: { plan_ordinal: 0, plan_strategy: 'track_0' },
-          attempts: 4, consumed_attempts: 3, non_consuming_attempts: 1,
+          identity: { plan_id: planId, ordinal: 0, strategy: 'track_0' },
+          attempts: 52, consumed_attempts: 52, non_consuming_attempts: 0,
           stale_completion_attempts: 0,
-          outcome_counts: { found: 1, no_match: 2, error: 0, no_results: 1 },
-          elapsed_s_mean: 4.21, elapsed_s_p95: 9.30,
-          result_count_mean: 5.5, browse_time_s_mean: 1.1,
-          match_time_s_mean: 3.0, peers_browsed_mean: 6.0,
-          fanout_waves_mean: 2.0, last_seen_at: '2026-05-09T01:00:00Z',
+          outcome_counts: { found: 1, no_match: 41, error: 0, no_results: 10 },
+          elapsed_s_mean: 60.62, elapsed_s_p95: 70.07,
+          result_count_mean: 1.82, browse_time_s_mean: 0.1,
+          match_time_s_mean: 0.2, peers_browsed_mean: 0.0,
+          fanout_waves_mean: 0.0, last_seen_at: '2026-05-09T01:00:00Z',
         },
         {
-          identity: { plan_ordinal: 1, plan_strategy: 'track_1' },
-          attempts: 2, consumed_attempts: 2, non_consuming_attempts: 0,
+          identity: { plan_id: planId, ordinal: 1, strategy: 'track_1' },
+          attempts: 33, consumed_attempts: 33, non_consuming_attempts: 0,
           stale_completion_attempts: 0,
-          outcome_counts: { found: 0, no_match: 1, error: 1, no_results: 0 },
-          elapsed_s_mean: 5.5, elapsed_s_p95: 7.0,
+          outcome_counts: { found: 0, no_match: 22, error: 1, no_results: 10 },
+          elapsed_s_mean: 55.5, elapsed_s_p95: 70.0,
           result_count_mean: 0, browse_time_s_mean: 0.5,
           match_time_s_mean: 5.0, peers_browsed_mean: 2.0,
           fanout_waves_mean: 1.0, last_seen_at: '2026-05-09T02:00:00Z',
@@ -535,12 +544,109 @@ function makeSlotStats() {
   };
 }
 
+/** `search_scope` as the inspection route emits it (issue #811). */
+function makeSearchScope(overrides = {}) {
+  return {
+    override: 'SCOPE-OVERRIDE',
+    target_format: null,
+    min_bitrate: 320,
+    tiers: ['lossless'],
+    catch_all: false,
+    configured_tiers: ['lossless', 'mp3 v0', 'mp3 320', 'aac', 'opus', 'ogg'],
+    source: 'override',
+    ...overrides,
+  };
+}
+
+/** `acquisition` as the inspection route emits it (issue #811). */
+function makeAcquisition(overrides = {}) {
+  return {
+    since: '2026-04-06T01:59:27Z',
+    since_reason: 'last_import',
+    candidate_tiers: [{ tier: 'lossless', count: 14 }],
+    candidates_outside_scope: 0,
+    grabs: [
+      { filetype: 'GRABTYPE', count: 9, last_at: '2026-06-15T03:55:00Z',
+        last_outcome: 'success' },
+    ],
+    grabs_total: 9,
+    last_found: {
+      search_log_id: 4242,
+      at: '2026-06-15T03:55:00Z',
+      strategy: 'FOUNDSTRAT',
+      username: 'FOUNDPEER',
+      tier: 'lossless',
+      matched_tracks: 11,
+      total_tracks: 11,
+      grab: {
+        download_log_id: 777,
+        outcome: 'success',
+        error_message: null,
+        at: '2026-06-15T04:01:00Z',
+      },
+    },
+    peers: [
+      { username: 'PEERLIST', tier: 'lossless', best_matched_tracks: 11,
+        total_tracks: 11, attempts: 9, last_at: '2026-06-15T03:55:00Z' },
+    ],
+    ...overrides,
+  };
+}
+
 /**
- * Build a complete inspection payload appropriate for the detail page.
+ * `GET /api/pipeline/<id>` — the third fetch the detail page makes.
+ * Field names measured live against request 986 on 2026-09-09:
+ * `current_library.{state,path}` and
+ * `request.{final_format,min_bitrate,current_spectral_grade,
+ * verified_lossless,beets_scenario}`, plus `history[]` rows carrying
+ * `outcome` / `created_at` / `soulseek_username`.
  */
+function makeLibraryPayload(overrides = {}) {
+  return {
+    request: {
+      final_format: 'LIBFORMAT',
+      min_bitrate: 320,
+      current_spectral_grade: 'LIBGRADE',
+      verified_lossless: false,
+      beets_scenario: 'LIBSCENARIO',
+      ...(overrides.request || {}),
+    },
+    current_library: {
+      state: 'unique',
+      release_source: 'musicbrainz',
+      release_id: '00000000-0000-0000-0000-000000000001',
+      album_id: 9649,
+      path: '/lib/LIBPATH/2000 - Test Album',
+      ...(overrides.current_library || {}),
+    },
+    history: overrides.history ?? [
+      { outcome: 'rejected', created_at: '2026-05-01T00:00:00Z',
+        soulseek_username: 'REJECTEDPEER' },
+      { outcome: 'success', created_at: '2026-04-06T01:59:27Z',
+        soulseek_username: 'IMPORTPEER' },
+    ],
+  };
+}
+
+/** A complete inspection payload for the detail page. */
 function makeDetailInspection(overrides = {}) {
   const base = makeInspection(overrides);
   base.stats = overrides.stats ?? makeSlotStats();
+  base.search_scope = overrides.search_scope === undefined
+    ? makeSearchScope()
+    : overrides.search_scope;
+  base.acquisition = overrides.acquisition === undefined
+    ? makeAcquisition()
+    : overrides.acquisition;
+  base.superseded_count = overrides.superseded_count ?? 2;
+  // Distinctive generator ids so "the detail page does not print the
+  // generator id unless it drifted" is a falsifiable assertion rather
+  // than one that passes on a two-character string appearing nowhere.
+  base.current_generator_id = overrides.current_generator_id ?? 'GENID-13';
+  if (base.active_plan && base.active_plan.plan) {
+    base.active_plan.plan.generator_id =
+      (overrides.plan && overrides.plan.generator_id) || 'GENID-13';
+  }
   if (overrides.legacy_logs !== undefined) {
     base.legacy_logs = overrides.legacy_logs;
   }
@@ -550,257 +656,732 @@ function makeDetailInspection(overrides = {}) {
   if (overrides.latest_failed_transient !== undefined) {
     base.latest_failed_transient = overrides.latest_failed_transient;
   }
-  // Add provenance so health-block tests have something to render.
   if (base.active_plan && base.active_plan.plan && overrides.provenance !== undefined) {
     base.active_plan.plan.provenance = overrides.provenance;
   }
   return base;
 }
 
+/**
+ * Two plan-aware history rows: one ordinary `no_match` with scored
+ * candidates, one `found` carrying a linked grab. Row keys measured live
+ * against `GET /api/pipeline/986/search-plan/history` on 2026-09-09.
+ */
 function makeHistoryRows() {
   return [
     {
       id: 12345, created_at: '2026-05-09T03:00:00Z', request_id: 2566,
       plan_id: 583, plan_item_id: 5821, plan_ordinal: 2,
-      plan_strategy: 'track_2', plan_canonical_query_key: 'foo',
-      plan_repeat_group: 'track_2', plan_generator_id: '13',
+      plan_strategy: 'ATT-STRAT-A', plan_canonical_query_key: 'foo',
+      plan_repeat_group: 'track_2', plan_generator_id: 'GENID-13',
       execution_stage: 'accepted', attempt_consumed: true,
       cursor_update_status: 'advanced', stale_reason: null,
-      plan_cycle_snapshot: 1,
-      outcome: 'no_match', variant: 'track_2', query: 'q-current',
-      result_count: 12, elapsed_s: 4.23, final_state: 'Completed',
-      candidates: [{ user: 'peer-A', score: 0.9 }, { user: 'peer-B', score: 0.7 }],
+      plan_cycle_snapshot: 51,
+      outcome: 'no_match', variant: 'track_2', query: 'ATT-QUERY-A',
+      result_count: 12, elapsed_s: 4.23, final_state: 'Completed, TimedOut',
+      rejection_reason: 'strict_count_mismatch',
+      candidates: [
+        { username: 'CANDPEER', dir: 'd1', filetype: 'lossless',
+          matched_tracks: 0, total_tracks: 11, avg_ratio: 0.0,
+          missing_titles: [], file_count: 17, pre_filter_skip: false },
+        { username: 'CANDPEER', dir: 'd2', filetype: 'lossless',
+          matched_tracks: 0, total_tracks: 11, avg_ratio: 0.0,
+          missing_titles: [], file_count: 12, pre_filter_skip: false },
+        { username: 'SKIPPEER', dir: 'd3', filetype: 'mp3 320',
+          matched_tracks: 9, total_tracks: 11, avg_ratio: 0.9,
+          missing_titles: [], file_count: 3, pre_filter_skip: true },
+      ],
       browse_time_s: 1.2, match_time_s: 3.0,
       peers_browsed: 5, peers_browsed_lazy: 2, fanout_waves: 2,
+      grab_download_log_id: null, grab_outcome: null, grab_filetype: null,
+      grab_soulseek_username: null, grab_error_message: null, grab_at: null,
     },
     {
       id: 12340, created_at: '2026-05-09T02:00:00Z', request_id: 2566,
       plan_id: 583, plan_item_id: 5820, plan_ordinal: 1,
-      plan_strategy: 'track_1', plan_canonical_query_key: 'bar',
-      plan_repeat_group: 'track_1', plan_generator_id: '13',
-      execution_stage: 'stale_completion', attempt_consumed: false,
-      cursor_update_status: 'stale', stale_reason: 'plan_superseded',
-      plan_cycle_snapshot: 0,
-      outcome: 'partial', variant: 'track_1', query: 'q-stale',
-      result_count: 3, elapsed_s: 1.10, final_state: 'Cancelled',
-      candidates: null,
+      plan_strategy: 'ATT-STRAT-B', plan_canonical_query_key: 'bar',
+      plan_repeat_group: 'track_1', plan_generator_id: 'GENID-13',
+      execution_stage: 'accepted', attempt_consumed: true,
+      cursor_update_status: 'advanced', stale_reason: null,
+      plan_cycle_snapshot: 50,
+      outcome: 'found', variant: 'track_1', query: 'ATT-QUERY-B',
+      result_count: 3, elapsed_s: 70.1, final_state: 'Completed, TimedOut',
+      rejection_reason: null,
+      candidates: [
+        { username: 'GRABPEER', dir: 'g1', filetype: 'lossless',
+          matched_tracks: 11, total_tracks: 11, avg_ratio: 0.72,
+          missing_titles: [], file_count: 11, pre_filter_skip: false },
+      ],
       browse_time_s: 0.5, match_time_s: 0.6,
       peers_browsed: 1, peers_browsed_lazy: 0, fanout_waves: 1,
+      grab_download_log_id: 40287, grab_outcome: 'timeout',
+      grab_filetype: 'flac', grab_soulseek_username: 'GRABPEER',
+      grab_error_message: 'transfer timed out; 5-retry limit reached',
+      grab_at: '2026-05-09T02:10:00Z',
     },
   ];
 }
 
+/** Slice `html` between two markers so a needle cannot match a neighbour. */
+function fragment(html, startMarker, endMarker) {
+  const from = html.indexOf(startMarker);
+  if (from < 0) return '';
+  const to = endMarker ? html.indexOf(endMarker, from + startMarker.length) : -1;
+  return to < 0 ? html.slice(from) : html.slice(from, to);
+}
+
 {
-  // AE5: detail page surfaces every required telemetry column + plan
-  // structure + per-slot stats + plan-health + collapsed pre-rollout.
+  // Composition: every section is present, in order, and each one is fed
+  // by the payload field it claims. Sentinels are unique per field so a
+  // fragment reading its neighbour's argument shows up as a mis-ordered
+  // or missing needle.
   const inspection = makeDetailInspection({
+    items: [
+      { id: 1, plan_id: 583, ordinal: 0, strategy: 'track_0', query: 'SLOT-QUERY-0', canonical_query_key: 'a', repeat_group: 'track_0', provenance: {} },
+      { id: 2, plan_id: 583, ordinal: 1, strategy: 'track_1', query: 'SLOT-QUERY-1', canonical_query_key: 'b', repeat_group: 'track_1', provenance: {} },
+    ],
+    next_ordinal: 1,
+    cycle_count: 51,
+    provenance: { omitted_candidates: [{ strategy: 's', reason: 'year_unknown' }] },
     legacy_logs: { count: 12, head: [
       { id: 1, created_at: '2026-04-01T00:00:00Z', outcome: 'no_match',
-        variant: 'fallback', query: 'old_q', result_count: 0,
+        variant: 'fallback', query: 'LEGACY-QUERY', result_count: 0,
         elapsed_s: 1.0, final_state: 'Completed' },
-    ]},
-    // Flat plan dict, matching lib/search_plan_inspection.py::_plan_to_dict
-    // (see the AE fixture above for the full producer note).
-    latest_failed_deterministic: {
-      id: 580, generator_id: '13', failure_class: 'no_runnable_query',
-      error_message: 'metadata incomplete', created_at: '2026-05-08T00:00:00Z',
-    },
-    provenance: {
-      omitted_candidates: ['weird thing'],
-      deduped_losers: ['lose-1'],
-      dropped_low_entropy_tokens: ['the'],
-    },
+    ] },
   });
+  inspection.request.artist_name = 'TITLE-ARTIST';
+  inspection.request.album_title = 'TITLE-ALBUM';
+  inspection.request.status = 'REQSTATUS';
+  inspection.request.search_attempts = 423;
+  inspection.request.created_at = '2026-04-06T02:10:41Z';
+  inspection.request.last_attempt_at = '2026-09-08T20:22:12Z';
+  inspection.request.next_retry_after = '2026-09-09T00:22:12Z';
   const html = renderDetailPage({
     inspection,
     history: makeHistoryRows(),
     nextBeforeId: 12300,
+    library: makeLibraryPayload(),
   });
-  // Plan slot list rendered, with the cursor (next_ordinal=2) highlighted.
-  t.contains(html, 'sp-slot-list',
-    'AE5: slot list rendered');
-  t.contains(html, 'sp-slot-current',
-    'AE5: cursor slot has sp-slot-current marker');
-  // Plan-aware history table with telemetry columns visible.
-  t.contains(html, 'sp-history-table',
-    'AE5: plan-aware history table present');
-  for (const column of [
-    'Outcome', 'Strategy', 'Elapsed', 'Final state', 'Cursor', 'Stale',
-    'Consumed', 'Cycle', 'Peers', 'Fanout', 'Forensics',
-  ]) {
-    t.contains(html, column, `AE5: history table has a ${column} column`);
+
+  const order = [
+    ['title artist', 'TITLE-ARTIST'],
+    ['request status chip', 'REQSTATUS'],
+    ['meta attempt count', '423</strong> attempts since'],
+    ['scope section label', 'Searching for'],
+    ['scope override value', 'SCOPE-OVERRIDE'],
+    ['library column label', 'In the library now'],
+    ['library path', 'LIBPATH'],
+    ['override-check label', 'Is the override holding?'],
+    ['override-check peer', 'FOUNDPEER'],
+    ['plan slot query', 'SLOT-QUERY-0'],
+    ['attempts section label', 'Attempts'],
+    ['attempt strategy', 'ATT-STRAT-A'],
+    ['load older', 'sp-load-older-button'],
+    ['plan health label', 'Plan health'],
+    ['legacy section', 'LEGACY-QUERY'],
+  ];
+  let previous = -1;
+  let previousLabel = '(start)';
+  for (const [label, needle] of order) {
+    const at = html.indexOf(needle);
+    t.ok(at > previous,
+      `composition: ${label} renders after ${previousLabel} (at ${at}, previous ${previous})`);
+    previous = at;
+    previousLabel = label;
   }
-  // Specific row data: ordinal 2, strategy track_2, attempt_consumed=yes.
-  t.contains(html, 'q-current',
-    'AE5: current attempt query rendered');
-  t.contains(html, 'q-stale',
-    'AE5: stale attempt query rendered');
-  t.contains(html, 'plan_superseded',
-    'AE5: stale_reason rendered for the second row');
-  t.contains(html, 'sp-history-row-stale',
-    'AE5: stale row carries the .sp-history-row-stale CSS class');
-  t.contains(html, 'sp-candidate-forensics',
-    'AE5: candidate forensics rendered as <details>');
-  t.contains(html, 'peer-A',
-    'AE5: candidate JSONB serialised inside the forensics block');
-  // Per-slot stats.
-  t.contains(html, 'sp-stats-table',
-    'AE5: per-slot stats table rendered');
-  t.contains(html, 'track_0', 'AE5: per-slot stats include the track_0 strategy');
-  t.contains(html, 'track_1', 'AE5: per-slot stats include the track_1 strategy');
-  // Plan-health block.
-  t.contains(html, 'sp-health',
-    'AE5: plan-health block rendered');
-  t.contains(html, 'no_runnable_query',
-    'AE5: failure class surfaced in plan-health');
-  t.contains(html, 'metadata incomplete',
-    'AE5: failure error_message surfaced');
-  // created_at on the fixture's flat plan dict must reach the rendered
-  // failure timestamp via awstDateTime (UTC 2026-05-08T00:00:00Z + 8h).
-  t.contains(html, 'sp-health-failure-when',
-    'AE5: failure timestamp block rendered');
-  t.contains(html, '2026-05-08 08:00',
-    'AE5: failure created_at rendered via awstDateTime');
-  t.contains(html, 'omitted_candidates',
-    'AE5: provenance: omitted_candidates rendered');
-  t.contains(html, 'deduped_losers',
-    'AE5: provenance: deduped_losers rendered');
-  t.contains(html, 'dropped_low_entropy_tokens',
-    'AE5: provenance: dropped_low_entropy_tokens rendered');
-  // Pre-rollout legacy section, collapsed.
-  t.contains(html, 'sp-history-legacy-section',
-    'AE5: pre-rollout legacy section rendered');
-  t.contains(html, 'Pre-rollout history',
-    'AE5: pre-rollout summary text present');
-  t.contains(html, '<details class="sp-history-legacy">',
-    'AE5: pre-rollout block is collapsed via <details>');
-  t.contains(html, 'class="sp-history-row legacy"',
-    'AE5: legacy rows tagged distinctly');
-  t.contains(html, 'old_q',
-    'AE5: legacy row content rendered inside the collapsed block');
 }
 
 {
-  // AE6: cache stat label includes the literal substring "cycle-level".
-  const inspection = makeDetailInspection();
-  const html = renderDetailPage({
-    inspection,
-    history: makeHistoryRows(),
-    nextBeforeId: null,
-  });
-  t.contains(html, 'cycle-level',
-    'AE6: cache attribution label literally reads "cycle-level"');
-  t.contains(html, 'Cache attribution',
-    'AE6: cache attribution label introduces the level');
-}
-
-{
-  // AE7: plan-aware and legacy rows render in clearly-distinguished
-  // sections (different CSS classes, different parent sections).
-  const inspection = makeDetailInspection({
-    legacy_logs: { count: 5, head: [
-      { id: 9, created_at: '2026-04-09T00:00:00Z', outcome: 'no_match',
-        variant: 'fallback', query: 'legacy-q1', result_count: 1,
-        elapsed_s: 1.5, final_state: 'Completed' },
-      { id: 8, created_at: '2026-04-08T00:00:00Z', outcome: 'no_match',
-        variant: 'fallback', query: 'legacy-q2', result_count: 0,
-        elapsed_s: 0.9, final_state: 'Completed' },
-    ]},
-  });
-  const html = renderDetailPage({
-    inspection,
-    history: makeHistoryRows(),
-    nextBeforeId: null,
-  });
-  // Plan-aware rows live inside .sp-history-table without .legacy.
-  t.match(html, /<tr class="sp-history-row[ "]/, 'AE7: plan-aware rows use .sp-history-row without .legacy');
-  // Legacy rows live in .sp-history-legacy-section as .sp-history-row.legacy.
-  t.contains(html, 'class="sp-history-row legacy"',
-    'AE7: legacy rows distinguished via .legacy CSS suffix');
-  t.contains(html, 'sp-history-legacy-section',
-    'AE7: legacy rows live in their own section');
-  // The two rendered queries must both appear, in the expected sections.
-  t.contains(html, 'q-current', 'AE7: the plan-aware query is rendered');
-  t.contains(html, 'legacy-q1', 'AE7: the legacy query is rendered');
-}
-
-{
-  // AE10: a Refresh button is rendered and bound to the window handler.
-  // The function-spec assertion (export exists, button HTML present) is
-  // sufficient — fetch wiring is exercised by impure tests (not unit-runable here).
-  t.ok(typeof renderSearchPlanDetail === 'function',
-    'AE10: renderSearchPlanDetail is exported as a function');
-  t.ok(typeof searchPlanRefreshDetail === 'function',
-    'AE10: searchPlanRefreshDetail is exported (Refresh handler)');
+  // Header — exactly ONE Back button (the pre-#811 page rendered two).
   const html = renderDetailPage({
     inspection: makeDetailInspection(),
     history: makeHistoryRows(),
     nextBeforeId: null,
+    library: makeLibraryPayload(),
   });
+  const backs = html.split('window.closeSearchPlanDetail()').length - 1;
+  t.equal(backs, 1, 'header: exactly one Back button is rendered');
   t.contains(html, 'window.searchPlanRefreshDetail',
-    'AE10: Refresh button wires to window.searchPlanRefreshDetail');
-  t.match(html, />\s*Refresh\s*</, 'AE10: Refresh button label rendered');
+    'header: Refresh button wires to window.searchPlanRefreshDetail');
+  t.contains(html, 'window.searchPlanAdvance(2566, {})',
+    'header: Advance button wires to window.searchPlanAdvance');
+  t.contains(html, 'window.searchPlanRegenerate(2566)',
+    'header: Regenerate button wires to window.searchPlanRegenerate');
+  t.contains(html, 'sp-detail-header-actions',
+    'header: the advance form still has its action container to replace');
 }
 
 {
-  // Pagination — first render with a cursor renders a Load older button.
+  // Meta — the generator id is noise unless the plan drifted.
+  const clean = renderDetailPage({
+    inspection: makeDetailInspection(),
+    history: [], nextBeforeId: null, library: makeLibraryPayload(),
+  });
+  t.excludes(clean, 'GENID-13',
+    'meta: generator id is NOT rendered when the plan is current');
+  t.contains(clean, 'sp-detail-meta', 'meta: the meta line is rendered');
+  t.contains(clean, 'cursor', 'meta: the cursor position is rendered');
+  t.contains(clean, 'cycle', 'meta: the cycle count is rendered');
+
+  const drifted = renderDetailPage({
+    inspection: makeDetailInspection({
+      currentness: { generator_id_mismatch: true },
+      plan: { generator_id: 'GENID-12' },
+    }),
+    history: [], nextBeforeId: null, library: makeLibraryPayload(),
+  });
+  t.contains(drifted, 'plan generator out of date',
+    'meta: drift renders the "plan generator out of date" chip');
+  t.contains(drifted, 'GENID-12',
+    'meta: drift chip title carries the plan generator id');
+  t.contains(drifted, 'GENID-13',
+    'meta: drift chip title carries the current generator id');
+}
+
+{
+  // Scope chips — ladder order, lit vs struck, `any` bound to catch_all.
+  const html = renderDetailPage({
+    inspection: makeDetailInspection({
+      search_scope: makeSearchScope({
+        tiers: ['lossless', 'mp3 v0'], catch_all: false,
+      }),
+    }),
+    history: [], nextBeforeId: null, library: makeLibraryPayload(),
+  });
+  const scope = fragment(html, 'Searching for', 'In the library now');
+  t.contains(scope, '<span class="sp-tier sp-tier-on">lossless</span>',
+    'scope: an in-scope tier chip is lit');
+  t.contains(scope, '<span class="sp-tier sp-tier-on">mp3 v0</span>',
+    'scope: the second in-scope tier chip is lit');
+  t.contains(scope, '<span class="sp-tier">aac</span>',
+    'scope: an excluded configured tier chip is struck through');
+  t.contains(scope, '<span class="sp-tier">any</span>',
+    'scope: the any chip is struck when catch_all is false');
+  t.contains(scope, 'SCOPE-OVERRIDE', 'scope: the override value is rendered');
+  t.contains(scope, '320 kbps', 'scope: the bitrate floor is rendered');
+  t.contains(scope, 'Target format', 'scope: the target-format row is rendered');
+  t.contains(scope, 'catch-all excluded',
+    'scope: catch_all=false is stated beside the override');
+
+  const catchAll = renderDetailPage({
+    inspection: makeDetailInspection({
+      search_scope: makeSearchScope({
+        override: null, target_format: null, tiers: ['lossless', 'mp3 v0'],
+        catch_all: true, source: 'config',
+      }),
+    }),
+    history: [], nextBeforeId: null, library: makeLibraryPayload(),
+  });
+  const catchScope = fragment(catchAll, 'Searching for', 'In the library now');
+  t.contains(catchScope, '<span class="sp-tier sp-tier-on">any</span>',
+    'scope: the any chip is lit when catch_all is true');
+  t.excludes(catchScope, 'SCOPE-OVERRIDE',
+    'scope: a null override renders no override value');
+}
+
+{
+  // Library column — the third fetch's payload, and its failure mode.
+  const unique = renderDetailPage({
+    inspection: makeDetailInspection(),
+    history: [], nextBeforeId: null, library: makeLibraryPayload(),
+  });
+  const lib = fragment(unique, 'In the library now', 'Is the override holding?');
+  t.contains(lib, 'LIBFORMAT', 'library: request.final_format rendered');
+  t.contains(lib, 'LIBGRADE', 'library: request.current_spectral_grade rendered');
+  t.contains(lib, 'LIBSCENARIO', 'library: request.beets_scenario rendered');
+  t.contains(lib, 'LIBPATH', 'library: current_library.path rendered');
+  t.contains(lib, 'IMPORTPEER',
+    'library: the newest success history row supplies the import peer');
+  t.excludes(lib, 'REJECTEDPEER',
+    'library: a non-success history row is NOT read for the import peer');
+  t.contains(lib, '2026-04-06',
+    'library: the success row created_at supplies the import date');
+
+  const verified = renderDetailPage({
+    inspection: makeDetailInspection(),
+    history: [], nextBeforeId: null,
+    library: makeLibraryPayload({ request: { verified_lossless: true } }),
+  });
+  t.contains(fragment(verified, 'In the library now', 'Is the override holding?'),
+    'verified lossless',
+    'library: verified_lossless=true is stated');
+  t.excludes(fragment(unique, 'In the library now', 'Is the override holding?'),
+    'verified lossless',
+    'library: verified_lossless=false is not stated');
+
+  const missing = renderDetailPage({
+    inspection: makeDetailInspection(),
+    history: [], nextBeforeId: null,
+    library: makeLibraryPayload({ current_library: { state: 'missing', path: undefined } }),
+  });
+  const missingLib = fragment(missing, 'In the library now', 'Is the override holding?');
+  t.contains(missingLib, 'missing',
+    'library: a non-unique state renders the state word');
+  t.excludes(missingLib, 'LIBPATH',
+    'library: a non-unique state does not render a path');
+
+  const failed = renderDetailPage({
+    inspection: makeDetailInspection(),
+    history: [], nextBeforeId: null, library: null,
+  });
+  t.contains(failed, 'library state unavailable',
+    'library: a failed third fetch renders the unavailable copy, not a crash');
+  t.contains(failed, 'sp-detail',
+    'library: a failed third fetch still renders the rest of the page');
+}
+
+{
+  // Override checks — the one question the page exists to answer.
+  const clean = renderDetailPage({
+    inspection: makeDetailInspection(),
+    history: [], nextBeforeId: null, library: makeLibraryPayload(),
+  });
+  const checks = fragment(clean, 'Is the override holding?', 'sp-plan-table');
+  t.contains(checks, 'since import 2026-04-06',
+    'checks: since_reason=last_import renders "since import <date>"');
+  t.contains(checks, 'sp-check-ok',
+    'checks: candidates_outside_scope=0 renders the good mark');
+  t.contains(checks, 'GRABTYPE', 'checks: the grab filetype tally is rendered');
+  t.contains(checks, 'FOUNDPEER', 'checks: last_found peer rendered');
+  t.contains(checks, 'FOUNDSTRAT', 'checks: last_found strategy rendered');
+  t.contains(checks, 'PEERLIST', 'checks: the peers line is rendered');
+  t.excludes(checks, 'sp-check-att',
+    'checks: an all-clean acquisition renders no attention mark');
+
+  const allHistory = renderDetailPage({
+    inspection: makeDetailInspection({
+      acquisition: makeAcquisition({ since: null, since_reason: 'request_created' }),
+    }),
+    history: [], nextBeforeId: null, library: makeLibraryPayload(),
+  });
+  t.contains(allHistory, 'all history',
+    'checks: no last import renders the "all history" scope label');
+
+  const dirty = renderDetailPage({
+    inspection: makeDetailInspection({
+      acquisition: makeAcquisition({
+        candidate_tiers: [
+          { tier: 'lossless', count: 4 }, { tier: 'OUTOFSCOPE', count: 9 },
+        ],
+        candidates_outside_scope: 9,
+        grabs: [{ filetype: 'GRABTYPE', count: 9, last_at: '2026-06-15T03:55:00Z',
+          last_outcome: 'timeout' }],
+        last_found: {
+          search_log_id: 4242, at: '2026-06-15T03:55:00Z',
+          strategy: 'FOUNDSTRAT', username: 'FOUNDPEER', tier: 'lossless',
+          matched_tracks: 11, total_tracks: 11,
+          grab: {
+            download_log_id: 777, outcome: 'timeout',
+            error_message: 'transfer timed out; 5-retry limit reached',
+            at: '2026-06-15T04:01:00Z',
+          },
+        },
+      }),
+    }),
+    history: [], nextBeforeId: null, library: makeLibraryPayload(),
+  });
+  const dirtyChecks = fragment(dirty, 'Is the override holding?', 'sp-plan-table');
+  t.contains(dirtyChecks, 'sp-check-att',
+    'checks: a nonzero candidates_outside_scope raises the attention mark');
+  t.contains(dirtyChecks, 'OUTOFSCOPE',
+    'checks: the offending out-of-scope tier is named');
+  t.contains(dirtyChecks, 'transfer timed out',
+    'checks: a failed linked grab surfaces its error message');
+  t.excludes(dirtyChecks, '5-retry limit',
+    'checks: the grab error is shortened to its first clause');
+
+  const sparse = renderDetailPage({
+    inspection: makeDetailInspection({
+      acquisition: makeAcquisition({
+        candidate_tiers: [], grabs: [], grabs_total: 0,
+        last_found: null, peers: [], since: null, since_reason: null,
+      }),
+    }),
+    history: [], nextBeforeId: null, library: makeLibraryPayload(),
+  });
+  t.excludes(sparse, 'Is the override holding?',
+    'checks: the whole block is omitted when every row is empty');
+
+  const partial = renderDetailPage({
+    inspection: makeDetailInspection({
+      acquisition: makeAcquisition({
+        grabs: [], grabs_total: 0, last_found: null, peers: [],
+      }),
+    }),
+    history: [], nextBeforeId: null, library: makeLibraryPayload(),
+  });
+  const partialChecks = fragment(partial, 'Is the override holding?', 'sp-plan-table');
+  t.excludes(partialChecks, 'GRABTYPE',
+    'checks: an empty grabs list omits its row rather than printing a dash');
+  t.excludes(partialChecks, 'FOUNDPEER',
+    'checks: a null last_found omits its row rather than printing a dash');
+  t.excludes(partialChecks, 'PEERLIST',
+    'checks: an empty peers list omits its row rather than printing a dash');
+  t.contains(partialChecks, 'candidates scored',
+    'checks: the surviving candidate-tier row still renders');
+
+  const noAcquisition = renderDetailPage({
+    inspection: makeDetailInspection({ acquisition: null }),
+    history: [], nextBeforeId: null, library: makeLibraryPayload(),
+  });
+  t.excludes(noAcquisition, 'Is the override holding?',
+    'checks: a null acquisition omits the block');
+  t.contains(noAcquisition, 'sp-plan-table',
+    'checks: a null acquisition still renders the plan table');
+}
+
+{
+  // Plan table — slots merged with their tallies, matched on the
+  // production identity keys `{plan_id, ordinal}`.
+  const html = renderDetailPage({
+    inspection: makeDetailInspection({ next_ordinal: 1 }),
+    history: [], nextBeforeId: null, library: makeLibraryPayload(),
+  });
+  const plan = fragment(html, 'sp-plan-table', 'sp-attempts-section');
+  t.contains(plan, 'track_0', 'plan: slot 0 strategy rendered');
+  t.contains(plan, 'sp-plan-current',
+    'plan: the next_ordinal slot carries the current-row marker');
+  // Slot 0's tallies come from the stats row whose identity is
+  // {plan_id: 583, ordinal: 0}. If the matcher reverts to
+  // identity.plan_ordinal (absent from every producer) these go blank.
+  t.contains(plan, '>52<', 'plan: slot 0 Tried tally read via identity.ordinal');
+  t.contains(plan, '>41<', 'plan: slot 0 No-match tally rendered');
+  t.contains(plan, '>10<', 'plan: slot 0 Empty (no_results) tally rendered');
+  t.contains(plan, '61s', 'plan: slot 0 elapsed_s_mean rendered as Avg');
+  t.contains(plan, '05-09 09:00',
+    'plan: slot 0 last_seen_at rendered short in the Last column');
+  t.contains(plan, '>33<', 'plan: slot 1 Tried tally read via identity.ordinal');
+
+  // A stats bucket whose plan_id belongs to a superseded plan must NOT
+  // be merged into the active plan's rows.
+  const foreign = renderDetailPage({
+    inspection: makeDetailInspection({ stats: makeSlotStats({ plan_id: 999 }) }),
+    history: [], nextBeforeId: null, library: makeLibraryPayload(),
+  });
+  const foreignPlan = fragment(foreign, 'sp-plan-table', 'sp-attempts-section');
+  t.excludes(foreignPlan, '>52<',
+    'plan: stats for a different plan_id are not merged into this plan');
+  t.contains(foreignPlan, 'track_0',
+    'plan: a slot with no stats still renders, with blank tallies');
+
+  // The retired per-slot stats table and its cache label are gone.
+  t.excludes(html, 'sp-stats-table',
+    'plan: the separate per-slot stats table is gone');
+  t.excludes(html, 'Cache attribution',
+    'plan: the cache-attribution label is gone');
+  t.excludes(html, 'sp-slot-list',
+    'plan: the separate slot list is gone');
+}
+
+{
+  // Attempts — one line per row; abnormal facts inline, the rest behind
+  // the raw expander.
   const html = renderDetailPage({
     inspection: makeDetailInspection(),
     history: makeHistoryRows(),
-    nextBeforeId: 12300,
+    nextBeforeId: null,
+    library: makeLibraryPayload(),
+  });
+  const attempts = fragment(html, 'sp-attempts-tbody', 'Plan health');
+  t.contains(attempts, 'ATT-STRAT-A', 'attempts: row strategy rendered');
+  t.contains(attempts, 'CANDPEER',
+    'attempts: the best scored candidate username is rendered');
+  t.contains(attempts, '&times;2',
+    'attempts: a repeated username renders the repeat count');
+  t.contains(attempts, 'strict count mismatch',
+    'attempts: rejection_reason is humanized');
+  t.contains(attempts, 'grab timeout',
+    'attempts: a linked grab outcome is appended to the candidates cell');
+  t.contains(attempts, 'transfer timed out',
+    'attempts: the grab error message first clause is appended');
+  t.excludes(attempts, '5-retry limit',
+    'attempts: the grab error message is shortened to its first clause');
+  t.contains(attempts, 'sp-att-raw',
+    'attempts: each row carries a raw expander');
+  t.excludes(attempts, 'sp-att-grab-ok',
+    'attempts: a non-success grab does NOT get the success class');
+
+  const succeeded = renderDetailPage({
+    inspection: makeDetailInspection(),
+    history: makeHistoryRows().map((row) => (row.grab_outcome
+      ? { ...row, grab_outcome: 'success', grab_error_message: null }
+      : row)),
+    nextBeforeId: null,
+    library: makeLibraryPayload(),
+  });
+  t.contains(succeeded, 'sp-att-grab-ok',
+    'attempts: a successful grab gets the success class');
+
+  // Row 1 (no_match, no grab): everything abnormal-free stays inline-free
+  // and the telemetry lives behind the expander.
+  const firstRow = fragment(attempts, 'ATT-STRAT-A', 'sp-att-raw');
+  t.excludes(firstRow, 'Completed, TimedOut',
+    'attempts: a final_state starting with Completed is not rendered inline');
+  t.excludes(firstRow, 'not consumed',
+    'attempts: a consumed attempt renders no "not consumed" chip');
+  t.excludes(firstRow, 'SKIPPEER',
+    'attempts: a pre_filter_skip candidate is not chosen as the best');
+  const raw = fragment(attempts, 'sp-att-raw', '</details>');
+  t.contains(raw, 'peers', 'attempts raw: peers browsed behind the expander');
+  t.contains(raw, 'fanout', 'attempts raw: fanout waves behind the expander');
+  t.contains(raw, 'cycle', 'attempts raw: cycle snapshot behind the expander');
+  t.contains(raw, 'advanced', 'attempts raw: cursor status behind the expander');
+  t.contains(raw, 'ATT-QUERY-A', 'attempts raw: the query is behind the expander');
+  t.contains(raw, 'SKIPPEER',
+    'attempts raw: the full candidates JSON is behind the expander');
+}
+
+{
+  // Attempts — the three abnormal inline chips, one world each, against
+  // the same row that renders none of them above.
+  const base = makeHistoryRows()[0];
+  const CASES = [
+    ['stale cursor', { ...base, cursor_update_status: 'stale' }, '>stale</span>'],
+    ['stale reason', { ...base, stale_reason: 'plan_superseded' }, '>stale</span>'],
+    ['not consumed', { ...base, attempt_consumed: false }, 'not consumed'],
+    ['odd final state', { ...base, final_state: 'ODDSTATE' }, 'ODDSTATE'],
+  ];
+  for (const [label, row, needle] of CASES) {
+    const html = renderDetailPage({
+      inspection: makeDetailInspection(),
+      history: [row], nextBeforeId: null, library: makeLibraryPayload(),
+    });
+    const inline = fragment(
+      fragment(html, 'sp-attempts-tbody', 'Plan health'), 'ATT-STRAT-A', 'sp-att-raw');
+    t.contains(inline, needle,
+      `attempts: an abnormal ${label} attempt renders its inline chip`);
+  }
+}
+
+{
+  // Attempts filter — the section label counts loaded rows, the toggle is
+  // wired to the window handler, and Interesting is the default view.
+  const rows = makeHistoryRows();
+  const boring = {
+    ...rows[0],
+    id: 12000, plan_strategy: 'BORING-STRAT',
+    rejection_reason: null,
+    candidates: [{ username: 'BORINGPEER', pre_filter_skip: true }],
+  };
+  const all = [...rows, boring];
+  const html = renderDetailPage({
+    inspection: makeDetailInspection(),
+    history: all, nextBeforeId: null, library: makeLibraryPayload(),
+  });
+  t.contains(html, "window.searchPlanSetAttemptsFilter(2566, 'all')",
+    'attempts filter: the All button wires to the window handler');
+  t.contains(html, "window.searchPlanSetAttemptsFilter(2566, 'interesting')",
+    'attempts filter: the Interesting button wires to the window handler');
+  t.contains(html, '2 of 3 loaded',
+    'attempts filter: the section label reads "N of M loaded"');
+  t.contains(html, 'sp-filter-button-on',
+    'attempts filter: the active filter button is marked');
+  t.excludes(fragment(html, 'sp-attempts-tbody', 'Plan health'), 'BORING-STRAT',
+    'attempts filter: an uninteresting row is hidden by the default view');
+  t.contains(fragment(html, 'sp-attempts-tbody', 'Plan health'), 'ATT-STRAT-A',
+    'attempts filter: an interesting row survives the default view');
+}
+
+{
+  // Plan health — one line, then a provenance sentence, then raw.
+  const clean = renderDetailPage({
+    inspection: makeDetailInspection({
+      provenance: {
+        omitted_candidates: [
+          { strategy: 'unwild_year', reason: 'year_unknown' },
+          { strategy: 'unwild_rg_year', reason: 'year_unknown' },
+          { strategy: 'catalog_number', reason: 'catalog_number_unknown' },
+        ],
+        dedupe_losers: [],
+        dropped_low_entropy_tokens: [],
+      },
+    }),
+    history: [], nextBeforeId: null, library: makeLibraryPayload(),
+  });
+  const health = fragment(clean, 'Plan health', 'raw provenance');
+  t.contains(health, 'No plan failures',
+    'health: no failure plan renders the quiet line');
+  t.contains(health, 'generator current',
+    'health: a current generator is stated on the health line');
+  t.contains(health, '2 superseded plans',
+    'health: superseded_count is stated on the health line');
+  t.contains(health, 'Left out: 2 year unknown, 1 catalog number unknown',
+    'health: omitted_candidates are grouped by reason into one sentence');
+  t.excludes(health, 'unwild_rg_year',
+    'health: the raw provenance JSON is not dumped into the sentence');
+  t.excludes(health, 'Dropped low-entropy tokens',
+    'health: an empty dropped_low_entropy_tokens list is not mentioned');
+  t.contains(clean, 'raw provenance',
+    'health: the raw provenance stays behind a details expander');
+
+  const dropped = renderDetailPage({
+    inspection: makeDetailInspection({
+      provenance: { omitted_candidates: [], dropped_low_entropy_tokens: ['DROPTOKEN'] },
+    }),
+    history: [], nextBeforeId: null, library: makeLibraryPayload(),
+  });
+  t.contains(fragment(dropped, 'Plan health', 'raw provenance'), 'DROPTOKEN',
+    'health: a non-empty dropped_low_entropy_tokens list is named');
+  t.excludes(fragment(dropped, 'Plan health', 'raw provenance'), 'Left out',
+    'health: an empty omitted_candidates list produces no "Left out" sentence');
+
+  const failed = renderDetailPage({
+    inspection: makeDetailInspection({
+      latest_failed_deterministic: {
+        id: 580, generator_id: 'GENID-13', failure_class: 'no_runnable_query',
+        error_message: 'HEALTHERROR', created_at: '2026-05-08T00:00:00Z',
+      },
+    }),
+    history: [], nextBeforeId: null, library: makeLibraryPayload(),
+  });
+  t.contains(failed, 'no_runnable_query',
+    'health: a deterministic failure class is surfaced');
+  t.contains(failed, 'HEALTHERROR',
+    'health: the sanitised failure error is surfaced');
+  t.excludes(failed, 'No plan failures',
+    'health: the quiet line is replaced when a failure exists');
+
+  const transient = renderDetailPage({
+    inspection: makeDetailInspection({
+      latest_failed_transient: {
+        id: 581, generator_id: 'GENID-13', failure_class: 'mirror_timeout',
+        error_message: 'TRANSIENTERROR', created_at: '2026-05-08T00:00:00Z',
+      },
+    }),
+    history: [], nextBeforeId: null, library: makeLibraryPayload(),
+  });
+  t.contains(transient, 'mirror_timeout',
+    'health: a transient failure class is surfaced too');
+}
+
+{
+  // Legacy — omitted entirely at zero rows, rendered otherwise.
+  const none = renderDetailPage({
+    inspection: makeDetailInspection({ legacy_logs: { count: 0, head: [] } }),
+    history: [], nextBeforeId: null, library: makeLibraryPayload(),
+  });
+  t.excludes(none, 'sp-history-legacy-section',
+    'legacy: the whole section is omitted when legacy_logs.count is 0');
+  t.excludes(none, 'Pre-rollout history',
+    'legacy: no pre-rollout heading is rendered at zero rows');
+
+  const some = renderDetailPage({
+    inspection: makeDetailInspection({
+      legacy_logs: { count: 5, head: [
+        { id: 9, created_at: '2026-04-09T00:00:00Z', outcome: 'no_match',
+          variant: 'fallback', query: 'LEGACY-Q1', result_count: 1,
+          elapsed_s: 1.5, final_state: 'Completed' },
+      ] },
+    }),
+    history: [], nextBeforeId: null, library: makeLibraryPayload(),
+  });
+  t.contains(some, 'sp-history-legacy-section',
+    'legacy: the section renders when legacy rows exist');
+  t.contains(some, 'LEGACY-Q1', 'legacy: the legacy query is rendered');
+  t.contains(some, '<details class="sp-history-legacy">',
+    'legacy: the legacy block stays collapsed');
+}
+
+{
+  // Pagination — cursor present renders Load older wired to the handler.
+  const html = renderDetailPage({
+    inspection: makeDetailInspection(),
+    history: makeHistoryRows(), nextBeforeId: 12300,
+    library: makeLibraryPayload(),
   });
   t.contains(html, 'sp-load-older-button',
     'pagination: Load older button rendered when nextBeforeId is non-null');
   t.contains(html, 'window.searchPlanLoadOlder(2566, 12300)',
     'pagination: button onclick wires the cursor seed');
-}
 
-{
-  // Pagination — exhausted: no Load older button.
-  const html = renderDetailPage({
+  const exhausted = renderDetailPage({
     inspection: makeDetailInspection(),
-    history: makeHistoryRows(),
-    nextBeforeId: null,
+    history: makeHistoryRows(), nextBeforeId: null,
+    library: makeLibraryPayload(),
   });
-  t.excludes(html, 'sp-load-older-button',
+  t.excludes(exhausted, 'sp-load-older-button',
     'pagination: no Load older button when nextBeforeId is null');
 }
 
 {
-  // Edge — no plan-aware history, but legacy rows exist. The page shows
-  // an empty-state for plan-aware and a populated legacy section.
-  const inspection = makeDetailInspection({
-    legacy_logs: { count: 1, head: [
-      { id: 1, created_at: '2026-04-01T00:00:00Z', outcome: 'no_match',
-        variant: 'fallback', query: 'legacy-only', result_count: 1,
-        elapsed_s: 1.0, final_state: 'Completed' },
-    ]},
-  });
+  // Empty attempts — an empty-state instead of a headerless table.
   const html = renderDetailPage({
-    inspection,
-    history: [],
-    nextBeforeId: null,
+    inspection: makeDetailInspection({ legacy_logs: { count: 0, head: [] } }),
+    history: [], nextBeforeId: null, library: makeLibraryPayload(),
   });
-  t.contains(html, 'No plan-aware attempts yet',
-    'edge: empty plan-aware history shows an empty-state message');
-  t.contains(html, 'legacy-only',
-    'edge: legacy section still renders the legacy row');
+  t.contains(html, 'No attempts yet',
+    'empty: an empty history renders the attempts empty-state');
 }
 
 {
-  // Edge — both empty: empty-state for both, no errors.
-  const inspection = makeDetailInspection({
-    legacy_logs: { count: 0, head: [] },
-  });
+  // A deterministic-failed request has no active plan at all. The page
+  // still renders — the operator opened it to find out why.
   const html = renderDetailPage({
-    inspection,
-    history: [],
-    nextBeforeId: null,
+    inspection: makeDetailInspection({
+      active_plan: null,
+      currentness: { has_active_plan: false, has_deterministic_failure: true },
+      latest_failed_deterministic: {
+        id: 580, generator_id: 'GENID-13', failure_class: 'no_runnable_query',
+        error_message: 'NOPLANERROR', created_at: '2026-05-08T00:00:00Z',
+      },
+      legacy_logs: { count: 0, head: [] },
+    }),
+    history: makeHistoryRows(), nextBeforeId: null,
+    library: makeLibraryPayload(),
   });
-  t.contains(html, 'No plan-aware attempts yet',
-    'both-empty: plan-aware empty-state shown');
-  t.contains(html, 'No legacy attempts',
-    'both-empty: legacy empty-state shown');
+  t.contains(html, 'sp-detail',
+    'no plan: the page still renders without an active plan');
+  t.excludes(html, 'sp-plan-table',
+    'no plan: the Plan table is omitted when there is nothing to show');
+  t.contains(html, 'NOPLANERROR',
+    'no plan: the deterministic failure error is why the operator is here');
+  t.contains(html, 'ATT-STRAT-A',
+    'no plan: attempts still render without an active plan');
+  t.contains(html, 'Searching for',
+    'no plan: the scope section still renders without an active plan');
+}
+
+// --- isInterestingAttempt --------------------------------------------
+t.section('isInterestingAttempt()');
+
+{
+  /** A boring row: no_match, every candidate pre-filter-skipped, consumed. */
+  const boring = () => ({
+    outcome: 'no_match',
+    candidates: [{ username: 'x', pre_filter_skip: true }],
+    cursor_update_status: 'advanced',
+    stale_reason: null,
+    attempt_consumed: true,
+  });
+  const CASES = [
+    ['boring no_match is not interesting', boring(), false],
+    ['boring no_results is not interesting',
+      { ...boring(), outcome: 'no_results' }, false],
+    ['null candidates is not interesting by itself',
+      { ...boring(), candidates: null }, false],
+    ['empty candidates is not interesting by itself',
+      { ...boring(), candidates: [] }, false],
+    ['found is interesting', { ...boring(), outcome: 'found' }, true],
+    ['an outcome outside no_match/no_results is interesting',
+      { ...boring(), outcome: 'error' }, true],
+    ['a scored (non-skipped) candidate is interesting',
+      { ...boring(), candidates: [{ username: 'x', pre_filter_skip: false }] }, true],
+    ['a candidate with no pre_filter_skip key counts as scored',
+      { ...boring(), candidates: [{ username: 'x' }] }, true],
+    ['cursor_update_status=stale is interesting',
+      { ...boring(), cursor_update_status: 'stale' }, true],
+    ['a non-empty stale_reason is interesting',
+      { ...boring(), stale_reason: 'plan_superseded' }, true],
+    ['an empty-string stale_reason is not interesting',
+      { ...boring(), stale_reason: '' }, false],
+    ['attempt_consumed=false is interesting',
+      { ...boring(), attempt_consumed: false }, true],
+    ['a null row is not interesting', null, false],
+  ];
+  for (const [label, row, expected] of CASES) {
+    t.equal(isInterestingAttempt(row), expected,
+      `isInterestingAttempt: ${label}`);
+  }
 }
 
 // --- closeSearchPlanDetail back-button restore -----------------------
@@ -1721,14 +2302,18 @@ async function withRaceFixture(impl) {
     inspection42.request_id = 42;
     const inspection43 = makeDetailInspection({ request_id: 43 });
     inspection43.request_id = 43;
-    // Fire 42's render. It enqueues two fetches (inspection + history).
+    // Fire 42's render. It enqueues three fetches: inspection, history,
+    // and the per-request pipeline payload for the library column.
     const p42 = renderSearchPlanDetail(42);
-    // Fire 43's render. It enqueues two more.
+    // Fire 43's render. It enqueues three more.
     const p43 = renderSearchPlanDetail(43);
-    // We now have 4 deferreds. Resolve 43's first (positions 2 and 3 in
-    // the queue) so the page becomes "the 43 view".
-    ctx.fetchQueue[2].resolve(fakeOkResponse(inspection43));
-    ctx.fetchQueue[3].resolve(fakeOkResponse({ rows: [], next_before_id: null }));
+    t.equal(ctx.fetchCalls.length, 6,
+      'F1: each detail render dispatches three fetches');
+    // Resolve 43's first (positions 3, 4 and 5 in the queue) so the page
+    // becomes "the 43 view".
+    ctx.fetchQueue[3].resolve(fakeOkResponse(inspection43));
+    ctx.fetchQueue[4].resolve(fakeOkResponse({ rows: [], next_before_id: null }));
+    ctx.fetchQueue[5].resolve(fakeOkResponse(makeLibraryPayload()));
     await p43;
     // Capture the post-43-paint HTML.
     const after43 = ctx.getInnerHtml();
@@ -1737,10 +2322,55 @@ async function withRaceFixture(impl) {
     // Now resolve 42's fetches — the stale render must NOT clobber.
     ctx.fetchQueue[0].resolve(fakeOkResponse(inspection42));
     ctx.fetchQueue[1].resolve(fakeOkResponse({ rows: [], next_before_id: null }));
+    ctx.fetchQueue[2].resolve(fakeOkResponse(makeLibraryPayload()));
     await p42;
     // The HTML must still match the 43 paint, not get overwritten by 42.
     t.equal(ctx.getInnerHtml(), after43,
       'F1: stale 42 render did NOT clobber the live 43 paint');
+  });
+}
+
+// #811 — the Interesting/All toggle repaints from the loaded rows and
+// dispatches no fetch of its own.
+{
+  await withRaceFixture(async (ctx) => {
+    const boring = {
+      ...makeHistoryRows()[0],
+      id: 12000, plan_strategy: 'BORING-STRAT',
+      rejection_reason: null,
+      candidates: [{ username: 'BORINGPEER', pre_filter_skip: true }],
+    };
+    const rows = [...makeHistoryRows(), boring];
+    const render = renderSearchPlanDetail(42);
+    ctx.fetchQueue[0].resolve(fakeOkResponse(makeDetailInspection()));
+    ctx.fetchQueue[1].resolve(fakeOkResponse({ rows, next_before_id: null }));
+    ctx.fetchQueue[2].resolve(fakeOkResponse(makeLibraryPayload()));
+    await render;
+    const afterRender = ctx.fetchCalls.slice();
+    t.anyContains(afterRender, '/api/pipeline/42/search-plan',
+      'toggle prereq: the detail render fetched the inspection payload');
+    t.anyContains(afterRender, '/api/pipeline/42/search-plan/history',
+      'toggle prereq: the detail render fetched a history page');
+    t.anyContains(afterRender, '/api/pipeline/42',
+      'toggle prereq: the detail render fetched the per-request payload');
+    t.excludes(ctx.getInnerHtml(), 'BORING-STRAT',
+      'toggle: the default Interesting view hides an uninteresting row');
+
+    searchPlanSetAttemptsFilter(42, 'all');
+    t.deepEqual(ctx.fetchCalls, afterRender,
+      'toggle: switching to All dispatches no additional fetch');
+    t.contains(ctx.getInnerHtml(), 'BORING-STRAT',
+      'toggle: All re-renders the cached rows including the boring one');
+
+    searchPlanSetAttemptsFilter(42, 'interesting');
+    t.deepEqual(ctx.fetchCalls, afterRender,
+      'toggle: switching back to Interesting dispatches no additional fetch');
+    t.excludes(ctx.getInnerHtml(), 'BORING-STRAT',
+      'toggle: switching back to Interesting hides the boring row again');
+
+    searchPlanSetAttemptsFilter(42, 'nonsense');
+    t.contains(ctx.getInnerHtml(), 'ATT-STRAT-A',
+      'toggle: an unrecognised mode is ignored rather than blanking the view');
   });
 }
 
@@ -1860,7 +2490,7 @@ async function withRaceFixture(impl) {
       },
     };
     ctx.document.querySelector = (/** @type {string} */ sel) => {
-      if (sel.includes('sp-history-tbody')) return tbody;
+      if (sel.includes('sp-attempts-tbody')) return tbody;
       if (sel.includes('sp-load-older-wrap')) return wrap;
       return null;
     };

@@ -279,70 +279,110 @@
   .sp-failure-class { color: #ec9; font-size: 0.85em; }
   .sp-failure-class strong { color: #f88; }
   .sp-failure-error { color: #b88; font-size: 0.78em; margin-top: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
-  /* Search-plan detail page (U4) — full-page renderer dropped into
+  /* Search-plan detail page — full-page renderer dropped into
      #pipeline-content when state.pipelineView === 'search-plan-detail'.
-     Mirrors the .p-detail / .sp-summary visual language: dark surface,
-     blue-violet accent. Action / refresh / back buttons reuse
-     .sp-action-button. The history table is dense and horizontal-scroll-
-     ready (overflow-x:auto) so 15+ telemetry columns fit on narrow
-     screens without forcing word-wrap on every cell. */
+     Rewritten for issue #811: the page leads with the quality override
+     and what the library already holds, then the override check, then
+     the plan and its attempts. Wide tables scroll inside .sp-tablewrap
+     so the page body never scrolls sideways. */
   .sp-detail-loading { color: #888; padding: 16px; font-size: 0.9em; }
-  .sp-detail { background: #15161a; padding: 14px 18px; border-radius: 6px; border: 1px solid #2a2a3a; color: #ccd; }
-  .sp-detail-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid #222; }
+  .sp-detail { background: #15161a; padding: 14px 18px 18px; border-radius: 6px; border: 1px solid #2a2a3a; color: #ccd; display: flex; flex-direction: column; gap: 14px; }
+  .sp-detail-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; padding-bottom: 10px; border-bottom: 1px solid #222; }
   .sp-detail-header-left { display: inline-flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   .sp-detail-title { font-size: 1.05em; font-weight: 500; color: #ccd; }
-  .sp-detail-header-actions { display: inline-flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+  .sp-detail-header-actions { display: inline-flex; gap: 5px; align-items: center; flex-wrap: wrap; }
   .sp-back-button { padding: 3px 11px; background: #2a2a3a; color: #aac; border: 1px solid #3a3a4a; border-radius: 4px; cursor: pointer; font-size: 0.85em; line-height: 1.2; }
   .sp-back-button:hover { background: #3a3a4a; color: #ccd; }
-  .sp-detail-meta { display: flex; gap: 14px; flex-wrap: wrap; color: #99a; font-size: 0.85em; margin-bottom: 12px; }
-  .sp-detail-section { margin: 12px 0; }
-  .sp-slot-list { list-style: none; padding: 0; margin: 4px 0 0 0; display: flex; flex-direction: column; gap: 2px; }
-  .sp-slot { display: grid; grid-template-columns: 32px 100px 1fr auto; gap: 10px; padding: 3px 6px; border-radius: 3px; font-size: 0.82em; background: #181818; }
-  .sp-slot-current { background: #1a2235; border-left: 2px solid #56b; color: #cce; font-weight: 500; }
-  .sp-slot-ordinal { color: #777; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  .sp-slot-strategy { color: #aac; }
-  .sp-slot-query { color: #888; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
-  .sp-slot-meta { color: #555; font-size: 0.95em; }
-  .sp-slot-list-empty { color: #666; font-size: 0.85em; padding: 6px; font-style: italic; }
-  .sp-history-table { width: 100%; border-collapse: collapse; font-size: 0.78em; margin-top: 4px; display: block; overflow-x: auto; }
-  .sp-history-table thead { background: #1a1a22; }
-  .sp-history-table th { color: #889; text-align: left; font-weight: 600; padding: 4px 8px; border-bottom: 1px solid #333; white-space: nowrap; }
-  .sp-history-table td { color: #aaa; padding: 4px 8px; border-bottom: 1px solid #1f1f1f; vertical-align: top; }
-  .sp-history-row.legacy td { color: #666; }
-  .sp-history-row.legacy .sp-history-strategy { color: #966; font-style: italic; }
-  .sp-history-row-stale td { background: #221a1a; }
-  .sp-history-table code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #888; word-break: break-all; }
-  .sp-history-empty { color: #666; font-size: 0.85em; padding: 6px; font-style: italic; }
-  .sp-candidate-forensics { margin: 0; }
-  .sp-candidate-forensics summary { cursor: pointer; user-select: none; color: #889; font-size: 0.95em; }
-  .sp-candidate-forensics summary:hover { color: #ccd; }
-  .sp-candidate-forensics pre { background: #0e0e0e; color: #aaa; padding: 6px; border-radius: 3px; max-width: 720px; max-height: 360px; overflow: auto; font-size: 0.95em; }
+  .sp-detail-meta { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; color: #99a; font-size: 0.85em; font-variant-numeric: tabular-nums; }
+  .sp-detail-meta strong { color: #ccd; font-weight: 600; }
+  .sp-detail-section { display: flex; flex-direction: column; gap: 7px; margin: 0; }
+  .sp-section-sub { text-transform: none; letter-spacing: 0; font-weight: 400; color: #667; font-size: 0.95em; }
+  .sp-chip { display: inline-block; padding: 1px 7px; border-radius: 3px; font-size: 0.78em; font-weight: 600; letter-spacing: 0.2px; }
+  .sp-chip-good { background: #1c2a22; color: #6db38f; }
+  .sp-chip-warn { background: #33281b; color: #d9a05a; }
+  .sp-chip-bad { background: #2c1c1c; color: #d88080; }
+  .sp-chip-dim { background: #22242b; color: #889; font-weight: 500; }
+  /* "Searching for" — scope on the left, what the library holds on the right. */
+  .sp-scope { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 720px) { .sp-scope { grid-template-columns: 1fr; } }
+  .sp-scope-col { background: #1a1c22; border-radius: 5px; padding: 10px 12px; display: flex; flex-direction: column; gap: 7px; }
+  .sp-scope-label { color: #667; font-size: 0.78em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+  .sp-tiers { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
+  .sp-tier { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.78em; padding: 2px 8px; border-radius: 3px; border: 1px solid #2a2a3a; color: #667; text-decoration: line-through; text-decoration-color: #4a4d5a; }
+  .sp-tier-on { color: #e6e9f5; background: #1a2235; border-color: #56b; text-decoration: none; font-weight: 600; }
+  .sp-kv { display: grid; grid-template-columns: max-content 1fr; column-gap: 12px; row-gap: 3px; font-size: 0.85em; margin: 0; }
+  .sp-kv dt { color: #99a; }
+  .sp-kv dd { margin: 0; color: #ccd; font-variant-numeric: tabular-nums; }
+  .sp-kv code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .sp-kv-why { color: #889; }
+  .sp-have { display: grid; grid-template-columns: max-content max-content 1fr; gap: 4px 14px; align-items: baseline; font-size: 0.85em; }
+  .sp-have-tag { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 700; color: #889; letter-spacing: 0.5px; font-size: 0.9em; }
+  .sp-have-fmt { color: #ccd; }
+  .sp-have-spec { color: #6db38f; }
+  .sp-have-path { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85em; color: #667; overflow-wrap: anywhere; }
+  .sp-have-scenario { color: #889; font-size: 0.82em; }
+  .sp-have-unavailable { color: #889; font-size: 0.85em; font-style: italic; }
+  /* "Is the override holding?" — the one question the page exists for. */
+  .sp-checks { display: flex; flex-direction: column; gap: 4px; background: #1a1c22; border-radius: 5px; padding: 10px 12px; border-left: 3px solid #6db38f; }
+  .sp-check { display: grid; grid-template-columns: 18px 1fr; gap: 8px; align-items: baseline; font-size: 0.85em; font-variant-numeric: tabular-nums; }
+  .sp-check-mark { font-weight: 700; text-align: center; }
+  .sp-check-ok .sp-check-mark { color: #6db38f; }
+  .sp-check-att .sp-check-mark { color: #d9a05a; }
+  .sp-check-peer { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #b8bdd6; }
+  .sp-check-when { color: #889; }
+  /* Dense tables: plan slots + their tallies, and one line per attempt. */
+  .sp-tablewrap { overflow-x: auto; }
+  .sp-plan-table, .sp-attempts-table { width: 100%; border-collapse: collapse; font-size: 0.8em; font-variant-numeric: tabular-nums; }
+  .sp-plan-table th, .sp-attempts-table th { color: #889; text-align: left; font-weight: 600; padding: 4px 8px; border-bottom: 1px solid #30323b; white-space: nowrap; }
+  .sp-plan-table td, .sp-attempts-table td { padding: 4px 8px; border-bottom: 1px solid #1f2025; vertical-align: top; color: #b5b9c9; }
+  .sp-plan-table th.sp-n, .sp-plan-table td.sp-n,
+  .sp-attempts-table th.sp-n, .sp-attempts-table td.sp-n { text-align: right; }
+  .sp-plan-table tr.sp-plan-current td { background: #1a2235; color: #dfe2ee; }
+  .sp-plan-table tr.sp-plan-current td:first-child { box-shadow: inset 3px 0 0 #56b; }
+  .sp-plan-ord { color: #667; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; width: 24px; }
+  .sp-plan-strat { color: #aab0cc; white-space: nowrap; }
+  .sp-plan-q { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #9a9fb3; }
+  .sp-plan-found { color: #6db38f; font-weight: 600; }
+  .sp-plan-zero { color: #667; }
+  .sp-attempts-table td { white-space: nowrap; }
+  .sp-attempts-table td.sp-att-cands { white-space: normal; }
+  .sp-att-when { color: #889; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .sp-att-strat { color: #aab0cc; }
+  .sp-att-strat .sp-chip { margin-left: 6px; }
+  .sp-att-peer { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #b8bdd6; }
+  .sp-att-rej { color: #d9a05a; }
+  .sp-att-arrow { color: #667; }
+  .sp-att-grab { color: #d88080; }
+  .sp-att-grab-ok { color: #6db38f; }
+  .sp-attempts-table tr.sp-att-found td { background: #17201b; }
+  .sp-filters { display: inline-flex; gap: 4px; margin-left: 10px; }
+  .sp-filter-button { padding: 1px 9px; background: #23252e; color: #aab0cc; border: 1px solid #343744; border-radius: 4px; cursor: pointer; font-size: 0.9em; line-height: 1.4; text-transform: none; letter-spacing: 0; font-weight: 400; }
+  .sp-filter-button:hover { background: #2e3140; color: #dfe2ee; }
+  .sp-filter-button-on { background: #1a2235; border-color: #56b; color: #dfe2ee; }
+  .sp-att-raw { margin: 0; }
+  .sp-att-raw summary { cursor: pointer; user-select: none; color: #667; font-size: 0.95em; }
+  .sp-att-raw summary:hover { color: #ccd; }
+  .sp-att-raw pre { background: #0e0f12; color: #9a9fb3; padding: 8px 10px; border-radius: 4px; font-size: 0.95em; max-height: 260px; max-width: 720px; overflow: auto; margin: 6px 0 0; white-space: pre-wrap; }
   .sp-load-older-wrap { padding: 6px 0; }
   .sp-load-older-button { padding: 4px 12px; background: #2a2a3a; color: #aac; border: 1px solid #3a3a4a; border-radius: 4px; cursor: pointer; font-size: 0.82em; }
   .sp-load-older-button:hover { background: #3a3a4a; color: #ccd; }
   .sp-load-older-error { color: #d88; font-size: 0.8em; padding: 4px 0; }
-  .sp-stats-cache-label { color: #889; font-size: 0.78em; padding-bottom: 4px; font-style: italic; }
-  .sp-stats-table { width: 100%; border-collapse: collapse; font-size: 0.8em; }
-  .sp-stats-table th { color: #889; text-align: left; font-weight: 600; padding: 3px 8px; border-bottom: 1px solid #333; }
-  .sp-stats-table td { color: #aaa; padding: 3px 8px; border-bottom: 1px solid #1f1f1f; }
-  .sp-stats-empty { color: #666; font-size: 0.85em; padding: 6px; font-style: italic; }
-  .sp-health { background: #1a1a1a; padding: 8px 12px; border-radius: 4px; border-left: 2px solid #844; }
-  .sp-health-failures-empty { color: #6a9; font-size: 0.85em; }
-  .sp-health-failure { padding: 6px 0; }
-  .sp-health-failure-label { color: #b88; font-size: 0.85em; font-weight: 500; }
-  .sp-health-failure-class { color: #f88; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding-left: 6px; }
-  .sp-health-failure-when { color: #666; font-size: 0.78em; padding: 2px 0; }
-  .sp-health-failure-error { color: #d99; font-size: 0.78em; background: #1a0e0e; padding: 6px 8px; border-radius: 3px; max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
-  .sp-health-prov-label { color: #889; font-size: 0.78em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; padding: 8px 0 4px; }
-  .sp-health-provenance, .sp-health-provenance-empty { color: #889; font-size: 0.82em; }
-  .sp-health-provenance-empty { font-style: italic; color: #555; }
-  .sp-health-prov-row { padding: 4px 0; }
-  .sp-health-prov-key { color: #aac; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding-right: 6px; }
-  .sp-health-prov-val { color: #888; font-size: 0.95em; background: #0e0e0e; padding: 6px; border-radius: 3px; max-height: 220px; overflow: auto; white-space: pre-wrap; }
+  /* Plan health — quiet unless something is wrong. */
+  .sp-health { color: #99a; font-size: 0.85em; display: flex; flex-direction: column; gap: 4px; }
+  .sp-health-ok { color: #6db38f; }
+  .sp-health-bad { color: #d88080; }
+  /* Pre-rollout (plan_id IS NULL) history — collapsed, and omitted
+     entirely when the request has no legacy rows at all. */
   .sp-history-legacy-section { background: #161618; padding: 8px 12px; border-radius: 4px; }
   .sp-history-legacy summary { cursor: pointer; user-select: none; color: #889; font-size: 0.78em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
   .sp-history-legacy summary:hover { color: #ccd; }
   .sp-history-legacy[open] summary { color: #ccd; }
+  .sp-history-table { width: 100%; border-collapse: collapse; font-size: 0.8em; }
+  .sp-history-table th { color: #889; text-align: left; font-weight: 600; padding: 4px 8px; border-bottom: 1px solid #333; white-space: nowrap; }
+  .sp-history-table td { color: #aaa; padding: 4px 8px; border-bottom: 1px solid #1f1f1f; vertical-align: top; }
+  .sp-history-table th.sp-n, .sp-history-table td.sp-n { text-align: right; }
+  .sp-history-row.legacy td { color: #666; }
+  .sp-history-table code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #888; word-break: break-all; }
   .sp-history-table-legacy { margin-top: 6px; }
   /* Search-plan advance form (U5) — replaces the action toolbar in the
      summary panel or detail page when the operator clicks Advance.

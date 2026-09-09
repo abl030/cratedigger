@@ -854,6 +854,43 @@ depends on.
   this block — they still render, just with no triage chip, which is correct
   for that whole cohort and not a missing-data bug. `recents.js`/`history.js`
   render the `wrong_match_triage_*` fields conditionally on presence.
+- **Search-plan inspector** — the 🔍 button `renderSearchPlanButton` injects
+  into Browse artist-page release rows (`discography.js`) and Recents rows
+  (`recents.js`) opens an inline summary panel (plan status, cursor, cycle,
+  last three attempts, Advance / Regenerate); "Open detail →" swaps the Pipeline
+  tab for the full detail page and the single Back button restores the
+  originating tab, sub-view, and scroll position. `web/js/search_plan.js`
+  owns both surfaces; the detail page is one composed entry,
+  `renderDetailPage`, over three fetches — the inspection payload, one
+  history page, and `GET /api/pipeline/<id>` for the library column. That
+  third fetch never breaks the page: a failure renders the column as
+  `library state unavailable`, because a search plan is readable whether or
+  not Beets is.
+- **Search-plan detail page (issue #811)** — sections in order: header
+  (Back, title, request-status chip, Refresh / Advance / Regenerate); a meta
+  line with plan status, cursor, cycle, attempts-since-created, last search,
+  and next eligible time; **Searching for** — the effective tier ladder as
+  lit / struck chips (plus an `any` chip bound to catch-all) beside the
+  override, bitrate floor and target format, and **In the library now**, the
+  compact HAVE strip; **Is the override holding?** — check rows keyed ✓ or !
+  on candidates scored outside the scope, grabs by filetype and their last
+  outcome, the last found folder with the outcome of the grab it produced,
+  and the peers seen; **Plan** — the slot list and the per-slot tallies as
+  one table, current slot highlighted; **Attempts** — one line per attempt
+  with an Interesting / All toggle (`isInterestingAttempt`) that re-renders
+  from the loaded rows without refetching, and a per-row `raw` expander
+  holding cycle, peers, fanout, cursor status and the full candidates JSON;
+  **Plan health** — one line plus a provenance sentence grouping the
+  generator's omitted candidates by reason; and the collapsed pre-rollout
+  legacy history, omitted entirely when the request has no legacy rows.
+  Facts that are constant or normal stay off the page: the generator id
+  appears only as an amber `plan generator out of date` chip when
+  `currentness.generator_id_mismatch` is set, and `stale` / `not consumed` /
+  a non-`Completed` final state appear as inline chips only when abnormal.
+  Per-slot tallies merge onto a slot by the payload's own identity keys,
+  `identity.plan_id` and `identity.ordinal` — the pre-#811 renderer read
+  `identity.plan_ordinal`, which no producer writes, so every tally showed
+  as a dash.
 
 ## Dev Server Workflows
 
