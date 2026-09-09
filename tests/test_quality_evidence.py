@@ -1662,11 +1662,16 @@ class TestEverySpectralGradeCompanionIsRejectedWithoutOne(unittest.TestCase):
     R19, which needs the subject, so a provenance-only world is
     unreachable there by construction.
 
-    The bitrate clause has a blast radius beyond itself. Both
-    ``tests.test_candidate_admission_progress_generated`` and
-    ``tests.test_quality_decisions`` narrow their own strategies on the
-    strength of "a persisted row can never carry a bitrate without a
-    grade", in comments, with nothing exercising the guard they cite.
+    The bitrate clause has a blast radius beyond itself.
+    ``tests.test_candidate_admission_progress_generated`` narrows its own
+    strategy on the strength of "a persisted row can never carry a bitrate
+    without a grade" — its ``SpectralFact`` literal has no bitrate-only
+    member, and the comment above it cites this clause as the reason —
+    while nothing exercised the guard it cites.
+    ``tests.test_quality_decisions`` cites the same sentence at
+    ``test_ungraded_existing_spectral_number_is_not_evidence``, though only
+    to explain why the shape it deliberately constructs has no producer;
+    that module draws no strategies at all.
 
     Each row asserts its clause's EXACT message, because the capture
     family's own assertion matches on the shared "require a spectral

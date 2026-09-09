@@ -10735,19 +10735,20 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         The outcome has a producer, though not one any deployment reaches
         today. ``lib.util.validate_audio`` returns ``outcome="skipped"``
         when ``cfg.audio_check_mode == "off"``, and that report rides
-        ``PreimportMeasurement.audio_validation`` into
+        ``PreimportMeasurement.audio_validation`` into the candidate-side
         ``evidence_from_measurement``. But ``audio_check`` is read only by
         ``lib.config``: ``nix/module.nix`` renders a fixed ``[Beets
         Validation]`` block without it and offers no override, so a
         module-deployed installation cannot set ``off`` at all, and doc2
-        runs the ``normal`` default. Two other current-evidence builders
-        (``evidence_from_album_info`` and the propagation write) never pass
-        ``audio_validation``, so they carry ``legacy_unrecorded`` whatever
-        the mode is. So this stays coverage for a member of the set the
-        deployment does not exercise — which is the right reason to pin it,
-        not a reason to call it dead. (Greping
-        ``skipped_audio_validation_report`` finds nothing: the constructor
-        has no caller, and the outcome is spelled elsewhere.)
+        runs the ``normal`` default. The two current-evidence builders
+        (``evidence_from_album_info`` and the propagation write) pass no
+        ``audio_validation`` at all, so they carry ``legacy_unrecorded``
+        whatever the mode is. So this stays coverage for a member of the
+        set the deployment does not exercise — which is the right reason to
+        pin it, not a reason to call it dead. (Greping
+        ``skipped_audio_validation_report`` finds its definition, two
+        re-exports and these tests: the constructor has no production
+        caller, and the outcome is spelled elsewhere.)
         """
         from lib.quality import skipped_audio_validation_report
 
@@ -10817,14 +10818,24 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         this class (mutant runner finding, #1378 review round), because
         nothing ever stored a ``skipped`` report and then wrote over it.
 
-        That guard is spelled once per column, so this asserts both columns
-        a stored-``skipped`` world can distinguish: ``audio_validation``
-        itself and ``audio_error``. The third, ``audio_corrupt``, is
-        unobservable here by construction rather than untested —
-        ``storage_validation_errors`` forces it to agree with the outcome,
-        and every weak outcome is a non-corrupt one, so both the preserve
-        and the replace branch yield ``False`` whenever the guard's
-        stored-side list is what decides.
+        That guard is spelled once per column, and the three columns are
+        not equally reachable:
+
+        - ``audio_validation`` is the one this world distinguishes for
+          real. Both branches carry a different report.
+        - ``audio_error`` is asserted as fail-closed legislation, not as a
+          live scenario. The seeded value is hand-authored: production sets
+          ``audio_error`` only inside ``measure_preimport_state``'s
+          ``if not audio_result.valid`` branch, and ``skipped`` counts as
+          valid, so a real ``skipped`` row carries NULL and both branches
+          would agree. A future writer that pairs the two is what this
+          catches.
+        - ``audio_corrupt`` is stronger than unpinned and stronger than
+          unproduced: the distinguishing row cannot be built at all.
+          ``storage_validation_errors`` forces the flag to agree with the
+          outcome, migration 064's own validator repeats that check in
+          SQL, and every weak outcome is non-corrupt — so both branches
+          yield ``False`` whenever the stored-side list is what decides.
         """
         from lib.quality import skipped_audio_validation_report
 

@@ -10,11 +10,11 @@
 -- past its revert (13ed134f, 07:50) by the usual deploy lag -- 48 of the 60
 -- were written after the revert was authored.
 --
--- Every reader names its columns explicitly, so nothing selects the column
--- even implicitly. In lib/ and scripts/ that is lib/pipeline_db/evidence.py,
--- lib/pipeline_db/download_log.py and scripts/decision_differential.py;
--- migrations/021 and tests/test_evidence_decoder.py read the table too, and
--- name their columns as well.
+-- No read site of this table selects the column even implicitly: every one
+-- names its columns, and there is no SELECT * against the table anywhere.
+-- The production readers are lib/pipeline_db/evidence.py and
+-- lib/pipeline_db/download_log.py; scripts/decision_differential.py reads it
+-- too, and its own fail-closed schema contract never listed the column.
 --
 -- Forward-only removal, issue #1378 item 4. A future byte-level reuse guard
 -- adds its own column together with the writer that fills it.
