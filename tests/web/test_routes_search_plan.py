@@ -338,6 +338,15 @@ class TestPipelineSearchPlanContract(_FakeDbWebServerCase):
         self.assertFalse(scope["catch_all"])
         self.assertEqual(scope["source"], "override")
         self.assertEqual(scope["min_bitrate"], 320)
+        # The route must hand the payload the runtime config's OWN ladder.
+        # Its CLI twin pins this; without it here, a route passing an
+        # empty ``allowed_filetypes`` renders an empty "configured tiers"
+        # and nothing on the API side notices (mutant runner, 6).
+        from lib.config import read_runtime_config
+        self.assertEqual(
+            scope["configured_tiers"],
+            list(read_runtime_config().allowed_filetypes))
+        self.assertTrue(scope["configured_tiers"])
         self.assertEqual(data["request"]["search_attempts"], 9)
         self.assertEqual(data["request"]["min_bitrate"], 320)
         self.assertEqual(data["request"]["target_format"], None)

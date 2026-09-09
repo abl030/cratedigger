@@ -401,16 +401,24 @@ class _SearchPlanMixin(_PipelineDBBase):
         and a registered exception is a weaker guarantee than a literal:
 
         * ``jsonb_array_elements(CASE WHEN jsonb_typeof(x.candidates) =
-          'array' THEN x.candidates END)`` — the unnest. ``candidates``
-          is SQL NULL on pre-attempt/error rows (a strict function over
-          NULL contributes zero rows, verified against the ephemeral PG)
-          and the function ERRORS on a non-array jsonb. The guard belongs
-          in the function's own argument rather than in a WHERE clause:
-          a qual at the join level is a filter on rows the function has
-          already been asked to produce, and in the ``last_found``
-          query's LEFT JOIN LATERAL it could not reach the input at all.
-          With no ELSE the CASE yields NULL, so a non-array contributes
-          zero elements instead of raising.
+          'array' THEN x.candidates END)`` — the unnest. Its NULL half is
+          load-bearing: ``candidates`` is SQL NULL on pre-attempt/error
+          rows (649 live rows), and a strict function over NULL
+          contributes zero rows rather than raising (verified against the
+          ephemeral PG). Its non-array half is fail-closed LEGISLATION,
+          not a live path — ``jsonb_array_elements`` errors on a non-array
+          jsonb, and the only writer,
+          ``msgspec.json.encode(list[CandidateScore])``, cannot produce
+          one: measured on the live corpus 2026-09-09, ``candidates`` is
+          ``array`` on 498,528 rows and NULL on 649, with zero non-array
+          values across 1,391,812 elements. It stays because the column is
+          plain jsonb and the next writer is not bound by that encoder.
+          The guard belongs in the function's own argument rather than in
+          a WHERE clause: a qual at the join level filters rows the
+          function has already been asked to produce, and in the
+          ``last_found`` query's LEFT JOIN LATERAL it could not reach the
+          input at all. With no ELSE the CASE yields NULL, so either
+          shape contributes zero elements.
         * ``COALESCE((c->>'pre_filter_skip')::boolean, FALSE) = FALSE`` —
           scored candidates only. The pre-filter's sampled rows record
           peers the walk never browsed, so they are not evidence about a

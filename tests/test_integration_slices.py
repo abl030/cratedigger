@@ -13863,6 +13863,81 @@ class TestSearchToGrabLinkPropagationSlice(unittest.TestCase):
         row = next(e for e in db.download_logs if e.id == log_id)
         self.assertIsNone(row.search_log_id)
 
+    def test_have_analysis_error_persists_the_link(self):
+        """The third dl_info-carrying terminal site (mutant runner, 7)."""
+        from lib.dispatch.outcome_actions import _record_have_analysis_error
+        from tests.dispatch_helpers import make_dispatch_request
+
+        db, _entry, dl_info = self._seeded(search_log_id=self.SEARCH_LOG_ID)
+        _record_have_analysis_error(
+            make_dispatch_request(
+                request_id=42, dl_info=dl_info, path="/processing/albums/x"),
+            db,
+            raw_error="ffprobe exited 1",
+            installed_path="/Beets/Artist/Album",
+            snapshot_guard=None,
+        )
+        self.assertEqual(
+            db.download_logs[0].outcome, "have_analysis_error")
+        self.assertEqual(
+            db.download_logs[0].search_log_id, self.SEARCH_LOG_ID)
+
+    def test_the_local_completion_bundle_persists_the_link(self):
+        """The automation local-completion fallback (mutant runner, 8).
+
+        Its sibling ``_timeout_album`` was pinned; this one builds its own
+        ``TerminalDownloadAudit`` from the same reconstructed entry.
+        """
+        from lib.download import _local_completion_terminal_outcome
+        from lib.download_reconstruction import reconstruct_grab_list_entry
+        from lib.quality import ActiveDownloadState
+
+        # The real wanted -> downloading -> processing transcript, then
+        # the link a found search would have stamped on that attempt.
+        db, rid = self._preview_failure_request()
+        job = handoff_automation_owner(db, rid)
+        self._stamp_link(db, rid)
+        request = db.get_request(rid)
+        assert request is not None
+        state = ActiveDownloadState.from_raw(request["active_download_state"])
+        entry = reconstruct_grab_list_entry(request, state)
+
+        pending = _local_completion_terminal_outcome(
+            entry, state,
+            request_id=rid,
+            import_job_id=job.id,
+            transition=None,
+            outcome="failed",
+            detail="local processing failed",
+        )
+        self.assertEqual(pending.audit.search_log_id, self.SEARCH_LOG_ID)
+
+    def test_the_entry_to_state_projection_is_lossless_both_ways(self):
+        """The WRITE half of the round trip (mutant runner, 9).
+
+        ``reconstruct_grab_list_entry`` (state -> entry) was pinned;
+        ``build_active_download_state`` (entry -> state) was not, while
+        its own comment claims the projection is lossless in both
+        directions.
+        """
+        from lib.download import build_active_download_state
+        from lib.download_reconstruction import reconstruct_grab_list_entry
+
+        entry = make_grab_list_entry(
+            album_id=42,
+            files=[make_download_file(
+                filename="Music\\Album\\01.flac", username="peer")],
+            search_log_id=self.SEARCH_LOG_ID,
+        )
+        state = build_active_download_state(entry)
+        self.assertEqual(state.search_log_id, self.SEARCH_LOG_ID)
+
+        request = make_request_row(id=42, status="downloading")
+        self.assertEqual(
+            reconstruct_grab_list_entry(request, state).search_log_id,
+            entry.search_log_id,
+        )
+
     def test_an_unstamped_state_writes_a_null_link(self):
         """Must-still-work control: no stamp, no fabricated link."""
         from lib.dispatch import _record_rejection_and_maybe_requeue
