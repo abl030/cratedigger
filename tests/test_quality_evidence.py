@@ -1668,10 +1668,13 @@ class TestEverySpectralGradeCompanionIsRejectedWithoutOne(unittest.TestCase):
     without a grade" — its ``SpectralFact`` literal has no bitrate-only
     member, and the comment above it cites this clause as the reason —
     while nothing exercised the guard it cites.
-    ``tests.test_quality_decisions`` cites the same sentence at
-    ``test_ungraded_existing_spectral_number_is_not_evidence``, though only
-    to explain why the shape it deliberately constructs has no producer;
-    that module draws no strategies at all.
+    ``tests.test_quality_decisions`` narrowed its hand-written
+    ``TestCompareQualitySharedSpectralBucket.CASES`` table on the same
+    fact, under test-fidelity Rule C, and cites the clause twice: once in
+    that table's own header and once at
+    ``test_ungraded_existing_spectral_number_is_not_evidence``, to say why
+    the shape it deliberately constructs has no producer. Its worlds are a
+    literal table, not a strategy.
 
     Each row asserts its clause's EXACT message, because the capture
     family's own assertion matches on the shared "require a spectral

@@ -10745,10 +10745,10 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         ``audio_validation`` at all, so they carry ``legacy_unrecorded``
         whatever the mode is. So this stays coverage for a member of the
         set the deployment does not exercise — which is the right reason to
-        pin it, not a reason to call it dead. (Greping
-        ``skipped_audio_validation_report`` finds its definition, two
-        re-exports and these tests: the constructor has no production
-        caller, and the outcome is spelled elsewhere.)
+        pin it, not a reason to call it dead. (``skipped_audio_validation_
+        report`` has no production caller: the outcome is spelled
+        elsewhere, which is why greping the constructor name says nothing
+        about reachability.)
         """
         from lib.quality import skipped_audio_validation_report
 
@@ -10824,12 +10824,11 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         - ``audio_validation`` is the one this world distinguishes for
           real. Both branches carry a different report.
         - ``audio_error`` is asserted as fail-closed legislation, not as a
-          live scenario. The seeded value is hand-authored: production sets
-          ``audio_error`` only inside ``measure_preimport_state``'s
-          ``if not audio_result.valid`` branch, and ``skipped`` counts as
-          valid, so a real ``skipped`` row carries NULL and both branches
-          would agree. A future writer that pairs the two is what this
-          catches.
+          live scenario. The seeded value is hand-authored: every
+          production site that sets ``audio_error`` sets a corrupt-shaped
+          ``audio_validation`` alongside it, so a real ``skipped`` row
+          carries NULL and both branches would agree. A future writer that
+          pairs the two is what this catches.
         - ``audio_corrupt`` is stronger than unpinned and stronger than
           unproduced: the distinguishing row cannot be built at all.
           ``storage_validation_errors`` forces the flag to agree with the
