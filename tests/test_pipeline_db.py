@@ -15607,6 +15607,77 @@ class TestConsumedAttemptStampsDownloadState(unittest.TestCase):
                 self.assertEqual(len(rows), 1)
                 self.assertEqual(rows[0]["id"], result.search_log_id)
 
+    def test_the_stamped_link_survives_the_first_poll_cycle(self):
+        """Issue #1405: the link must reach the audit row, not just the DB.
+
+        The whole path, with no hand-built state anywhere in it: a real
+        claim (``build_active_download_state``), the real stamp
+        (``record_consumed_search_attempt``), the state read back the
+        way the poller reads it, the REAL ``reduce_poll_cycle``, the
+        REAL guarded write-back (``update_download_state_if_downloading``,
+        which rewrites the WHOLE state), and then the reconstruction
+        every ``download_log`` writer goes through
+        (``reconstruct_grab_list_entry`` -> ``_build_download_info``).
+
+        This composition is what was missing. The stamp pins above stop
+        at the stamp; #1400's integration slices start from a state that
+        ALREADY carries the link. Nothing crossed the poll in between --
+        so a reducer rebuild that dropped the key was invisible to every
+        test and erased the link on the first cycle after claim in
+        production (request 4351, search_log 563143, download_log 41283
+        with a NULL link).
+        """
+        from lib.dispatch.helpers import _build_download_info
+        from lib.download_reconstruction import reconstruct_grab_list_entry
+        from lib.quality import (
+            PollCycleConfig,
+            PollCycleDecision,
+            PollCycleSnapshot,
+            PollFileSnapshot,
+            reduce_poll_cycle,
+        )
+
+        self._claim(self.FINGERPRINT)
+        stamp = self.db.record_consumed_search_attempt(self._attempt())
+        self.assertTrue(stamp.download_state_stamped)
+
+        # What the poller reads at the top of the next cycle.
+        persisted = ActiveDownloadState.from_raw(self._state())
+        self.assertEqual(persisted.search_log_id, stamp.search_log_id)
+
+        reduced = reduce_poll_cycle(
+            persisted,
+            PollCycleSnapshot(files=[PollFileSnapshot(
+                transfer_id="tx-1", state="InProgress",
+                bytes_transferred=512)]),
+            datetime(2026, 9, 1, 0, 1, tzinfo=UTC),
+            PollCycleConfig(
+                remote_queue_timeout=3600, stalled_timeout=1800,
+                max_file_retries=5),
+        )
+        self.assertEqual(
+            reduced.verdict.decision, PollCycleDecision.in_progress)
+        assert reduced.state is not None
+        self.assertTrue(self.db.update_download_state_if_downloading(
+            self.req_id,
+            reduced.state.to_json(),
+            expected_enqueued_at=persisted.enqueued_at,
+        ))
+
+        row = self.db.get_request(self.req_id)
+        assert row is not None
+        round_tripped = ActiveDownloadState.from_raw(
+            row["active_download_state"])
+        # The observation really was persisted, so this is the post-poll
+        # state and not a stale read.
+        self.assertEqual(round_tripped.files[0].bytes_transferred, 512)
+        self.assertEqual(
+            round_tripped.attempt_fingerprint, self.FINGERPRINT)
+
+        dl_info = _build_download_info(
+            reconstruct_grab_list_entry(row, round_tripped))
+        self.assertEqual(dl_info.search_log_id, stamp.search_log_id)
+
     def test_a_stale_completion_still_stamps_the_grab_it_produced(self):
         """Cursor staleness is about the CURSOR, not about the grab.
 
