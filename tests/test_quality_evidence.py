@@ -1651,12 +1651,18 @@ class TestEverySpectralGradeCompanionIsRejectedWithoutOne(unittest.TestCase):
     above, per field), the spectral bitrate, and the two markers
     (``spectral_subject`` / ``spectral_provenance``, which share one
     message via an ``or``). Only the capture family had a per-field table,
-    so mutant runs against the other two survived every test in the tree
-    (#1378 review round): dropping the provenance operand from the markers
-    clause survived 771 tests and a 20,000-example fuzz burst, and
-    neutering the bitrate clause survived 1,028.
+    so mutants against the other two survived (#1378 review round).
+    Measured over the five modules nearest the clause -- this one plus
+    ``test_evidence_generated``, ``test_quality_decisions``,
+    ``test_candidate_admission_progress_generated``, ``test_pipeline_db``,
+    946 tests -- dropping the provenance operand and neutering the bitrate
+    clause each fail exactly one thing: the matching row below. The
+    provenance one is not an entropy miss that a deeper burst would catch:
+    ``TestGeneratedSpectralDisjunctSubsumption`` gates both its clauses on
+    R19, which needs the subject, so a provenance-only world is
+    unreachable there by construction.
 
-    That second one has a blast radius beyond itself. Both
+    The bitrate clause has a blast radius beyond itself. Both
     ``tests.test_candidate_admission_progress_generated`` and
     ``tests.test_quality_decisions`` narrow their own strategies on the
     strength of "a persisted row can never carry a bitrate without a
