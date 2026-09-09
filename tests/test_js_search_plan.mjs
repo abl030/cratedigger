@@ -1249,8 +1249,15 @@ function fragment(html, startMarker, endMarker) {
     'attempts: a final_state starting with Completed is not rendered inline');
   t.excludes(firstRow, 'not consumed',
     'attempts: a consumed attempt renders no "not consumed" chip');
+  t.excludes(firstRow, '>stale<',
+    'attempts: a non-stale attempt renders no stale chip');
   t.excludes(firstRow, 'SKIPPEER',
     'attempts: a pre_filter_skip candidate is not chosen as the best');
+  // Row 1 sets all six grab_* fields to null: an unlinked search has no
+  // grab to report, so the arrow chip must not appear at all. Sliced to
+  // the cell because row 2 IS linked and does carry one.
+  t.excludes(fragment(firstRow, 'sp-att-cands', '</td>'), 'sp-att-grab',
+    'attempts: a null grab_outcome renders no grab chip on that row');
   const raw = fragment(attempts, 'sp-att-raw', '</details>');
   t.contains(raw, 'peers', 'attempts raw: peers browsed behind the expander');
   t.contains(raw, 'fanout', 'attempts raw: fanout waves behind the expander');
@@ -1259,6 +1266,56 @@ function fragment(html, startMarker, endMarker) {
   t.contains(raw, 'ATT-QUERY-A', 'attempts raw: the query is behind the expander');
   t.contains(raw, 'SKIPPEER',
     'attempts raw: the full candidates JSON is behind the expander');
+}
+
+{
+  // Attempts — which scored candidate the Candidates cell names. The
+  // ordinary fixture's two scored candidates are exactly tied on both
+  // comparator keys, so it cannot tell "best" from "first" or "worst";
+  // these worlds order the loser FIRST so the comparator has to move.
+  const base = makeHistoryRows()[0];
+  /** @param {Array<Object>} candidates */
+  const cellFor = (candidates) => {
+    const html = renderDetailPage({
+      inspection: makeDetailInspection(),
+      history: [{ ...base, candidates, rejection_reason: null }],
+      nextBeforeId: null, library: makeLibraryPayload(),
+    });
+    return fragment(
+      fragment(html, 'sp-attempts-tbody', 'Plan health'), 'sp-att-cands', '</td>');
+  };
+
+  const byMatched = cellFor([
+    { username: 'WORSTPEER', dir: 'w', filetype: 'mp3 320',
+      matched_tracks: 2, total_tracks: 11, avg_ratio: 0.30,
+      missing_titles: [], file_count: 9, pre_filter_skip: false },
+    { username: 'BESTPEER', dir: 'b', filetype: 'lossless',
+      matched_tracks: 11, total_tracks: 11, avg_ratio: 0.80,
+      missing_titles: [], file_count: 11, pre_filter_skip: false },
+  ]);
+  t.contains(byMatched, 'BESTPEER',
+    'attempts: the most-matched scored candidate is the one named');
+  t.contains(byMatched, 'lossless 11/11',
+    'attempts: the named candidate carries ITS tier and match count');
+  t.excludes(byMatched, 'WORSTPEER',
+    'attempts: a worse scored candidate is not named');
+  t.excludes(byMatched, 'mp3 320',
+    'attempts: a worse candidate does not lend its tier to the cell');
+
+  const byRatio = cellFor([
+    { username: 'TIELOW', dir: 'l', filetype: 'lossless',
+      matched_tracks: 5, total_tracks: 11, avg_ratio: 0.20,
+      missing_titles: [], file_count: 5, pre_filter_skip: false },
+    { username: 'TIEHIGH', dir: 'h', filetype: 'lossless',
+      matched_tracks: 5, total_tracks: 11, avg_ratio: 0.90,
+      missing_titles: [], file_count: 5, pre_filter_skip: false },
+  ]);
+  t.contains(byRatio, 'TIEHIGH',
+    'attempts: a tie on matched tracks is broken by the higher avg_ratio');
+  t.excludes(byRatio, 'TIELOW',
+    'attempts: the lower avg_ratio loses that tie');
+  t.contains(byRatio, 'ratio 0.90',
+    'attempts: the winning candidate’s own ratio is the one rendered');
 }
 
 {
