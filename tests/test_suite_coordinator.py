@@ -26,6 +26,7 @@ from scripts.phase_parsers import (
     pyright_checks,
     python_tests,
     ruff,
+    tsc,
 )
 from scripts.phase_parsers.python_tests import (
     FAILURE_MARKER_PREFIX,
@@ -73,6 +74,7 @@ from tests.parent_signal_guard import guard_kill_statement, guard_source_prelude
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 JS_HELPER = REPO_ROOT / "scripts" / "run_js_checks.sh"
+TSC_HELPER = REPO_ROOT / "scripts" / "run_tsc.sh"
 RUN_SUITE = REPO_ROOT / "scripts" / "run_test_suite.py"
 
 
@@ -248,6 +250,17 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                 js_checks.parse_unit_failures,
             ),
             PhaseSpec(
+                "tsc",
+                _python_command(
+                    "web/js/browse.js(605,26): error TS2339: Property "
+                    "'dataset' does not exist on type 'Element'.",
+                    2,
+                ),
+                "bash scripts/run_tsc.sh",
+                tsc.parse_failures,
+                (1, 2),
+            ),
+            PhaseSpec(
                 "pyright",
                 _python_command(
                     "lib/typed.py:7:4 - error: Argument is unknown "
@@ -300,13 +313,14 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
             [
                 "web/js/bad.js",
                 "tests/test_js_bad.mjs",
+                "web/js/browse.js:605:26",
                 "lib/typed.py:7:4",
                 "lib/lint.py:9:2",
                 "lib/dead.py:12",
                 "tests.test_alpha.TestAlpha.test_bad",
             ],
         )
-        self.assertIn("FAILED: 6 phases, 6 failures", terminal)
+        self.assertIn("FAILED: 7 phases, 7 failures", terminal)
         self.assertIn(f"bundle: {result.bundle}", terminal)
         for phase in summary.phases:
             log = result.bundle / phase.log
@@ -404,6 +418,7 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
             {
                 "js-syntax": js_checks.parse_syntax_failures,
                 "js-unit": js_checks.parse_unit_failures,
+                "tsc": tsc.parse_failures,
                 "pyright": pyright_checks.parse_failures,
                 "ruff": ruff.parse_failures,
                 "vulture": dead_code.parse_failures,
@@ -2984,6 +2999,120 @@ class TestCoordinatorRunsAsAScript(unittest.TestCase):
         self.assertEqual(
             completed.returncode, 0, completed.stdout + completed.stderr
         )
+
+
+class TestTypeScriptWrapperAgainstRealTsc(unittest.TestCase):
+    """`scripts/run_tsc.sh` driven for real, against a temp project.
+
+    The dialect tests in `tests/test_phase_parsers.py` hand the parser text
+    a human typed. This is the other half: the wrapper runs the real tsc,
+    and the parser reads what really came out. Without it, the parser and
+    the tool could drift apart with both sides green (issue #1390).
+    """
+
+    def setUp(self) -> None:
+        self.root = tempfile.TemporaryDirectory()
+        self.js = Path(self.root.name) / "web" / "js"
+        self.js.mkdir(parents=True)
+        shutil.copyfile(
+            REPO_ROOT / "web" / "js" / "jsconfig.json",
+            self.js / "jsconfig.json",
+        )
+
+    def tearDown(self) -> None:
+        self.root.cleanup()
+
+    def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [str(TSC_HELPER), *args],
+            cwd=self.root.name,
+            env=os.environ | {"CRATEDIGGER_REPO_ROOT": self.root.name},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def test_a_clean_project_passes_with_nothing_to_index(self) -> None:
+        (self.js / "ok.js").write_text(
+            "// @ts-check\nexport const answer = 42;\n", encoding="utf-8"
+        )
+
+        result = self._run()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            tsc.parse_failures(
+                PhaseLog(
+                    text=result.stdout,
+                    log_name="tsc.log",
+                    rerun_command="bash scripts/run_tsc.sh",
+                )
+            ).failures,
+            (),
+        )
+
+    def test_a_real_type_error_exits_2_and_reaches_the_index(self) -> None:
+        """The exact shape the phase meets: exit 2, and a parsed entry."""
+        (self.js / "bad.js").write_text(
+            "// @ts-check\n"
+            "/** @param {string} s @returns {string} */\n"
+            "export function shout(s) { return s.toUpperCase(); }\n"
+            "shout(7);\n",
+            encoding="utf-8",
+        )
+
+        result = self._run()
+
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        (failure,) = tsc.parse_failures(
+            PhaseLog(
+                text=result.stdout,
+                log_name="tsc.log",
+                rerun_command="bash scripts/run_tsc.sh",
+            )
+        ).failures
+        self.assertEqual(failure.identity, "web/js/bad.js:4:7")
+        self.assertEqual(failure.owner, "web/js/bad.js")
+        self.assertTrue(
+            failure.detail.startswith("TS2345 "), failure.detail
+        )
+        self.assertEqual(failure.rerun_command, "bash scripts/run_tsc.sh")
+
+    def test_an_unreadable_project_exits_1_and_names_the_checker(self) -> None:
+        """tsc's fileless form, produced rather than typed by hand."""
+        (self.js / "jsconfig.json").unlink()
+
+        result = self._run()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        (failure,) = tsc.parse_failures(
+            PhaseLog(
+                text=result.stdout,
+                log_name="tsc.log",
+                rerun_command="bash scripts/run_tsc.sh",
+            )
+        ).failures
+        self.assertEqual(failure.identity, "scripts/run_tsc.sh:TS5058")
+        self.assertEqual(failure.owner, "scripts/run_tsc.sh")
+
+    def test_an_argument_is_a_usage_error_outside_the_failure_codes(
+        self,
+    ) -> None:
+        """64, not 2: 2 is tsc's own "found type errors" status.
+
+        Reusing it would let a mistyped invocation report as a red gate
+        with nothing in the index. 64 is outside the phase's
+        `failure_exit_codes`, so the coordinator calls it what it is.
+        """
+        tsc_phase = next(
+            phase for phase in _default_phases() if phase.name == "tsc"
+        )
+
+        result = self._run("web/js/ok.js")
+
+        self.assertEqual(result.returncode, 64)
+        self.assertIn("usage:", result.stderr)
+        self.assertNotIn(64, tsc_phase.failure_exit_codes)
 
 
 if __name__ == "__main__":

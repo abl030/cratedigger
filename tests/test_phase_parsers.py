@@ -30,6 +30,7 @@ from scripts.phase_parsers import (
     pyright_checks,
     python_tests,
     ruff,
+    tsc,
 )
 from scripts.targeted_test_selection import expand_test_selection
 
@@ -238,6 +239,109 @@ class TestPyrightDialect(unittest.TestCase):
         self.assertEqual(
             [failure.identity for failure in parsed.failures],
             ["lib/a.py:1:1", "lib/b.py:2:3"],
+        )
+
+
+class TestTypeScriptDialect(unittest.TestCase):
+    """`run_tsc.sh` — position is the identity, in tsc's parenthesised form.
+
+    The lines are verbatim from the 2026-09-09 baseline run over `web/js`
+    that issue #1390 measured, so the shapes here are the ones the gate
+    really meets: a diagnostic, its indented continuation, and the
+    fileless form tsc uses when it cannot read the project at all.
+    """
+
+    def test_a_diagnostic_becomes_one_entry_at_its_position(self) -> None:
+        (failure,) = tsc.parse_failures(
+            _log(
+                "web/js/browse.js(605,26): error TS2339: Property 'dataset' "
+                "does not exist on type 'Element'.",
+                rerun="bash scripts/run_tsc.sh",
+            )
+        ).failures
+
+        self.assertEqual(failure.identity, "web/js/browse.js:605:26")
+        self.assertEqual(failure.owner, "web/js/browse.js")
+        self.assertEqual(
+            failure.detail,
+            "TS2339 Property 'dataset' does not exist on type 'Element'.",
+        )
+        self.assertEqual(failure.rerun_command, "bash scripts/run_tsc.sh")
+        self.assertEqual(failure.log, "phase.log")
+
+    def test_an_indented_continuation_line_is_not_its_own_entry(self) -> None:
+        """An assignability failure explains itself on the lines below.
+
+        They carry no position, so indexing them would put entries in the
+        bundle that name no file and no line.
+        """
+        parsed = tsc.parse_failures(
+            _log(
+                "web/js/discography.js(638,36): error TS2345: Argument of "
+                "type 'Element' is not assignable to parameter of type "
+                "'HTMLElement'.\n"
+                "  Type 'Element' is missing the following properties from "
+                "type 'HTMLElement': accessKey, accessKeyLabel, "
+                "autocapitalize, autocorrect, and 129 more."
+            )
+        )
+
+        self.assertEqual(
+            [failure.identity for failure in parsed.failures],
+            ["web/js/discography.js:638:36"],
+        )
+
+    def test_two_diagnostics_in_one_file_are_two_distinct_entries(
+        self,
+    ) -> None:
+        parsed = tsc.parse_failures(
+            _log(
+                "web/js/history.js(31,67): error TS2345: first\n"
+                "web/js/history.js(32,23): error TS2345: second"
+            )
+        )
+
+        self.assertEqual(
+            [failure.identity for failure in parsed.failures],
+            ["web/js/history.js:31:67", "web/js/history.js:32:23"],
+        )
+
+    def test_a_fileless_error_is_indexed_against_the_checker(self) -> None:
+        """tsc reports a project it cannot read with no file at all.
+
+        It exits 1 there rather than the 2 it uses for source
+        diagnostics, so the phase fails; a failed phase whose index is
+        empty is the one outcome the bundle cannot explain.
+        """
+        (failure,) = tsc.parse_failures(
+            _log(
+                "error TS5058: The specified path does not exist: "
+                "'web/js/jsconfig.json'.",
+                rerun="bash scripts/run_tsc.sh",
+            )
+        ).failures
+
+        self.assertEqual(failure.identity, "scripts/run_tsc.sh:TS5058")
+        self.assertEqual(failure.owner, "scripts/run_tsc.sh")
+        self.assertEqual(
+            failure.detail,
+            "TS5058 The specified path does not exist: "
+            "'web/js/jsconfig.json'.",
+        )
+
+    def test_lines_that_are_not_diagnostics_are_ignored(self) -> None:
+        """The dev shell's own banner reaches the log on stderr."""
+        parsed = tsc.parse_failures(
+            _log(
+                "cratedigger dev shell — targeted: python3 "
+                "scripts/run_targeted_tests.py tests.test_X\n"
+                "web/js/recents.js(27,3): error TS2322: real one"
+            )
+        )
+
+        self.assertEqual(
+            [failure.identity for failure in parsed.failures],
+            ["web/js/recents.js:27:3"],
         )
 
 
@@ -502,29 +606,29 @@ class TestPythonSchedulerDialect(unittest.TestCase):
 
 
 class TestEveryParserSelectsThisModule(unittest.TestCase):
-    """Editing a parser must run its dialect tests, all six of them.
+    """Editing a parser must run its dialect tests, all seven of them.
 
-    Five of the six fail closed without the `prefix:scripts/phase_parsers/`
+    Six of the seven fail closed without the `prefix:scripts/phase_parsers/`
     row, because the basename probe derives `tests.test_<stem>` and no
     `tests/test_ruff.py`, `test_dead_code.py`, `test_js_checks.py`,
-    `test_python_tests.py` or `test___init__.py` exists. `pyright_checks.py`
-    is the exception and the reason this pin was written: `tests/
-    test_pyright_checks.py` DOES exist, for `scripts/run_pyright_checks.py`,
-    so that one file would quietly resolve a wrong-subject module instead
-    of raising.
+    `test_python_tests.py`, `test_tsc.py` or `test___init__.py` exists.
+    `pyright_checks.py` is the exception and the reason this pin was
+    written: `tests/test_pyright_checks.py` DOES exist, for
+    `scripts/run_pyright_checks.py`, so that one file would quietly
+    resolve a wrong-subject module instead of raising.
 
     `MASKABLE_RULE_PINS` in tests/test_selection_coverage_audit.py now
     carries that deletion-visibility contract for every rule row, this one
     included (issue #1313, batch D). What stays here is what a one-path pin
-    cannot say: the package's own file list, and that ALL six parsers reach
-    the dialect tests.
+    cannot say: the package's own file list, and that ALL seven parsers
+    reach the dialect tests.
 
     Deleting the row, and narrowing it so that `pyright_checks.py` still
     matches while its siblings stop, both go red in both places: the pins
     watch what the pinned path loses AND freeze every pinned row's path
     conditions. What is still only here is the per-file evidence — that all
-    six parsers really do reach the dialect tests, against this package's own
-    file list, rather than one sampled path standing in for the rest.
+    seven parsers really do reach the dialect tests, against this package's
+    own file list, rather than one sampled path standing in for the rest.
     """
 
     def test_each_parser_module_resolves_the_dialect_tests(self) -> None:
@@ -540,6 +644,7 @@ class TestEveryParserSelectsThisModule(unittest.TestCase):
                 "pyright_checks.py",
                 "python_tests.py",
                 "ruff.py",
+                "tsc.py",
             ],
         )
         for name in modules:
@@ -574,6 +679,7 @@ class TestDialectsDoNotOverlap(unittest.TestCase):
             "CRATEDIGGER_CHECK_FAILURE "
             '{"identity": "a", "owner": "b", "detail": "c"}'
         ),
+        "web/js/browse.js(605,26): error TS2339: Property 'dataset'",
     )
 
     def test_ruff_reads_nothing_from_another_tools_output(self) -> None:
@@ -605,6 +711,13 @@ class TestDialectsDoNotOverlap(unittest.TestCase):
                 self.assertEqual(
                     dead_code.parse_failures(_log(text)).failures, ()
                 )
+
+    def test_tsc_reads_nothing_from_another_tools_output(self) -> None:
+        for text in self.OTHER_TOOLS:
+            with self.subTest(text=text):
+                if "): error TS" in text:
+                    continue
+                self.assertEqual(tsc.parse_failures(_log(text)).failures, ())
 
     def test_the_python_scheduler_reads_nothing_from_another_tool(
         self,
