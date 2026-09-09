@@ -75,6 +75,11 @@ pkgs.mkShell {
     pkgs.util-linux
     pkgs.zsh
     pkgs.ruff
+    # Same tsc shell.nix carries: tests/test_suite_coordinator.py drives
+    # scripts/run_tsc.sh against real tsc, and a breadth pass that
+    # selects that module dies on `exec: tsc: not found` before it
+    # collects a single mutant (issue #1390).
+    pkgs.typescript_5
     testPythonEnv
     pkgs.sox
     pkgs.ffmpeg
