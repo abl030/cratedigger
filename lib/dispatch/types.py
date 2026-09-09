@@ -419,6 +419,19 @@ class DispatchRequest:
     source_dirs: list[str] | None = None
 
     # --- evidence / attempt -----------------------------------------
+    #: The import job that owns this mutation. Optional at the type on
+    #: purpose. ``dispatch_import_from_db`` requires ``import_job_id`` OR
+    #: ``download_log_id``, so a caller supplying only the latter reaches
+    #: ``lib/dispatch/entry_points.py``'s construction with ``None`` here.
+    #: No production caller does that today. ``scripts/importer.py``'s
+    #: force/local lane always passes ``job.id``, and the automation lane
+    #: types it ``int`` from ``process_completed_album`` through
+    #: ``_process_beets_validation``. So ``dispatch_import_core``'s
+    #: ``launch_authority_missing`` refusal is fail-closed legislation for
+    #: the permitted call shape rather than a live branch, and narrowing
+    #: this to ``int`` would mean forbidding that shape at the entry point,
+    #: not deleting a dead field. Measured for issue #1378 item 6; there is
+    #: no database column of this name.
     candidate_import_job_id: int | None = None
     candidate_download_log_id: int | None = None
     attempt_spectral_audit: SpectralDetail | None = None
