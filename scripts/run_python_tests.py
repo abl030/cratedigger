@@ -1251,11 +1251,18 @@ def shuffled_schedule(
     return tuple(targets)
 
 
-def shuffle_replay_command(seed: int, target_name: str) -> str:
-    """The exact command that reruns one target under the same order."""
+def shuffle_replay_command(seed: int, module_name: str) -> str:
+    """The exact command that reruns one module under the same order.
+
+    The selector is the MODULE, never a hotspot shard's ``module::batch``
+    name, which ``--test`` does not accept. Rerunning the module re-derives
+    the same shards with the same load names, and each target's salt is its
+    own load names, so the order inside every target replays identically.
+    Only the order ACROSS targets belongs to the whole run's schedule.
+    """
     return (
         f"{SHUFFLE_SEED_ENV}={seed} python3 scripts/run_python_tests.py "
-        f"--test {target_name}"
+        f"--test {module_name}"
     )
 
 
@@ -1562,8 +1569,9 @@ def _run_test_target(target: TestTarget, durations: int) -> TargetRunResult:
             result_path.read_bytes(),
             type=ChildTargetResult,
         )
-        # Coverage is a set question: a shuffled child (#1322) reports its
-        # IDs in run order, and a dropped or invented ID must still fail.
+        # Coverage is a multiset question: a shuffled child (#1322) reports
+        # its IDs in run order, and a dropped, invented, or duplicated ID
+        # must still fail.
         if target.expected_test_ids and sorted(child.test_ids) != sorted(
             target.expected_test_ids
         ):
@@ -1859,12 +1867,13 @@ def _shuffle_detail_suffix(seed: int | None) -> str:
     return "" if seed is None else f" (shuffled order, seed {seed})"
 
 
-def _shuffle_failure_note(seed: int, target_name: str) -> str:
+def _shuffle_failure_note(seed: int, target: TestTarget) -> str:
     """The triage rule and the replay handle, printed under every failure."""
     return (
         f"shuffled order, seed {seed}: if this target is green in the "
         "fixed-order suite, this is a test-isolation defect, not a production "
-        f"finding. Replay alone: {shuffle_replay_command(seed, target_name)}"
+        "finding. Replay its module alone: "
+        + shuffle_replay_command(seed, target.module.name)
     )
 
 
@@ -2029,8 +2038,8 @@ def main(
         print(
             f"Order: shuffled with seed {shuffle_seed} (issue #1322); Hypothesis "
             "keeps its configured profile, so test order is the only moved "
-            "variable. Replay one target: "
-            + shuffle_replay_command(shuffle_seed, "<target>")
+            "variable. Replay one module: "
+            + shuffle_replay_command(shuffle_seed, "<module>")
         )
     elif measured_durations:
         schedule = order_targets_by_measured_cost(schedule, measured_durations)
@@ -2117,7 +2126,7 @@ def main(
                 f"target {result.target.test_name} ---"
             )
             if shuffle_seed is not None:
-                print(_shuffle_failure_note(shuffle_seed, result.target.test_name))
+                print(_shuffle_failure_note(shuffle_seed, result.target))
             print(_failure_diagnostics(result.output))
         for failure in sorted(
             remaining_infrastructure_failures,
@@ -2142,7 +2151,7 @@ def main(
                 f"{failure.target.test_name} ---"
             )
             if shuffle_seed is not None:
-                print(_shuffle_failure_note(shuffle_seed, failure.target.test_name))
+                print(_shuffle_failure_note(shuffle_seed, failure.target))
             print(failure.detail)
         if ram_root_marker is not None:
             # Issue #1111 item 2: every disk-full-classified failure is ONE

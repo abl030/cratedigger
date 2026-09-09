@@ -61,6 +61,7 @@ from scripts.run_python_tests import (
     _measure_available_memory_bytes,
     _measure_tempdir_available_bytes,
     _run_targets,
+    _shuffle_failure_note,
     assert_exact_schedule,
     assert_exact_target_coverage,
     assert_hypothesis_deadlines_disabled,
@@ -1605,12 +1606,58 @@ class TestShuffledOrder(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(ValueError):
                 shuffle_seed_from_environment({SHUFFLE_SEED_ENV: raw})
 
-    def test_replay_command_names_the_seed_variable_and_the_target(self) -> None:
+    def test_replay_command_names_the_seed_variable_and_the_module(self) -> None:
         self.assertEqual(
             shuffle_replay_command(7, "tests.test_util"),
             "CRATEDIGGER_SHUFFLE_SEED=7 python3 scripts/run_python_tests.py "
             "--test tests.test_util",
         )
+
+    def test_failure_note_replays_a_hotspot_shard_by_its_module(self) -> None:
+        """A shard's own name (``module::class-batch-NN``) is not a selector
+        ``--test`` accepts; the runnable replay is the module, which
+        re-derives the same shards with the same salts (review finding on
+        #1391: the first cut printed the shard name)."""
+        shard = TestTarget(
+            module=TestModule(
+                name="tests.test_pipeline_db",
+                path=Path("tests/test_pipeline_db.py"),
+                weight=1,
+            ),
+            test_name="tests.test_pipeline_db::class-batch-01",
+        )
+
+        note = _shuffle_failure_note(7, shard)
+
+        self.assertIn(shuffle_replay_command(7, "tests.test_pipeline_db"), note)
+        self.assertNotIn("::", note)
+        self.assertIn("test-isolation defect", note)
+
+    def test_replayed_hotspot_module_keeps_the_same_shard_salts(self) -> None:
+        """The replay contract behind the note above: selecting a hotspot
+        module alone yields targets with the same load names as the full
+        run, and load names are the salt, so every shard's inner order is
+        identical under the same seed."""
+        module_name = next(iter(HOTSPOT_SHARD_POLICIES))
+        listed = {module_name: list_module_test_ids(module_name, REPO_ROOT)}
+        modules = discover_test_modules(REPO_ROOT / "tests", REPO_ROOT, "test*.py")
+        hotspot = [module for module in modules if module.name == module_name]
+
+        # build_test_targets is per module, so the full run's targets for
+        # this module are exactly what it builds from the module alone.
+        full_run = build_test_targets(schedule_modules(hotspot), listed)
+        replay = select_test_targets(modules, [module_name], listed_test_ids=listed)
+
+        full_salts = sorted(
+            "|".join(t.load_names or (t.test_name,))
+            for t in full_run
+            if t.module.name == module_name
+        )
+        replay_salts = sorted(
+            "|".join(t.load_names or (t.test_name,)) for t in replay
+        )
+        self.assertTrue(full_salts, "the hotspot really shards")
+        self.assertEqual(replay_salts, full_salts)
 
     def _run_alpha_with_expected(
         self, expected: tuple[str, ...]
@@ -1645,9 +1692,9 @@ class TestShuffledOrder(unittest.TestCase):
             )
 
     def test_expected_ids_accept_any_order_but_stay_exact(self) -> None:
-        """A shuffled child reports its IDs in run order; coverage is a set
-        question, so a reordered run passes while a dropped or invented ID
-        still trips the guard."""
+        """A shuffled child reports its IDs in run order; coverage is a
+        multiset question, so a reordered run passes while a dropped or
+        invented ID still trips the guard."""
         results, failures = self._run_alpha_with_expected(tuple(reversed(_ALPHA_IDS)))
 
         self.assertEqual(failures, ())

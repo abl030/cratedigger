@@ -12,6 +12,8 @@ from unittest.mock import MagicMock, patch
 
 from defusedxml.common import DefusedXmlException
 
+from tests.helpers import cold_ffmpeg_version_probe
+
 
 class TestRepairMp3Headers(unittest.TestCase):
 
@@ -44,36 +46,20 @@ class TestRepairMp3Headers(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def _cold_version_probe(case: unittest.TestCase) -> None:
-    """Start every audio-validation test with a cold, leaf-mocked version probe.
-
-    Issue #1322: the shuffled nightly suite caught this module depending on
-    test order. ``lib.util._ffmpeg_version`` is a one-slot process cache;
-    earlier tests warmed it with a ``MagicMock``-derived value through the
-    bare ``sp.run`` mock, so a test whose ``sp.run`` side effect only
-    understands ``-i`` invocations crashed on the version probe whenever it
-    ran first. The probe is an external subprocess edge, mocked at the leaf.
-    """
-    from lib.util import _ffmpeg_version
-
-    _ffmpeg_version.cache_clear()
-    case.addCleanup(_ffmpeg_version.cache_clear)
-    version_probe = patch(
-        "lib.util.sp.check_output", return_value=b"ffmpeg version test\n"
-    )
-    version_probe.start()
-    case.addCleanup(version_probe.stop)
-
-
 class TestValidateAudio(unittest.TestCase):
 
     def setUp(self):
-        _cold_version_probe(self)
+        # Issue #1322: the shuffled nightly suite caught this module depending
+        # on test order through lib.util._ffmpeg_version's one-slot cache.
+        cold_ffmpeg_version_probe(self)
 
     def test_version_probe_starts_cold_and_records_a_real_string(self):
-        """Regression pin for the #1322 order coupling: the cache is empty
-        when a test starts, and the recorded tool version is the probed
-        string, never a mock artefact."""
+        """Regression pin for the #1322 order coupling, two clauses with
+        disjoint mutants: the cache is cold when a test starts (fails when
+        the helper stops clearing, because the earlier tests of this class
+        warm it), and the recorded tool version is the probed string, a
+        real ``str`` (fails when the helper stops mocking the probe at the
+        leaf, because the bare ``sp.run`` mock then answers it)."""
         from lib.util import _ffmpeg_version, validate_audio
 
         self.assertEqual(_ffmpeg_version.cache_info().currsize, 0)
@@ -87,6 +73,7 @@ class TestValidateAudio(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
         self.assertTrue(result.valid)
+        self.assertIsInstance(result.report.tool_version, str)
         self.assertEqual(result.report.tool_version, "ffmpeg version test")
 
     def test_disabled_mode_is_explicitly_skipped_without_touching_disk(self):
@@ -459,7 +446,7 @@ class TestValidateAudioStderrPolicy(unittest.TestCase):
     """
 
     def setUp(self):
-        _cold_version_probe(self)
+        cold_ffmpeg_version_probe(self)
 
     # (description, returncode, stderr) — rc=0 cases must produce corrupt_files=[]
     FALSE_POSITIVE_CASES: ClassVar = [

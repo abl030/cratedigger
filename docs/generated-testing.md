@@ -542,19 +542,29 @@ suite's scratch `TMPDIR`.
 fixed-order suite is a test-isolation defect in the test, never a production
 finding. Every failure block carries the seed and the exact replay command,
 the indexed detail the bundle keeps carries the seed, and the terminal
-`FAILED` line is tagged, so one target replays alone with the same order:
+`FAILED` line is tagged. The replay selects the failing target's MODULE
+(a hotspot shard's own `module::batch` name is not a selector): rerunning
+the module re-derives the same shards with the same load names, and each
+target's salt is its own load names, so the order inside every target
+replays identically. Only the order across targets belongs to the whole
+run's schedule.
 
 ```bash
 CRATEDIGGER_SHUFFLE_SEED=<seed> nix-shell --run \
   "python3 scripts/run_python_tests.py --test tests.test_X"
 ```
 
-The exact-ID coverage guard on audited hotspot shards compares IDs as a set,
-so a reordered child still proves nothing was dropped or invented. Measured
-before the stage existed (2026-09-09): two seeds over about 11.8k tests each
-found one real coupling, a one-slot process cache in `lib/util.py` that
-`tests/test_util.py` depended on other tests warming first, fixed in the
-same PR. Expect a hit every few weeks, not every night.
+The exact-ID coverage guard on audited hotspot shards compares IDs as a
+multiset, so a reordered child still proves nothing was dropped, invented,
+or duplicated. The stage runs the whole canonical suite for its admission
+lock and failure bundle; the five order-blind phases it repeats cost about
+a minute a night. Measured before the stage existed (2026-09-09): two seeds
+over about 11.8k tests each found one real coupling, a one-slot process
+cache in `lib/util.py` that `tests/test_util.py` depended on other tests
+warming first, fixed in the same PR; the first rehearsal of the stage then
+found that the seed leaks into fixture-spawned scripts, which the gate
+scripts and `tests/fakes/subprocess_env.py` now scrub. Two seeds is a small
+sample; do not read a rate into it.
 
 Loading a tier is an **import side effect**, so every module that uses
 Hypothesis must import the profile module itself — at module level, and

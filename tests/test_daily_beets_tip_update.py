@@ -18,6 +18,20 @@ class TestDailyBeetsTipUpdateScript(unittest.TestCase):
         self.addCleanup(self.tempdir.cleanup)
         self.fake = FakeDailyFlakeUpdateCommands(Path(self.tempdir.name))
 
+    def test_inherited_shuffle_seed_never_reaches_the_tip_suite(self) -> None:
+        """Issue #1322: scripts/run_python_tests.py honours
+        CRATEDIGGER_SHUFFLE_SEED wherever it finds it, and the tip canary's
+        suite is a fixed-order one; the script scrubs an inherited seed the
+        way it scrubs TEST_DB_DSN."""
+        proc = self.fake.run(
+            SCRIPT, extra_env={"CRATEDIGGER_SHUFFLE_SEED": "999"}
+        )
+        state = self.fake.state
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("tip-suite", state["stages"])
+        self.assertIsNone(state["stage_env"]["tip-suite"]["CRATEDIGGER_SHUFFLE_SEED"])
+
     def test_green_tip_canary_proves_the_suite_and_publishes_nothing(self) -> None:
         proc = self.fake.run(SCRIPT)
         state = self.fake.state

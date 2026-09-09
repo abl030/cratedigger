@@ -32,6 +32,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from scripts.run_python_tests import (
     HOTSPOT_SHARD_POLICIES,
+    SHUFFLE_SEED_ENV,
     STRATEGY_SPACE_EXHAUSTED,
     TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE,
     ChildTargetResult,
@@ -1074,6 +1075,11 @@ def _test_subprocess_environment(
     environment = dict(base)
     environment.pop("TEST_DB_DSN", None)
     environment.pop(_SCHEMA_READY_ENV, None)
+    # The fuzz tier moves Hypothesis entropy, never test order, and its
+    # exact-ID guard below is ordered; the shared child would honour an
+    # inherited seed from the nightly shuffled stage or a developer's
+    # shell and turn every multi-test target into a bogus mismatch (#1322).
+    environment.pop(SHUFFLE_SEED_ENV, None)
     python_paths = [str(REPO_ROOT), str(REPO_ROOT / "tests")]
     inherited_python_path = environment.get("PYTHONPATH")
     if inherited_python_path:
