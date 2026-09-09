@@ -6,6 +6,7 @@ import fcntl
 import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -425,6 +426,28 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                 "python": python_tests.parse_failures,
             },
         )
+
+    def test_each_default_phase_reruns_exactly_the_command_it_runs(
+        self,
+    ) -> None:
+        """The rerun an operator is handed has to be the phase's own command.
+
+        `PhaseSpec` carries the two independently, and only pyright's had
+        a pin. The mutmut breadth pass on the #1390 branch put ~40
+        survivors here: every phase's argv and rerun string could be
+        emptied, XX-wrapped or upper-cased and nothing noticed, so a
+        failure index could name a command that does not exist. Comparing
+        them to each other, and the script to the disk, is the check that
+        does not restate the literal it guards.
+        """
+        for phase in _default_phases():
+            with self.subTest(phase=phase.name):
+                self.assertEqual(phase.rerun_command, shlex.join(phase.command))
+                _interpreter, script, *_ = phase.command
+                self.assertTrue(
+                    (REPO_ROOT / script).is_file(),
+                    f"{phase.name} runs {script}, which is not in the tree",
+                )
 
     def test_command_start_failure_is_indexed_and_does_not_stop_later_phase(
         self,
@@ -3032,6 +3055,12 @@ class TestTypeScriptWrapperAgainstRealTsc(unittest.TestCase):
             check=False,
         )
 
+    @staticmethod
+    def _tsc_phase() -> PhaseSpec:
+        return next(
+            phase for phase in _default_phases() if phase.name == "tsc"
+        )
+
     def test_a_clean_project_passes_with_nothing_to_index(self) -> None:
         (self.js / "ok.js").write_text(
             "// @ts-check\nexport const answer = 42;\n", encoding="utf-8"
@@ -3064,6 +3093,10 @@ class TestTypeScriptWrapperAgainstRealTsc(unittest.TestCase):
         result = self._run()
 
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        # The code tsc really exits with has to be one the phase counts as
+        # a failure. Asserting it against the measured run rather than
+        # against the literal keeps the two from drifting apart.
+        self.assertIn(result.returncode, self._tsc_phase().failure_exit_codes)
         (failure,) = tsc.parse_failures(
             PhaseLog(
                 text=result.stdout,
@@ -3085,6 +3118,7 @@ class TestTypeScriptWrapperAgainstRealTsc(unittest.TestCase):
         result = self._run()
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(result.returncode, self._tsc_phase().failure_exit_codes)
         (failure,) = tsc.parse_failures(
             PhaseLog(
                 text=result.stdout,
@@ -3104,15 +3138,11 @@ class TestTypeScriptWrapperAgainstRealTsc(unittest.TestCase):
         with nothing in the index. 64 is outside the phase's
         `failure_exit_codes`, so the coordinator calls it what it is.
         """
-        tsc_phase = next(
-            phase for phase in _default_phases() if phase.name == "tsc"
-        )
-
         result = self._run("web/js/ok.js")
 
         self.assertEqual(result.returncode, 64)
         self.assertIn("usage:", result.stderr)
-        self.assertNotIn(64, tsc_phase.failure_exit_codes)
+        self.assertNotIn(64, self._tsc_phase().failure_exit_codes)
 
 
 if __name__ == "__main__":

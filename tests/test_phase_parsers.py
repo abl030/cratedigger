@@ -328,6 +328,12 @@ class TestTypeScriptDialect(unittest.TestCase):
             "TS5058 The specified path does not exist: "
             "'web/js/jsconfig.json'.",
         )
+        # The two fields that make an index entry actionable rather than
+        # decorative. Both survived the mutmut breadth pass on this branch
+        # (`rerun_command=None`, `log=None`) because only the diagnostic
+        # branch above asserted them.
+        self.assertEqual(failure.rerun_command, "bash scripts/run_tsc.sh")
+        self.assertEqual(failure.log, "phase.log")
 
     def test_lines_that_are_not_diagnostics_are_ignored(self) -> None:
         """The dev shell's own banner reaches the log on stderr."""
