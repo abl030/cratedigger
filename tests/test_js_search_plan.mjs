@@ -1054,6 +1054,27 @@ function fragment(html, startMarker, endMarker) {
   t.contains(mixedChecks, 'sp-check-att',
     'checks: one failing grab among several raises the attention mark');
 
+  // `AcquisitionGrabGroup.filetype` is `str | None` and the producer's
+  // SQL groups the NULLs rather than dropping them (23 live slskd rows
+  // carry one), so the renderer meets a null here for real.
+  const nullFiletype = renderDetailPage({
+    inspection: makeDetailInspection({
+      acquisition: makeAcquisition({
+        grabs: [
+          { filetype: null, count: 2, last_at: '2026-09-01T00:00:00Z',
+            last_outcome: 'success' },
+        ],
+        grabs_total: 2,
+      }),
+    }),
+    history: [], nextBeforeId: null, library: makeLibraryPayload(),
+  });
+  const nullChecks = fragment(nullFiletype, 'Is the override holding?', 'sp-plan-table');
+  t.excludes(nullChecks, 'null',
+    'checks: a NULL grab filetype never renders the literal word "null"');
+  t.contains(nullChecks, '<strong>2</strong> —',
+    'checks: a NULL grab filetype renders a dash, the way the CLI names the gap');
+
   const allHistory = renderDetailPage({
     inspection: makeDetailInspection({
       acquisition: makeAcquisition({ since: null, since_reason: 'request_created' }),
@@ -1228,8 +1249,15 @@ function fragment(html, startMarker, endMarker) {
     'attempts: a final_state starting with Completed is not rendered inline');
   t.excludes(firstRow, 'not consumed',
     'attempts: a consumed attempt renders no "not consumed" chip');
+  t.excludes(firstRow, '>stale<',
+    'attempts: a non-stale attempt renders no stale chip');
   t.excludes(firstRow, 'SKIPPEER',
     'attempts: a pre_filter_skip candidate is not chosen as the best');
+  // Row 1 sets all six grab_* fields to null: an unlinked search has no
+  // grab to report, so the arrow chip must not appear at all. Sliced to
+  // the cell because row 2 IS linked and does carry one.
+  t.excludes(fragment(firstRow, 'sp-att-cands', '</td>'), 'sp-att-grab',
+    'attempts: a null grab_outcome renders no grab chip on that row');
   const raw = fragment(attempts, 'sp-att-raw', '</details>');
   t.contains(raw, 'peers', 'attempts raw: peers browsed behind the expander');
   t.contains(raw, 'fanout', 'attempts raw: fanout waves behind the expander');
@@ -1238,6 +1266,56 @@ function fragment(html, startMarker, endMarker) {
   t.contains(raw, 'ATT-QUERY-A', 'attempts raw: the query is behind the expander');
   t.contains(raw, 'SKIPPEER',
     'attempts raw: the full candidates JSON is behind the expander');
+}
+
+{
+  // Attempts — which scored candidate the Candidates cell names. The
+  // ordinary fixture's two scored candidates are exactly tied on both
+  // comparator keys, so it cannot tell "best" from "first" or "worst";
+  // these worlds order the loser FIRST so the comparator has to move.
+  const base = makeHistoryRows()[0];
+  /** @param {Array<Object>} candidates */
+  const cellFor = (candidates) => {
+    const html = renderDetailPage({
+      inspection: makeDetailInspection(),
+      history: [{ ...base, candidates, rejection_reason: null }],
+      nextBeforeId: null, library: makeLibraryPayload(),
+    });
+    return fragment(
+      fragment(html, 'sp-attempts-tbody', 'Plan health'), 'sp-att-cands', '</td>');
+  };
+
+  const byMatched = cellFor([
+    { username: 'WORSTPEER', dir: 'w', filetype: 'mp3 320',
+      matched_tracks: 2, total_tracks: 11, avg_ratio: 0.30,
+      missing_titles: [], file_count: 9, pre_filter_skip: false },
+    { username: 'BESTPEER', dir: 'b', filetype: 'lossless',
+      matched_tracks: 11, total_tracks: 11, avg_ratio: 0.80,
+      missing_titles: [], file_count: 11, pre_filter_skip: false },
+  ]);
+  t.contains(byMatched, 'BESTPEER',
+    'attempts: the most-matched scored candidate is the one named');
+  t.contains(byMatched, 'lossless 11/11',
+    'attempts: the named candidate carries ITS tier and match count');
+  t.excludes(byMatched, 'WORSTPEER',
+    'attempts: a worse scored candidate is not named');
+  t.excludes(byMatched, 'mp3 320',
+    'attempts: a worse candidate does not lend its tier to the cell');
+
+  const byRatio = cellFor([
+    { username: 'TIELOW', dir: 'l', filetype: 'lossless',
+      matched_tracks: 5, total_tracks: 11, avg_ratio: 0.20,
+      missing_titles: [], file_count: 5, pre_filter_skip: false },
+    { username: 'TIEHIGH', dir: 'h', filetype: 'lossless',
+      matched_tracks: 5, total_tracks: 11, avg_ratio: 0.90,
+      missing_titles: [], file_count: 5, pre_filter_skip: false },
+  ]);
+  t.contains(byRatio, 'TIEHIGH',
+    'attempts: a tie on matched tracks is broken by the higher avg_ratio');
+  t.excludes(byRatio, 'TIELOW',
+    'attempts: the lower avg_ratio loses that tie');
+  t.contains(byRatio, 'ratio 0.90',
+    'attempts: the winning candidate’s own ratio is the one rendered');
 }
 
 {
@@ -2485,6 +2563,23 @@ async function withRaceFixture(impl) {
     searchPlanSetAttemptsFilter(42, 'nonsense');
     t.contains(ctx.getInnerHtml(), 'ATT-STRAT-A',
       'toggle: an unrecognised mode is ignored rather than blanking the view');
+
+    // A call naming a request the snapshot is not about cannot repaint,
+    // so it must not change the mode either — otherwise it silently
+    // reconfigures the NEXT page painted. `renderDetailPage` is the
+    // reader of that module state, so driving it is the observation.
+    const beforeStale = ctx.getInnerHtml();
+    searchPlanSetAttemptsFilter(99, 'all');
+    t.equal(ctx.getInnerHtml(), beforeStale,
+      'toggle: a mismatched request id repaints nothing');
+    t.deepEqual(ctx.fetchCalls, afterRender,
+      'toggle: a mismatched request id fetches nothing');
+    const nextPaint = renderDetailPage({
+      inspection: makeDetailInspection(),
+      history: rows, nextBeforeId: null, library: makeLibraryPayload(),
+    });
+    t.excludes(fragment(nextPaint, 'sp-attempts-tbody', 'Plan health'), 'BORING-STRAT',
+      'toggle: a mismatched request id leaves the view mode untouched');
   });
 }
 
@@ -2516,9 +2611,12 @@ async function withRaceFixture(impl) {
     ctx.fetchQueue[2].resolve(fakeOkResponse(makeLibraryPayload()));
     await render;
 
+    /** @type {any} */
+    const caption = { textContent: '2 of 2 loaded' };
     ctx.document.querySelector = (/** @type {string} */ sel) => {
       if (sel.includes('sp-attempts-tbody')) return tbody;
       if (sel.includes('sp-load-older-wrap')) return wrap;
+      if (sel.includes('sp-attempts-count')) return caption;
       return null;
     };
     const older = {
@@ -2536,6 +2634,11 @@ async function withRaceFixture(impl) {
     }));
     await page;
     t.equal(appended.length, 1, 'load older: one insert for the page');
+    // Two loaded rows became four, three of which the active filter
+    // admits — the caption has to say so, not keep the first page's
+    // numbers over a table that has grown.
+    t.equal(caption.textContent, '3 of 4 loaded',
+      'load older: the section caption recounts loaded rows after the append');
     t.contains(appended[0], 'OLDER-FOUND',
       'load older: an interesting older row is appended under the default filter');
     t.excludes(appended[0], 'OLDER-BORING',

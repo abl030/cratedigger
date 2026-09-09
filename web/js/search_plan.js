@@ -1188,7 +1188,15 @@ function renderOverrideChecks(acquisition, scope) {
       const outcome = g && g.last_outcome
         ? ` (last ${esc(humanizeToken(g.last_outcome))}${g.last_at ? ` ${esc(shortWhen(g.last_at))}` : ''})`
         : '';
-      return `<strong>${esc(String(Number(g && g.count) || 0))}</strong> ${esc(String(g && g.filetype))}${outcome}`;
+      // `AcquisitionGrabGroup.filetype` is `str | None` — NULL on a
+      // download_log row whose files never yielded an extension. The
+      // grabs query keeps that group (`GROUP BY filetype ... ORDER BY
+      // n DESC, filetype ASC NULLS LAST`), unlike the candidate-tier
+      // query beside it, which filters its NULLs out. So the null
+      // reaches here, and the naive `String(null)` shows the operator
+      // the literal word "null"; name the gap with a dash instead.
+      const filetype = (g && g.filetype) ? String(g.filetype) : '—';
+      return `<strong>${esc(String(Number(g && g.count) || 0))}</strong> ${esc(filetype)}${outcome}`;
     }).join(' · ');
     rows.push(checkRow(allSucceeded,
       `<strong>${esc(String(total))}</strong> grabs · ${tally}`));
@@ -1252,6 +1260,21 @@ function renderPlanTable(args) {
   const statsSlots = Array.isArray(args.statsSlots) ? args.statsSlots : [];
   const rows = items.map((item) => {
     const ordinal = item.ordinal;
+    // The producer groups its rows by `(plan_id, plan_ordinal,
+    // plan_strategy)` (`lib/pipeline_db/_shared.py`), one field wider
+    // than the `(plan_id, ordinal)` a plan item can be matched on, so
+    // in principle two groups could answer to one slot and `find` would
+    // report the first one's tallies for both.
+    //
+    // Taking the first match is exact today. `plan_strategy` is a
+    // snapshot column stamped per attempt from the plan item the
+    // executor consumed, and a plan's items are immutable — a changed
+    // generator supersedes the plan rather than rewriting its slots —
+    // so every row sharing a `(plan_id, ordinal)` carries the same
+    // strategy. Measured on the live DB 2026-09-09: over 499,237
+    // plan-aware `search_log` rows, `plan_strategy` is NULL on none of
+    // them, and the two key widths yield the same 44,410 distinct
+    // groups. Match on the strategy too if that ever stops holding.
     const slot = statsSlots.find((candidate) => {
       const identity = (candidate && candidate.identity) || {};
       return identity.plan_id === args.planId && identity.ordinal === ordinal;
@@ -1425,6 +1448,20 @@ function renderAttemptRow(row) {
 }
 
 /**
+ * The Attempts section's row-count caption. One spelling, because
+ * {@link searchPlanLoadOlder} has to rewrite it in place after
+ * appending a page and a second spelling would drift from this one.
+ *
+ * @param {number} shownCount  Rows the active filter admits.
+ * @param {number} totalCount  Rows loaded so far.
+ * @returns {string} Plain text, safe for `textContent` or an escaped
+ *   interpolation — both operands are rendered from numbers.
+ */
+function attemptsCountLabel(shownCount, totalCount) {
+  return `${shownCount} of ${totalCount} loaded`;
+}
+
+/**
  * Render the Attempts section: the Interesting/All toggle, the filtered
  * rows, and the Load-older affordance.
  *
@@ -1440,7 +1477,7 @@ function renderAttemptsSection(args) {
     return `<button class="sp-filter-button${on ? ' sp-filter-button-on' : ''}" type="button" onclick="event.stopPropagation(); window.searchPlanSetAttemptsFilter(${args.requestId}, '${mode}')">${label}</button>`;
   };
   const filters = `<span class="sp-filters">${button('interesting', 'Interesting')}${button('all', 'All')}</span>`;
-  const label = `<div class="sp-section-label">Attempts <span class="sp-section-sub">${esc(String(shown.length))} of ${esc(String(rows.length))} loaded</span>${filters}</div>`;
+  const label = `<div class="sp-section-label">Attempts <span class="sp-section-sub sp-attempts-count">${esc(attemptsCountLabel(shown.length, rows.length))}</span>${filters}</div>`;
   if (rows.length === 0) {
     return `<div class="sp-detail-section sp-attempts-section">${label}
       <div class="sp-attempts-empty">No attempts yet</div>
@@ -1796,13 +1833,18 @@ export async function renderSearchPlanDetail(requestId) {
  */
 export function searchPlanSetAttemptsFilter(requestId, mode) {
   if (mode !== 'interesting' && mode !== 'all') return;
-  attemptsFilter = mode;
   const snapshot = detailSnapshot;
   if (!snapshot || snapshot.requestId !== requestId) return;
   if (typeof document === 'undefined') return;
   const el = /** @type {HTMLElement|null} */ (
     document.getElementById('pipeline-content'));
   if (!el) return;
+  // The mode is a property of the page this call is about to paint, so
+  // it changes only once every guard has passed. Assigning first let a
+  // call that could not repaint — a stale request id from a page the
+  // operator has already left — silently change the view mode of the
+  // NEXT page painted.
+  attemptsFilter = mode;
   el.innerHTML = renderDetailPage({
     inspection: snapshot.inspection,
     history: snapshot.rows,
@@ -1892,6 +1934,22 @@ export async function searchPlanLoadOlder(requestId, beforeId) {
     if (detailSnapshot && detailSnapshot.requestId === requestId) {
       detailSnapshot.rows = detailSnapshot.rows.concat(rows);
       detailSnapshot.nextBeforeId = nextBeforeId;
+      // The section caption counts loaded rows, and this call just
+      // loaded some — leaving it alone reports the first page's numbers
+      // over a table that has grown. Recount from the snapshot (every
+      // loaded row) under the active filter, the same two numbers
+      // `renderAttemptsSection` derives. The snapshot is the only
+      // honest source for the total, so a mismatched snapshot leaves
+      // the caption alone rather than guessing from the visible rows.
+      const caption = /** @type {HTMLElement|null} */ (
+        document.querySelector('.sp-attempts-section .sp-attempts-count'));
+      if (caption) {
+        const loaded = detailSnapshot.rows;
+        const shownCount = attemptsFilter === 'all'
+          ? loaded.length
+          : loaded.filter(isInterestingAttempt).length;
+        caption.textContent = attemptsCountLabel(shownCount, loaded.length);
+      }
     }
     if (wrap) {
       if (nextBeforeId == null) {
