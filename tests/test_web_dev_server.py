@@ -1212,6 +1212,7 @@ class WebDevServerStaticParityTest(unittest.TestCase):
             self.assertEqual(response.status, 200)
             self.assertEqual(
                 response.headers["Content-Type"], JS_CONTENT_TYPE)
+            self.assertEqual(response.headers["Cache-Control"], "no-cache")
         self.assertEqual(body, (WEB_ROOT / "js" / "main.js").read_bytes())
 
         for path, (filename, content_type) in ICON_ASSETS.items():
@@ -1221,6 +1222,10 @@ class WebDevServerStaticParityTest(unittest.TestCase):
                     self.assertEqual(response.status, 200)
                     self.assertEqual(
                         response.headers["Content-Type"], content_type)
+                    # Production caches icons for a day; this server must
+                    # not, or the screenshot loop reads a stale page.
+                    self.assertEqual(
+                        response.headers["Cache-Control"], "no-cache")
                 self.assertEqual(
                     icon, (WEB_ROOT / "assets" / filename).read_bytes())
 
@@ -1230,6 +1235,9 @@ class WebDevServerStaticParityTest(unittest.TestCase):
     def test_the_index_is_still_served_at_the_root(self) -> None:
         with urlopen(f"{self.base}/", timeout=10) as response:
             self.assertEqual(response.status, 200)
+            self.assertEqual(
+                response.headers["Content-Type"], "text/html; charset=utf-8")
+            self.assertEqual(response.headers["Cache-Control"], "no-cache")
             self.assertIn("DEV fixture:peers", response.read().decode())
 
     def test_watched_files_hold_only_what_the_browser_can_fetch(self) -> None:

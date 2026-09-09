@@ -304,7 +304,7 @@ class DevHandler(BaseHTTPRequestHandler):
         `no-cache`, because live reload is the point of this server and
         production's day-long icon caching would defeat it.
         """
-        if path in ("", "/"):
+        if path == "/":
             self._serve_index()
             return
         static = resolve_static_file(path)
