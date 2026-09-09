@@ -11,9 +11,10 @@
  * Much of this module is Node-tested: filters, sorting, URL builders,
  * and several renderers (`renderLabelLinks`, `renderPaginationControls`,
  * `renderLabelRows`, ...) in `tests/test_js_util.mjs`, and the
- * search-result render + click wiring in `tests/test_js_labels.mjs`.
- * The label-detail page flow (`openLabelDetail`, `closeLabelDetail`,
- * `goToLabelPage`) is DOM-bound and verified via playwright.
+ * search-result render + click wiring, the detail-page composition and
+ * the `openLabelDetail` load flow (including the `closeLabelDetail` that
+ * supersedes it) in `tests/test_js_labels.mjs`. `goToLabelPage` is still
+ * only reached via playwright.
  */
 
 import { state, API, toast } from './state.js';
@@ -364,13 +365,6 @@ export async function openLabelDetail(labelId, labelName) {
   try {
     const payload = await loadLabelReleases(labelId, { page: 1 });
     if (requestToken !== labelDetailRequestToken) return;
-    const totalCount = (payload && payload.label && payload.label.release_count) || 0;
-    if (totalCount > BIG_LABEL_THRESHOLD) {
-      // Flag the label as big so any future affordance that wants to
-      // know can branch on it. (The toggle itself reads totalCount
-      // directly today, but the flag is cheap to keep.)
-      state.labelFilters.bigLabel = true;
-    }
     renderLabelDetail(body, payload);
   } catch (e) {
     if (requestToken !== labelDetailRequestToken) return;
@@ -387,8 +381,9 @@ export async function goToLabelPage(page) {
   if (!state.browseLabel) return;
   const requestToken = ++labelDetailRequestToken;
   const labelId = state.browseLabel.id;
-  // Read the current toggle state if present — bigLabel labels show an
-  // explicit checkbox; default otherwise comes from the original load.
+  // Read the current toggle state if present — a label over
+  // BIG_LABEL_THRESHOLD shows an explicit checkbox; default otherwise
+  // comes from the original load.
   const toggle = /** @type {HTMLInputElement|null} */ (
     document.getElementById('label-include-sublabels'));
   const currentBody = /** @type {any} */ (
