@@ -21,7 +21,7 @@ export function setRecentsFilter(f) {
 
 /**
  * Switch Recents between history, active acquisition, and importer work.
- * @param {string} sub
+ * @param {'history'|'acquisition'|'imports'} sub
  */
 export function setRecentsSub(sub) {
   state.recentsSub = sub;

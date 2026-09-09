@@ -89,6 +89,56 @@ dependency runs one way only.
 | `lib/redis_cache.py` | The Redis client behind the clients' `meta:` metadata namespace and the routes' `web:` invalidation groups (`lib/peer_cache.py` has its own, for a different subject) |
 | `web/index.html` | Frontend HTML shell and inline CSS |
 | `web/js/` | Vanilla JavaScript ES modules |
+| `web/js/jsconfig.json` | The type-check project: the options `scripts/run_tsc.sh` and an editor both read |
+| `web/js/globals.d.ts` | The `window.*` handlers `main.js` installs, declared for the modules that call them |
+
+## Type checking
+
+Every module carries `// @ts-check`, and the canonical suite's `tsc` phase
+(`scripts/run_tsc.sh` → `scripts/phase_parsers/tsc.py`) is what makes those
+pragmas mean something: issue #1390 found 48 errors across the 31 modules on a
+surface no checker had ever run over, burned them down, and left the gate
+behind. Run it directly with:
+
+```bash
+nix-shell --run "bash scripts/run_tsc.sh"
+```
+
+Three things to know when it goes red:
+
+- **A cross-module handler needs a declaration.** `main.js` installs the
+  onclick surface with `Object.assign(window, {…})`, which type-checks
+  nothing. A module that then *calls* `window.foo()` gets TS2339 until `foo`
+  is declared in `web/js/globals.d.ts`, typed as the exported function it
+  actually is (`typeof import('./recents.js').loadRecents`). Only handlers
+  read from JavaScript are declared there; the rest reach the page through
+  `onclick` attribute strings in rendered HTML, which nothing checks.
+- **`querySelector`-family results are `Element`.** Reading `.dataset` or
+  `.value`, or passing one to an `HTMLElement` parameter, needs the JSDoc
+  cast the modules already use — `/** @type {HTMLElement|null} */ (…)`.
+  Prefer casting at the query so the whole downstream is typed. Reach for
+  `instanceof HTMLElement` only where no `.mjs` suite can reach the line:
+  the Node test runner defines no such global (measured on node 24.19.0,
+  `typeof HTMLElement` is `undefined`, and `x instanceof undefined` throws
+  `TypeError`), so it throws wherever a suite does drive the code. Two
+  sites predate the gate and sit in that safe corner — `web/js/main.js:55`
+  and `web/js/replace_picker.js:576`, both reading `document.activeElement`
+  behind a fetch response no suite drives. tsc accepts the shape, so
+  nothing mechanical stops a third; the cast is the default.
+- **A stale JSDoc typedef is a documentation bug, not a checker
+  complaint.** 14 of the original 48 were fields the server really sends
+  (`status` from `web/routes/pipeline_mutations.py`, `started_at` from
+  `web/triage_runner.py`, `masterless`/`pairing` from the rendered row's own
+  onclick). Fix the typedef against the producer, never by widening to
+  `Object`.
+
+`tests/*.mjs` is deliberately outside the project. Measured 2026-09-09, the
+same options over the 30 suites report 285 errors, 37 of which are the Node
+runtime the suites are written against and tsc cannot see: `node:` module
+imports (13), `process` (12) and `setImmediate` (12). Those need
+`@types/node`, an npm package, and there is no npm here
+(`.claude/rules/web.md`). Strictness is at the tsc default; raising it is
+not on anyone's list.
 
 ## API Endpoints
 

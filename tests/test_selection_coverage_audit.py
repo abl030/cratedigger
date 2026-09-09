@@ -2059,6 +2059,7 @@ class TestSelectionCoverageCheckersTripOnViolations(unittest.TestCase):
                 "scripts/phase_parsers/pyright_checks.py",
                 "scripts/phase_parsers/python_tests.py",
                 "scripts/phase_parsers/ruff.py",
+                "scripts/phase_parsers/tsc.py",
             ),
         )
         self.assertEqual(
@@ -2090,7 +2091,7 @@ class TestSelectionCoverageCheckersTripOnViolations(unittest.TestCase):
         )
         walked = rule_candidate_paths(derived_only, REPO_ROOT)
 
-        self.assertEqual(len(walked), 6)
+        self.assertEqual(len(walked), 7)
         self.assertEqual(
             [
                 path

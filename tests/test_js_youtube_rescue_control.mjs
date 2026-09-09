@@ -28,11 +28,27 @@ const mixedDuplicateHtml = renderYoutubeRescueControl('release-mixed', 1, identi
 t.contains(mixedDuplicateHtml, 'disabled', 'one valid plus one invalid exact entry stays disabled');
 t.contains(mixedDuplicateHtml, 'Exact evidence required', 'the mixed pair says why it is disabled');
 
-function fakeHost(watchUrl = '') {
-  const buttons = [];
-  const result = { innerHTML: '', querySelectorAll: () => buttons };
+function fakeHost(watchUrl = '', buttons = []) {
+  // Selector-aware on purpose. A `querySelectorAll: () => buttons` that
+  // answers any string cannot tell `[data-browse-id]` from a typo, and a
+  // planted typo survived every assertion in this file (issue #1390
+  // review, mutant J14). `selectors` records what production asked for.
+  const selectors = [];
+  const result = {
+    innerHTML: '',
+    querySelectorAll: (sel) => {
+      selectors.push(sel);
+      return sel === '[data-browse-id]' ? buttons : [];
+    },
+  };
   const input = { value: watchUrl };
-  return { dataset: {}, querySelector: (s) => s === 'input' ? input : result, result, buttons };
+  return {
+    dataset: {},
+    querySelector: (s) => s === 'input' ? input : result,
+    result,
+    buttons,
+    selectors,
+  };
 }
 
 t.section('checkYoutubeRescue() — busy guard and manual URL submission');
@@ -108,7 +124,7 @@ t.section('pickYoutubeRescue() — cancellation is reusable and accept submits o
   // Button cancellation is reusable; accepted submit carries browse_id only
   // and the submitting guard admits one concurrent POST.
   const button = { dataset: { browseId: 'MPREb_kb5fohQCJ6d' }, addEventListener: (_name, listener) => { button.listener = listener; } };
-  const submitHost = fakeHost(); submitHost.result.querySelectorAll = () => [button];
+  const submitHost = fakeHost('', [button]);
   let confirms = false;
   const requests = []; let releaseSubmit;
   const globals = stubGlobals({
@@ -121,6 +137,8 @@ t.section('pickYoutubeRescue() — cancellation is reusable and accept submits o
     },
   });
   await checkYoutubeRescue('release-submit', 1, identifier);
+  t.deepEqual(submitHost.selectors, ['[data-browse-id]'],
+    'the rescue choices are found by the data-browse-id attribute selector');
   await button.listener({ stopPropagation() {} });
   t.equal(requests.length, 1, 'cancel keeps choice active without submit');
   confirms = true;
@@ -136,7 +154,7 @@ t.section('pickYoutubeRescue() — cancellation is reusable and accept submits o
 t.section('pickYoutubeRescue() — a rejected submit toasts and clears its guard');
 {
   const rejectButton = { dataset: { browseId: 'MPREb_kb5fohQCJ6d' }, addEventListener: (_name, listener) => { rejectButton.listener = listener; } };
-  const rejectHost = fakeHost(); rejectHost.result.querySelectorAll = () => [rejectButton];
+  const rejectHost = fakeHost('', [rejectButton]);
   const toastNode = { style: {}, textContent: '' };
   const globals = stubGlobals({
     document: { getElementById: (id) => id === 'yt-rescue-release-reject' ? rejectHost : toastNode },

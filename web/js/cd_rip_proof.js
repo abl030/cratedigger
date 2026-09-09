@@ -18,7 +18,7 @@ function isInteger(value) {
   return Number.isSafeInteger(value);
 }
 
-/** @param {unknown} value @returns {boolean} */
+/** @param {unknown} value @returns {value is number} */
 function isUint32(value) {
   return isInteger(value) && value >= 0 && value <= 0xFFFFFFFF;
 }
@@ -61,10 +61,13 @@ function validCtdb(raw, offsets, leadout) {
   if (!Array.isArray(raw.response_toc_sectors)
       || raw.response_toc_sectors.length < 2
       || !raw.response_toc_sectors.every(isUint32)) return false;
-  if (!isUint32(raw.response_toc_shift_sectors)) return false;
+  // Bound to a const before the guard: a narrowing survives into the map
+  // callback below for a const, not for a property read off a parameter.
+  const shiftSectors = raw.response_toc_shift_sectors;
+  if (!isUint32(shiftSectors)) return false;
   if (!isSha256(raw.response_sha256)) return false;
   const normalized = raw.response_toc_sectors.map(
-    (sector) => sector - raw.response_toc_shift_sectors,
+    (sector) => sector - shiftSectors,
   );
   const expected = [...offsets, leadout];
   return normalized.length === expected.length

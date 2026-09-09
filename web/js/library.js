@@ -348,8 +348,12 @@ export function banSourceConfirmationMessage() {
 }
 
 /**
- * @param {{request_status: string, username?: string|null,
- *   beets_removed?: boolean, hashes_recorded?: number}} data
+ * `status` is `'partial'` when the cleanup did not finish; the route
+ * (`web/routes/pipeline_mutations.py::post_pipeline_ban_source`) sends it
+ * on every response.
+ * @param {{request_status: string, status: 'ok'|'partial',
+ *   username?: string|null, beets_removed?: boolean,
+ *   hashes_recorded?: number}} data
  * @returns {string}
  */
 export function describeBanSourceSuccess(data) {

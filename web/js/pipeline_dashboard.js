@@ -1013,7 +1013,7 @@ function renderUnfindableBacklogChart(points) {
 /**
  * Coerce a persisted unfindable-backlog series into chartable points.
  * @param {any} points
- * @returns {{label: string, value: number}[]}
+ * @returns {{time: string, backlog: number}[]}
  */
 export function normalizeUnfindableBacklogSeries(points) {
   return (Array.isArray(points) ? points : []).map(point => {

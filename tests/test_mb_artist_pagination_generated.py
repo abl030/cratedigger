@@ -16,6 +16,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import MagicMock, patch
 
@@ -28,6 +29,128 @@ from lib.api_bases import PUBLIC_MB_WS2_BASE
 
 ARTIST_ID = "00000000-0000-0000-0000-000000000917"
 
+# The two client-side fan-out widths this module pins, spelled here rather
+# than read from production: a mutant that narrows either one must move the
+# assertion, not the target it is measured against.
+#   * four concurrent requests per custom mirror -- lib/mb_api.py::_MB_MIRROR_CONCURRENCY,
+#     also pinned directly by test_public_musicbrainz_stays_serial_while_custom_mirror_uses_four_slots
+#   * three independent browse families per catalogue fetch -- the
+#     ``max_workers=3`` fan-out in lib/mb_api.py::get_artist_release_groups
+_MIRROR_SLOTS = 4
+_BROWSE_FAMILIES = 3
+
+
+@dataclass(frozen=True)
+class _FanoutGates:
+    """Fan-out facts the mirror ENFORCES, so no assertion has to observe one.
+
+    ``concurrent_request_waves`` is a ladder of arrival widths: the mirror
+    holds each arriving handler before it answers until that many requests
+    are in flight at once, then opens that rung for good and moves to the
+    next.  The client cannot reach a rung it does not fan out far enough to
+    fill, so a narrowed client fails loudly instead of quietly passing.
+
+    ``overlapping_handlers`` is applied after the response is written: a
+    handler stays alive until that many handler threads overlap.  The client
+    has already read its body and dropped its lease by then, which is the
+    whole point -- server thread lifetime is not the client's mirror lease.
+    """
+
+    concurrent_request_waves: tuple[int, ...]
+    overlapping_handlers: int
+    # Bounded well under production's own 15s urlopen timeout so a client
+    # that stops fanning out records a named failure instead of colliding
+    # with a socket timeout and a production retry.
+    timeout_seconds: float = 10.0
+
+
+class _FanoutLatch:
+    """Hold mirror handlers until the gated fan-out facts are true."""
+
+    def __init__(
+        self, gates: _FanoutGates, lock: threading.Lock, alive: Callable[[], int],
+    ) -> None:
+        self.gates = gates
+        self.failures: list[str] = []
+        self._alive = alive
+        self._condition = threading.Condition(lock)
+        self._rung = 0
+        self._waiting = 0
+        self._overlap_open = False
+        self._abandoned = False
+
+    def wake_all(self) -> None:
+        """Re-check every held handler.  Call with the shared lock held."""
+        self._condition.notify_all()
+
+    def hold_before_write(self) -> None:
+        with self._condition:
+            rung = self._rung
+            if self._abandoned or rung >= len(self.gates.concurrent_request_waves):
+                return
+            wanted = self.gates.concurrent_request_waves[rung]
+            self._waiting += 1
+            if self._waiting >= wanted:
+                self._open_rung(rung)
+                return
+            deadline = time.monotonic() + self.gates.timeout_seconds
+            while self._rung == rung and not self._abandoned:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.failures.append(
+                        f"client never had {wanted} requests in flight at once "
+                        f"(wave {rung}; {self._waiting} arrived)",
+                    )
+                    self._open_rung(rung)
+                    return
+                self._condition.wait(remaining)
+
+    def hold_after_write(self) -> None:
+        with self._condition:
+            wanted = self.gates.overlapping_handlers
+            deadline = time.monotonic() + self.gates.timeout_seconds
+            while not self._overlap_open and not self._abandoned:
+                if self._alive() >= wanted:
+                    self._overlap_open = True
+                    self._condition.notify_all()
+                    return
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.failures.append(
+                        f"handler threads never overlapped {wanted} deep "
+                        f"({self._alive()} alive at the deadline)",
+                    )
+                    self._overlap_open = True
+                    self._condition.notify_all()
+                    return
+                self._condition.wait(remaining)
+
+    def abandon(self) -> None:
+        """Release every held handler at mirror teardown.
+
+        A client that raised early leaves handlers held; releasing them keeps
+        teardown bounded.  Anything still shut records its own failure, so an
+        abandoned run can never read as a satisfied gate.
+        """
+        with self._condition:
+            self._abandoned = True
+            if self._rung < len(self.gates.concurrent_request_waves):
+                self.failures.append(
+                    "mirror shut down with the arrival ladder still closed at wave "
+                    f"{self._rung}",
+                )
+            if not self._overlap_open:
+                self.failures.append(
+                    "mirror shut down before "
+                    f"{self.gates.overlapping_handlers} handler threads overlapped",
+                )
+            self._condition.notify_all()
+
+    def _open_rung(self, rung: int) -> None:
+        self._rung = rung + 1
+        self._waiting = 0
+        self._condition.notify_all()
+
 
 class _NestedRecordingWorld:
     def __init__(
@@ -35,6 +158,7 @@ class _NestedRecordingWorld:
         after_write_delay: float = 0,
         catalogue_short_page: int | None = None, fail_release_groups: bool = False,
         blank_catalogue_id: bool = False, catalogue_total: int | None = None,
+        fanout_gates: _FanoutGates | None = None,
     ) -> None:
         self.ids = [f"release-{index:05d}" for index in range(total)]
         self.short_page = short_page
@@ -47,6 +171,39 @@ class _NestedRecordingWorld:
         self.active_server_handlers = 0
         self.max_active_server_handlers = 0
         self._lock = threading.Lock()
+        self.latch = (
+            None if fanout_gates is None
+            else _FanoutLatch(
+                fanout_gates, self._lock, lambda: self.active_server_handlers,
+            )
+        )
+
+    def begin_handler(self) -> None:
+        with self._lock:
+            self.active_server_handlers += 1
+            self.max_active_server_handlers = max(
+                self.max_active_server_handlers, self.active_server_handlers,
+            )
+            if self.latch is not None:
+                self.latch.wake_all()
+
+    def end_handler(self) -> None:
+        with self._lock:
+            self.active_server_handlers -= 1
+            if self.latch is not None:
+                self.latch.wake_all()
+
+    def catalogue_date(self, index: int) -> str:
+        """A ``first-release-date`` that DESCENDS as ids ascend.
+
+        Production sorts its catalogue rows by ``(first_release_date, id)``
+        and the browse pages arrive id-ascending, so a world that dates
+        every row the same year hands the sort a list already in its own
+        output order: deleting the sort survives, and only reversing it
+        fails.  Dating the rows against their arrival makes the ordering
+        assertion measure the sort instead of the mirror.
+        """
+        return f"{1000 + len(self.ids) - index}"
 
     def response(self, path: str, query: dict[str, list[str]]) -> dict[str, object]:
         offset = int(query.get("offset", ["0"])[0])
@@ -59,7 +216,8 @@ class _NestedRecordingWorld:
                 {
                     "id": "" if self.blank_catalogue_id and index == 0 else f"rg-{index:05d}",
                     "title": f"Group {index}",
-                    "primary-type": "Album", "first-release-date": "2000",
+                    "primary-type": "Album",
+                    "first-release-date": self.catalogue_date(index),
                     "artist-credit": [{"name": "Artist", "artist": {
                         "id": ARTIST_ID, "name": "Artist",
                     }}],
@@ -78,7 +236,8 @@ class _NestedRecordingWorld:
                     "id": f"track-{index:05d}", "status": "Official",
                     "release-group": {
                         "id": f"track-rg-{index:05d}", "title": f"Track {index}",
-                        "primary-type": "Album", "first-release-date": "2000",
+                        "primary-type": "Album",
+                        "first-release-date": self.catalogue_date(index),
                         "artist-credit": [{"name": "Various", "artist": {
                             "id": "various", "name": "Various",
                         }}],
@@ -131,29 +290,30 @@ class _Mirror:
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
-                with mirror.world._lock:
-                    mirror.world.active_server_handlers += 1
-                    mirror.world.max_active_server_handlers = max(
-                        mirror.world.max_active_server_handlers,
-                        mirror.world.active_server_handlers,
-                    )
+                world = mirror.world
+                world.begin_handler()
                 try:
-                    if mirror.world.delay:
-                        time.sleep(mirror.world.delay)
+                    if world.delay:
+                        time.sleep(world.delay)
                     parsed = urllib.parse.urlsplit(self.path)
-                    body = json.dumps(mirror.world.response(
+                    body = json.dumps(world.response(
                         parsed.path, urllib.parse.parse_qs(parsed.query),
                     )).encode()
+                    if world.latch is not None:
+                        world.latch.hold_before_write()
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
+                    # ``wbufsize = 0``: the body reaches the client here, so the
+                    # client drops its mirror lease while this thread is held.
                     self.wfile.write(body)
-                    if mirror.world.after_write_delay:
-                        time.sleep(mirror.world.after_write_delay)
+                    if world.latch is not None:
+                        world.latch.hold_after_write()
+                    if world.after_write_delay:
+                        time.sleep(world.after_write_delay)
                 finally:
-                    with mirror.world._lock:
-                        mirror.world.active_server_handlers -= 1
+                    world.end_handler()
 
             def log_message(self, format: str, *_args: object) -> None:
                 pass
@@ -169,6 +329,11 @@ class _Mirror:
         return f"http://{host}:{port}/ws/2"
 
     def __exit__(self, *_exc: object) -> None:
+        # ``server_close`` joins handler threads, so release anything still
+        # held before teardown; a gate that never opened records its own
+        # failure inside ``abandon``.
+        if self.world.latch is not None:
+            self.world.latch.abandon()
         self.server.shutdown()
         self.thread.join()
         self.server.server_close()
@@ -291,22 +456,99 @@ class TestArtistRecordingPaginationPins(unittest.TestCase):
                 self.assertEqual(len(actual), len(set(actual)))
 
     def test_catalogue_fanout_is_globally_bounded_and_stably_normalized(self) -> None:
-        # Keep completed server handlers alive after the client has read the
-        # response.  Server thread lifetime is not the client semaphore lease.
-        world = _NestedRecordingWorld(250, delay=0.01, after_write_delay=0.05)
+        # The mirror ENFORCES this overlap instead of the test observing one.
+        # A 250-row catalogue is fetched as three independent browse families
+        # (three first pages), then six segment pages the client may only run
+        # four at a time.  So the arrival ladder is (3, 4): the first rung can
+        # only be filled by all three families being in flight together, and
+        # the second only by the client leasing every mirror slot at once.
+        # Handlers are then held past their own response until more of them
+        # are alive than the client is ever allowed to lease -- server thread
+        # lifetime is not the client semaphore lease.  A client that stops
+        # fanning out cannot fill a rung, and records a named failure rather
+        # than hanging or reading whatever the host's idle cores allowed.
+        gates = _FanoutGates(
+            concurrent_request_waves=(_BROWSE_FAMILIES, _MIRROR_SLOTS),
+            overlapping_handlers=_MIRROR_SLOTS + 1,
+        )
+        world = _NestedRecordingWorld(250, fanout_gates=gates)
         with _Mirror(world) as api_base, _ClientSlotProbe(api_base) as probe, patch.object(
             mb, "MB_API_BASE", api_base,
         ), patch(
             "lib.mb_api._cache.memoize_meta", side_effect=_without_metadata_cache,
         ):
             rows = mb.get_artist_release_groups(ARTIST_ID)
+        assert world.latch is not None
+        self.assertEqual(world.latch.failures, [])
         assert_request_cap(probe.max_active)
-        self.assertGreater(probe.max_active, 1)
-        self.assertGreater(world.max_active_server_handlers, 4)
+        self.assertEqual(probe.max_active, _MIRROR_SLOTS)
+        self.assertGreater(world.max_active_server_handlers, _MIRROR_SLOTS)
+        # The world dates its rows against their arrival order (see
+        # ``catalogue_date``), so this measures the production sort rather
+        # than the order the mirror happened to answer in.
         self.assertEqual(
             [(row.first_release_date, row.id) for row in rows],
             sorted((row.first_release_date, row.id) for row in rows),
         )
+
+    def test_fanout_latch_names_the_gate_a_narrowed_client_cannot_fill(self) -> None:
+        # Known-bad self-test, one world per clause of the latch's own
+        # reporting.  Both worlds are single-threaded: nothing else can fill
+        # the gate, which is exactly the shape a client that stopped fanning
+        # out presents.
+        arrivals = _FanoutLatch(
+            _FanoutGates(
+                concurrent_request_waves=(2,), overlapping_handlers=1,
+                timeout_seconds=0.01,
+            ),
+            threading.Lock(), lambda: 1,
+        )
+        arrivals.hold_before_write()
+        self.assertEqual(
+            arrivals.failures,
+            ["client never had 2 requests in flight at once (wave 0; 1 arrived)"],
+        )
+        overlap = _FanoutLatch(
+            _FanoutGates(
+                concurrent_request_waves=(), overlapping_handlers=2,
+                timeout_seconds=0.01,
+            ),
+            threading.Lock(), lambda: 1,
+        )
+        overlap.hold_after_write()
+        self.assertEqual(
+            overlap.failures,
+            ["handler threads never overlapped 2 deep (1 alive at the deadline)"],
+        )
+        # Q3: a gate its world does reach stays quiet, and says so at teardown.
+        satisfied = _FanoutLatch(
+            _FanoutGates(
+                concurrent_request_waves=(1,), overlapping_handlers=1,
+                timeout_seconds=0.01,
+            ),
+            threading.Lock(), lambda: 1,
+        )
+        satisfied.hold_before_write()
+        satisfied.hold_after_write()
+        satisfied.abandon()
+        self.assertEqual(satisfied.failures, [])
+
+    def test_fanout_latch_reports_a_teardown_that_beat_its_own_gates(self) -> None:
+        # A client that raised early leaves the gates shut; teardown must
+        # release the handlers AND refuse to read as a satisfied run.
+        latch = _FanoutLatch(
+            _FanoutGates(concurrent_request_waves=(2,), overlapping_handlers=2),
+            threading.Lock(), lambda: 0,
+        )
+        latch.abandon()
+        self.assertEqual(latch.failures, [
+            "mirror shut down with the arrival ladder still closed at wave 0",
+            "mirror shut down before 2 handler threads overlapped",
+        ])
+        # Abandoned gates never block again: teardown stays bounded.
+        latch.hold_before_write()
+        latch.hold_after_write()
+        self.assertEqual(len(latch.failures), 2)
 
     def test_short_catalogue_pages_fill_each_counted_segment(self) -> None:
         world = _NestedRecordingWorld(150, catalogue_short_page=80)

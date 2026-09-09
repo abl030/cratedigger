@@ -132,6 +132,16 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_multidisc_manifest_generated",
         "tests.test_cross_request_enqueue_guard_generated",
     ),
+    "lib/search_plan_inspection.py": (
+        # Was an admitted zero-neighbour gap (issue #1199): there is no
+        # tests.test_search_plan_inspection, so the basename probes found
+        # nothing and a solo diff to the inspection payload selected only
+        # the ambient gates. Its two real homes are named for the route
+        # and for the wire this payload crosses, neither of which the
+        # probe can derive (issue #1402).
+        "tests.web.test_routes_search_plan",
+        "tests.test_search_plan_detail_wire",
+    ),
     "lib/slskd_transfer_ledger.py": (
         # Was an admitted zero-neighbour gap (issue #1199): no
         # tests.test_slskd_transfer_ledger. The registered cycle step's
@@ -1427,6 +1437,15 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         # source.
         "tests.test_unused_import_audit",
     ),
+    "scripts/run_tsc.sh": (
+        # The basename probe derives tests.test_run_tsc, which does not
+        # exist: this wrapper's dialect is pinned in
+        # tests.test_phase_parsers (the `bash scripts/run_tsc.sh` rerun
+        # command and the fileless-diagnostic owner both name it) and its
+        # place in the phase plan in tests.test_suite_coordinator.
+        "tests.test_phase_parsers",
+        "tests.test_suite_coordinator",
+    ),
     "scripts/run_tests.sh": (
         # All three read this file's source and pin a distinct property of
         # it: test_js_suite_audit that it still reaches the coordinator,
@@ -1599,11 +1618,6 @@ LIB_MODULES_WITHOUT_SELECTION_COVERAGE: dict[str, str] = {
         "measured 2026-08-19: zero neighbours -- tests.test_replace_status "
         "does not exist and no EXACT_PATH_NEIGHBOURS/prefix rule covers it "
         "(issue #1199)"
-    ),
-    "lib/search_plan_inspection.py": (
-        "measured 2026-08-19: zero neighbours -- "
-        "tests.test_search_plan_inspection does not exist and no "
-        "EXACT_PATH_NEIGHBOURS/prefix rule covers it (issue #1199)"
     ),
     "lib/v0_probe.py": (
         "measured 2026-08-19: zero neighbours -- tests.test_v0_probe does "

@@ -36,6 +36,41 @@ def _ctdb_proof(confidence: int) -> CdRipBitVerification:
     )
 
 
+def _shifted_ctdb_proof() -> CdRipBitVerification:
+    """A CTDB response whose TOC sits at a nonzero offset from the disc's.
+
+    Every other CTDB fixture carries ``response_toc_shift_sectors=0``, and
+    zero is the one value where subtracting the shift and adding it agree.
+    So no fixture could distinguish the verifier's ``sector - shift`` from
+    ``sector + shift``, and a planted sign flip survived the whole JS suite
+    (issue #1390 review, mutant J7). This is the world that decides it.
+    """
+    shift = 32
+    offsets = [0]
+    leadout = 470
+    return CdRipBitVerification(
+        toc=CdTocIdentity(
+            track_offsets_sectors=offsets,
+            leadout_sector=leadout,
+            accuraterip_id="000001d6-000003ac-02000601",
+            musicbrainz_disc_id="exact-shifted-disc-id",
+        ),
+        ctdb=CtdbWholeDiscMatch(
+            provider="ctdb",
+            url="https://db.cue.tools/lookup2.php?shifted=1",
+            entry_id="ctdb-entry-shifted",
+            confidence=18,
+            crc32=0x3456789A,
+            stride_samples=5880,
+            response_toc_sectors=[
+                sector + shift for sector in [*offsets, leadout]
+            ],
+            response_toc_shift_sectors=shift,
+            response_sha256="e" * 64,
+        ),
+    )
+
+
 def _accuraterip_proof() -> CdRipBitVerification:
     offsets = [index * 200 for index in range(12)]
     return CdRipBitVerification(
@@ -101,6 +136,7 @@ def fixture_payload() -> dict[str, object]:
     proofs = {
         "ctdb_6": _ctdb_proof(6),
         "ctdb_24": _ctdb_proof(24),
+        "ctdb_18_shifted_toc": _shifted_ctdb_proof(),
         "accuraterip_min_1": _accuraterip_proof(),
         "ctdb_11_accuraterip_min_3": _dual_provider_proof(),
     }

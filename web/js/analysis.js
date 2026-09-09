@@ -51,10 +51,10 @@ export function analysisChipHtml(rg) {
 export function applyAnalysisChips(containerEl, disambData) {
   // Large catalogues have hundreds of groups.  Index the rendered nodes once
   // instead of scanning the whole document for every analysis row.
+  const renderedRows = /** @type {HTMLElement[]} */ (
+    Array.from(containerEl.querySelectorAll('.rg[data-rg-id]')));
   const rowsByReleaseGroupId = new Map(
-    Array.from(containerEl.querySelectorAll('.rg[data-rg-id]')).map(row => [
-      row.dataset.rgId, row,
-    ]),
+    renderedRows.map(row => [row.dataset.rgId, row]),
   );
   for (const rg of disambData.release_groups || []) {
     const row = rowsByReleaseGroupId.get(rg.release_group_id);

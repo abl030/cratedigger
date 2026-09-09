@@ -36,6 +36,7 @@ from scripts.phase_parsers import (
     pyright_checks,
     python_tests,
     ruff,
+    tsc,
 )
 from scripts.test_substrate import (
     BUNDLE_ANNOUNCEMENT_PREFIX,
@@ -317,6 +318,18 @@ def _default_phases() -> tuple[PhaseSpec, ...]:
             ("bash", "scripts/run_js_checks.sh", "unit"),
             "bash scripts/run_js_checks.sh unit",
             js_checks.parse_unit_failures,
+        ),
+        PhaseSpec(
+            "tsc",
+            ("bash", "scripts/run_tsc.sh"),
+            "bash scripts/run_tsc.sh",
+            tsc.parse_failures,
+            # 2 is what tsc exits when it reported diagnostics in the
+            # sources; 1 is what it exits when it could not get that far
+            # (an unreadable project file, an unknown option), which the
+            # parser indexes as a fileless finding. Anything else is the
+            # coordinator's infrastructure failure, not a type error.
+            (1, 2),
         ),
         PhaseSpec(
             "pyright",
