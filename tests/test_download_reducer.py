@@ -17,6 +17,29 @@ from lib.quality import (
 )
 
 
+def _seeded_file(**overrides) -> ActiveDownloadFileState:
+    """A persisted file with its identity seeded, not left at defaults.
+
+    ``local_path`` and the disc numbering are the per-file half of what a
+    poll must carry and never re-derive (#1405 review): a fixture that
+    leaves them ``None`` cannot tell a copy that carries them from one
+    that drops them. Module-level because
+    ``TestReducePollCycle.IDENTITY_BRANCH_WORLDS`` is evaluated while its
+    class is still being defined.
+    """
+    values = {
+        "username": "alice",
+        "filename": "Album\\01.flac",
+        "file_dir": "Album",
+        "size": 100,
+        "disk_no": 1,
+        "disk_count": 2,
+        "local_path": "/downloads/Album/01.flac",
+    }
+    values.update(overrides)
+    return ActiveDownloadFileState(**values)
+
+
 class TestDecideDownloadAction(unittest.TestCase):
     """Test the pure download decision function."""
 
@@ -155,14 +178,7 @@ class TestReducePollCycle(unittest.TestCase):
             "filetype": "flac",
             "enqueued_at": "2026-07-11T02:58:00+00:00",
             "last_progress_at": "2026-07-11T02:59:00+00:00",
-            "files": [
-                ActiveDownloadFileState(
-                    username="alice",
-                    filename="Album\\01.flac",
-                    file_dir="Album",
-                    size=100,
-                ),
-            ],
+            "files": [_seeded_file()],
             # #1196 item 1: present by default so every case in this
             # class builds a state with a real fingerprint value. This
             # does NOT by itself guard against a reducer path dropping
@@ -452,6 +468,13 @@ class TestReducePollCycle(unittest.TestCase):
     #: it gets its own assertion below. Each row is
     #: ``(decision, state overrides, per-file snapshots)``, reduced
     #: under this class's one config.
+    #:
+    #: The two vanished rows are CONTROLS, not guards: on those branches
+    #: the reducer returns the persisted object itself, so their
+    #: assertions compare an input to itself and no rebuild mutant can
+    #: fail them. They are here to prove the branch reaches the
+    #: assertions at all. The other six rebuild the state, and are where
+    #: every mutant this test kills is killed.
     IDENTITY_BRANCH_WORLDS: ClassVar[tuple[tuple[
         PollCycleDecision,
         dict[str, object],
@@ -485,12 +508,10 @@ class TestReducePollCycle(unittest.TestCase):
         (
             PollCycleDecision.retry_files,
             {"files": [
-                ActiveDownloadFileState(
-                    username="alice", filename="Album\\01.flac",
-                    file_dir="Album", size=100),
-                ActiveDownloadFileState(
-                    username="alice", filename="Album\\02.flac",
-                    file_dir="Album", size=100),
+                _seeded_file(),
+                _seeded_file(
+                    filename="Album\\02.flac",
+                    local_path="/downloads/Album/02.flac"),
             ]},
             [
                 PollFileSnapshot(
@@ -511,18 +532,15 @@ class TestReducePollCycle(unittest.TestCase):
             {
                 "enqueued_at": "2026-07-11T02:50:00+00:00",
                 "last_progress_at": "2026-07-11T02:50:00+00:00",
-                "files": [ActiveDownloadFileState(
-                    username="alice", filename="Album\\01.flac",
-                    file_dir="Album", size=100, last_state="InProgress")],
+                "files": [_seeded_file(last_state="InProgress")],
             },
             [PollFileSnapshot(transfer_id="tx-1", state="InProgress")],
         ),
         (
             PollCycleDecision.timeout_all_errored,
-            {"files": [ActiveDownloadFileState(
-                username="alice", filename="Album\\01.flac",
-                file_dir="Album", size=100,
-                last_state="Completed, Rejected", last_exception="banned")]},
+            {"files": [_seeded_file(
+                last_state="Completed, Rejected",
+                last_exception="banned")]},
             [PollFileSnapshot()],
         ),
     )
@@ -543,6 +561,13 @@ class TestReducePollCycle(unittest.TestCase):
         ``attempt_fingerprint``'s own protection was a comment plus one
         single-branch pin.
 
+        The same holds one level down and for the fields no issue is
+        named after: ``filetype``, ``enqueued_at``, the slskd queue key,
+        the disc numbering, and the event-stamped ``local_path`` that is
+        the ONLY completed-file location authority. Every row seeds them,
+        because a guard over a field the fixture leaves at its default
+        cannot tell "carried" from "dropped" (#1405 review).
+
         One row per non-``None``-state decision, so a branch that starts
         rebuilding state through some other constructor is caught here
         rather than in production.
@@ -561,6 +586,20 @@ class TestReducePollCycle(unittest.TestCase):
                 self.assertEqual(
                     result.state.attempt_fingerprint, "fp-9f8e7d6c")
                 self.assertEqual(result.state.search_log_id, 563143)
+                # The rest of the attempt's identity, at both levels.
+                self.assertEqual(result.state.filetype, state.filetype)
+                self.assertEqual(result.state.enqueued_at, state.enqueued_at)
+                self.assertEqual(
+                    len(result.state.files), len(state.files))
+                for index, was in enumerate(state.files):
+                    now = result.state.files[index]
+                    self.assertEqual(now.username, was.username)
+                    self.assertEqual(now.filename, was.filename)
+                    self.assertEqual(now.file_dir, was.file_dir)
+                    self.assertEqual(now.size, was.size)
+                    self.assertEqual(now.disk_no, was.disk_no)
+                    self.assertEqual(now.disk_count, was.disk_count)
+                    self.assertEqual(now.local_path, was.local_path)
 
     def test_the_identity_branch_table_covers_every_stateful_decision(self):
         """A new decision branch owes a row above, not a silent gap."""
@@ -638,6 +677,31 @@ class TestReducePollCycle(unittest.TestCase):
             result.state.last_progress_at, "2026-07-11T02:50:00+00:00")
         self.assertEqual(
             result.verdict.decision, PollCycleDecision.timeout_stalled)
+
+    def test_a_zero_byte_observation_replaces_a_larger_persisted_count(self):
+        """Zero is an observation, not a missing value.
+
+        ``_copy_download_file_state`` reads ``None`` as "leave this field
+        alone", so the guard has to be ``is not None`` rather than plain
+        truthiness: a live transfer reporting 0 bytes against a persisted
+        100 must persist 0. Under a truthiness guard the 100 survives, a
+        later 50-byte observation reads as no progress, and the stall
+        clock never resets for a download that is moving.
+        """
+        state = self._state(files=[_seeded_file(
+            bytes_transferred=100, last_state="InProgress")])
+
+        result = self._reduce(
+            state,
+            self._snapshot(PollFileSnapshot(
+                transfer_id="tx-1", state="InProgress",
+                bytes_transferred=0)),
+        )
+
+        assert result.state is not None
+        self.assertEqual(result.state.files[0].bytes_transferred, 0)
+        self.assertEqual(
+            result.verdict.decision, PollCycleDecision.in_progress)
 
     def test_a_change_into_a_non_progress_state_is_not_progress(self):
         """Must-still-work control for the case above.

@@ -423,7 +423,7 @@ def _copy_download_file_state(
 ) -> ActiveDownloadFileState:
     """Rebuild one file's state with ONLY the fields this cycle observed.
 
-    Structural for the same reason as ``_copy_download_state`` above
+    Structural for the same reason as ``_copy_download_state`` below
     (issue #1405): the identity a poll must never re-derive --
     ``username``/``filename`` (the slskd queue key), ``file_dir``,
     ``size``, the disc numbering, and the event-stamped ``local_path``
@@ -458,15 +458,20 @@ def _copy_download_state(
     any field a later change forgets to add, because every rebuild in
     ``reduce_poll_cycle`` goes through here and the first
     ``update_download_state_if_downloading`` after a claim rewrites the
-    whole state from what this returns.
+    whole state from what this returns. ``msgspec.structs.replace``
+    also moves keyword-name checking from Pyright to a loud runtime
+    ``TypeError``: a misspelled field here fails on the first call
+    instead of being flagged at the constructor.
 
     That is not hypothetical: issue #1196 item 1 added
     ``attempt_fingerprint`` and had to carry it by hand, and issue #1405
     is the same defect shipped for real -- #811's ``search_log_id`` was
     added to the struct, the claim writer, and the reader, but not to
-    this copy, so every stamped link was erased on the very first poll
-    cycle after claim and every ``download_log`` row landed with a NULL
-    link (measured: request 4351, search_log 563143, download_log 41283).
+    this copy, so every stamped link was erased on the first poll cycle
+    that REBUILT the state -- every branch except the two vanished ones,
+    which return the persisted object itself -- and every
+    ``download_log`` row landed with a NULL link (measured: request
+    4351, search_log 563143, download_log 41283).
 
     A ``None`` argument means "leave this field alone", which is why the
     changed set is built rather than passed straight through; no caller

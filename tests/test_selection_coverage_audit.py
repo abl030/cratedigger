@@ -351,6 +351,13 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
         "tests.test_slskd_searches",
         "tests.test_slskd_sweep_exception_contracts",
     ),
+    # The lib/quality/ prefix rule resolves the three decision-album
+    # modules regardless, masking the loss of the poll-cycle reducer's own
+    # pin and the generated module that patrols it (#1405).
+    "lib/quality/download_state.py": (
+        "tests.test_download_reducer",
+        "tests.test_download_errors_generated",
+    ),
     # The basename probe resolves tests.test_measurement regardless,
     # masking the loss of the only module covering the public
     # diagnostic_from_stderr helper #1313 moved here (tests/
