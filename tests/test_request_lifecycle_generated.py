@@ -1267,6 +1267,51 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
             # contract, so here it just means "no plan, skip".
             return
 
+    @precondition(lambda self: self._ids_with_status("downloading"))
+    @rule(data=st.data())
+    def hand_off_to_processing(self, data) -> None:
+        """Enter ``processing`` through the real atomic handoff (#898).
+
+        Without this rule the machine's only state-carrying status is
+        ``downloading``, so the #811 stamp guard's status half is
+        unreachable: every non-``downloading`` row it ever sees has a NULL
+        state, which the fingerprint half refuses anyway. ``processing``
+        RETAINS the state and its fingerprint, so it is the world where
+        only the status half can refuse.
+        """
+        rid = data.draw(
+            st.sampled_from(self._ids_with_status("downloading")),
+            label="handoff target")
+        state = self._download_state(rid)
+        if state is None:
+            return
+        enqueued_at = state.get("enqueued_at")
+        if not isinstance(enqueued_at, str):
+            return
+        result = self.db.handoff_automation_import(
+            request_id=rid,
+            expected_enqueued_at=enqueued_at,
+            canonical_path=f"/processing/albums/{rid}",
+            message="lifecycle handoff",
+        )
+        row = self._row(rid)
+        if not result.committed:
+            raise AssertionError(
+                f"handoff refused a downloading row: {result.outcome!r}")
+        if row["status"] != "processing":
+            raise AssertionError(
+                f"handoff left status={row['status']!r}")
+        # The handoff legitimately ADDS processor ownership
+        # (``processing_started_at``, ``current_path``); what it must not
+        # do is disturb the attempt identity the #811 stamp guard keys on.
+        after = self._download_state(rid)
+        assert after is not None
+        for key in ("enqueued_at", "attempt_fingerprint"):
+            if after.get(key) != state.get(key):
+                raise AssertionError(
+                    f"handoff changed {key}: "
+                    f"{state.get(key)!r} -> {after.get(key)!r}")
+
     @precondition(lambda self: self.ids)
     @rule(data=st.data())
     def record_found_attempt(self, data) -> None:
@@ -1278,10 +1323,29 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
         never the caller's, so the rule offers every combination and the
         checker adjudicates.
         """
-        rid = data.draw(st.sampled_from(self.ids), label="found target")
+        # Two deliberate biases, both measured rather than assumed. A run
+        # instrumented at the fake's stamp saw 940 calls, of which 4
+        # reached a ``downloading`` row and none of those carried a
+        # matching fingerprint: the other rules retire rows out of
+        # ``downloading`` far faster than a uniform draw over every id
+        # revisits one, and two free fingerprint draws rarely coincide.
+        # The ELIGIBLE branch was therefore unreached in a whole
+        # derandomized suite run, leaving the guard patrolled only in its
+        # refusing direction. Both biases ADD draws; neither removes a
+        # world the uniform draw could reach.
+        targets = [st.sampled_from(self.ids)]
+        downloading = self._ids_with_status("downloading")
+        if downloading:
+            targets.append(st.sampled_from(downloading))
+        rid = data.draw(st.one_of(*targets), label="found target")
+        own = self._download_state(rid)
+        own_fingerprint = None if own is None else own.get(
+            "attempt_fingerprint")
+        choices = [st.none(), st.sampled_from(CLAIM_FINGERPRINTS)]
+        if isinstance(own_fingerprint, str):
+            choices.append(st.just(own_fingerprint))
         supplied = data.draw(
-            st.one_of(st.none(), st.sampled_from(CLAIM_FINGERPRINTS)),
-            label="grab fingerprint")
+            st.one_of(*choices), label="grab fingerprint")
         outcome = data.draw(
             st.sampled_from(("found", "no_match")), label="search outcome")
         self._ensure_plan(rid)
