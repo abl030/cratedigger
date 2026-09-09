@@ -32,6 +32,7 @@ import re
 import subprocess
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import ClassVar
 
 from tests._source_pins import strip_line_comments
@@ -272,8 +273,16 @@ _NIX_EVAL_CACHE: dict[str, dict[str, object] | Exception] = {}
 #: with no ``.git`` at all (a ``git archive`` snapshot, which is where the
 #: mutant runner works) cannot be fetched as ``git+file``, so the preamble
 #: falls back to #1248's filtered ``builtins.path`` copy there, excluding
-#: ``__pycache__`` and ``tests/_harness_fixtures`` (the latter now belt and
-#: braces, since its contents are tracked); ``builtins.path``'s result carries a
+#: ``__pycache__`` and ``tests/_harness_fixtures``. Since #1394 the latter
+#: is a TRACKED directory, so the two branches deliberately differ over it:
+#: the snapshot carries it, the fallback drops it. That cannot change what
+#: any eval here evaluates — they read the module and package outputs,
+#: which come from the ``runtimeSrc`` fileset, and that names no ``tests/``
+#: path at all. It is NOT true that nothing in the flake reads ``tests/``:
+#: the beets-compat contract checks export ``PYTHONPATH=${self}`` and run
+#: ``-m unittest tests.…``. No eval under ``tests/`` builds those, so the
+#: difference stays invisible — but do not read the filter as a no-op.
+#: ``builtins.path``'s result carries a
 #: store-path string context that ``getFlake`` refuses, so the fallback
 #: discards it with ``unsafeDiscardStringContext``, which is safe because
 #: the copy is already realized on disk by then. That fallback is weaker,
@@ -1070,28 +1079,74 @@ class TestNixEvalPreamblesNeverWalkTheLiveTree(unittest.TestCase):
     be followed by the one accepted shape, and the literals are spelled
     from parts so this test's own text never satisfies it.
 
-    The second method closes the same invariant's other half (#1394): a
+    The other two methods close the same invariant's other half (#1394): a
     flake ref handed to ``nix`` on the COMMAND LINE never passes through
     ``builtins.getFlake``, so the scan above cannot see it, and
     ``tests/test_readme_nix_quick_start.py`` was still overriding an input
     with ``path:<live root>`` long after the preambles were fixed. That ref
-    walks wider than the shape above ever did: it copies untracked paths,
-    ``.gitignore``d ones, and ``.git`` itself (measured 2026-09-09).
+    resolves to the SAME store path the pre-#1378 ``toString ./.`` shape
+    did (measured 2026-09-09) — it copies untracked paths, ``.gitignore``d
+    ones, and ``.git`` itself, all of which the accepted ``git+file``
+    snapshot leaves out. Only the explicit ``path:`` prefix forces that
+    fetcher: a bare absolute path resolves to the git snapshot, which is
+    why one fixed substring is the whole grammar this needs.
+
+    Both scans are FLAT (``tests/*.py``, not ``tests/**/*.py``), like the
+    modules they police; a subdirectory such as ``tests/web/`` is unscanned
+    by either.
     """
 
-    def test_no_module_names_the_live_tree_as_a_flake_ref(self) -> None:
-        forbidden = "path:" + "{REPO_ROOT}"
+    #: Spelled from parts so this module's own text never satisfies it.
+    LIVE_TREE_FLAKE_REF: ClassVar[str] = "path:" + "{REPO_ROOT}"
+
+    def _assert_no_module_names_the_live_tree(self, scanned: list[Path]) -> None:
+        self.assertGreaterEqual(len(scanned), 2, scanned)
         offenders = sorted(
-            path.name for path in (REPO_ROOT / "tests").glob("*.py")
-            if forbidden in path.read_text(encoding="utf-8")
+            path.name for path in scanned
+            if self.LIVE_TREE_FLAKE_REF in path.read_text(encoding="utf-8")
         )
         self.assertEqual(
             offenders,
             [],
-            f"a flake ref spelled {forbidden!r} hands Nix the live worktree; "
-            "resolve the source to a store path first "
+            f"a flake ref spelled {self.LIVE_TREE_FLAKE_REF!r} hands Nix the "
+            "live worktree; resolve the source to a store path first "
             "(tests/test_readme_nix_quick_start.py has the one helper)",
         )
+
+    def test_no_module_names_the_live_tree_as_a_flake_ref(self) -> None:
+        self._assert_no_module_names_the_live_tree(
+            sorted((REPO_ROOT / "tests").glob("*.py"))
+        )
+
+    def test_the_scanned_literal_is_the_spelling_a_module_would_use(self) -> None:
+        """Corrupt the literal and the scan goes inert; this is what notices.
+
+        A second, independently assembled spelling of the same thing, so a
+        one-character edit to the constant cannot leave the guard looking
+        for a string nothing writes while every test stays green. The
+        self-test below builds its offender FROM the constant, so it cannot
+        catch this on its own.
+        """
+        self.assertEqual(self.LIVE_TREE_FLAKE_REF, "path:" + "{" + "REPO_ROOT" + "}")
+
+    def test_the_live_tree_flake_ref_check_trips_and_names_the_module(self) -> None:
+        """Known-bad self-test, plus the world where the check must stay quiet."""
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            offender = root / "test_offender.py"
+            offender.write_text(
+                f'ref = f"{self.LIVE_TREE_FLAKE_REF}"\n', encoding="utf-8"
+            )
+            # A ref built from a value, not from the live root: legitimate,
+            # and what the helper this pin points at actually does.
+            innocent = root / "test_innocent.py"
+            innocent.write_text('ref = f"path:{store_path}"\n', encoding="utf-8")
+            other = root / "test_other.py"
+            other.write_text("ref = None\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(AssertionError, "hands Nix the live worktree"):
+                self._assert_no_module_names_the_live_tree([innocent, offender])
+            self._assert_no_module_names_the_live_tree([innocent, other])
 
     def test_every_preamble_prefers_the_git_snapshot(self) -> None:
         call = "builtins.getFlake" + " ("

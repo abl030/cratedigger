@@ -93,30 +93,64 @@ def _read_nix_quick_start() -> str:
 class TestCratediggerSourceFlakeRef(unittest.TestCase):
     """#1394: the ``cratedigger`` input override never names the live tree.
 
-    Both branches are driven for real. The ``.git`` branch is asserted
-    against this repository; the fallback is asserted against a throwaway
-    flake with no ``.git`` at all, which is the only way to reach it.
+    Each branch is driven against a throwaway tree this class builds, one
+    with ``.git`` and one without, so both hold wherever the module runs.
+    Asserting the git branch against THIS repository would have proved
+    nothing in a ``git archive`` snapshot, which has no ``.git`` of its own
+    and sends every call down the fallback — and that snapshot is exactly
+    where the mutant runner works.
     """
 
-    def test_the_repository_resolves_to_a_store_path_without_untracked_state(
-        self,
-    ) -> None:
+    @staticmethod
+    def _flake(root: Path) -> None:
+        (root / "flake.nix").write_text("{ outputs = _: {}; }\n", encoding="utf-8")
+
+    @staticmethod
+    def _git(root: Path, *args: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(root), *args],
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+
+    def test_this_repository_resolves_to_a_store_path(self) -> None:
         ref = _cratedigger_source_flake_ref()
         self.assertTrue(ref.startswith("path:/nix/store/"), ref)
         self.assertNotIn(str(REPO_ROOT), ref)
+        self.assertTrue((Path(ref.removeprefix("path:")) / "flake.nix").is_file(), ref)
+
+    def test_a_tree_with_git_resolves_to_the_snapshot(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._flake(root)
+            (root / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+            (root / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+            self._git(root, "init", "-q", "-b", "main")
+            self._git(root, "add", "flake.nix", "tracked.txt", ".gitignore")
+            self._git(
+                root,
+                "-c", "user.email=fixture@example.invalid",
+                "-c", "user.name=fixture",
+                "commit", "-qm", "fixture",
+            )
+            (root / "untracked.txt").write_text("untracked\n", encoding="utf-8")
+            (root / "ignored.txt").write_text("ignored\n", encoding="utf-8")
+
+            ref = _cratedigger_source_flake_ref(root)
+
+        self.assertTrue(ref.startswith("path:/nix/store/"), ref)
         source = Path(ref.removeprefix("path:"))
-        # It really is this repository...
-        self.assertTrue((source / "flake.nix").is_file(), source)
-        # ...and it is the git snapshot, not a copy of the working
-        # directory: a `path:` copy of the live tree carries `.git`.
+        self.assertTrue((source / "tracked.txt").is_file(), source)
+        # The three a `path:` ref would have carried (measured 2026-09-09).
+        self.assertFalse((source / "untracked.txt").exists(), source)
+        self.assertFalse((source / "ignored.txt").exists(), source)
         self.assertFalse((source / ".git").exists(), source)
 
     def test_a_tree_with_no_git_falls_back_to_the_filtered_copy(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            (root / "flake.nix").write_text(
-                "{ outputs = _: {}; }\n", encoding="utf-8"
-            )
+            self._flake(root)
             (root / "kept.txt").write_text("kept\n", encoding="utf-8")
             for churn in ("_harness_fixtures", "__pycache__"):
                 (root / churn).mkdir()

@@ -10,8 +10,11 @@
  * evaluation copying the working tree died mid-walk with
  * "path .../tests/_harness_fixtures does not exist". A tracked file is in
  * the tree before any phase starts and stays there, so no walker can catch
- * it half-existing, and the git snapshot every Nix eval under `tests/` now
- * loads carries it like any other tracked file.
+ * it half-existing. The git snapshot those evals load carries it like any
+ * other tracked file; their `.git`-less fallback still filters this
+ * directory out by name, which changes nothing they evaluate, because what
+ * they read is built from the `runtimeSrc` fileset and that names no
+ * `tests/` path.
  *
  * It is deliberately not named `test_js_*.mjs`, and it sits in a
  * subdirectory of `tests/` rather than in `tests/` itself:
