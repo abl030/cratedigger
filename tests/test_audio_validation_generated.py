@@ -14,7 +14,8 @@ from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers suite/fuzz
 from lib.quality import AudioValidationReport, AudioValidationResult
-from lib.util import validate_audio
+from lib.util import _ffmpeg_version, validate_audio
+from tests.helpers import cold_ffmpeg_version_cache
 
 
 def _first_flac_frame(data: bytes) -> int:
@@ -49,6 +50,12 @@ class TestAudioValidationGenerated(unittest.TestCase):
     clean_path: Path
     clean_bytes: bytes
     frame_start: int
+
+    def setUp(self) -> None:
+        # Issue #1322: the real-probe test below and the ``sp.run``-mocking
+        # tests share lib.util._ffmpeg_version's one-slot process cache;
+        # every test starts cold so the real one really probes ffmpeg.
+        cold_ffmpeg_version_cache(self)
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -154,6 +161,10 @@ class TestAudioValidationGenerated(unittest.TestCase):
             assert_corrupt_audio_is_rejected(known_bad)
 
     def test_real_unset_streaminfo_md5_is_not_repaired_or_persisted(self) -> None:
+        # Cold on entry (the helper's contract; the earlier real tests of
+        # this class would otherwise have warmed it), so the probe below
+        # is this test's own.
+        self.assertEqual(_ffmpeg_version.cache_info().currsize, 0)
         with tempfile.TemporaryDirectory() as album:
             path = Path(album, "track.flac")
             unset_md5 = bytearray(self.clean_bytes)
@@ -167,7 +178,14 @@ class TestAudioValidationGenerated(unittest.TestCase):
 
         self.assertTrue(result.valid)
         self.assertEqual(result.report.outcome, "passed")
+        # A real ``str`` from the real probe, and the probe really ran in
+        # THIS test: a MagicMock left in the process-wide cache by a
+        # neighbouring ``sp.run`` mock would satisfy ``startswith``
+        # vacuously (issue #1322 review), and a cache the earlier real
+        # tests of this class had warmed would hide the helper's clearing.
+        self.assertIsInstance(result.report.tool_version, str)
         self.assertTrue(result.report.tool_version.startswith("ffmpeg version"))
+        self.assertEqual(_ffmpeg_version.cache_info().currsize, 1)
         self.assertEqual(result.report.diagnostics, [])
         self.assertEqual(after, before)
 

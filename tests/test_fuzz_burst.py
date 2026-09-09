@@ -19,6 +19,7 @@ from scripts.run_fuzz_tests import (
     FuzzPropertyManifest,
     FuzzTarget,
     PropertyDepth,
+    _test_subprocess_environment,
     aggregate_property_depth,
     assert_exact_fuzz_coverage,
     assert_fuzz_admission,
@@ -583,6 +584,28 @@ class TestFuzzTargetPlanning(unittest.TestCase):
 
         self.assertTrue(manifest.uses_ephemeral_postgres)
         self.assertNotIn("TEST_DB_DSN", environment)
+
+    def test_child_environment_drops_the_suite_shuffle_seed(self) -> None:
+        """Issue #1322: the fuzz tier moves entropy, never order, and its
+        exact-ID guard is ordered, so an inherited CRATEDIGGER_SHUFFLE_SEED
+        (the nightly shuffled stage exports one to every child; a developer
+        replaying a shuffled failure may export one too) must never reach a
+        fuzz child, where it would turn every multi-test target into a
+        bogus unexpected-IDs failure."""
+        environment = _test_subprocess_environment(
+            {
+                "CRATEDIGGER_SHUFFLE_SEED": "20260909",
+                "TEST_DB_DSN": "postgresql://must-not-leak",
+                "PATH": "/bin",
+            },
+            profile="fuzz",
+            active_database=Path("/tmp/fuzz-database"),
+        )
+
+        self.assertNotIn("CRATEDIGGER_SHUFFLE_SEED", environment)
+        self.assertNotIn("TEST_DB_DSN", environment)
+        self.assertEqual(environment["CRATEDIGGER_HYPOTHESIS_PROFILE"], "fuzz")
+        self.assertEqual(environment["PATH"], "/bin")
 
 
 class TestFuzzTargetsMidRunHeadroom(unittest.TestCase):

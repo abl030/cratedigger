@@ -12,6 +12,8 @@ from unittest.mock import MagicMock, patch
 
 from defusedxml.common import DefusedXmlException
 
+from tests.helpers import cold_ffmpeg_version_probe
+
 
 class TestRepairMp3Headers(unittest.TestCase):
 
@@ -45,6 +47,34 @@ class TestRepairMp3Headers(unittest.TestCase):
 
 
 class TestValidateAudio(unittest.TestCase):
+
+    def setUp(self):
+        # Issue #1322: the shuffled nightly suite caught this module depending
+        # on test order through lib.util._ffmpeg_version's one-slot cache.
+        cold_ffmpeg_version_probe(self)
+
+    def test_version_probe_starts_cold_and_records_a_real_string(self):
+        """Regression pin for the #1322 order coupling, two clauses with
+        disjoint mutants: the cache is cold when a test starts (fails when
+        the helper stops clearing, because the earlier tests of this class
+        warm it), and the recorded tool version is the probed string, a
+        real ``str`` (fails when the helper stops mocking the probe at the
+        leaf, because the bare ``sp.run`` mock then answers it)."""
+        from lib.util import _ffmpeg_version, validate_audio
+
+        self.assertEqual(_ffmpeg_version.cache_info().currsize, 0)
+        tmpdir = tempfile.mkdtemp()
+        try:
+            open(os.path.join(tmpdir, "track.flac"), "w").close()
+            with patch("lib.util.sp.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stderr="")
+                result = validate_audio(tmpdir)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        self.assertTrue(result.valid)
+        self.assertIsInstance(result.report.tool_version, str)
+        self.assertEqual(result.report.tool_version, "ffmpeg version test")
 
     def test_disabled_mode_is_explicitly_skipped_without_touching_disk(self):
         from lib.util import validate_audio
@@ -414,6 +444,9 @@ class TestValidateAudioStderrPolicy(unittest.TestCase):
     stable readable bytes are bad audio. Negative signal exits are separately
     covered as measurement failures.
     """
+
+    def setUp(self):
+        cold_ffmpeg_version_probe(self)
 
     # (description, returncode, stderr) — rc=0 cases must produce corrupt_files=[]
     FALSE_POSITIVE_CASES: ClassVar = [

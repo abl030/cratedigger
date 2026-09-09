@@ -15,6 +15,7 @@ from collections.abc import Callable, Sequence
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 import msgspec
 from hypothesis import HealthCheck, assume, given, settings
@@ -36,6 +37,7 @@ from scripts.run_python_tests import (
     HOTSPOT_ISOLATED_METHODS,
     HOTSPOT_SHARD_POLICIES,
     HYPOTHESIS_CASE_STATUSES,
+    SHUFFLE_SEED_ENV,
     STRATEGY_SPACE_EXHAUSTED,
     TARGET_DURATION_CACHE_NAME,
     TEST_HOST_MEMORY_EXHAUSTED,
@@ -60,6 +62,7 @@ from scripts.run_python_tests import (
     _measure_available_memory_bytes,
     _measure_tempdir_available_bytes,
     _run_targets,
+    _shuffle_failure_note,
     assert_exact_schedule,
     assert_exact_target_coverage,
     assert_hypothesis_deadlines_disabled,
@@ -77,6 +80,10 @@ from scripts.run_python_tests import (
     schedule_modules,
     select_test_targets,
     shard_test_ids,
+    shuffle_replay_command,
+    shuffle_seed_from_environment,
+    shuffled_schedule,
+    shuffled_suite,
     store_target_durations,
     test_subprocess_environment,
     worker_environment,
@@ -1535,6 +1542,438 @@ class TestModuleScheduling(unittest.TestCase):
         self.assertEqual(len(targets), 12)
 
 
+_ALPHA_IDS = (
+    "fixture_tests.test_alpha.Alpha.test_a",
+    "fixture_tests.test_alpha.Alpha.test_b",
+    "fixture_tests.test_alpha.Alpha.test_c",
+)
+
+
+class TestShuffledOrder(unittest.TestCase):
+    """Issue #1322: seeded test-order shuffling, replayable one target at a time.
+
+    The nightly ``shuffled_suite`` stage runs the deterministic suite with a
+    fresh seed each night; Hypothesis stays on its derandomized profile, so
+    order is the ONLY variable the stage moves. These tests pin the three
+    contracts a red night depends on: the same seed reproduces the same
+    order, the exact-ID coverage guard accepts a reordered run while still
+    refusing a dropped or invented test, and the printed seed is enough to
+    replay one target alone.
+    """
+
+    @staticmethod
+    def _suite_of(names: Sequence[str]) -> unittest.TestSuite:
+        class Cases(unittest.TestCase):
+            pass
+
+        for name in names:
+            setattr(Cases, name, lambda self: None)
+        return unittest.defaultTestLoader.loadTestsFromTestCase(Cases)
+
+    @staticmethod
+    def _ids(suite: unittest.TestSuite) -> list[str]:
+        return [test.id() for test in _iter_test_cases(suite)]
+
+    def test_shuffled_suite_is_a_seeded_salted_permutation(self) -> None:
+        suite = self._suite_of([f"test_{letter}" for letter in "abcdefgh"])
+        baseline = self._ids(suite)
+        self.assertEqual(baseline, sorted(baseline), "loader order is the baseline")
+
+        first = self._ids(shuffled_suite(suite, seed=3, salt="tests.test_m"))
+        again = self._ids(shuffled_suite(suite, seed=3, salt="tests.test_m"))
+        other_salt = self._ids(shuffled_suite(suite, seed=3, salt="tests.test_n"))
+        other_seed = self._ids(shuffled_suite(suite, seed=4, salt="tests.test_m"))
+
+        self.assertEqual(first, again, "one seed and salt replay one order")
+        self.assertEqual(sorted(first), baseline, "every test still runs once")
+        self.assertNotEqual(first, baseline, "the seed really reorders")
+        self.assertNotEqual(first, other_salt, "the salt keys the per-target replay")
+        self.assertNotEqual(first, other_seed, "a new seed is a new order")
+
+    def test_shuffled_schedule_is_a_seeded_permutation(self) -> None:
+        schedule = tuple(_target(f"tests.test_{letter}") for letter in "abcdef")
+
+        first = shuffled_schedule(schedule, seed=11)
+
+        self.assertEqual(first, shuffled_schedule(schedule, seed=11))
+        self.assertEqual(sorted(first, key=lambda t: t.test_name),
+                         sorted(schedule, key=lambda t: t.test_name))
+        self.assertNotEqual(first, schedule)
+
+    def test_shuffle_seed_env_is_absent_an_integer_or_refused(self) -> None:
+        self.assertIsNone(shuffle_seed_from_environment({}))
+        self.assertEqual(shuffle_seed_from_environment({SHUFFLE_SEED_ENV: "42"}), 42)
+        for raw in ("", "nope", "7.5"):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                shuffle_seed_from_environment({SHUFFLE_SEED_ENV: raw})
+
+    def test_replay_command_names_the_seed_variable_and_the_module(self) -> None:
+        self.assertEqual(
+            shuffle_replay_command(7, "tests.test_util"),
+            "CRATEDIGGER_SHUFFLE_SEED=7 python3 scripts/run_python_tests.py "
+            "--test tests.test_util",
+        )
+
+    def test_failure_note_replays_a_hotspot_shard_by_its_module(self) -> None:
+        """A shard's own name (``module::class-batch-NN``) is not a selector
+        ``--test`` accepts; the runnable replay is the module, which
+        re-derives the same shards with the same salts (review finding on
+        #1391: the first cut printed the shard name)."""
+        shard = TestTarget(
+            module=TestModule(
+                name="tests.test_pipeline_db",
+                path=Path("tests/test_pipeline_db.py"),
+                weight=1,
+            ),
+            test_name="tests.test_pipeline_db::class-batch-01",
+        )
+
+        note = _shuffle_failure_note(7, shard)
+
+        self.assertIn(shuffle_replay_command(7, "tests.test_pipeline_db"), note)
+        self.assertNotIn("::", note)
+        self.assertIn("test-isolation defect", note)
+
+    def test_replayed_hotspot_module_keeps_the_same_shard_salts(self) -> None:
+        """The replay contract behind the note above: selecting a hotspot
+        module alone yields targets with the same load names as the full
+        run, and load names are the salt, so every shard's inner order is
+        identical under the same seed."""
+        modules = discover_test_modules(REPO_ROOT / "tests", REPO_ROOT, "test*.py")
+        # Both producers of a ``module::batch`` target name: the sharded
+        # hotspots and the isolated-method ones (``::remainder``), which
+        # reach ``hotspot_targets`` through different branches.
+        hotspot_names = sorted(
+            HOTSPOT_SHARD_POLICIES.keys() | HOTSPOT_ISOLATED_METHODS.keys()
+        )
+        for module_name in hotspot_names:
+            with self.subTest(module=module_name):
+                listed = {module_name: list_module_test_ids(module_name, REPO_ROOT)}
+                hotspot = [m for m in modules if m.name == module_name]
+
+                # build_test_targets is per module, so the full run's
+                # targets for this module are exactly what it builds from
+                # the module alone.
+                full_run = build_test_targets(schedule_modules(hotspot), listed)
+                replay = select_test_targets(
+                    modules, [module_name], listed_test_ids=listed
+                )
+
+                full_salts = sorted(
+                    "|".join(t.load_names or (t.test_name,)) for t in full_run
+                )
+                replay_salts = sorted(
+                    "|".join(t.load_names or (t.test_name,)) for t in replay
+                )
+                self.assertTrue(
+                    any("::" in t.test_name for t in full_run),
+                    "the hotspot really produces batch-named targets",
+                )
+                self.assertEqual(replay_salts, full_salts)
+                # Parity alone cannot see a wrong-but-consistent salt inside
+                # the one function both paths share (mutant-runner finding
+                # on #1391), so pin the salt's content too: every target
+                # names what it loads (an empty load_names would make the
+                # child try to load "module::batch" itself), and the
+                # targets' expected IDs partition the module's listed IDs.
+                self.assertTrue(
+                    all(t.load_names for t in full_run),
+                    "every hotspot target names what it loads",
+                )
+                self.assertEqual(
+                    sorted(i for t in full_run for i in t.expected_test_ids),
+                    sorted(listed[module_name]),
+                )
+
+    def _run_alpha_with_expected(
+        self, expected: tuple[str, ...], *, shuffle_seed: str | None = None
+    ) -> tuple[tuple[TargetRunResult, ...], tuple[TargetInfrastructureFailure, ...]]:
+        overrides = {SHUFFLE_SEED_ENV: shuffle_seed} if shuffle_seed else {}
+        with (
+            tempfile.TemporaryDirectory() as tempdir,
+            patch.dict(os.environ, overrides),
+        ):
+            if shuffle_seed is None:
+                os.environ.pop(SHUFFLE_SEED_ENV, None)
+            root = Path(tempdir)
+            tests_dir = root / "fixture_tests"
+            tests_dir.mkdir()
+            (tests_dir / "__init__.py").write_text("", encoding="utf-8")
+            (tests_dir / "test_alpha.py").write_text(
+                "import unittest\n\n"
+                "class Alpha(unittest.TestCase):\n"
+                "    def test_a(self):\n        pass\n"
+                "    def test_b(self):\n        pass\n"
+                "    def test_c(self):\n        pass\n",
+                encoding="utf-8",
+            )
+            target = TestTarget(
+                module=TestModule(
+                    name="fixture_tests.test_alpha",
+                    path=tests_dir / "test_alpha.py",
+                    weight=1,
+                ),
+                test_name="fixture_tests.test_alpha",
+                expected_test_ids=expected,
+            )
+            return _run_targets(
+                (target,),
+                worker_count=1,
+                top_level_directory=root,
+                durations=0,
+            )
+
+    def test_expected_ids_accept_any_order_but_stay_exact(self) -> None:
+        """A shuffled child reports its IDs in run order; coverage is a
+        multiset question, so a reordered run passes while a dropped or
+        invented ID still trips the guard."""
+        results, failures = self._run_alpha_with_expected(tuple(reversed(_ALPHA_IDS)))
+
+        self.assertEqual(failures, ())
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0].successful)
+
+        # The child itself out of loader order, expected in loader order:
+        # seed 1 runs the fixture as c, a, b under the real salt contract,
+        # so a guard that sorts only one side trips here (mutant-runner
+        # finding on #1391: the unshuffled fixture could not tell).
+        results, failures = self._run_alpha_with_expected(_ALPHA_IDS, shuffle_seed="1")
+
+        self.assertEqual(failures, ())
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0].successful)
+
+        # The four ways a multiset can differ, so that neither a set compare
+        # (blind to "duplicated") nor a length compare (blind to
+        # "substituted") could stand in for it (mutant-runner finding on
+        # #1391: the first cut only varied the count).
+        for label, expected in (
+            ("dropped", _ALPHA_IDS[:2]),
+            ("invented", (*_ALPHA_IDS, "fixture_tests.test_alpha.Alpha.test_bogus")),
+            ("duplicated", (_ALPHA_IDS[0], *_ALPHA_IDS)),
+            ("substituted", (_ALPHA_IDS[0], _ALPHA_IDS[1], _ALPHA_IDS[1])),
+        ):
+            with self.subTest(expected=label):
+                results, failures = self._run_alpha_with_expected(expected)
+                self.assertEqual(results, ())
+                self.assertEqual(len(failures), 1)
+                self.assertIn("unexpected test IDs", failures[0].detail)
+
+    def test_child_reports_its_real_shuffled_run_order_for_a_sharded_target(
+        self,
+    ) -> None:
+        """The child itself, driven the way a hotspot shard drives it
+        (``selected_test_ids`` given, in loader order): under seed 1 it
+        must both RUN c, b, a and REPORT c, b, a. The guard test above only
+        proves the outcome is order-insensitive; a child that skipped the
+        shuffle for sharded targets, or reported sorted IDs whatever it
+        ran, passed it (mutant-runner finding on #1391)."""
+        ids = tuple(
+            f"fixture_child_order.test_alpha.Alpha.test_{letter}" for letter in "abc"
+        )
+        expected_order = (ids[2], ids[1], ids[0])  # seed 1 under the real salt
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            package = root / "fixture_child_order"
+            package.mkdir()
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            (package / "test_alpha.py").write_text(
+                "import unittest\n\n"
+                "class Alpha(unittest.TestCase):\n"
+                "    def test_a(self):\n        pass\n"
+                "    def test_b(self):\n        pass\n"
+                "    def test_c(self):\n        pass\n",
+                encoding="utf-8",
+            )
+            result_path = root / "result.json"
+            # The runner's own child protocol, as `_run_test_target` speaks
+            # it, in a fresh interpreter: no in-process sys.path mutation
+            # (the dual-load audit forbids inserting a temp dir), and the
+            # fixture package is visible only to that child.
+            env = {
+                **os.environ,
+                SHUFFLE_SEED_ENV: "1",
+                "PYTHONPATH": os.pathsep.join([str(root), str(REPO_ROOT)]),
+            }
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(RUNNER),
+                    "--_run-target",
+                    msgspec.json.encode(("fixture_child_order.test_alpha",)).decode(),
+                    "0",
+                    str(result_path),
+                    msgspec.json.encode(ids).decode(),
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            child = msgspec.json.decode(result_path.read_bytes(), type=ChildTargetResult)
+
+        self.assertTrue(child.successful)
+        self.assertEqual(child.test_ids, expected_order, "reported in run order")
+        ran_order = tuple(
+            test_id
+            for line in child.output.splitlines()
+            for test_id in ids
+            if line.startswith(test_id.rsplit(".", 1)[1] + " (")
+        )
+        self.assertEqual(ran_order, expected_order, "really ran in that order")
+
+    def _write_order_fixture(self, root: Path) -> Path:
+        """Three modules of five tests each, every test appending its ID to
+        a shared log: with one worker the log is the exact run order, so it
+        witnesses both the order inside a target and the target schedule."""
+        tests_dir = root / "fixture_tests"
+        tests_dir.mkdir()
+        (tests_dir / "__init__.py").write_text("", encoding="utf-8")
+        for module in ("one", "two", "three"):
+            (tests_dir / f"test_order_{module}.py").write_text(
+                "import os\nimport unittest\n\n"
+                "class Order(unittest.TestCase):\n"
+                + "".join(
+                    f"    def test_{letter}(self):\n        self._log()\n"
+                    for letter in "abcde"
+                )
+                + "    def _log(self):\n"
+                "        with open(os.environ['FIXTURE_ORDER_LOG'], 'a',"
+                " encoding='utf-8') as log:\n"
+                "            log.write(self.id() + '\\n')\n",
+                encoding="utf-8",
+            )
+        return tests_dir
+
+    @staticmethod
+    def _module_sequence(order: Sequence[str]) -> list[str]:
+        """Collapse a run-order log to the sequence of modules it visited."""
+        sequence: list[str] = []
+        for test_id in order:
+            module = test_id.rsplit(".", 2)[0]
+            if not sequence or sequence[-1] != module:
+                sequence.append(module)
+        return sequence
+
+    def _run_order_fixture(
+        self,
+        root: Path,
+        tests_dir: Path,
+        *,
+        argv: Sequence[str] = (),
+        env_extra: dict[str, str] | None = None,
+    ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+        with tempfile.NamedTemporaryFile(
+            dir=root, prefix="order-", suffix=".log", delete=False
+        ) as handle:
+            log = Path(handle.name)
+        env = {**os.environ, "FIXTURE_ORDER_LOG": str(log)}
+        # The nightly shuffled stage exports the seed to every child; a
+        # baseline run here must not inherit it.
+        env.pop(SHUFFLE_SEED_ENV, None)
+        env.update(env_extra or {})
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(RUNNER),
+                "--start-directory",
+                str(tests_dir),
+                "--top-level-directory",
+                str(root),
+                "--jobs",
+                "1",
+                "--durations",
+                "0",
+                *argv,
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        return proc, log.read_text(encoding="utf-8").splitlines()
+
+    def test_seed_flag_and_variable_give_one_reproducible_non_default_order(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            tests_dir = self._write_order_fixture(root)
+
+            # Seed 1 is the smallest that, under the real seed:salt contract,
+            # reorders all three modules AND the schedule (chosen by
+            # enumeration, not luck: seed 7 left one module in loader order).
+            baseline_proc, baseline = self._run_order_fixture(root, tests_dir)
+            flag_proc, by_flag = self._run_order_fixture(
+                root, tests_dir, argv=("--shuffle-seed", "1")
+            )
+            _, by_flag_again = self._run_order_fixture(
+                root, tests_dir, argv=("--shuffle-seed", "1")
+            )
+            _, by_variable = self._run_order_fixture(
+                root, tests_dir, env_extra={SHUFFLE_SEED_ENV: "1"}
+            )
+            # The schedule the runner shuffles is the real scheduler's, not
+            # the duration-cache order an unshuffled run may apply on top.
+            expected_schedule = [
+                target.test_name
+                for target in shuffled_schedule(
+                    build_test_targets(
+                        schedule_modules(
+                            discover_test_modules(tests_dir, root, "test*.py")
+                        ),
+                        {},
+                    ),
+                    seed=1,
+                )
+            ]
+
+        self.assertEqual(baseline_proc.returncode, 0, baseline_proc.stdout)
+        self.assertEqual(flag_proc.returncode, 0, flag_proc.stdout + flag_proc.stderr)
+        self.assertEqual(len(baseline), 15)
+        self.assertNotIn("shuffled", baseline_proc.stdout)
+        self.assertEqual(by_flag, by_flag_again, "one seed replays one order")
+        self.assertEqual(sorted(by_flag), sorted(baseline), "every test still runs once")
+        self.assertEqual(by_variable, by_flag, "the flag and the variable are one contract")
+        self.assertIn("Order: shuffled with seed 1", flag_proc.stdout)
+
+        # Inside a target: the fixed order is the loader's, the seeded one is not.
+        baseline_modules = self._module_sequence(baseline)
+        shuffled_modules = self._module_sequence(by_flag)
+        self.assertEqual(len(baseline_modules), 3, "one visit per target")
+        self.assertEqual(len(shuffled_modules), 3, "a target still runs whole")
+        for module in baseline_modules:
+            fixed = [t for t in baseline if t.startswith(module + ".")]
+            seeded = [t for t in by_flag if t.startswith(module + ".")]
+            self.assertEqual(fixed, sorted(fixed), module)
+            self.assertNotEqual(seeded, fixed, f"{module}: the seed really reorders")
+        # Across targets: the schedule itself moved, through the real
+        # scheduler, to exactly the permutation the seed dictates.
+        self.assertEqual(shuffled_modules, expected_schedule,
+                         "the seed reaches the target schedule")
+        self.assertNotEqual(expected_schedule, sorted(expected_schedule),
+                            "seed 1 must move the alphabetical schedule")
+
+    def test_a_malformed_seed_variable_fails_closed_before_any_test_runs(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            tests_dir = self._write_order_fixture(root)
+            proc, order = self._run_order_fixture(
+                root, tests_dir, env_extra={SHUFFLE_SEED_ENV: "tonight"}
+            )
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(order, [], "nothing ran unshuffled by accident")
+        self.assertIn(SHUFFLE_SEED_ENV, proc.stdout + proc.stderr)
+
+
 class TestRunnerProcessContract(unittest.TestCase):
     def _write_fixture_suite(self, root: Path, *, failing: bool = False) -> Path:
         tests_dir = root / "fixture_tests"
@@ -1569,12 +2008,15 @@ class TestRunnerProcessContract(unittest.TestCase):
         return tests_dir
 
     def _run_fixture(
-        self, *, failing: bool = False
+        self, *, failing: bool = False, extra_argv: Sequence[str] = ()
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
             tests_dir = self._write_fixture_suite(root, failing=failing)
             env = {**os.environ, "TEST_DB_DSN": "postgresql://must-not-leak"}
+            # A fixture run is unshuffled unless the test itself asks (#1322);
+            # the nightly shuffled stage exports the seed to every child.
+            env.pop(SHUFFLE_SEED_ENV, None)
             return subprocess.run(
                 [
                     sys.executable,
@@ -1587,6 +2029,7 @@ class TestRunnerProcessContract(unittest.TestCase):
                     "2",
                     "--durations",
                     "2",
+                    *extra_argv,
                 ],
                 cwd=REPO_ROOT,
                 env=env,
@@ -1613,6 +2056,36 @@ class TestRunnerProcessContract(unittest.TestCase):
         self.assertIn("alpha third failure sentinel", result.stdout)
         self.assertIn("beta delayed failure sentinel", result.stdout)
         self.assertIn("FAILED", result.stdout)
+        self.assertNotIn("shuffled", result.stdout, "no seed, no seed talk")
+
+    def test_shuffled_failures_carry_the_seed_and_a_replay_command(self) -> None:
+        """Issue #1322: the seed is the replay handle, so it must be on the
+        run header, on every failure block, in the indexed failure detail
+        the bundle keeps, and on the terminal FAILED line."""
+        result = self._run_fixture(failing=True, extra_argv=("--shuffle-seed", "7"))
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Order: shuffled with seed 7", result.stdout)
+        self.assertIn(
+            shuffle_replay_command(7, "fixture_tests.test_alpha"), result.stdout
+        )
+        self.assertIn(
+            shuffle_replay_command(7, "fixture_tests.nested.test_beta"),
+            result.stdout,
+        )
+        self.assertIn("test-isolation defect", result.stdout)
+        markers = [
+            msgspec.json.decode(
+                line.removeprefix(FAILURE_MARKER_PREFIX).encode(),
+                type=CheckFailureMarker,
+            )
+            for line in result.stdout.splitlines()
+            if line.startswith(FAILURE_MARKER_PREFIX)
+        ]
+        self.assertTrue(markers)
+        for marker in markers:
+            self.assertIn("shuffled order, seed 7", marker.detail)
+        self.assertRegex(result.stdout, r"FAILED: .*\[shuffled order, seed 7\]")
 
     def _run_enospc_fixture(
         self, *, mixed: bool

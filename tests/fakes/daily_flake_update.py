@@ -135,7 +135,13 @@ def main():
                 fail(f"unexpected nix-shell argv: {args!r}")
             shell_command = args[1]
             if shell_command == "bash scripts/run_tests.sh":
-                stage = "suite"
+                # Issue #1322: the same suite command runs twice a night; the
+                # seeded-shuffle variable is what tells the stages apart.
+                stage = (
+                    "shuffled-suite"
+                    if os.environ.get("CRATEDIGGER_SHUFFLE_SEED")
+                    else "suite"
+                )
             elif shell_command == "bash scripts/fuzz_burst.sh":
                 stage = "fuzz"
             elif shell_command == "bash scripts/world_model_burst.sh":
@@ -156,6 +162,10 @@ def main():
         state["stages"].append(stage)
         state["stage_env"][stage] = {
             "TEST_DB_DSN": os.environ.get("TEST_DB_DSN"),
+            "CRATEDIGGER_SHUFFLE_SEED": os.environ.get("CRATEDIGGER_SHUFFLE_SEED"),
+            "CRATEDIGGER_SUITE_OWNS_HEADROOM": os.environ.get(
+                "CRATEDIGGER_SUITE_OWNS_HEADROOM"
+            ),
             "CRATEDIGGER_WORLD_DATABASE": os.environ.get(
                 "CRATEDIGGER_WORLD_DATABASE"
             ),
