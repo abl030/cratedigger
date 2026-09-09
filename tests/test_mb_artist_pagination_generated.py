@@ -32,10 +32,10 @@ ARTIST_ID = "00000000-0000-0000-0000-000000000917"
 # The two client-side fan-out widths this module pins, spelled here rather
 # than read from production: a mutant that narrows either one must move the
 # assertion, not the target it is measured against.
-#   * four concurrent requests per custom mirror -- web/mb.py::_MB_MIRROR_CONCURRENCY,
+#   * four concurrent requests per custom mirror -- lib/mb_api.py::_MB_MIRROR_CONCURRENCY,
 #     also pinned directly by test_public_musicbrainz_stays_serial_while_custom_mirror_uses_four_slots
 #   * three independent browse families per catalogue fetch -- the
-#     ``max_workers=3`` fan-out in web/mb.py::get_artist_release_groups
+#     ``max_workers=3`` fan-out in lib/mb_api.py::get_artist_release_groups
 _MIRROR_SLOTS = 4
 _BROWSE_FAMILIES = 3
 
