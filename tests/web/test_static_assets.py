@@ -8,10 +8,29 @@ from tests.web._harness import _FakeDbWebServerCase
 from web.request_security import BROWSER_CHANNEL, CHANNEL_HEADER
 from web.static_assets import (
     ICON_ASSETS,
-    JS_CONTENT_TYPE,
     WEB_ROOT,
     resolve_static_file,
 )
+
+#: What the BROWSER must be told a `/js/*.js` response is, spelled out.
+#:
+#: Not `web.static_assets.JS_CONTENT_TYPE`: independent review's mutant
+#: runner corrupted that constant to `text/javascript; charset=utf-8` and
+#: every test in this file and in `tests/test_web_dev_server.py` still
+#: passed, because each derived its expectation from the same constant
+#: production reads. `TestStaticIconAssets` below has always spelled the
+#: icon types out, which is why the matching mutant on `ICON_ASSETS` died
+#: instead; this is that pattern applied to the rule's other half.
+BROWSER_JS_CONTENT_TYPE = "application/javascript; charset=utf-8"
+
+#: Same reasoning for the icon map: the expectation is written here, and
+#: `ICON_ASSETS` is checked against it rather than read for it.
+EXPECTED_ICON_ASSETS = {
+    "/favicon.ico": ("favicon.ico", "image/x-icon"),
+    "/favicon-16x16.png": ("favicon-16x16.png", "image/png"),
+    "/favicon-32x32.png": ("favicon-32x32.png", "image/png"),
+    "/apple-touch-icon.png": ("apple-touch-icon.png", "image/png"),
+}
 
 
 class TestResolveStaticFile(unittest.TestCase):
@@ -21,11 +40,12 @@ class TestResolveStaticFile(unittest.TestCase):
         resolved = resolve_static_file("/js/main.js")
         assert resolved is not None
         self.assertEqual(resolved.path, WEB_ROOT / "js" / "main.js")
-        self.assertEqual(resolved.content_type, JS_CONTENT_TYPE)
+        self.assertEqual(resolved.content_type, BROWSER_JS_CONTENT_TYPE)
         self.assertEqual(resolved.cache_control, "no-cache")
 
     def test_every_icon_resolves_into_web_assets_with_its_type(self):
-        for url_path, (filename, content_type) in ICON_ASSETS.items():
+        self.assertEqual(set(ICON_ASSETS), set(EXPECTED_ICON_ASSETS))
+        for url_path, (filename, content_type) in EXPECTED_ICON_ASSETS.items():
             with self.subTest(url_path=url_path):
                 resolved = resolve_static_file(url_path)
                 assert resolved is not None
@@ -94,6 +114,13 @@ class TestStaticIconAssets(_FakeDbWebServerCase):
                     self.assertEqual(resp.status, 200)
                     self.assertEqual(
                         resp.headers["Content-Type"], content_type)
+                    # This PR moved the header off `_static_asset`'s own
+                    # hardcoded literal onto `StaticFile.cache_control`,
+                    # and nothing through the real server asserted it, so
+                    # `_static_file` could have ended a day of browser
+                    # icon caching in silence (review F3).
+                    self.assertEqual(
+                        resp.headers["Cache-Control"], "public, max-age=86400")
                     self.assertEqual(
                         int(resp.headers["Content-Length"]), len(body))
                 self.assertTrue(body.startswith(magic),
@@ -124,7 +151,8 @@ class TestStaticJsModules(_FakeDbWebServerCase):
         with urlopen(request) as resp:
             body = resp.read()
             self.assertEqual(resp.status, 200)
-            self.assertEqual(resp.headers["Content-Type"], JS_CONTENT_TYPE)
+            self.assertEqual(
+                resp.headers["Content-Type"], BROWSER_JS_CONTENT_TYPE)
             self.assertEqual(resp.headers["Cache-Control"], "no-cache")
         self.assertEqual(body, (WEB_ROOT / "js" / "main.js").read_bytes())
 

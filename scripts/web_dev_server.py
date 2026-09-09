@@ -40,7 +40,11 @@ sys.path.insert(0, str(REPO_ROOT))
 from web.index_document import (
     render_index_document,
 )
-from web.static_assets import WEB_ROOT, resolve_static_file
+from web.static_assets import (
+    WEB_ROOT,
+    normalized_request_path,
+    resolve_static_file,
+)
 
 if TYPE_CHECKING:
     from lib.pipeline_db import PipelineDB
@@ -299,11 +303,15 @@ class DevHandler(BaseHTTPRequestHandler):
         """Serve the index, or whatever `web/static_assets.py` resolves.
 
         The rule is production's, asked of the same module (#1390 residual
-        8): before that this walked all of `web/` and answered 200 to its
-        own Python source. Only the caching differs. Everything here is
-        `no-cache`, because live reload is the point of this server and
-        production's day-long icon caching would defeat it.
+        8): before that this walked all of `web/` and answered 200 to
+        `web/`'s own Python source. The normalization is production's too,
+        and shipping the rule without it was the first draft's defect:
+        `/js/main.js/` and an absolute-form request target's empty path
+        served there and 404d here. Only the caching differs. Everything
+        here is `no-cache`, because live reload is the point of this
+        server and production's day-long icon caching would defeat it.
         """
+        path = normalized_request_path(path)
         if path == "/":
             self._serve_index()
             return

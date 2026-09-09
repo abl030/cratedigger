@@ -24,6 +24,15 @@ The rule itself, unchanged from what production already enforced:
 * everything else is not a static file. ``/`` is the index, which each
   server renders its own way and neither resolves through here.
 
+``normalized_request_path`` is the other half, and it is why the rule is
+here rather than spelled twice. Production normalized in ``do_GET`` and
+the dev server did not, so the same URL reached the same rule as two
+different strings and got two answers: an absolute-form request target
+(``GET http://host HTTP/1.1``, which parses to an empty path) and
+``/js/main.js/`` both served on one and 404d on the other. Independent
+review measured that on the first draft of this module, where the rule
+was shared and the normalization was not.
+
 Resolution says nothing about existence: the caller stats the path and
 404s a miss, which is what makes ``/js/nope.js`` and a deleted icon behave
 the same way.
@@ -62,13 +71,36 @@ class StaticFile:
     cache_control: str
 
 
+def normalized_request_path(url_path: str) -> str:
+    """One canonical form per URL: production's own ``do_GET`` expression.
+
+    Trailing slashes collapse and an empty path becomes ``/``, so
+    ``/js/main.js/`` is the same request as ``/js/main.js``, and the empty
+    path an absolute-form request target parses to is the index.
+
+    Every caller of :func:`resolve_static_file` calls this first, and the
+    resolver does NOT repeat it: a second call inside the resolver was
+    measurably inert with both callers in place, and this repository does
+    not keep a fallback nothing triggers. The consequence is a
+    precondition, stated here rather than enforced: hand the resolver a
+    raw path and ``/js/main.js/`` resolves to nothing.
+    """
+    return url_path.rstrip("/") or "/"
+
+
 def resolve_static_file(url_path: str) -> StaticFile | None:
     """Resolve one GET path to a static file under ``web/``, or ``None``.
 
-    ``url_path`` is the parsed path with no query string, exactly as both
-    servers already hold it. Percent-escapes are NOT decoded here, because
-    neither caller decodes them either: ``/js/%2e%2e/x.js`` stays a literal
-    name that resolves to a file nobody has.
+    ``url_path`` is the parsed path with no query string, already through
+    :func:`normalized_request_path` (see its precondition note).
+    Percent-escapes are NOT decoded here, because
+    neither caller decodes them either. That is narrower than it sounds:
+    an escaped SEPARATOR stops a path at the basename guard
+    (``/js/%2e%2e%2fserver.js`` resolves to a file with that whole string
+    as its name), but escaped dots around a real separator do not, so
+    ``/js/%2e%2e/main.js`` is `main.js` and serves. It has always been,
+    on both servers; independent review caught this docstring claiming
+    otherwise.
     """
     if url_path.startswith(JS_URL_PREFIX) and url_path.endswith(JS_URL_SUFFIX):
         # `basename` is the traversal guard, and it is production's own: the

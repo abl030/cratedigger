@@ -87,6 +87,7 @@ dependency runs one way only.
 | `lib/discogs_api.py` | Discogs mirror client (search, artist releases, master pressings) |
 | `lib/api_bases.py` | Process-startup wiring for both clients' mirror origins |
 | `lib/redis_cache.py` | The Redis client behind the clients' `meta:` metadata namespace and the routes' `web:` invalidation groups (`lib/peer_cache.py` has its own, for a different subject) |
+| `web/static_assets.py` | The one rule deciding which URLs serve a file out of `web/`, and the normalization applied before asking it; `web/server.py` and `scripts/web_dev_server.py` both ask it, so the dev server cannot answer a URL production refuses (#1390) |
 | `web/index.html` | Frontend HTML shell and inline CSS |
 | `web/js/` | Vanilla JavaScript ES modules |
 | `web/js/jsconfig.json` | The type-check project: the options `scripts/run_tsc.sh` and an editor both read |

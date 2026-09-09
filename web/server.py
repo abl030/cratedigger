@@ -109,7 +109,11 @@ from web.routes._registry import (
     merge_registries,
 )
 from web.runtime import WebRuntime, install_runtime, runtime
-from web.static_assets import StaticFile, resolve_static_file
+from web.static_assets import (
+    StaticFile,
+    normalized_request_path,
+    resolve_static_file,
+)
 
 # Single merged registry (#496): each route module exports one
 # ``ROUTES: list[RouteRegistration]`` next to its handlers; this is the
@@ -411,7 +415,7 @@ class Handler(BaseHTTPRequestHandler):
             _health_routes.serve_healthz(self)
             return
         parsed = urlparse(self.path)
-        path = parsed.path.rstrip("/") or "/"
+        path = normalized_request_path(parsed.path)
         params = parse_qs(parsed.query)
 
         try:
