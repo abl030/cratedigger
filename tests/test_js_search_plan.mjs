@@ -948,6 +948,29 @@ function fragment(html, startMarker, endMarker) {
   t.excludes(checks, 'sp-check-att',
     'checks: an all-clean acquisition renders no attention mark');
 
+  // One failing grab among several is still a failing grab: the verdict
+  // is `every`, not `some`. A single-entry fixture cannot tell the two
+  // apart, which is how a `.some(...)` mutant survived the first pass.
+  const mixedGrabs = renderDetailPage({
+    inspection: makeDetailInspection({
+      acquisition: makeAcquisition({
+        grabs: [
+          { filetype: 'flac', count: 4, last_at: '2026-06-01T00:00:00Z',
+            last_outcome: 'success' },
+          { filetype: 'MIXEDTYPE', count: 5, last_at: '2026-06-15T03:55:00Z',
+            last_outcome: 'timeout' },
+        ],
+        grabs_total: 9,
+      }),
+    }),
+    history: [], nextBeforeId: null, library: makeLibraryPayload(),
+  });
+  const mixedChecks = fragment(mixedGrabs, 'Is the override holding?', 'sp-plan-table');
+  t.contains(mixedChecks, 'MIXEDTYPE',
+    'checks: every grab filetype group is tallied');
+  t.contains(mixedChecks, 'sp-check-att',
+    'checks: one failing grab among several raises the attention mark');
+
   const allHistory = renderDetailPage({
     inspection: makeDetailInspection({
       acquisition: makeAcquisition({ since: null, since_reason: 'request_created' }),
@@ -1039,8 +1062,11 @@ function fragment(html, startMarker, endMarker) {
   });
   const plan = fragment(html, 'sp-plan-table', 'sp-attempts-section');
   t.contains(plan, 'track_0', 'plan: slot 0 strategy rendered');
-  t.contains(plan, 'sp-plan-current',
-    'plan: the next_ordinal slot carries the current-row marker');
+  // Identity, not presence: a marker on the wrong rows is still present.
+  t.contains(plan, '<tr class="sp-plan-current">\n      <td class="sp-plan-ord">1</td>',
+    'plan: the next_ordinal slot is the row carrying the current-row marker');
+  t.contains(plan, '<tr class="">\n      <td class="sp-plan-ord">0</td>',
+    'plan: a slot that is not next_ordinal carries no current-row marker');
   // Slot 0's tallies come from the stats row whose identity is
   // {plan_id: 583, ordinal: 0}. If the matcher reverts to
   // identity.plan_ordinal (absent from every producer) these go blank.
@@ -1174,8 +1200,13 @@ function fragment(html, startMarker, endMarker) {
     'attempts filter: the Interesting button wires to the window handler');
   t.contains(html, '2 of 3 loaded',
     'attempts filter: the section label reads "N of M loaded"');
-  t.contains(html, 'sp-filter-button-on',
-    'attempts filter: the active filter button is marked');
+  // Identity, not presence: marking both buttons is still "marked".
+  t.contains(html,
+    `sp-filter-button sp-filter-button-on" type="button" onclick="event.stopPropagation(); window.searchPlanSetAttemptsFilter(2566, 'interesting')"`,
+    'attempts filter: the ACTIVE Interesting button is the one marked');
+  t.contains(html,
+    `sp-filter-button" type="button" onclick="event.stopPropagation(); window.searchPlanSetAttemptsFilter(2566, 'all')"`,
+    'attempts filter: the inactive All button is NOT marked');
   t.excludes(fragment(html, 'sp-attempts-tbody', 'Plan health'), 'BORING-STRAT',
     'attempts filter: an uninteresting row is hidden by the default view');
   t.contains(fragment(html, 'sp-attempts-tbody', 'Plan health'), 'ATT-STRAT-A',
