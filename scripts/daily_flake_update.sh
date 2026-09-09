@@ -99,6 +99,11 @@ cd "$checkout"
 # The world wrappers repeat this guard, but the normal suite must be protected
 # too because its conftest accepts TEST_DB_DSN for explicit developer use.
 unset TEST_DB_DSN
+# The fixed-order suite must be fixed-order whatever the caller's environment
+# carries: scripts/run_python_tests.py honours CRATEDIGGER_SHUFFLE_SEED wherever
+# it finds it, and the shuffled stage below exports one to every child, this
+# script's own test suite included (issue #1322). Only that stage mints a seed.
+unset CRATEDIGGER_SHUFFLE_SEED
 
 daily_resource_monitor_set_phase flake_update
 echo "daily unstable gate: updating flake.lock"

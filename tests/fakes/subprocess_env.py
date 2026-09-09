@@ -45,9 +45,19 @@ import os
 BYTECODE_CACHE_OPT_OUT_VARS = ("PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX")
 
 
+#: The suite's own seeded test-order shuffle (issue #1322). The nightly
+#: ``shuffled_suite`` stage exports it to every child, this fixture's spawned
+#: scripts included; a fixture subprocess must never inherit it, because the
+#: shuffle is about the suite's order, not about what its tests spawn. A test
+#: that wants a spawned script to see one passes it explicitly.
+SUITE_SHUFFLE_SEED_VAR = "CRATEDIGGER_SHUFFLE_SEED"
+
+
 def inherited_environment() -> dict[str, str]:
-    """``os.environ`` without the bytecode-cache opt-outs above."""
+    """``os.environ`` without the bytecode-cache opt-outs above or the
+    suite's own shuffle seed."""
     environment = os.environ.copy()
     for name in BYTECODE_CACHE_OPT_OUT_VARS:
         environment.pop(name, None)
+    environment.pop(SUITE_SHUFFLE_SEED_VAR, None)
     return environment

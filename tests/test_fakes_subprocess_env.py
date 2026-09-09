@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from tests.fakes.subprocess_env import (
     BYTECODE_CACHE_OPT_OUT_VARS,
+    SUITE_SHUFFLE_SEED_VAR,
     inherited_environment,
 )
 
@@ -84,6 +85,18 @@ class InheritedEnvironmentTestCase(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertNotIn(name, environment)
 
+    def test_the_suite_shuffle_seed_is_dropped(self) -> None:
+        """Issue #1322: the nightly shuffled stage exports the suite's seed
+        to every child, and scripts/run_python_tests.py honours it wherever
+        it finds it, so a fixture's spawned script would otherwise shuffle
+        or mislabel itself. Found by the first shuffled rehearsal: the
+        daily-gate fake's shim-hold tests held on a stage that had been
+        relabelled by the inherited seed."""
+        with patch.dict(os.environ, {SUITE_SHUFFLE_SEED_VAR: "20260909"}):
+            environment = inherited_environment()
+
+        self.assertNotIn(SUITE_SHUFFLE_SEED_VAR, environment)
+
     def test_everything_else_is_inherited_unchanged(self) -> None:
         """Must still work: this drops two names, not the environment. A
         fixture that lost PATH or TMPDIR here would fail in ways nothing
@@ -95,17 +108,19 @@ class InheritedEnvironmentTestCase(unittest.TestCase):
                 name: value
                 for name, value in os.environ.items()
                 if name not in BYTECODE_CACHE_OPT_OUT_VARS
+                and name != SUITE_SHUFFLE_SEED_VAR
             }
 
         self.assertEqual(environment, expected)
         self.assertEqual(environment[marker], "kept")
 
     def test_an_absent_opt_out_is_not_an_error(self) -> None:
-        """The ordinary case — nobody exported either variable."""
+        """The ordinary case — nobody exported any dropped variable."""
         stripped = {
             name: value
             for name, value in os.environ.items()
             if name not in BYTECODE_CACHE_OPT_OUT_VARS
+            and name != SUITE_SHUFFLE_SEED_VAR
         }
         with patch.dict(os.environ, stripped, clear=True):
             environment = inherited_environment()

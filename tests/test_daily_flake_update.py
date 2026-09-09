@@ -158,6 +158,27 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.assertIn("FAIL world-model burst", proc.stdout)
         self.assertIn("PASS mirror-harness smoke", proc.stdout)
 
+    def test_inherited_shuffle_seed_never_reaches_the_fixed_order_stage(
+        self,
+    ) -> None:
+        """Issue #1322: the runner honours CRATEDIGGER_SHUFFLE_SEED wherever it
+        finds it, and the nightly shuffled stage exports one to every child,
+        this suite included. Found by the first shuffled rehearsal: without
+        the script's own scrub, an inherited seed turned the fixed-order
+        stage into a second shuffled one. The gate scrubs it and mints its
+        own for the shuffled stage only."""
+        proc = self.fake.run(
+            SCRIPT, extra_env={"CRATEDIGGER_SHUFFLE_SEED": "999"}
+        )
+        state = self.fake.state
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(state["stages"][:2], ["suite", "shuffled-suite"])
+        self.assertIsNone(state["stage_env"]["suite"]["CRATEDIGGER_SHUFFLE_SEED"])
+        minted = state["stage_env"]["shuffled-suite"]["CRATEDIGGER_SHUFFLE_SEED"]
+        self.assertTrue(minted and minted.isdigit(), minted)
+        self.assertNotEqual(minted, "999", "the gate mints its own seed")
+
     def test_shuffled_suite_failure_reads_beside_a_green_fixed_order_suite(
         self,
     ) -> None:
