@@ -1669,6 +1669,20 @@ class TestShuffledOrder(unittest.TestCase):
                     "the hotspot really produces batch-named targets",
                 )
                 self.assertEqual(replay_salts, full_salts)
+                # Parity alone cannot see a wrong-but-consistent salt inside
+                # the one function both paths share (mutant-runner finding
+                # on #1391), so pin the salt's content too: every target
+                # names what it loads (an empty load_names would make the
+                # child try to load "module::batch" itself), and the
+                # targets' expected IDs partition the module's listed IDs.
+                self.assertTrue(
+                    all(t.load_names for t in full_run),
+                    "every hotspot target names what it loads",
+                )
+                self.assertEqual(
+                    sorted(i for t in full_run for i in t.expected_test_ids),
+                    sorted(listed[module_name]),
+                )
 
     def _run_alpha_with_expected(
         self, expected: tuple[str, ...]
@@ -1712,9 +1726,15 @@ class TestShuffledOrder(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertTrue(results[0].successful)
 
+        # The four ways a multiset can differ, so that neither a set compare
+        # (blind to "duplicated") nor a length compare (blind to
+        # "substituted") could stand in for it (mutant-runner finding on
+        # #1391: the first cut only varied the count).
         for label, expected in (
             ("dropped", _ALPHA_IDS[:2]),
             ("invented", (*_ALPHA_IDS, "fixture_tests.test_alpha.Alpha.test_bogus")),
+            ("duplicated", (_ALPHA_IDS[0], *_ALPHA_IDS)),
+            ("substituted", (_ALPHA_IDS[0], _ALPHA_IDS[1], _ALPHA_IDS[1])),
         ):
             with self.subTest(expected=label):
                 results, failures = self._run_alpha_with_expected(expected)
