@@ -46,13 +46,21 @@ them, and do not omit them.
 - A late finding is applied or recorded before merge. A reader's report that
   lands after the implementer closed its round belongs to whoever holds it:
   fix it, or write it up as a residual on the issue. It is never dropped.
+- On a correction round, the reader lists every claim the correction commit
+  itself added, in comments, docstrings, rule and skill sentences, or PR
+  prose, and re-derives each; no round catches its own false claims.
+- Every path an agent writes under `$CLAUDE_JOB_DIR/tmp` sits in a
+  subdirectory the brief gives that agent alone,
+  `$CLAUDE_JOB_DIR/tmp/<agent-name>/`. Subagents share the parent's job tmp
+  dir, so a generic filename collides: an implementer's `pr_body.md`
+  overwrote the orchestrator's draft of the same name.
 - The mutant runner never works in a live worktree. A subagent's shell stays
   pinned to its parent's worktree even after `git worktree add`, so the
   orchestrator materializes `git archive <sha> | tar -x -C
-  "$CLAUDE_JOB_DIR/tmp/<name>"` plus a `-pristine` twin; the runner mutates
-  only there, with `PYTHONDONTWRITEBYTECODE=1`, and proves each restore with
-  `diff -rq` against the twin. Never `/tmp`, never a reviewer clone into
-  `/tmp`, never a detached HEAD in an implementer's tree.
+  "$CLAUDE_JOB_DIR/tmp/<agent-name>"` plus a `-pristine` twin; the runner
+  mutates only there, with `PYTHONDONTWRITEBYTECODE=1`, and proves each
+  restore with `diff -rq` against the twin. Never `/tmp`, never a reviewer
+  clone into `/tmp`, never a detached HEAD in an implementer's tree.
 - A one-shot mutant driver asserts `count(old) == 1 and count(new) == 0`
   before it writes, restores by inverse edit as the first statement of its
   `finally`, and hashes against a baseline captured before any driver ran.

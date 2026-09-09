@@ -1311,7 +1311,7 @@ rationale; never allowlist a pure decision.
     (argument swaps, past-fix reverts, adapter derivations, JS) are
     outside the catalog (#1317). Mechanical
     discipline, not judgment: `PYTHONDONTWRITEBYTECODE=1`; a `git archive
-    <sha> | tar -x -C "$CLAUDE_JOB_DIR/tmp/<name>"` snapshot plus a
+    <sha> | tar -x -C "$CLAUDE_JOB_DIR/tmp/<agent-name>"` snapshot plus a
     `-pristine` twin, never a live worktree (mutant planting mutates
     production files — a shared tree makes the reader read lies — and a
     subagent's shell stays pinned to its parent's worktree even after
