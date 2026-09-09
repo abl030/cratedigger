@@ -871,8 +871,12 @@ def _log_search_result(
                 result.grab_attempt_fingerprint is not None
                 and not consumed.download_state_stamped
             ):
-                # Issue #811: this warning is the ONLY operator-visible
-                # evidence that a grab lost its search link. Reaching it
+                # Issue #811: on the normal search path this warning is
+                # the operator-visible evidence that a grab lost its
+                # search link (the one other way a ``found`` grab can
+                # miss its stamp is an owner-path crash, which drains the
+                # result with ``log_search=False`` and is reported by that
+                # path's own ``logger.exception``). Reaching it
                 # means the request stopped being ``downloading`` between
                 # the claim and this write, or its persisted attempt
                 # fingerprint stopped matching the one the executor

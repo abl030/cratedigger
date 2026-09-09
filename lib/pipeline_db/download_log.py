@@ -78,10 +78,14 @@ WRITABLE_IMPORT_ACCEPTANCE_OUTCOMES: tuple[DownloadLogOutcome, ...] = (
 #: ``user_offline`` (written at enqueue time, before any transfer began).
 #: The YouTube outcomes are excluded because they are not slskd at all.
 #:
-#: Two honest edges. ``success`` is also an ``IMPORT_ACCEPTANCE_OUTCOMES``
+#: Three honest edges. ``success`` is also an ``IMPORT_ACCEPTANCE_OUTCOMES``
 #: member, so it can never fall INSIDE its own window — it is listed
 #: because a grab genuinely can end that way, and the vocabulary test
 #: subtracts the overlap rather than pretending the counter rejects it.
+#: ``measurement_failed`` is listed for the same reason, but the grabs
+#: query also requires ``soulseek_username IS NOT NULL`` and the preview
+#: measurement-failure writer never records one (130 live rows, 0 with a
+#: username, measured 2026-09-09), so today no such row enters the tally.
 #: And ``rejected``/``have_analysis_error`` are reachable from the force
 #: lane too, whose rows inherit ``source='slskd'`` from their origin row;
 #: those are counted, which slightly over-reports a request the operator
