@@ -133,6 +133,17 @@ daily_resource_monitor_set_phase runner_overhead
 run_stage deterministic_suite "deterministic full suite" \
     env CRATEDIGGER_SUITE_OWNS_HEADROOM=1 \
     nix-shell --run "bash scripts/run_tests.sh"
+# Issue #1322: the same suite in a seeded random test order, with Hypothesis
+# still on its derandomized profile, so order is the only variable this stage
+# moves. A red here beside a green fixed-order stage is a test-isolation
+# defect, never a production finding. The seed is the replay handle;
+# scripts/run_python_tests.py prints it under every failure block.
+shuffle_seed=$(( (RANDOM << 15) | RANDOM ))
+echo "daily unstable gate: shuffled-order suite seed ${shuffle_seed}"
+run_stage shuffled_suite "shuffled-order deterministic suite (seed ${shuffle_seed})" \
+    env CRATEDIGGER_SUITE_OWNS_HEADROOM=1 \
+        CRATEDIGGER_SHUFFLE_SEED="${shuffle_seed}" \
+    nix-shell --run "bash scripts/run_tests.sh"
 run_stage stable_nix "stable Nix and Beets-release checks" \
     nix build .#checks.x86_64-linux.beetsStableCandidate --print-build-logs
 run_stage world_model "world-model burst" \

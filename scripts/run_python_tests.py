@@ -9,6 +9,7 @@ import io
 import math
 import multiprocessing
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -1190,6 +1191,74 @@ def _iter_test_cases(suite: unittest.TestSuite) -> Iterator[unittest.TestCase]:
             yield test
 
 
+#: Seeded test-order shuffle (issue #1322). The nightly ``shuffled_suite``
+#: stage sets this for the whole suite coordinator; ``main`` re-exports it so
+#: every isolated target child shuffles under the same seed, and a developer
+#: replays one target by setting the seed a failure block printed. The
+#: Hypothesis profile is untouched, so order is the ONLY variable this moves:
+#: a target that is red shuffled and green in the fixed-order suite is a
+#: test-isolation defect, never a production finding.
+SHUFFLE_SEED_ENV = "CRATEDIGGER_SHUFFLE_SEED"
+
+
+def shuffle_seed_from_environment(env: Mapping[str, str]) -> int | None:
+    """Read the seeded-shuffle handle; unset means the ordinary fixed order.
+
+    Anything present but non-integer fails closed rather than silently
+    running unshuffled under a stage that believes it is shuffling.
+    """
+    raw = env.get(SHUFFLE_SEED_ENV)
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"{SHUFFLE_SEED_ENV} must be an integer, got {raw!r}"
+        ) from exc
+
+
+def shuffled_suite(
+    suite: unittest.TestSuite,
+    *,
+    seed: int,
+    salt: str,
+) -> unittest.TestSuite:
+    """Return the suite's tests in a seeded random order.
+
+    ``salt`` is the target's load names, so the same seed replays the same
+    order for one target run alone as it produced inside the whole suite.
+    """
+    tests = list(_iter_test_cases(suite))
+    random.Random(f"{seed}:{salt}").shuffle(tests)
+    return unittest.TestSuite(tests)
+
+
+def shuffled_schedule(
+    schedule: Sequence[TestTarget],
+    *,
+    seed: int,
+) -> tuple[TestTarget, ...]:
+    """Return the target schedule in a seeded random order.
+
+    Every target still runs in its own fresh interpreter; what this moves is
+    which targets share a persistent worker's private PostgreSQL, and in
+    what order. That database and the shared scratch ``TMPDIR`` are the
+    cross-target channels a shuffle can probe.
+    """
+    targets = list(schedule)
+    random.Random(f"{seed}:schedule").shuffle(targets)
+    return tuple(targets)
+
+
+def shuffle_replay_command(seed: int, target_name: str) -> str:
+    """The exact command that reruns one target under the same order."""
+    return (
+        f"{SHUFFLE_SEED_ENV}={seed} python3 scripts/run_python_tests.py "
+        f"--test {target_name}"
+    )
+
+
 @dataclass(frozen=True)
 class ResolvedHypothesisSettings:
     """The settings object one Hypothesis test will actually run under."""
@@ -1407,6 +1476,9 @@ def _run_test_target_child(
         suite = unittest.TestSuite(
             discovered_by_id[test_id] for test_id in selected_test_ids
         )
+    shuffle_seed = shuffle_seed_from_environment(os.environ)
+    if shuffle_seed is not None:
+        suite = shuffled_suite(suite, seed=shuffle_seed, salt="|".join(test_names))
     if max_examples_override is not None:
         override_hypothesis_max_examples(suite, max_examples_override)
     assert_hypothesis_deadlines_disabled(suite)
@@ -1490,7 +1562,11 @@ def _run_test_target(target: TestTarget, durations: int) -> TargetRunResult:
             result_path.read_bytes(),
             type=ChildTargetResult,
         )
-        if target.expected_test_ids and child.test_ids != target.expected_test_ids:
+        # Coverage is a set question: a shuffled child (#1322) reports its
+        # IDs in run order, and a dropped or invented ID must still fail.
+        if target.expected_test_ids and sorted(child.test_ids) != sorted(
+            target.expected_test_ids
+        ):
             raise RuntimeError(
                 f"target {target.test_name} ran unexpected test IDs: "
                 f"expected {target.expected_test_ids!r}, got {child.test_ids!r}"
@@ -1778,6 +1854,20 @@ def _collapse_memory_exhausted_failures(
     return tuple(remaining), marker
 
 
+def _shuffle_detail_suffix(seed: int | None) -> str:
+    """Seed tag for the indexed failure detail the bundle keeps (#1322)."""
+    return "" if seed is None else f" (shuffled order, seed {seed})"
+
+
+def _shuffle_failure_note(seed: int, target_name: str) -> str:
+    """The triage rule and the replay handle, printed under every failure."""
+    return (
+        f"shuffled order, seed {seed}: if this target is green in the "
+        "fixed-order suite, this is a test-isolation defect, not a production "
+        f"finding. Replay alone: {shuffle_replay_command(seed, target_name)}"
+    )
+
+
 def _failure_diagnostics(output: str) -> str:
     marker_index = output.find(_FAILURE_MARKER)
     if marker_index >= 0:
@@ -1827,6 +1917,17 @@ def _parser() -> argparse.ArgumentParser:
         type=_parse_nonnegative_int,
         default=DEFAULT_DURATIONS,
     )
+    parser.add_argument(
+        "--shuffle-seed",
+        type=int,
+        default=None,
+        metavar="SEED",
+        help=(
+            "run every target's tests, and the target schedule, in a seeded "
+            f"random order (issue #1322); the {SHUFFLE_SEED_ENV} variable is "
+            "the same contract and is what the nightly shuffled stage sets"
+        ),
+    )
     return parser
 
 
@@ -1856,6 +1957,21 @@ def main(
     code selection -- runs for real, unmocked.
     """
     args = _parser().parse_args(argv)
+    try:
+        shuffle_seed: int | None = (
+            args.shuffle_seed
+            if args.shuffle_seed is not None
+            else shuffle_seed_from_environment(os.environ)
+        )
+    except ValueError as exc:
+        # Fail closed before discovery: a stage that believes it is
+        # shuffling must never quietly run the fixed order instead.
+        print(str(exc), file=sys.stderr)
+        return 2
+    if shuffle_seed is not None:
+        # One contract for the flag and the variable: every isolated target
+        # child reads the variable (`_run_test_target_child`), so export it.
+        os.environ[SHUFFLE_SEED_ENV] = str(shuffle_seed)
     top = args.top_level_directory.resolve()
     start = args.start_directory
     if not start.is_absolute():
@@ -1908,7 +2024,15 @@ def main(
     measured_durations = (
         load_target_durations(runtime_dir) if runtime_dir is not None else {}
     )
-    if measured_durations:
+    if shuffle_seed is not None:
+        schedule = shuffled_schedule(schedule, seed=shuffle_seed)
+        print(
+            f"Order: shuffled with seed {shuffle_seed} (issue #1322); Hypothesis "
+            "keeps its configured profile, so test order is the only moved "
+            "variable. Replay one target: "
+            + shuffle_replay_command(shuffle_seed, "<target>")
+        )
+    elif measured_durations:
         schedule = order_targets_by_measured_cost(schedule, measured_durations)
         known = sum(
             1 for target in schedule if target.test_name in measured_durations
@@ -1980,7 +2104,10 @@ def main(
                     CheckFailureMarker(
                         identity=result.target.test_name,
                         owner=owner,
-                        detail=f"{len(result.failed_test_ids)} failed test IDs",
+                        detail=(
+                            f"{len(result.failed_test_ids)} failed test IDs"
+                            + _shuffle_detail_suffix(shuffle_seed)
+                        ),
                         test_ids=result.failed_test_ids,
                     )
                 ).decode()
@@ -1989,6 +2116,8 @@ def main(
                 f"\n--- FAIL: worker {result.worker_pid}, "
                 f"target {result.target.test_name} ---"
             )
+            if shuffle_seed is not None:
+                print(_shuffle_failure_note(shuffle_seed, result.target.test_name))
             print(_failure_diagnostics(result.output))
         for failure in sorted(
             remaining_infrastructure_failures,
@@ -2004,7 +2133,7 @@ def main(
                     CheckFailureMarker(
                         identity=failure.target.test_name,
                         owner=owner,
-                        detail=failure.detail,
+                        detail=failure.detail + _shuffle_detail_suffix(shuffle_seed),
                     )
                 ).decode()
             )
@@ -2012,6 +2141,8 @@ def main(
                 "\n--- FAIL: worker infrastructure, target "
                 f"{failure.target.test_name} ---"
             )
+            if shuffle_seed is not None:
+                print(_shuffle_failure_note(shuffle_seed, failure.target.test_name))
             print(failure.detail)
         if ram_root_marker is not None:
             # Issue #1111 item 2: every disk-full-classified failure is ONE
@@ -2053,6 +2184,11 @@ def main(
         print(
             f"\nFAILED: {failed_targets} of {len(schedule)} targets; "
             f"Ran {known_count} reported tests in {wall_seconds:.1f}s"
+            + (
+                f" [shuffled order, seed {shuffle_seed}]"
+                if shuffle_seed is not None
+                else ""
+            )
         )
         # Promotion requires a HOMOGENEOUS failure set: exactly one
         # environmental cause and nothing else unexplained. If BOTH

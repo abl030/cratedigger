@@ -57,8 +57,28 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.assertIn(["nix", "flake", "update", "nixpkgs"], state["events"])
         self.assertEqual(
             state["stages"],
-            ["suite", "stable-candidate", "world", "fuzz", "mirror"],
+            ["suite", "shuffled-suite", "stable-candidate", "world", "fuzz", "mirror"],
         )
+        # Issue #1322: the shuffled stage is the ONLY one carrying a seed, and
+        # the seed it carries is the one the runner announced, so a red night
+        # is replayable from the log alone.
+        self.assertIsNone(state["stage_env"]["suite"]["CRATEDIGGER_SHUFFLE_SEED"])
+        shuffle_seed = state["stage_env"]["shuffled-suite"]["CRATEDIGGER_SHUFFLE_SEED"]
+        self.assertTrue(shuffle_seed and shuffle_seed.isdigit(), shuffle_seed)
+        self.assertIn(
+            f"daily unstable gate: shuffled-order suite seed {shuffle_seed}",
+            proc.stdout,
+        )
+        self.assertIn(
+            f"PASS shuffled-order deterministic suite (seed {shuffle_seed})",
+            proc.stdout,
+        )
+        for stage in ("suite", "shuffled-suite"):
+            self.assertEqual(
+                state["stage_env"][stage]["CRATEDIGGER_SUITE_OWNS_HEADROOM"],
+                "1",
+                stage,
+            )
         self.assertEqual(state["commit_count"], 1)
         self.assertEqual(state["push_count"], 1)
         self.assertEqual(state["push_ref"], "HEAD:refs/heads/main")
@@ -77,6 +97,7 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.assertNotIn("resource receipt invalid", proc.stderr)
         for phase in (
             "deterministic_suite",
+            "shuffled_suite",
             "stable_nix",
             "world_model",
             "generated_fuzz",
@@ -130,11 +151,33 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertEqual(
             state["stages"],
-            ["suite", "stable-candidate", "world", "fuzz", "mirror"],
+            ["suite", "shuffled-suite", "stable-candidate", "world", "fuzz", "mirror"],
         )
         self.assertEqual(state["commit_count"], 0)
         self.assertEqual(state["push_count"], 0)
         self.assertIn("FAIL world-model burst", proc.stdout)
+        self.assertIn("PASS mirror-harness smoke", proc.stdout)
+
+    def test_shuffled_suite_failure_reads_beside_a_green_fixed_order_suite(
+        self,
+    ) -> None:
+        """Issue #1322 triage rule: a red shuffled stage next to a green
+        fixed-order stage is a test-isolation defect. The summary must put
+        both verdicts, and the seed, in front of the reader."""
+        self.fake.update_state(fault="shuffled-suite")
+
+        proc = self.fake.run(SCRIPT)
+        state = self.fake.state
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(state["commit_count"], 0)
+        self.assertEqual(state["push_count"], 0)
+        shuffle_seed = state["stage_env"]["shuffled-suite"]["CRATEDIGGER_SHUFFLE_SEED"]
+        self.assertIn("PASS deterministic full suite", proc.stdout)
+        self.assertIn(
+            f"FAIL shuffled-order deterministic suite (seed {shuffle_seed})",
+            proc.stdout,
+        )
         self.assertIn("PASS mirror-harness smoke", proc.stdout)
         self.assertIn("candidate failed; flake.lock was not committed", proc.stderr)
         self.assertEqual(
@@ -157,7 +200,7 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         state = self.fake.state
 
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(len(state["stages"]), 5)
+        self.assertEqual(len(state["stages"]), 6)
         self.assertEqual(state["commit_count"], 0)
         self.assertEqual(state["push_count"], 0)
         self.assertIn("flake.lock already current", proc.stdout)
@@ -242,6 +285,22 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.assertIn(
             'run_stage deterministic_suite "deterministic full suite" \\\n'
             "    env CRATEDIGGER_SUITE_OWNS_HEADROOM=1 \\\n"
+            '    nix-shell --run "bash scripts/run_tests.sh"',
+            source,
+        )
+
+    def test_shuffled_suite_stage_sets_headroom_and_a_fresh_seed(self) -> None:
+        """Issue #1322: the shuffled stage is the same unattended launcher as
+        the deterministic one (so it owns headroom the same way) plus the
+        seed the runner reads. Pinned as an exact block, like the stage
+        above, so dropping either variable fails this test by name."""
+        source = pinned_source(SCRIPT)
+
+        self.assertIn(
+            'run_stage shuffled_suite "shuffled-order deterministic suite'
+            ' (seed ${shuffle_seed})" \\\n'
+            "    env CRATEDIGGER_SUITE_OWNS_HEADROOM=1 \\\n"
+            '        CRATEDIGGER_SHUFFLE_SEED="${shuffle_seed}" \\\n'
             '    nix-shell --run "bash scripts/run_tests.sh"',
             source,
         )

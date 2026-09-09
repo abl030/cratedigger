@@ -27,7 +27,8 @@ fakes and helpers—the subject under assertion is the boundary.
 `scripts/daily_flake_update.sh` is the Nixpkgs-reference unattended entry
 point. It checks out current `main`, advances only the `nixpkgs` node in
 `flake.lock`, and runs the deterministic suite (which owns both Pyright
-contracts), the
+contracts), the same suite again in a seeded random test order (the
+`shuffled_suite` stage — see "Order is a separate axis" below), the
 `beetsStableCandidate` aggregate (every non-tip flake check plus the complete
 reviewed Beets-release matrix), the default lifecycle hammer, the
 20,000-example fuzz burst, and the mirror-harness smoke. The moving tip build,
@@ -519,6 +520,41 @@ Run a randomized burst whenever quality policy changes:
 nix-shell --run "bash scripts/fuzz_burst.sh"                    # all generated modules
 nix-shell --run "bash scripts/fuzz_burst.sh tests.test_quality_generated"  # subset
 ```
+
+### Order is a separate axis
+
+The fuzz tier moves Hypothesis entropy with the test order fixed. The
+nightly `shuffled_suite` stage (issue #1322) moves test order with entropy
+fixed: `--shuffle-seed N` on `scripts/run_python_tests.py`, or the
+`CRATEDIGGER_SHUFFLE_SEED` variable the stage sets, shuffles the tests inside
+every target and the target schedule across workers, while the Hypothesis
+profile stays on the derandomized `suite` tier. Each stage owns exactly one
+variable, so a red night is attributable without a rerun.
+
+What a shuffle can and cannot reach: every target already runs in its own
+fresh interpreter, so module-level state cannot leak between targets. The
+shuffle probes order INSIDE a target (module-level caches, class fixtures,
+tests that assume an earlier test warmed something) and, across targets, the
+order in which they share a persistent worker's private PostgreSQL and the
+suite's scratch `TMPDIR`.
+
+**Triage rule:** a target that is red under a seed and green in the
+fixed-order suite is a test-isolation defect in the test, never a production
+finding. Every failure block carries the seed and the exact replay command,
+the indexed detail the bundle keeps carries the seed, and the terminal
+`FAILED` line is tagged, so one target replays alone with the same order:
+
+```bash
+CRATEDIGGER_SHUFFLE_SEED=<seed> nix-shell --run \
+  "python3 scripts/run_python_tests.py --test tests.test_X"
+```
+
+The exact-ID coverage guard on audited hotspot shards compares IDs as a set,
+so a reordered child still proves nothing was dropped or invented. Measured
+before the stage existed (2026-09-09): two seeds over about 11.8k tests each
+found one real coupling, a one-slot process cache in `lib/util.py` that
+`tests/test_util.py` depended on other tests warming first, fixed in the
+same PR. Expect a hit every few weeks, not every night.
 
 Loading a tier is an **import side effect**, so every module that uses
 Hypothesis must import the profile module itself — at module level, and
