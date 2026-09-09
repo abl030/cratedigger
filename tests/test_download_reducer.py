@@ -2,6 +2,7 @@
 
 import unittest
 from datetime import UTC, datetime
+from typing import ClassVar
 
 from lib.quality import (
     ActiveDownloadFileState,
@@ -134,13 +135,15 @@ class TestReducePollCycle(unittest.TestCase):
             # #1196 item 1: present by default so every case in this
             # class builds a state with a real fingerprint value. This
             # does NOT by itself guard against a reducer path dropping
-            # the field -- only ``test_progress_snapshot_carries_
-            # attempt_fingerprint_forward`` below asserts
-            # ``result.state.attempt_fingerprint``, and a planted
-            # mutant that drops the field in ``_copy_download_state``
-            # fails exactly that one test; every other case in this
-            # class stays green because none of them read the field.
-            # That dedicated pin is the actual guard.
+            # the field -- only the cases that actually READ
+            # ``result.state.attempt_fingerprint`` fail when a mutant
+            # drops it from ``_copy_download_state``. Those are
+            # ``test_progress_snapshot_carries_attempt_fingerprint_
+            # forward`` (the #1196 single-branch pin) and
+            # ``test_every_branch_carries_the_attempt_identity_forward``
+            # (#1405, every stateful branch, both identity fields).
+            # Every other case here stays green because none of them
+            # read either field.
             "attempt_fingerprint": "fp-abc12345",
         }
         values.update(overrides)
@@ -388,6 +391,144 @@ class TestReducePollCycle(unittest.TestCase):
                     self._snapshot(file_snapshot),
                 )
                 self.assertEqual(result.verdict.decision, expected)
+
+    #: One world per ``PollCycleDecision`` the reducer can return on a
+    #: state that is still ``downloading``. ``reset_missing_state`` is
+    #: absent because it is the one branch whose input state is ``None``;
+    #: it gets its own assertion below. Each row is
+    #: ``(decision, state kwargs, per-file snapshots, cfg overrides)``.
+    IDENTITY_BRANCH_WORLDS: ClassVar[tuple[
+        tuple[PollCycleDecision, dict, list, dict], ...
+    ]] = (
+        (
+            PollCycleDecision.wait_fresh_vanished,
+            {"enqueued_at": "2026-07-11T02:59:30+00:00"},
+            [PollFileSnapshot()],
+            {},
+        ),
+        (
+            PollCycleDecision.timeout_vanished,
+            {},
+            [PollFileSnapshot()],
+            {},
+        ),
+        (
+            PollCycleDecision.in_progress,
+            {},
+            [PollFileSnapshot(
+                transfer_id="tx-1", state="InProgress", bytes_transferred=40)],
+            {},
+        ),
+        (
+            PollCycleDecision.complete,
+            {},
+            [PollFileSnapshot(
+                transfer_id="tx-1",
+                state="Completed, Succeeded",
+                bytes_transferred=100,
+            )],
+            {},
+        ),
+        (
+            PollCycleDecision.retry_files,
+            {"files": [
+                ActiveDownloadFileState(
+                    username="alice", filename="Album\\01.flac",
+                    file_dir="Album", size=100),
+                ActiveDownloadFileState(
+                    username="alice", filename="Album\\02.flac",
+                    file_dir="Album", size=100),
+            ]},
+            [
+                PollFileSnapshot(
+                    transfer_id="tx-1", state="InProgress",
+                    bytes_transferred=25),
+                PollFileSnapshot(
+                    transfer_id="tx-2", state="Completed, Rejected",
+                    exception="banned"),
+            ],
+            {},
+        ),
+        (
+            PollCycleDecision.timeout_remote_queue,
+            {"enqueued_at": "2026-07-11T02:50:00+00:00"},
+            [PollFileSnapshot(transfer_id="tx-1", state="Queued, Remotely")],
+            {},
+        ),
+        (
+            PollCycleDecision.timeout_stalled,
+            {
+                "enqueued_at": "2026-07-11T02:50:00+00:00",
+                "last_progress_at": "2026-07-11T02:50:00+00:00",
+                "files": [ActiveDownloadFileState(
+                    username="alice", filename="Album\\01.flac",
+                    file_dir="Album", size=100, last_state="InProgress")],
+            },
+            [PollFileSnapshot(transfer_id="tx-1", state="InProgress")],
+            {},
+        ),
+        (
+            PollCycleDecision.timeout_all_errored,
+            {"files": [ActiveDownloadFileState(
+                username="alice", filename="Album\\01.flac",
+                file_dir="Album", size=100,
+                last_state="Completed, Rejected", last_exception="banned")]},
+            [PollFileSnapshot()],
+            {},
+        ),
+    )
+
+    def test_every_branch_carries_the_attempt_identity_forward(self):
+        """#1405: every reducer rebuild preserves the attempt's identity.
+
+        ``attempt_fingerprint`` (#1196 item 1) and ``search_log_id``
+        (#811) are set once per attempt and never re-derived from a
+        poll observation. Every rebuild in ``reduce_poll_cycle`` goes
+        through ``_copy_download_state``, and the first
+        ``update_download_state_if_downloading`` after a claim rewrites
+        the whole state from what that helper returns -- so a field the
+        helper forgets is erased from ``active_download_state`` on the
+        very first poll cycle. That is exactly what #1405 measured in
+        production for ``search_log_id`` (request 4351, search_log
+        563143, download_log 41283 with a NULL link), while
+        ``attempt_fingerprint``'s own protection was a comment plus one
+        single-branch pin.
+
+        One row per non-``None``-state decision, so a branch that starts
+        rebuilding state through some other constructor is caught here
+        rather than in production.
+        """
+        for decision, overrides, snapshots, cfg in self.IDENTITY_BRANCH_WORLDS:
+            with self.subTest(decision=decision.value):
+                state = self._state(
+                    attempt_fingerprint="fp-9f8e7d6c",
+                    search_log_id=563143,
+                    **overrides,
+                )
+                result = self._reduce(
+                    state, self._snapshot(*snapshots), **cfg)
+
+                self.assertEqual(result.verdict.decision, decision)
+                assert result.state is not None
+                self.assertEqual(
+                    result.state.attempt_fingerprint, "fp-9f8e7d6c")
+                self.assertEqual(result.state.search_log_id, 563143)
+
+    def test_the_identity_branch_table_covers_every_stateful_decision(self):
+        """A new decision branch owes a row above, not a silent gap."""
+        covered = {row[0] for row in self.IDENTITY_BRANCH_WORLDS}
+        self.assertEqual(
+            covered,
+            set(PollCycleDecision) - {PollCycleDecision.reset_missing_state},
+        )
+
+    def test_the_reset_branch_carries_no_identity_because_it_has_no_state(self):
+        """The one decision whose state really is ``None`` (control)."""
+        result = self._reduce(None, self._snapshot())
+
+        self.assertEqual(
+            result.verdict.decision, PollCycleDecision.reset_missing_state)
+        self.assertIsNone(result.state)
 
     def test_retry_limit_timeout_preserves_last_terminal_evidence(self):
         state = self._state(files=[

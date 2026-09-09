@@ -421,27 +421,25 @@ def _copy_download_file_state(
     last_state: str | None = None,
     last_exception: str | None = None,
 ) -> ActiveDownloadFileState:
-    return ActiveDownloadFileState(
-        username=file.username,
-        filename=file.filename,
-        file_dir=file.file_dir,
-        size=file.size,
-        disk_no=file.disk_no,
-        disk_count=file.disk_count,
-        retry_count=(file.retry_count if retry_count is None else retry_count),
-        bytes_transferred=(
-            file.bytes_transferred
-            if bytes_transferred is None
-            else bytes_transferred
-        ),
-        last_state=file.last_state if last_state is None else last_state,
-        last_exception=(
-            file.last_exception
-            if last_exception is None
-            else last_exception
-        ),
-        local_path=file.local_path,
-    )
+    """Rebuild one file's state with ONLY the fields this cycle observed.
+
+    Structural for the same reason as ``_copy_download_state`` above
+    (issue #1405): the identity a poll must never re-derive --
+    ``username``/``filename`` (the slskd queue key), ``file_dir``,
+    ``size``, the disc numbering, and the event-stamped ``local_path``
+    that is the ONLY completed-file location authority -- is carried by
+    construction instead of by a hand-maintained list.
+    """
+    changed: dict[str, object] = {}
+    if retry_count is not None:
+        changed["retry_count"] = retry_count
+    if bytes_transferred is not None:
+        changed["bytes_transferred"] = bytes_transferred
+    if last_state is not None:
+        changed["last_state"] = last_state
+    if last_exception is not None:
+        changed["last_exception"] = last_exception
+    return msgspec.structs.replace(file, **changed)
 
 
 def _copy_download_state(
@@ -452,29 +450,40 @@ def _copy_download_state(
     processing_started_at: str | None = None,
     current_path: str | None = None,
 ) -> ActiveDownloadState:
-    return ActiveDownloadState(
-        filetype=state.filetype,
-        enqueued_at=state.enqueued_at,
-        files=state.files if files is None else files,
-        last_progress_at=(
-            state.last_progress_at
-            if last_progress_at is None
-            else last_progress_at
-        ),
-        processing_started_at=(
-            state.processing_started_at
-            if processing_started_at is None
-            else processing_started_at
-        ),
-        current_path=state.current_path if current_path is None else current_path,
-        # Identity of THIS attempt never changes across a poll-cycle
-        # progress update -- unconditionally carried forward, never
-        # recomputed (issue #1196 item 1). Dropping this would silently
-        # erase the fingerprint from ``active_download_state`` on the
-        # very first poll cycle after claim, since every reducer
-        # rebuild in ``reduce_poll_cycle`` goes through this helper.
-        attempt_fingerprint=state.attempt_fingerprint,
-    )
+    """Rebuild a state with ONLY the observation fields a poll changes.
+
+    Structural by construction: ``msgspec.structs.replace`` names the
+    fields this cycle changes and carries every other field --
+    ``filetype``, ``enqueued_at``, and the attempt's identity
+    (``attempt_fingerprint``, ``search_log_id``, and whatever is added
+    next) -- forward untouched. A hand-listed rebuild silently erases
+    any field a later change forgets to add, because every rebuild in
+    ``reduce_poll_cycle`` goes through here and the first
+    ``update_download_state_if_downloading`` after a claim rewrites the
+    whole state from what this returns.
+
+    That is not hypothetical: issue #1196 item 1 added
+    ``attempt_fingerprint`` and had to carry it by hand, and issue #1405
+    is the same defect shipped for real -- #811's ``search_log_id`` was
+    added to the struct, the claim writer, and the reader, but not to
+    this copy, so every stamped link was erased on the very first poll
+    cycle after claim and every ``download_log`` row landed with a NULL
+    link (measured: request 4351, search_log 563143, download_log 41283).
+
+    A ``None`` argument means "leave this field alone", which is why the
+    changed set is built rather than passed straight through; no caller
+    needs to write ``None`` INTO one of these fields.
+    """
+    changed: dict[str, object] = {}
+    if files is not None:
+        changed["files"] = files
+    if last_progress_at is not None:
+        changed["last_progress_at"] = last_progress_at
+    if processing_started_at is not None:
+        changed["processing_started_at"] = processing_started_at
+    if current_path is not None:
+        changed["current_path"] = current_path
+    return msgspec.structs.replace(state, **changed)
 
 
 def _datetime_from_iso(value: str) -> datetime:
