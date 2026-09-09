@@ -50,6 +50,37 @@ class TestDecideDownloadAction(unittest.TestCase):
         v = self._decide(all_remote_queued=True,
                          elapsed_seconds=3601, remote_queue_timeout=3600)
         self.assertEqual(v.decision, DownloadDecision.timeout_remote_queue)
+        # The reason is the operator-facing failure evidence: the poller
+        # hands it straight to _timeout_album, which records it as the
+        # download_log message for this timeout. Its two siblings below
+        # assert their own reasons; this one did not, so nulling it
+        # survived the suite (#1405 mutmut breadth pass).
+        self.assertIn("remote_queue_timeout", v.reason)
+
+    def test_remote_queue_timeout_fires_exactly_at_the_timeout(self):
+        """The boundary second belongs to the timeout, not to waiting.
+
+        #812 was a tie comparison off by exactly this much.
+        """
+        v = self._decide(all_remote_queued=True,
+                         elapsed_seconds=3600, remote_queue_timeout=3600)
+        self.assertEqual(v.decision, DownloadDecision.timeout_remote_queue)
+
+    def test_stall_fires_exactly_at_the_timeout(self):
+        """Same boundary, the other timer."""
+        v = self._decide(idle_seconds=1800, stalled_timeout=1800)
+        self.assertEqual(v.decision, DownloadDecision.timeout_stalled)
+
+    def test_a_file_with_no_retry_history_gets_its_whole_budget(self):
+        """A fresh error is retry zero, so one retry is still allowed.
+
+        With ``max_file_retries=1`` the default decides the outcome:
+        zero retries used means retry, one means give up.
+        """
+        v = self._decide(error_filenames=["new.flac"], total_files=2,
+                         file_retries={}, max_file_retries=1)
+        self.assertEqual(v.decision, DownloadDecision.retry_files)
+        self.assertEqual(v.files_to_retry, ["new.flac"])
 
     def test_remote_queue_not_timed_out(self):
         v = self._decide(all_remote_queued=True,
@@ -294,6 +325,29 @@ class TestReducePollCycle(unittest.TestCase):
             PollCycleDecision.timeout_vanished,
         )
 
+    def test_the_vanished_grace_window_closes_exactly_at_its_deadline(self):
+        """The boundary second is outside the grace, like both timeouts.
+
+        One second earlier the reducer must still wait; at the deadline
+        the planned-but-invisible attempt has had its window.
+        """
+        cases = [
+            ("one second inside", "2026-07-11T02:59:01+00:00",
+             PollCycleDecision.wait_fresh_vanished),
+            ("exactly at the deadline", "2026-07-11T02:59:00+00:00",
+             PollCycleDecision.timeout_vanished),
+        ]
+        for desc, enqueued_at, expected in cases:
+            with self.subTest(desc=desc):
+                result = self._reduce(
+                    self._state(
+                        enqueued_at=enqueued_at,
+                        last_progress_at=enqueued_at),
+                    self._snapshot(PollFileSnapshot()),
+                    vanished_grace_seconds=60,
+                )
+                self.assertEqual(result.verdict.decision, expected)
+
     def test_partial_vanish_is_captured_and_retried_without_losing_evidence(self):
         files = [
             ActiveDownloadFileState(
@@ -529,6 +583,89 @@ class TestReducePollCycle(unittest.TestCase):
         self.assertEqual(
             result.verdict.decision, PollCycleDecision.reset_missing_state)
         self.assertIsNone(result.state)
+
+    def test_a_state_change_with_no_new_bytes_still_restarts_the_stall_clock(
+        self,
+    ):
+        """Progress is a state transition too, not only bytes.
+
+        A peer that moves a file from unobserved to ``InProgress``
+        without yet delivering a byte IS making progress, and the
+        reducer's own progress test says so
+        (``current_state != file.last_state`` AND the new state is not
+        one of the non-progress states). Only the byte half of that
+        ``or`` was ever asserted, so inverting the state half to ``in
+        _NON_PROGRESS_STATES`` survived the whole reducer suite and both
+        generated properties -- while flipping this world's decision
+        from ``in_progress`` to ``timeout_stalled``, i.e. cancelling and
+        requeuing a download that is fine. Found by the #1405 mutmut
+        breadth pass.
+        """
+        state = self._state(
+            enqueued_at="2026-07-11T02:50:00+00:00",
+            last_progress_at="2026-07-11T02:50:00+00:00",
+        )
+
+        result = self._reduce(
+            state,
+            self._snapshot(PollFileSnapshot(
+                transfer_id="tx-1", state="InProgress",
+                bytes_transferred=0)),
+        )
+
+        assert result.state is not None
+        self.assertEqual(result.state.last_progress_at, self.NOW.isoformat())
+        self.assertEqual(
+            result.verdict.decision, PollCycleDecision.in_progress)
+
+    def test_an_observation_with_no_state_at_all_is_not_progress(self):
+        """The other must-still-work control: absence is not evidence.
+
+        A transfer slskd lists without any state, against a file we have
+        never seen a state for, says nothing about progress -- so the
+        stall clock keeps running. The reducer spells that as the empty
+        fallback ``(current_state or "")`` landing in the non-progress
+        set; a mutant that makes the fallback any other string turns
+        silence into progress and postpones every stall.
+        """
+        state = self._state(
+            enqueued_at="2026-07-11T02:50:00+00:00",
+            last_progress_at="2026-07-11T02:50:00+00:00",
+        )
+
+        result = self._reduce(
+            state,
+            self._snapshot(PollFileSnapshot(
+                transfer_id="tx-1", state=None, bytes_transferred=0)),
+        )
+
+        assert result.state is not None
+        self.assertEqual(
+            result.state.last_progress_at, "2026-07-11T02:50:00+00:00")
+        self.assertEqual(
+            result.verdict.decision, PollCycleDecision.timeout_stalled)
+
+    def test_a_change_into_a_non_progress_state_is_not_progress(self):
+        """Must-still-work control for the case above.
+
+        A file entering the peer's own queue has not progressed, so the
+        stall clock must keep running from the last real progress.
+        """
+        state = self._state(
+            enqueued_at="2026-07-11T02:50:00+00:00",
+            last_progress_at="2026-07-11T02:50:00+00:00",
+        )
+
+        result = self._reduce(
+            state,
+            self._snapshot(PollFileSnapshot(
+                transfer_id="tx-1", state="Queued, Remotely",
+                bytes_transferred=0)),
+        )
+
+        assert result.state is not None
+        self.assertEqual(
+            result.state.last_progress_at, "2026-07-11T02:50:00+00:00")
 
     def test_retry_limit_timeout_preserves_last_terminal_evidence(self):
         state = self._state(files=[

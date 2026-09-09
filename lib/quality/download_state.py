@@ -447,8 +447,6 @@ def _copy_download_state(
     *,
     files: list[ActiveDownloadFileState] | None = None,
     last_progress_at: str | None = None,
-    processing_started_at: str | None = None,
-    current_path: str | None = None,
 ) -> ActiveDownloadState:
     """Rebuild a state with ONLY the observation fields a poll changes.
 
@@ -472,17 +470,21 @@ def _copy_download_state(
 
     A ``None`` argument means "leave this field alone", which is why the
     changed set is built rather than passed straight through; no caller
-    needs to write ``None`` INTO one of these fields.
+    needs to write ``None`` INTO either field.
+
+    ``processing_started_at`` and ``current_path`` used to be accepted
+    here too. No reducer branch ever passed them -- both are written by
+    the atomic handoff command, not by a poll -- and the field-by-field
+    rebuild hid that, because the unused arguments still read their
+    values off ``state`` on every call. Under the structural copy they
+    became branches nothing executes, which is how the catalog breadth
+    pass found them.
     """
     changed: dict[str, object] = {}
     if files is not None:
         changed["files"] = files
     if last_progress_at is not None:
         changed["last_progress_at"] = last_progress_at
-    if processing_started_at is not None:
-        changed["processing_started_at"] = processing_started_at
-    if current_path is not None:
-        changed["current_path"] = current_path
     return msgspec.structs.replace(state, **changed)
 
 
