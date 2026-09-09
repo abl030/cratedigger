@@ -158,6 +158,14 @@ class TestDeployScript(unittest.TestCase):
         ]
         self.assertGreaterEqual(len(active_reads), 3)
         self.assertLess(active_reads[-1], names.index("fleet-deploy"))
+        # The previous-invocation read comes after the wait, so the run that
+        # was in flight becomes "previous" and the trigger's own run is new.
+        invocation_reads = [
+            index for index, event in enumerate(self.world.events())
+            if event[0] == "ssh" and "--property=InvocationID --value" in str(event[2])
+        ]
+        self.assertEqual(len(invocation_reads), 1)
+        self.assertGreater(invocation_reads[0], active_reads[-1])
         self.assertIn("doc2 activated nixosconfig", proc.stdout)
 
     def test_in_flight_upgrade_that_never_finishes_times_out(self) -> None:

@@ -1029,6 +1029,39 @@ class TestWebAuthMatrixPreamblesStayIdentical(unittest.TestCase):
         )
         _assert_web_auth_matrix_preambles_equal(part1, part2_same)
 
+
+class TestNixEvalPreamblesNeverWalkTheLiveTree(unittest.TestCase):
+    """#1378: every nix-eval preamble loads the flake from the git snapshot
+    when it can, and no world names the live tree as ``src``.
+
+    The defect this guards against is a race with the concurrently running
+    JavaScript phase (see the comment above ``_NIX_EVAL_CACHE``), which no
+    test can assert as a value: reverting every preamble to the live-tree
+    shape leaves every eval green (measured by the #1387 mutant runner). So
+    the guard is a source pin, spelled from parts so this test's own text
+    never satisfies it.
+    """
+
+    PREAMBLE_MODULES = (
+        REPO_ROOT / "tests" / "test_nix_module.py",
+        REPO_ROOT / "tests" / "test_web_auth_mode_generated.py",
+    )
+
+    def test_every_preamble_prefers_the_git_snapshot(self) -> None:
+        live_flake = "getFlake (toString " + "./.)"
+        live_src = "src = " + "./.;"
+        filtered_src = "src = " + "repoSource;"
+        snapshot = '"git+file://" ' + "+ toString ./."
+        guard = "if builtins.pathExists " + "./.git"
+        for path in self.PREAMBLE_MODULES:
+            with self.subTest(path=path.name):
+                source = path.read_text(encoding="utf-8")
+                self.assertNotIn(live_flake, source)
+                self.assertNotIn(live_src, source)
+                self.assertNotIn(filtered_src, source)
+                self.assertGreaterEqual(source.count(snapshot), 1)
+                self.assertEqual(source.count(snapshot), source.count(guard))
+
     def test_missing_marker_fails_closed(self) -> None:
         """Known-bad self-test for the marker-not-found guard clauses."""
         with self.assertRaisesRegex(AssertionError, "part1 world-list marker not found"):
