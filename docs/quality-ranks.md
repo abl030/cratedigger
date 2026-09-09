@@ -298,7 +298,10 @@ that genuinely have none are AAC — whose cliff is a one-sided content
 
 Every MP3 and every lossless candidate is spectrally scanned at preview; no
 other codec is (none has a calibrated cliff policy). There is no bitrate
-threshold and no mode test.
+threshold and no mode test. Two conditions stop the scan before the codec
+question is asked, and neither presumes anything about the audio: an exact
+CD-rip bit verification, and a nested folder layout. Both are at the bottom
+of this section.
 
 There used to be: a VBR MP3 whose album average cleared 210 kbps skipped the
 scan, on the premise that a high-average VBR MP3 is self-evidently genuine.
@@ -331,9 +334,26 @@ mirror withholds an opinion where production measured, never the reverse):
    issue #829 Phase 5 PR2b removed, so the divergence is recorded on both
    docstrings rather than closed.
 
-The one remaining bypass is an exact CD-rip bit verification, which is
-stronger evidence than a spectral estimate rather than an assumption about
-one.
+The one remaining *evidence* bypass is an exact CD-rip bit verification,
+which is stronger evidence than a spectral estimate rather than an
+assumption about one.
+
+The other stop is not a bypass at all: a **nested folder layout** skips the
+candidate scan because every decider already rejects on the layout fact
+(`candidate_preimport_reject_fact`, `full_pipeline_decision_from_evidence`,
+and the classify surface's four-fact block all answer `nested_layout`
+without reading a spectral field), so the scan can change no outcome. It
+only makes the synchronous classify surface wait: measured on doc2 before
+the skip, `pipeline-cli import-preview` took 29s on a 12-track nested MP3
+album and 24s on a 12-track nested FLAC one, and timing the same albums'
+stages directly put 22s and 16-19s of that in the candidate scan — all to
+answer "flatten the folder" (issue #1378 item 3). Measuring the MP3 album
+either way on one host: 26.6s with the scan, 5.0s without. `audio_corrupt` and
+`bad_audio_hash` both outrank a nested layout and both return before this
+point, so a corrupt candidate keeps the attempt audit issue #1030 pinned;
+the skip is reached only where `nested_layout` is the surviving fact. The
+CD-rip call at the same site was already layout-gated, though for its own
+reason: a nested tree cannot be one disc's table of contents.
 
 ### AAC
 

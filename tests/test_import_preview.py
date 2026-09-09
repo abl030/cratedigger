@@ -4044,6 +4044,97 @@ class TestLanePolicySeam(unittest.TestCase):
                 )
 
 
+class TestNestedCandidateSpectralCostThroughTheLane(unittest.TestCase):
+    """Issue #1378 item 3: the composition, not the module.
+
+    The nested-layout skip is written in ``lib/measurement.py`` but its cost
+    is paid on ``preview_import_from_path`` — a synchronous operator surface
+    (``pipeline-cli import-preview``, the values-preview route). So these
+    compose the REAL lane with the REAL ``measure_preimport_state`` over a
+    real nested tree; the only stand-ins are the sox/ffmpeg spectral seam
+    (``lib.measurement.spectral_analyze``) and the dry-run harness
+    subprocess, both external edges.
+
+    Measured on doc2 at ``origin/main`` before the skip: 29s for a 12-track
+    MP3 album and 24s for a 12-track FLAC one, ~75% of it the candidate
+    scan, to answer "flatten the folder".
+    """
+
+    def _db(self) -> FakePipelineDB:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, mb_release_id="mbid-42", artist_name="Artist",
+            album_title="Album",
+        ))
+        return db
+
+    def _tree(self, *, nested: bool) -> str:
+        fixture = os.path.join(
+            os.path.dirname(__file__), "fixtures", "audio_hash",
+            "sine_440.mp3",
+        )
+        source = tempfile.mkdtemp(dir=_PREVIEW_SOURCE_ROOT)
+        self.addCleanup(shutil.rmtree, source, ignore_errors=True)
+        album = os.path.join(source, "Disc 1") if nested else source
+        os.makedirs(album, exist_ok=True)
+        shutil.copy(fixture, os.path.join(album, "01 - Track.mp3"))
+        return source
+
+    def _run(self, source: str, scanned: list[str]):
+        from lib.spectral_check import AlbumResult, TrackResult
+
+        def analyze(path: str, trim_seconds: int = 30) -> AlbumResult:
+            scanned.append(path)
+            return AlbumResult(
+                grade="genuine", estimated_bitrate_kbps=320, suspect_pct=0.0,
+                tracks=[TrackResult(
+                    grade="genuine", hf_deficit_db=20.0, cliff_detected=False,
+                    cliff_freq_hz=None, estimated_bitrate_kbps=320, error=None,
+                )],
+            )
+
+        with patch(
+            "lib.config.read_runtime_config",
+            return_value=_preview_runtime_config(
+                beets_harness_path="/fake/harness/run_beets_harness.sh",
+                pipeline_db_enabled=True,
+            ),
+        ), patch(
+            "lib.beets_db.BeetsDB", lambda **_kwargs: FakeBeetsDB()
+        ), patch(
+            "lib.measurement.spectral_analyze", side_effect=analyze,
+        ), patch(
+            "lib.import_preview.run_import_one",
+            return_value=SimpleNamespace(
+                import_result=ImportResult(decision="import"), stderr="",
+            ),
+        ):
+            return preview_import_from_path(
+                self._db(), request_id=42, path=source,
+            )
+
+    def test_nested_candidate_is_told_to_flatten_without_a_spectral_scan(self):
+        scanned: list[str] = []
+        preview = self._run(self._tree(nested=True), scanned)
+
+        self.assertEqual(preview.decision, "nested_layout")
+        self.assertEqual(preview.verdict, "confident_reject")
+        self.assertEqual(
+            scanned, [],
+            "a nested candidate must not pay a per-track spectral scan "
+            "to be told to flatten the folder",
+        )
+
+    def test_flat_candidate_still_pays_for_its_spectral_evidence(self):
+        """Must-still-work control: the skip is keyed on layout alone, so a
+        flat album in the same lane is scanned exactly as before."""
+        scanned: list[str] = []
+        preview = self._run(self._tree(nested=False), scanned)
+
+        self.assertNotEqual(preview.decision, "nested_layout")
+        self.assertEqual(len(scanned), 1)
+
+
 class TestOwnedProcessingNormalization(unittest.TestCase):
     """Issue #853: repair belongs after private processing publication."""
 
