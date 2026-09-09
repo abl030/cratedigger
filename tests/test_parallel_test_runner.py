@@ -62,6 +62,7 @@ from scripts.run_python_tests import (
     _measure_available_memory_bytes,
     _measure_tempdir_available_bytes,
     _run_targets,
+    _run_test_target_child,
     _shuffle_failure_note,
     assert_exact_schedule,
     assert_exact_target_coverage,
@@ -1758,6 +1759,62 @@ class TestShuffledOrder(unittest.TestCase):
                 self.assertEqual(results, ())
                 self.assertEqual(len(failures), 1)
                 self.assertIn("unexpected test IDs", failures[0].detail)
+
+    def test_child_reports_its_real_shuffled_run_order_for_a_sharded_target(
+        self,
+    ) -> None:
+        """The child itself, driven the way a hotspot shard drives it
+        (``selected_test_ids`` given, in loader order): under seed 1 it
+        must both RUN c, b, a and REPORT c, b, a. The guard test above only
+        proves the outcome is order-insensitive; a child that skipped the
+        shuffle for sharded targets, or reported sorted IDs whatever it
+        ran, passed it (mutant-runner finding on #1391)."""
+        ids = tuple(
+            f"fixture_child_order.test_alpha.Alpha.test_{letter}" for letter in "abc"
+        )
+        expected_order = (ids[2], ids[1], ids[0])  # seed 1 under the real salt
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            package = root / "fixture_child_order"
+            package.mkdir()
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            (package / "test_alpha.py").write_text(
+                "import unittest\n\n"
+                "class Alpha(unittest.TestCase):\n"
+                "    def test_a(self):\n        pass\n"
+                "    def test_b(self):\n        pass\n"
+                "    def test_c(self):\n        pass\n",
+                encoding="utf-8",
+            )
+            sys.path.insert(0, str(root))
+            self.addCleanup(sys.path.remove, str(root))
+            self.addCleanup(
+                lambda: [
+                    sys.modules.pop(name)
+                    for name in list(sys.modules)
+                    if name.startswith("fixture_child_order")
+                ]
+            )
+            result_path = root / "result.json"
+            with patch.dict(os.environ, {SHUFFLE_SEED_ENV: "1"}):
+                exit_code = _run_test_target_child(
+                    ("fixture_child_order.test_alpha",),
+                    0,
+                    result_path,
+                    selected_test_ids=ids,
+                )
+            child = msgspec.json.decode(result_path.read_bytes(), type=ChildTargetResult)
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(child.successful)
+        self.assertEqual(child.test_ids, expected_order, "reported in run order")
+        ran_order = tuple(
+            test_id
+            for line in child.output.splitlines()
+            for test_id in ids
+            if line.startswith(test_id.rsplit(".", 1)[1] + " (")
+        )
+        self.assertEqual(ran_order, expected_order, "really ran in that order")
 
     def _write_order_fixture(self, root: Path) -> Path:
         """Three modules of five tests each, every test appending its ID to
