@@ -303,7 +303,7 @@
   .sp-chip-bad { background: #2c1c1c; color: #d88080; }
   .sp-chip-dim { background: #22242b; color: #889; font-weight: 500; }
   /* "Searching for" — scope on the left, what the library holds on the right. */
-  .sp-scope { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .sp-scope { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
   @media (max-width: 720px) { .sp-scope { grid-template-columns: 1fr; } }
   .sp-scope-col { background: #1a1c22; border-radius: 5px; padding: 10px 12px; display: flex; flex-direction: column; gap: 7px; }
   .sp-scope-label { color: #667; font-size: 0.78em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
@@ -315,7 +315,7 @@
   .sp-kv dd { margin: 0; color: #ccd; font-variant-numeric: tabular-nums; }
   .sp-kv code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .sp-kv-why { color: #889; }
-  .sp-have { display: grid; grid-template-columns: max-content max-content 1fr; gap: 4px 14px; align-items: baseline; font-size: 0.85em; }
+  .sp-have { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 14px; align-items: baseline; font-size: 0.85em; }
   .sp-have-tag { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 700; color: #889; letter-spacing: 0.5px; font-size: 0.9em; }
   .sp-have-fmt { color: #ccd; }
   .sp-have-spec { color: #6db38f; }
@@ -362,7 +362,12 @@
   .sp-att-raw { margin: 0; }
   .sp-att-raw summary { cursor: pointer; user-select: none; color: #667; font-size: 0.95em; }
   .sp-att-raw summary:hover { color: #ccd; }
-  .sp-att-raw pre { background: #0e0f12; color: #9a9fb3; padding: 8px 10px; border-radius: 4px; font-size: 0.95em; max-height: 260px; max-width: 720px; overflow: auto; margin: 6px 0 0; white-space: pre-wrap; }
+  /* The raw expander lives in the narrowest column of a dense table, so
+     an in-flow pre-wrap block shreds JSON one token per line. Keep the
+     text unwrapped and give the block a real minimum width: the cell
+     widens only while the operator has it open, and .sp-tablewrap
+     absorbs the overflow. */
+  .sp-att-raw pre { background: #0e0f12; color: #9a9fb3; padding: 8px 10px; border-radius: 4px; font-size: 0.95em; min-width: 460px; max-height: 300px; max-width: 720px; overflow: auto; margin: 6px 0 0; white-space: pre; }
   .sp-load-older-wrap { padding: 6px 0; }
   .sp-load-older-button { padding: 4px 12px; background: #2a2a3a; color: #aac; border: 1px solid #3a3a4a; border-radius: 4px; cursor: pointer; font-size: 0.82em; }
   .sp-load-older-button:hover { background: #3a3a4a; color: #ccd; }

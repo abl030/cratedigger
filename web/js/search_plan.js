@@ -988,8 +988,10 @@ function scopeSourceLabel(source) {
  * @returns {string}
  */
 function renderScopeColumn(scope) {
-  const why = [scopeSourceLabel(scope.source)];
-  if (scope.catch_all !== true) why.push('catch-all excluded');
+  // An unset `source` contributes nothing rather than an empty clause —
+  // "none set · ; catch-all excluded" is what the naive join produces.
+  const why = [scopeSourceLabel(scope.source), ...(scope.catch_all !== true
+    ? ['catch-all excluded'] : [])].filter((clause) => clause !== '');
   const overrideValue = scope.override
     ? `<code>${esc(String(scope.override))}</code>`
     : '<span class="sp-kv-why">none set</span>';
@@ -1002,7 +1004,7 @@ function renderScopeColumn(scope) {
   return `<div class="sp-scope-col">
     ${renderTierChips(scope)}
     <dl class="sp-kv">
-      <dt>Override</dt><dd>${overrideValue} <span class="sp-kv-why">· ${esc(why.join('; '))}</span></dd>
+      <dt>Override</dt><dd>${overrideValue}${why.length ? ` <span class="sp-kv-why">· ${esc(why.join('; '))}</span>` : ''}</dd>
       <dt>Bitrate floor</dt><dd>${floorValue}</dd>
       <dt>Target format</dt><dd>${targetValue}</dd>
     </dl>
@@ -1053,15 +1055,17 @@ function renderLibraryColumn(library) {
   const scenario = request.beets_scenario
     ? `<div class="sp-have-scenario">beets match ${esc(String(request.beets_scenario))}</div>`
     : '';
+  // The path gets its own full-width row rather than a third grid
+  // column: a library path is long enough to shear a max-content column
+  // into a six-line ribbon beside two short labels.
   return `<div class="sp-scope-col">${label}
     <div class="sp-have">
       <span class="sp-have-tag">HAVE</span>
-      <span class="sp-have-fmt">${esc(fmt)}${esc(floor)}</span>
-      <span class="sp-have-spec">${esc(proof.join(' · '))}</span>
+      <span class="sp-have-fmt">${esc(fmt)}${esc(floor)}${proof.length ? ` <span class="sp-have-spec">${esc(proof.join(' · '))}</span>` : ''}</span>
       <span class="sp-have-tag">FROM</span>
       <span class="sp-have-fmt">${from}</span>
-      <span class="sp-have-path">${esc(String(current.path || ''))}</span>
     </div>
+    <div class="sp-have-path">${esc(String(current.path || ''))}</div>
     ${scenario}
   </div>`;
 }
