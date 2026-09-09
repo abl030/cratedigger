@@ -6,6 +6,9 @@ composed ``PipelineDB`` class.
 """
 from lib.pipeline_db._db import PipelineDB
 from lib.pipeline_db._shared import (
+    ACQUISITION_PEER_LIMIT,
+    ACQUISITION_SINCE_LAST_IMPORT,
+    ACQUISITION_SINCE_REQUEST_CREATED,
     ADVISORY_LOCK_NAMESPACE_IMPORT,
     ADVISORY_LOCK_NAMESPACE_IMPORTER,
     ADVISORY_LOCK_NAMESPACE_PLAN,
@@ -35,6 +38,11 @@ from lib.pipeline_db._shared import (
     SEARCH_LOG_STAGE_PRE_ATTEMPT,
     SEARCH_LOG_STAGE_RECONCILIATION,
     SEARCH_LOG_STAGE_STALE_COMPLETION,
+    AcquisitionGrab,
+    AcquisitionGrabGroup,
+    AcquisitionLastFound,
+    AcquisitionPeer,
+    AcquisitionTierCount,
     ActiveSearchPlan,
     AddRequestInput,
     BadAudioHashInput,
@@ -52,6 +60,7 @@ from lib.pipeline_db._shared import (
     RequestSpectralStateUpdate,
     RequestV0ProbeStateUpdate,
     SaturationSummary,
+    SearchAcquisitionSummary,
     SearchLogHistoryPage,
     SearchLogOutcome,
     SearchPlanInspection,
@@ -134,6 +143,9 @@ from lib.pipeline_db.rows import (
 from lib.pipeline_db.terminal_outcomes import ImportJobTerminalConflict
 
 __all__ = [
+    "ACQUISITION_PEER_LIMIT",
+    "ACQUISITION_SINCE_LAST_IMPORT",
+    "ACQUISITION_SINCE_REQUEST_CREATED",
     "ADVISORY_LOCK_NAMESPACE_IMPORT",
     "ADVISORY_LOCK_NAMESPACE_IMPORTER",
     "ADVISORY_LOCK_NAMESPACE_PLAN",
@@ -168,6 +180,11 @@ __all__ = [
     "SEARCH_LOG_STAGE_PRE_ATTEMPT",
     "SEARCH_LOG_STAGE_RECONCILIATION",
     "SEARCH_LOG_STAGE_STALE_COMPLETION",
+    "AcquisitionGrab",
+    "AcquisitionGrabGroup",
+    "AcquisitionLastFound",
+    "AcquisitionPeer",
+    "AcquisitionTierCount",
     "ActiveSearchPlan",
     "AddRequestInput",
     "AlbumRequestRow",
@@ -206,6 +223,7 @@ __all__ = [
     "RequestSpectralStateUpdate",
     "RequestV0ProbeStateUpdate",
     "SaturationSummary",
+    "SearchAcquisitionSummary",
     "SearchLogHistoryPage",
     "SearchLogOutcome",
     "SearchPlanInspection",

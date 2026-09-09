@@ -43,6 +43,29 @@ class TestPipelineSearchPlanContract(_FakeDbWebServerCase):
         "superseded_count",
         "legacy_logs",
         "stats",
+        # Issue #811.
+        "search_scope",
+        "acquisition",
+    }
+    SEARCH_SCOPE_REQUIRED_FIELDS: ClassVar = {
+        "override", "target_format", "min_bitrate", "tiers", "catch_all",
+        "configured_tiers", "source",
+    }
+    ACQUISITION_REQUIRED_FIELDS: ClassVar = {
+        "since", "since_reason", "candidate_tiers",
+        "candidates_outside_scope", "grabs", "grabs_total", "last_found",
+        "peers",
+    }
+    ACQUISITION_LAST_FOUND_REQUIRED_FIELDS: ClassVar = {
+        "search_log_id", "at", "strategy", "username", "tier",
+        "matched_tracks", "total_tracks", "grab",
+    }
+    ACQUISITION_GRAB_REQUIRED_FIELDS: ClassVar = {
+        "download_log_id", "outcome", "error_message", "at",
+    }
+    ACQUISITION_PEER_REQUIRED_FIELDS: ClassVar = {
+        "username", "tier", "best_matched_tracks", "total_tracks",
+        "attempts", "last_at",
     }
     STATS_REQUIRED_FIELDS: ClassVar = {
         "request_id", "current", "superseded_and_legacy",
@@ -61,6 +84,10 @@ class TestPipelineSearchPlanContract(_FakeDbWebServerCase):
     REQUEST_REQUIRED_FIELDS: ClassVar = {
         "id", "status", "artist_name", "album_title",
         "mb_release_id", "discogs_release_id", "year", "source",
+        # Issue #811: the quality override and its retry pacing.
+        "search_filetype_override", "target_format", "min_bitrate",
+        "search_attempts", "created_at", "last_attempt_at",
+        "next_retry_after",
     }
     CURRENTNESS_REQUIRED_FIELDS: ClassVar = {
         "is_wanted",
@@ -241,6 +268,138 @@ class TestPipelineSearchPlanContract(_FakeDbWebServerCase):
             "cycle_only")
         self.assertFalse(
             data["stats"]["current"]["cache_per_search_available"])
+        # Issue #811 blocks.
+        _assert_required_fields(
+            self, data["search_scope"], self.SEARCH_SCOPE_REQUIRED_FIELDS,
+            "search-plan search_scope")
+        _assert_required_fields(
+            self, data["acquisition"], self.ACQUISITION_REQUIRED_FIELDS,
+            "search-plan acquisition")
+
+    def test_search_plan_reports_the_override_scope_and_the_grab_it_found(
+        self,
+    ) -> None:
+        """Issue #811: production-shaped scope + acquisition payload.
+
+        The request row carries real ``datetime`` values (the builder's
+        own production shape), a real ``CandidateScore`` list reaches
+        ``search_log.candidates``, and a linked ``download_log`` row
+        supplies the grab — so this scenario would 500 on an
+        unserializable value the way the search-plan-history datetime bug
+        did (``docs/solutions/testing/contract-test-mocks-must-mirror-
+        production-shape.md``).
+        """
+        from lib.quality import CandidateScore
+
+        self.db.seed_request(make_request_row(
+            id=100,
+            status="wanted",
+            search_filetype_override="lossless",
+            min_bitrate=320,
+            search_attempts=9,
+            created_at=datetime(2026, 5, 1, tzinfo=UTC),
+            last_attempt_at=datetime(2026, 9, 1, 3, 0, tzinfo=UTC),
+            next_retry_after=datetime(2026, 9, 1, 4, 0, tzinfo=UTC),
+        ))
+        self._seed_active_plan()
+        self.db.log_search(
+            request_id=100, query="q", outcome="found",
+            candidates=[
+                CandidateScore(
+                    username="anjingpaeh", dir="/a/album",
+                    filetype="lossless", matched_tracks=11, total_tracks=11,
+                    avg_ratio=0.98, missing_titles=[], file_count=11),
+                CandidateScore(
+                    username="lossy_peer", dir="/b/album",
+                    filetype="mp3 320", matched_tracks=6, total_tracks=11,
+                    avg_ratio=0.5, missing_titles=["Two"], file_count=7),
+                # A second out-of-scope tier so the outside-scope count is
+                # asymmetric: with one in and one out, inverting the
+                # membership test gives the same number either way.
+                CandidateScore(
+                    username="ogg_peer", dir="/c/album",
+                    filetype="opus", matched_tracks=4, total_tracks=11,
+                    avg_ratio=0.4, missing_titles=["Two"], file_count=5),
+            ],
+        )
+        search_log_id = self.db.get_search_history(100)[0]["id"]
+        assert isinstance(search_log_id, int)
+        log_id = self.db.log_download(
+            100, soulseek_username="anjingpaeh", filetype="flac",
+            outcome="timeout", error_message="remote queue timeout",
+            search_log_id=search_log_id)
+
+        status, data = self._get("/api/pipeline/100/search-plan")
+        self.assertEqual(status, 200)
+
+        scope = data["search_scope"]
+        self.assertEqual(scope["override"], "lossless")
+        self.assertEqual(scope["tiers"], ["lossless"])
+        self.assertFalse(scope["catch_all"])
+        self.assertEqual(scope["source"], "override")
+        self.assertEqual(scope["min_bitrate"], 320)
+        # The route must hand the payload the runtime config's OWN ladder.
+        # Its CLI twin pins this; without it here, a route passing an
+        # empty ``allowed_filetypes`` renders an empty "configured tiers"
+        # and nothing on the API side notices (mutant runner, 6).
+        from lib.config import read_runtime_config
+        self.assertEqual(
+            scope["configured_tiers"],
+            list(read_runtime_config().allowed_filetypes))
+        self.assertTrue(scope["configured_tiers"])
+        self.assertEqual(data["request"]["search_attempts"], 9)
+        self.assertEqual(data["request"]["min_bitrate"], 320)
+        self.assertEqual(data["request"]["target_format"], None)
+        self.assertEqual(
+            data["request"]["created_at"], "2026-05-01T00:00:00+00:00")
+        self.assertEqual(
+            data["request"]["last_attempt_at"], "2026-09-01T03:00:00+00:00")
+        self.assertEqual(
+            data["request"]["next_retry_after"], "2026-09-01T04:00:00+00:00")
+
+        acq = data["acquisition"]
+        self.assertIsNone(acq["since"])
+        self.assertEqual(acq["since_reason"], "request_created")
+        self.assertEqual(
+            acq["candidate_tiers"],
+            [{"tier": "lossless", "count": 1},
+             {"tier": "mp3 320", "count": 1},
+             {"tier": "opus", "count": 1}])
+        # Both lossy candidates fall outside the lossless-only scope.
+        self.assertEqual(acq["candidates_outside_scope"], 2)
+        self.assertEqual(acq["grabs_total"], 1)
+        self.assertEqual(acq["grabs"][0]["filetype"], "flac")
+        self.assertEqual(acq["grabs"][0]["count"], 1)
+        self.assertEqual(acq["grabs"][0]["last_outcome"], "timeout")
+        # Every timestamp reaches the wire as an ISO string, not a
+        # datetime the JSON encoder would have died on and not a null.
+        self.assertIsInstance(acq["grabs"][0]["last_at"], str)
+        self.assertIsInstance(acq["last_found"]["at"], str)
+        self.assertIsInstance(acq["last_found"]["grab"]["at"], str)
+        self.assertIsInstance(acq["peers"][0]["last_at"], str)
+        _assert_required_fields(
+            self, acq["last_found"],
+            self.ACQUISITION_LAST_FOUND_REQUIRED_FIELDS,
+            "search-plan acquisition.last_found")
+        self.assertEqual(acq["last_found"]["username"], "anjingpaeh")
+        self.assertEqual(acq["last_found"]["tier"], "lossless")
+        _assert_required_fields(
+            self, acq["last_found"]["grab"],
+            self.ACQUISITION_GRAB_REQUIRED_FIELDS,
+            "search-plan acquisition.last_found.grab")
+        self.assertEqual(acq["last_found"]["grab"]["download_log_id"], log_id)
+        self.assertEqual(acq["last_found"]["grab"]["outcome"], "timeout")
+        for peer in acq["peers"]:
+            _assert_required_fields(
+                self, peer, self.ACQUISITION_PEER_REQUIRED_FIELDS,
+                "search-plan acquisition.peers[]")
+        self.assertEqual(
+            [p["username"] for p in acq["peers"]],
+            ["anjingpaeh", "lossy_peer", "ogg_peer"])
+        self.assertEqual(acq["peers"][0]["tier"], "lossless")
+        self.assertEqual(acq["peers"][0]["best_matched_tracks"], 11)
+        self.assertEqual(acq["peers"][0]["total_tracks"], 11)
+        self.assertEqual(acq["peers"][0]["attempts"], 1)
 
     # -- 404 missing request --
 
@@ -1023,6 +1182,11 @@ class TestPipelineSearchPlanHistoryContract(_FakeDbWebServerCase):
     """
 
     HISTORY_REQUIRED_FIELDS: ClassVar = {"request_id", "rows", "next_before_id"}
+    #: Issue #811 — the grab each search row produced, NULL when none.
+    ROW_GRAB_REQUIRED_FIELDS: ClassVar = {
+        "grab_download_log_id", "grab_outcome", "grab_filetype",
+        "grab_soulseek_username", "grab_error_message", "grab_at",
+    }
 
     def setUp(self) -> None:
         super().setUp()
@@ -1178,6 +1342,49 @@ class TestPipelineSearchPlanHistoryContract(_FakeDbWebServerCase):
         # Full round-trip: the response body must be valid JSON.
         import json as _json
         _json.dumps(data)  # raises TypeError if any datetime slipped through
+
+    def test_history_rows_carry_the_grab_each_search_produced(self):
+        """Issue #811, through the real service and the real fake DB.
+
+        Every other test in this class patches ``history_for_request``,
+        so none of them would see the ``grab_*`` columns go missing. This
+        one drives the whole path and pins the wire shape, including the
+        ISO serialization of ``grab_at``.
+        """
+        import json as _json
+
+        self.db.seed_request(make_request_row(id=100, status="wanted"))
+        self.db.log_search(request_id=100, query="found", outcome="found")
+        linked = self.db.get_search_history(100)[0]["id"]
+        assert isinstance(linked, int)
+        log_id = self.db.log_download(
+            100, soulseek_username="anjingpaeh", filetype="flac",
+            outcome="timeout", error_message="remote queue timeout",
+            search_log_id=linked)
+        self.db.log_search(request_id=100, query="miss", outcome="no_match")
+
+        status, data = self._get(
+            "/api/pipeline/100/search-plan/history?limit=50")
+        self.assertEqual(status, 200)
+        rows = {row["id"]: row for row in data["rows"]}
+        for row in data["rows"]:
+            _assert_required_fields(
+                self, row, self.ROW_GRAB_REQUIRED_FIELDS,
+                "search-plan history row")
+        self.assertEqual(rows[linked]["grab_download_log_id"], log_id)
+        self.assertEqual(rows[linked]["grab_outcome"], "timeout")
+        self.assertEqual(rows[linked]["grab_filetype"], "flac")
+        self.assertEqual(
+            rows[linked]["grab_soulseek_username"], "anjingpaeh")
+        self.assertEqual(
+            rows[linked]["grab_error_message"], "remote queue timeout")
+        self.assertIsInstance(
+            rows[linked]["grab_at"], str,
+            "grab_at must reach the wire as an ISO string")
+        unlinked = next(i for i in rows if i != linked)
+        self.assertIsNone(rows[unlinked]["grab_download_log_id"])
+        self.assertIsNone(rows[unlinked]["grab_at"])
+        _json.dumps(data)
 
     def test_history_404_body_shape_matches_neighbor_routes(self):
         """F3: 404 body must be {error: ...} only — no rows/next_before_id

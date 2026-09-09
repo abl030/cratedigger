@@ -82,6 +82,7 @@ from lib.transitions import (
 from lib.world_invariants import assert_replaced_row_frozen
 from tests.dispatch_helpers import handoff_automation_owner
 from tests.fakes import FakePipelineDB
+from tests.fakes.rows import SearchLogRow
 from tests.helpers import make_active_download_state_json
 
 LEGAL_STATUSES = frozenset({
@@ -159,6 +160,102 @@ def assert_download_state_coherent(row: dict) -> None:
         raise AssertionError(
             f"request {row['id']} carries active_download_state while "
             f"{row['status']!r}")
+
+
+#: The small alphabet of attempt fingerprints the lifecycle machine
+#: draws from. Small on purpose: a wide alphabet almost never produces
+#: the match the stamp guard is supposed to accept, and an invariant that
+#: only ever sees the refusing branch patrols nothing (#1094 Q2).
+CLAIM_FINGERPRINTS = ("fp-alpha", "fp-beta")
+
+
+def search_link_stamp_violations(
+    *,
+    status_before: str,
+    fingerprint_before: str | None,
+    supplied_fingerprint: str | None,
+    state_before: Mapping[str, object] | None,
+    state_after: Mapping[str, object] | None,
+    stamped: bool,
+    search_log_id: int,
+) -> list[str]:
+    """Issue #811: what one ``record_consumed_search_attempt`` may do to
+    ``active_download_state``.
+
+    Accumulating rather than short-circuiting, so a world that violates
+    several clauses reports all of them and clause ordering can never
+    mask one.
+
+    ``eligible`` restates the production guard's own three conditions —
+    a fingerprint was supplied, the row was ``downloading``, and the
+    row's persisted fingerprint equals the supplied one — and the first
+    two clauses police the guard in BOTH directions: it may not stamp an
+    ineligible attempt, and it may not refuse an eligible one. The third
+    pins the resulting state exactly, so a stamp that also rewrote (or
+    dropped) another field is a violation even though the link itself
+    landed correctly.
+    """
+    violations: list[str] = []
+    eligible = (
+        supplied_fingerprint is not None
+        and status_before == "downloading"
+        and fingerprint_before is not None
+        and fingerprint_before == supplied_fingerprint
+    )
+    if stamped and not eligible:
+        violations.append(
+            f"stamp landed on an ineligible attempt: status="
+            f"{status_before!r} persisted_fingerprint="
+            f"{fingerprint_before!r} supplied={supplied_fingerprint!r}")
+    if eligible and not stamped:
+        violations.append(
+            f"eligible attempt was refused the stamp: status="
+            f"{status_before!r} fingerprint={fingerprint_before!r}")
+    expected: dict[str, object] | None = (
+        None if state_before is None else dict(state_before))
+    if stamped:
+        if expected is None:
+            expected = {}
+        expected["search_log_id"] = search_log_id
+    if state_after != expected:
+        violations.append(
+            f"download state changed in a way the stamp does not explain: "
+            f"{state_before!r} -> {state_after!r} (expected {expected!r})")
+    return violations
+
+
+def assert_search_link_names_a_found_row(
+    row: Mapping[str, object],
+    search_logs: list[object],
+) -> None:
+    """A persisted link points at THIS request's own ``found`` search.
+
+    Two clauses: the id must belong to a search row of the same request,
+    and that row's outcome must be ``found`` — the only outcome that can
+    produce a grab.
+    """
+    state = row.get("active_download_state")
+    if not isinstance(state, dict):
+        return
+    link = state.get("search_log_id")
+    if link is None:
+        return
+    match = next(
+        (
+            entry for entry in search_logs
+            if getattr(entry, "id", None) == link
+            and getattr(entry, "request_id", None) == row.get("id")
+        ),
+        None,
+    )
+    if match is None:
+        raise AssertionError(
+            f"request {row.get('id')} links search_log_id={link!r} which is "
+            f"not one of its own search rows")
+    if getattr(match, "outcome", None) != "found":
+        raise AssertionError(
+            f"request {row.get('id')} links search_log_id={link!r} whose "
+            f"outcome is {getattr(match, 'outcome', None)!r}, not 'found'")
 
 
 def assert_processing_owner_equivalent(row: Mapping[str, object]) -> None:
@@ -880,6 +977,19 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
         assert row is not None
         return row
 
+    def _download_state(self, request_id: int) -> dict | None:
+        """The request's persisted state as a READ returns it.
+
+        ``self._row`` hands back the fake's raw internal row, where
+        ``active_download_state`` is still the writer's JSON string;
+        ``get_request`` is the projection every production reader
+        actually sees, and the #811 stamp lives inside that JSON.
+        """
+        row = self.db.get_request(request_id)
+        assert row is not None
+        state = row.get("active_download_state")
+        return state if isinstance(state, dict) else None
+
     def _ids_with_status(self, *statuses: str) -> list[int]:
         return [
             rid for rid in self.ids
@@ -906,9 +1016,12 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
     def claim_download(self, data) -> None:
         """DB-guarded: succeeds only from 'wanted'; targets ANY row."""
         rid = data.draw(st.sampled_from(self.ids), label="claim target")
+        fingerprint = data.draw(
+            st.sampled_from(CLAIM_FINGERPRINTS), label="claim fingerprint")
         before = copy.deepcopy(self._row(rid))
         ok = finalize_request(self.db, rid, RequestTransition.to_downloading(
-            state_json=make_active_download_state_json([])))
+            state_json=make_active_download_state_json(
+                [], attempt_fingerprint=fingerprint)))
         row = self._row(rid)
         if before["status"] == "wanted":
             if not isinstance(ok, TransitionApplied) or row["status"] != "downloading":
@@ -1133,6 +1246,150 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
         assert_replacement_linked(
             rid, self.db.get_request_by_replaces_request_id(rid))
 
+    def _ensure_plan(self, rid: int) -> None:
+        """Give ``rid`` an active plan so a consumed attempt can be run."""
+        if self._row(rid).get("active_plan_id") is not None:
+            return
+        try:
+            self.db.create_successful_search_plan(
+                request_id=rid,
+                generator_id="lifecycle-generator",
+                items=[SearchPlanItemInput(
+                    ordinal=0, strategy="album",
+                    query="Lifecycle Artist Album",
+                    canonical_query_key="lifecycle artist album",
+                    repeat_group=None,
+                )],
+            )
+        except ReplacedRequestMutationError:
+            # A replaced ancestor legitimately refuses plan generation;
+            # ``late_writers_cannot_mutate_replaced_ancestor`` owns that
+            # contract, so here it just means "no plan, skip".
+            return
+
+    @precondition(lambda self: self._ids_with_status("downloading"))
+    @rule(data=st.data())
+    def hand_off_to_processing(self, data) -> None:
+        """Enter ``processing`` through the real atomic handoff (#898).
+
+        Without this rule the machine's only state-carrying status is
+        ``downloading``, so the #811 stamp guard's status half is
+        unreachable: every non-``downloading`` row it ever sees has a NULL
+        state, which the fingerprint half refuses anyway. ``processing``
+        RETAINS the state and its fingerprint, so it is the world where
+        only the status half can refuse.
+        """
+        rid = data.draw(
+            st.sampled_from(self._ids_with_status("downloading")),
+            label="handoff target")
+        state = self._download_state(rid)
+        if state is None:
+            return
+        enqueued_at = state.get("enqueued_at")
+        if not isinstance(enqueued_at, str):
+            return
+        result = self.db.handoff_automation_import(
+            request_id=rid,
+            expected_enqueued_at=enqueued_at,
+            canonical_path=f"/processing/albums/{rid}",
+            message="lifecycle handoff",
+        )
+        row = self._row(rid)
+        if not result.committed:
+            raise AssertionError(
+                f"handoff refused a downloading row: {result.outcome!r}")
+        if row["status"] != "processing":
+            raise AssertionError(
+                f"handoff left status={row['status']!r}")
+        # The handoff legitimately ADDS processor ownership
+        # (``processing_started_at``, ``current_path``); what it must not
+        # do is disturb the attempt identity the #811 stamp guard keys on.
+        after = self._download_state(rid)
+        assert after is not None
+        for key in ("enqueued_at", "attempt_fingerprint"):
+            if after.get(key) != state.get(key):
+                raise AssertionError(
+                    f"handoff changed {key}: "
+                    f"{state.get(key)!r} -> {after.get(key)!r}")
+
+    @precondition(lambda self: self.ids)
+    @rule(data=st.data())
+    def record_found_attempt(self, data) -> None:
+        """Issue #811: a ``found`` attempt offering SOME grab fingerprint.
+
+        The fingerprint drawn may or may not be the one this row's own
+        claim persisted, and the row may be in any status — deciding
+        which of those combinations earns the link is the DB guard's job,
+        never the caller's, so the rule offers every combination and the
+        checker adjudicates.
+        """
+        # Two deliberate biases, both measured rather than assumed. A run
+        # instrumented at the fake's stamp saw 940 calls, of which 4
+        # reached a ``downloading`` row and none of those carried a
+        # matching fingerprint: the other rules retire rows out of
+        # ``downloading`` far faster than a uniform draw over every id
+        # revisits one, and two free fingerprint draws rarely coincide.
+        # The ELIGIBLE branch was therefore unreached in a whole
+        # derandomized suite run, leaving the guard patrolled only in its
+        # refusing direction. Both biases ADD draws; neither removes a
+        # world the uniform draw could reach.
+        targets = [st.sampled_from(self.ids)]
+        downloading = self._ids_with_status("downloading")
+        if downloading:
+            targets.append(st.sampled_from(downloading))
+        rid = data.draw(st.one_of(*targets), label="found target")
+        own = self._download_state(rid)
+        own_fingerprint = None if own is None else own.get(
+            "attempt_fingerprint")
+        choices = [st.none(), st.sampled_from(CLAIM_FINGERPRINTS)]
+        if isinstance(own_fingerprint, str):
+            choices.append(st.just(own_fingerprint))
+        supplied = data.draw(
+            st.one_of(*choices), label="grab fingerprint")
+        outcome = data.draw(
+            st.sampled_from(("found", "no_match")), label="search outcome")
+        self._ensure_plan(rid)
+        active = self.db.get_active_search_plan(rid)
+        if active is None:
+            return
+        item = active.items[0]
+        before = copy.deepcopy(self._row(rid))
+        state_before = copy.deepcopy(self._download_state(rid))
+        result = self.db.record_consumed_search_attempt(ConsumedAttemptInput(
+            request_id=rid,
+            plan_id=active.plan.id,
+            plan_item_id=item.id,
+            plan_ordinal=item.ordinal,
+            plan_strategy=item.strategy,
+            plan_canonical_query_key=item.canonical_query_key,
+            plan_repeat_group=item.repeat_group,
+            plan_generator_id=active.plan.generator_id,
+            query=item.query,
+            outcome=outcome,
+            plan_item_count=len(active.items),
+            cycle_count_snapshot=active.cycle_count,
+            apply_scheduler_attempt=True,
+            # Only a ``found`` attempt ever carries one in production —
+            # ``cratedigger._apply_find_download_result`` sets it on the
+            # found branch alone — so a non-found draw offers None.
+            grab_attempt_fingerprint=(
+                supplied if outcome == "found" else None),
+        ))
+        violations = search_link_stamp_violations(
+            status_before=str(before["status"]),
+            fingerprint_before=(
+                None if state_before is None
+                else state_before.get("attempt_fingerprint")),
+            supplied_fingerprint=(
+                supplied if outcome == "found" else None),
+            state_before=state_before,
+            state_after=self._download_state(rid),
+            stamped=result.download_state_stamped,
+            search_log_id=result.search_log_id,
+        )
+        if violations:
+            raise AssertionError("; ".join(violations))
+
     @precondition(lambda self: bool(self.frozen))
     @rule(data=st.data())
     def late_writers_cannot_mutate_replaced_ancestor(self, data) -> None:
@@ -1276,6 +1533,14 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
     def download_state_only_while_downloading(self) -> None:
         for rid in self.ids:
             assert_download_state_coherent(self._row(rid))
+
+    @invariant()
+    def download_state_links_only_its_own_found_search(self) -> None:
+        for rid in self.ids:
+            row = self.db.get_request(rid)
+            assert row is not None
+            assert_search_link_names_a_found_row(
+                row, list(self.db.search_logs))
 
     @invariant()
     def processing_status_matches_exact_owner_pointer(self) -> None:
@@ -1688,6 +1953,181 @@ class TestResolverCasViolationClauses(unittest.TestCase):
                 "matching resolver CAS lost child metadata",
             ],
         )
+
+
+class TestSearchLinkStampChecker(unittest.TestCase):
+    """Per-clause proof for ``search_link_stamp_violations`` (#811).
+
+    Three clauses, three questions each. Q1 (does it trip?) and Q3 (does
+    it stay quiet where production is right?) live here; Q2 (can the
+    strategy reach that world?) is the planted-mutant run recorded in the
+    PR's Fault injection section.
+    """
+
+    # Every world below is spelled out in full rather than merged from a
+    # shared base: the world IS the subject of a checker self-test, and a
+    # kwargs-merge helper both hides which dimension the case turns on and
+    # needs an untyped splat to call a precisely-typed checker.
+
+    # -- Q1: each clause trips on its own minimal world -----------------
+
+    def test_ineligible_stamp_clause_trips(self) -> None:
+        violations = search_link_stamp_violations(
+            status_before="wanted",
+            fingerprint_before=None,
+            supplied_fingerprint="fp-alpha",
+            state_before=None,
+            state_after={"search_log_id": 7},
+            stamped=True,
+            search_log_id=7,
+        )
+        self.assertEqual(len(violations), 1, violations)
+        self.assertRegex(
+            violations[0], r"^stamp landed on an ineligible attempt")
+
+    def test_refused_eligible_stamp_clause_trips(self) -> None:
+        violations = search_link_stamp_violations(
+            status_before="downloading",
+            fingerprint_before="fp-alpha",
+            supplied_fingerprint="fp-alpha",
+            state_before={"attempt_fingerprint": "fp-alpha"},
+            state_after={"attempt_fingerprint": "fp-alpha"},
+            stamped=False,
+            search_log_id=7,
+        )
+        self.assertEqual(len(violations), 1, violations)
+        self.assertRegex(
+            violations[0], r"^eligible attempt was refused the stamp")
+
+    def test_unexplained_state_change_clause_trips(self) -> None:
+        violations = search_link_stamp_violations(
+            status_before="downloading",
+            fingerprint_before="fp-alpha",
+            supplied_fingerprint="fp-alpha",
+            state_before={"attempt_fingerprint": "fp-alpha",
+                          "current_path": "/processing/album"},
+            state_after={"attempt_fingerprint": "fp-alpha",
+                         "search_log_id": 7},
+            stamped=True,
+            search_log_id=7,
+        )
+        self.assertEqual(len(violations), 1, violations)
+        self.assertRegex(
+            violations[0],
+            r"^download state changed in a way the stamp does not explain")
+
+    # -- Q3: each clause stays quiet where production is right ----------
+
+    def test_ineligible_attempt_that_was_correctly_refused_is_quiet(
+        self,
+    ) -> None:
+        """Ineligible AND unstamped is the guard working, not a violation."""
+        self.assertEqual(search_link_stamp_violations(
+            status_before="wanted",
+            fingerprint_before=None,
+            supplied_fingerprint="fp-alpha",
+            state_before=None,
+            state_after=None,
+            stamped=False,
+            search_log_id=7,
+        ), [])
+
+    def test_an_eligible_attempt_that_was_stamped_is_quiet(self) -> None:
+        self.assertEqual(search_link_stamp_violations(
+            status_before="downloading",
+            fingerprint_before="fp-alpha",
+            supplied_fingerprint="fp-alpha",
+            state_before={"attempt_fingerprint": "fp-alpha"},
+            state_after={"attempt_fingerprint": "fp-alpha",
+                         "search_log_id": 7},
+            stamped=True,
+            search_log_id=7,
+        ), [])
+
+    def test_a_second_stamp_over_an_existing_link_is_quiet(self) -> None:
+        """An overwrite of the key itself is not an unexplained change.
+
+        Production reaches this at most once per attempt today
+        (``get_wanted`` filters on ``status='wanted'``, so no second
+        search runs while a request is downloading), but the guard's
+        UPDATE does not care what the key already holds — so the clause
+        must judge the RESULT, not assume the key was absent. Written as
+        fail-closed legislation for a writer that re-points a link, not
+        as a claim that one exists.
+        """
+        self.assertEqual(search_link_stamp_violations(
+            status_before="downloading",
+            fingerprint_before="fp-alpha",
+            supplied_fingerprint="fp-alpha",
+            state_before={"attempt_fingerprint": "fp-alpha",
+                          "search_log_id": 3},
+            state_after={"attempt_fingerprint": "fp-alpha",
+                         "search_log_id": 7},
+            stamped=True,
+            search_log_id=7,
+        ), [])
+
+    def test_an_attempt_with_no_fingerprint_is_quiet(self) -> None:
+        self.assertEqual(search_link_stamp_violations(
+            status_before="downloading",
+            fingerprint_before="fp-alpha",
+            supplied_fingerprint=None,
+            state_before={"attempt_fingerprint": "fp-alpha"},
+            state_after={"attempt_fingerprint": "fp-alpha"},
+            stamped=False,
+            search_log_id=7,
+        ), [])
+
+
+class TestSearchLinkNamesAFoundRowChecker(unittest.TestCase):
+    """Per-clause proof for ``assert_search_link_names_a_found_row``."""
+
+    @staticmethod
+    def _log(log_id: int, request_id: int, outcome: str) -> SearchLogRow:
+        return SearchLogRow(
+            request_id=request_id, id=log_id, outcome=outcome)
+
+    @staticmethod
+    def _row(link: int | None) -> dict[str, object]:
+        state: dict[str, object] = {"attempt_fingerprint": "fp-alpha"}
+        if link is not None:
+            state["search_log_id"] = link
+        return {"id": 42, "active_download_state": state}
+
+    def test_unknown_search_log_id_clause_trips(self) -> None:
+        with self.assertRaisesRegex(
+            AssertionError, r"is not one of its own search rows",
+        ):
+            assert_search_link_names_a_found_row(
+                self._row(99), [self._log(1, 42, "found")])
+
+    def test_another_requests_search_row_trips_the_same_clause(self) -> None:
+        with self.assertRaisesRegex(
+            AssertionError, r"is not one of its own search rows",
+        ):
+            assert_search_link_names_a_found_row(
+                self._row(1), [self._log(1, 7, "found")])
+
+    def test_non_found_outcome_clause_trips(self) -> None:
+        with self.assertRaisesRegex(
+            AssertionError, r"outcome is 'no_match', not 'found'",
+        ):
+            assert_search_link_names_a_found_row(
+                self._row(1), [self._log(1, 42, "no_match")])
+
+    def test_a_link_to_this_requests_own_found_row_is_quiet(self) -> None:
+        assert_search_link_names_a_found_row(
+            self._row(1), [self._log(1, 42, "found")])
+
+    def test_an_unlinked_state_is_quiet(self) -> None:
+        """A downloading row with no stamp yet must not be accused."""
+        assert_search_link_names_a_found_row(
+            self._row(None), [self._log(1, 42, "no_match")])
+
+    def test_a_row_with_no_state_at_all_is_quiet(self) -> None:
+        assert_search_link_names_a_found_row(
+            {"id": 42, "active_download_state": None},
+            [self._log(1, 42, "no_match")])
 
 
 if __name__ == "__main__":

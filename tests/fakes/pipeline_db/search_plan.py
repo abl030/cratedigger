@@ -5,7 +5,9 @@ Persisted search plans, plan items, and the cursor.
 from __future__ import annotations
 
 import copy
+import json
 from collections.abc import (
+    Mapping,
     Sequence,
 )
 from dataclasses import dataclass, field
@@ -20,6 +22,7 @@ import msgspec
 if TYPE_CHECKING:
     from lib.pipeline_db import (
         SaturationSummary,
+        SearchAcquisitionSummary,
         SearchLogHistoryPage,
     )
     from lib.quality import CandidateScore
@@ -57,6 +60,10 @@ from lib.pipeline_db.decisions import (
     saturation_summary_from_counts,
     search_backoff_minutes,
 )
+from lib.pipeline_db.download_log import (
+    GRAB_OUTCOMES,
+    IMPORT_ACCEPTANCE_OUTCOMES,
+)
 from lib.search_classification import (
     SearchSummary as _SearchSummary,
 )
@@ -71,8 +78,21 @@ from tests.fakes._shared import _as_datetime, _utcnow
 from tests.fakes.pipeline_db._base import _FakePipelineDBBase
 from tests.fakes.pipeline_db._shared import _jsonb_column
 from tests.fakes.rows import (
+    DownloadLogRow,
     SearchLogRow,
 )
+
+
+def _optional_str(value: object) -> str | None:
+    """A JSONB scalar as ``str | None`` — the fake's ``x::text`` cast."""
+    return None if value is None else str(value)
+
+
+def _optional_int(value: object) -> int | None:
+    """A JSONB scalar as ``int | None`` — the fake's ``(x)::int`` cast."""
+    if value is None or isinstance(value, bool):
+        return None
+    return int(value) if isinstance(value, (int, float)) else None
 
 
 @dataclass
@@ -126,6 +146,73 @@ class _FakeSearchPlanMixin(_FakePipelineDBBase):
         "created_at",
     )
 
+
+    def _stamp_download_state_search_log(
+        self,
+        row: dict[str, object],
+        *,
+        fingerprint: str | None,
+        search_log_id: int,
+    ) -> bool:
+        """Mirror the ``active_download_state.search_log_id`` stamp (#811).
+
+        Production's guarded UPDATE requires ``status='downloading'`` AND
+        ``active_download_state->>'attempt_fingerprint'`` equal to the
+        caller's fingerprint; anything else is a zero-write. The stored
+        shape is preserved (writer JSON string in, JSON string out) so a
+        later read projects exactly as it would have before.
+        """
+        if fingerprint is None:
+            return False
+        if row.get("status") != "downloading":
+            return False
+        state = self._decoded_download_state(row)
+        if state is None or state.get("attempt_fingerprint") != fingerprint:
+            return False
+        state["search_log_id"] = search_log_id
+        row["active_download_state"] = (
+            json.dumps(state)
+            if isinstance(row.get("active_download_state"), str)
+            else state
+        )
+        return True
+
+    def _newest_grab_for_search(
+        self, search_log_id: int,
+    ) -> DownloadLogRow | None:
+        """The newest ``download_log`` row linked to one search (#811).
+
+        Mirrors production's ``LEFT JOIN LATERAL ... ORDER BY dl.id DESC
+        LIMIT 1``: one grab can write several audit rows over its life,
+        and the freshest one is what the operator is asking about.
+        """
+        linked = [
+            entry for entry in self.download_logs
+            if entry.search_log_id == search_log_id
+        ]
+        if not linked:
+            return None
+        return max(linked, key=lambda entry: entry.id)
+
+    def _grab_columns_for_search(
+        self, search_log_id: int,
+    ) -> dict[str, object]:
+        """The ``grab_*`` aliases ``get_search_history_page`` adds (#811).
+
+        All-None when nothing is linked, matching the real LEFT JOIN's
+        NULL columns rather than dropping the keys.
+        """
+        grab = self._newest_grab_for_search(search_log_id)
+        return {
+            "grab_download_log_id": grab.id if grab is not None else None,
+            "grab_outcome": grab.outcome if grab is not None else None,
+            "grab_filetype": grab.filetype if grab is not None else None,
+            "grab_soulseek_username": (
+                grab.soulseek_username if grab is not None else None),
+            "grab_error_message": (
+                grab.error_message if grab is not None else None),
+            "grab_at": grab.created_at if grab is not None else None,
+        }
 
     @staticmethod
     def _search_log_to_dict(entry: SearchLogRow) -> dict[str, object]:
@@ -396,7 +483,9 @@ class _FakeSearchPlanMixin(_FakePipelineDBBase):
                 continue
             if before_id is not None and entry.id > before_id:
                 continue
-            rows.append(self._search_log_to_dict(entry))
+            row = self._search_log_to_dict(entry)
+            row.update(self._grab_columns_for_search(entry.id))
+            rows.append(row)
             if len(rows) >= int(limit) + 1:
                 break
         next_before_id: int | None = None
@@ -406,6 +495,196 @@ class _FakeSearchPlanMixin(_FakePipelineDBBase):
             assert isinstance(extra_id, int)
             next_before_id = extra_id
         return _Page(rows=rows, next_before_id=next_before_id)
+
+    # --- Acquisition summary (issue #811) ---------------------------
+
+    @staticmethod
+    def _candidate_sort_key(candidate: Mapping[str, object]) -> tuple[object, ...]:
+        """Mirror ``_BEST_CANDIDATE_ORDER`` (lib/pipeline_db/search_plan.py).
+
+        Same five keys in the same directions, with PostgreSQL's default
+        ASC-NULLS-LAST spelled as a leading ``value is None`` flag.
+        """
+        matched = candidate.get("matched_tracks")
+        matched_int = matched if isinstance(matched, int) else -1
+        ratio = candidate.get("avg_ratio")
+        ratio_f = (
+            float(ratio) if isinstance(ratio, (int, float))
+            and not isinstance(ratio, bool) else -1.0
+        )
+
+        def _text(key: str) -> tuple[bool, str]:
+            value = candidate.get(key)
+            return (value is None, str(value) if value is not None else "")
+
+        return (
+            -matched_int, -ratio_f,
+            _text("username"), _text("filetype"), _text("dir"),
+        )
+
+    def _scored_candidates_since(
+        self, request_id: int, since: datetime | None,
+    ) -> list[tuple[SearchLogRow, dict[str, object]]]:
+        """Every SCORED candidate this request's searches produced in the
+        window, paired with the search row that produced it.
+
+        Mirrors production's ``jsonb_array_elements`` unnest plus the
+        ``pre_filter_skip`` filter: a non-array/absent ``candidates``
+        column contributes nothing rather than raising.
+        """
+        out: list[tuple[SearchLogRow, dict[str, object]]] = []
+        for entry in self.search_logs:
+            if entry.request_id != request_id:
+                continue
+            if since is not None and entry.created_at <= since:
+                continue
+            decoded = _jsonb_column(entry.candidates)
+            if not isinstance(decoded, list):
+                continue
+            for candidate in decoded:
+                if not isinstance(candidate, dict):
+                    continue
+                if candidate.get("pre_filter_skip"):
+                    continue
+                out.append((entry, {str(k): v for k, v in candidate.items()}))
+        return out
+
+    def get_search_acquisition_summary(
+        self, request_id: int,
+    ) -> SearchAcquisitionSummary:
+        """Mirror of ``PipelineDB.get_search_acquisition_summary`` (#811).
+
+        Same window (strictly after the newest successful import), same
+        groupings, same total orderings — the SQL's aggregation replayed
+        over the in-memory tables.
+        """
+        from lib.pipeline_db import (
+            ACQUISITION_PEER_LIMIT,
+            ACQUISITION_SINCE_LAST_IMPORT,
+            ACQUISITION_SINCE_REQUEST_CREATED,
+            AcquisitionGrab,
+            AcquisitionGrabGroup,
+            AcquisitionLastFound,
+            AcquisitionPeer,
+            AcquisitionTierCount,
+        )
+        from lib.pipeline_db import SearchAcquisitionSummary as _Summary
+
+        imports = [
+            entry for entry in self.download_logs
+            if entry.request_id == request_id
+            and entry.outcome in IMPORT_ACCEPTANCE_OUTCOMES
+        ]
+        since = max((e.created_at for e in imports), default=None)
+        scored = self._scored_candidates_since(request_id, since)
+
+        tier_counts: dict[str, int] = {}
+        for _entry, candidate in scored:
+            tier = candidate.get("filetype")
+            if tier is None:
+                continue
+            tier_counts[str(tier)] = tier_counts.get(str(tier), 0) + 1
+        candidate_tiers = [
+            AcquisitionTierCount(tier=tier, count=count)
+            for tier, count in sorted(
+                tier_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        ]
+
+        grab_rows = [
+            entry for entry in self.download_logs
+            if entry.request_id == request_id
+            and entry.source == "slskd"
+            and entry.soulseek_username is not None
+            and entry.outcome in GRAB_OUTCOMES
+            and (since is None or entry.created_at > since)
+        ]
+        by_filetype: dict[str | None, list[DownloadLogRow]] = {}
+        for entry in grab_rows:
+            by_filetype.setdefault(entry.filetype, []).append(entry)
+        grabs = [
+            AcquisitionGrabGroup(
+                filetype=filetype,
+                count=len(rows),
+                last_at=max(r.created_at for r in rows),
+                last_outcome=max(rows, key=lambda r: r.id).outcome,
+            )
+            for filetype, rows in sorted(
+                by_filetype.items(),
+                key=lambda kv: (-len(kv[1]), kv[0] is None, kv[0] or ""),
+            )
+        ]
+
+        found_rows = [
+            entry for entry in self.search_logs
+            if entry.request_id == request_id
+            and entry.outcome == "found"
+            and (since is None or entry.created_at > since)
+        ]
+        last_found: AcquisitionLastFound | None = None
+        if found_rows:
+            newest = max(found_rows, key=lambda e: e.id)
+            best_candidates = sorted(
+                (c for e, c in scored if e.id == newest.id),
+                key=self._candidate_sort_key,
+            )
+            best = best_candidates[0] if best_candidates else {}
+            grab_row = self._newest_grab_for_search(newest.id)
+            last_found = AcquisitionLastFound(
+                search_log_id=newest.id,
+                at=newest.created_at,
+                strategy=newest.plan_strategy,
+                username=_optional_str(best.get("username")),
+                tier=_optional_str(best.get("filetype")),
+                matched_tracks=_optional_int(best.get("matched_tracks")),
+                total_tracks=_optional_int(best.get("total_tracks")),
+                grab=(
+                    AcquisitionGrab(
+                        download_log_id=grab_row.id,
+                        outcome=grab_row.outcome,
+                        error_message=grab_row.error_message,
+                        at=grab_row.created_at,
+                    )
+                    if grab_row is not None else None
+                ),
+            )
+
+        by_peer: dict[str, list[tuple[SearchLogRow, dict[str, object]]]] = {}
+        for entry, candidate in scored:
+            username = candidate.get("username")
+            if username is None:
+                continue
+            by_peer.setdefault(str(username), []).append((entry, candidate))
+        peers: list[AcquisitionPeer] = []
+        for username, pairs in sorted(
+            by_peer.items(), key=lambda kv: (-len(kv[1]), kv[0]),
+        )[:ACQUISITION_PEER_LIMIT]:
+            best_pair = min(
+                pairs, key=lambda pair: self._candidate_sort_key(pair[1]))
+            matched = [
+                _optional_int(c.get("matched_tracks")) for _e, c in pairs
+            ]
+            present = [m for m in matched if m is not None]
+            peers.append(AcquisitionPeer(
+                username=username,
+                tier=_optional_str(best_pair[1].get("filetype")),
+                total_tracks=_optional_int(best_pair[1].get("total_tracks")),
+                best_matched_tracks=max(present) if present else None,
+                attempts=len(pairs),
+                last_at=max(e.created_at for e, _c in pairs),
+            ))
+
+        return _Summary(
+            request_id=request_id,
+            since=since,
+            since_reason=(
+                ACQUISITION_SINCE_LAST_IMPORT if since is not None
+                else ACQUISITION_SINCE_REQUEST_CREATED),
+            candidate_tiers=candidate_tiers,
+            grabs=grabs,
+            grabs_total=sum(g.count for g in grabs),
+            last_found=last_found,
+            peers=peers,
+        )
 
     def get_saturation_summary(
         self, request_id: int, *, window_days: int = 14,
@@ -1090,6 +1369,16 @@ class _FakeSearchPlanMixin(_FakePipelineDBBase):
                 ),
             ))
 
+            # Issue #811: mirror the production stamp exactly — same
+            # guard (``downloading`` AND an exact ``attempt_fingerprint``
+            # match), same deliberate independence from staleness, same
+            # zero-write-not-an-error semantics on a miss.
+            download_state_stamped = self._stamp_download_state_search_log(
+                row,
+                fingerprint=attempt.grab_attempt_fingerprint,
+                search_log_id=log_id,
+            )
+
             now = _utcnow()
             if not is_stale:
                 row["next_plan_ordinal"] = new_next_ordinal
@@ -1145,6 +1434,7 @@ class _FakeSearchPlanMixin(_FakePipelineDBBase):
                 new_next_ordinal=new_next_ordinal,
                 new_cycle_count=new_cycle,
                 is_stale=is_stale,
+                download_state_stamped=download_state_stamped,
             )
         except Exception:
             # Roll back the partial mutation so test assertions can prove

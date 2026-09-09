@@ -2824,6 +2824,123 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
         self.assertIn("analysis-peer", fake.get_cooled_down_users())
 
 
+@requires_postgres
+class TestTerminalAuditCarriesSearchLogLink(unittest.TestCase):
+    """Issue #811 / test-fidelity Rule A: ``TerminalDownloadAudit.
+    search_log_id`` survives the PostgreSQL boundary at every terminal
+    INSERT.
+
+    The field is on the Struct, the fake stores it, and the SQL column
+    list is a separate hand-maintained list at each of the two writers —
+    exactly the drift shape Rule A exists for.
+    """
+
+    def _search_log_id(self, db: PipelineDB, request_id: int) -> int:
+        db.log_search(request_id, query="q", outcome="found")
+        newest = db.get_search_history(request_id)[0]["id"]
+        assert isinstance(newest, int)
+        return newest
+
+    def test_job_backed_terminal_audit_round_trips_the_link(self) -> None:
+        db, request_id, job_id = _seed_running_import()
+        self.addCleanup(db.close)
+        search_log_id = self._search_log_id(db, request_id)
+
+        result = db.persist_import_terminal_outcome(ImportTerminalOutcome(
+            request_id=request_id,
+            import_job_id=job_id,
+            initial_transition=transitions.RequestTransition.to_wanted(
+                attempt_type="validation",
+            ),
+            audit=TerminalDownloadAudit(
+                outcome="rejected",
+                soulseek_username="link-peer",
+                beets_detail="rejected after a linked grab",
+                search_log_id=search_log_id,
+            ),
+            job=ImportJobTerminal(
+                status="failed",
+                error="rejected",
+                result={"success": False},
+                message="rejected",
+            ),
+        ))
+
+        row = db.get_download_log_entry(result.download_log_id)
+        assert row is not None
+        self.assertEqual(row["search_log_id"], search_log_id)
+
+    def test_job_less_rejection_audit_round_trips_the_link(self) -> None:
+        db = make_db()
+        self.addCleanup(db.close)
+        request_id = db.add_request(
+            mb_release_id="jobless-rejection-link",
+            artist_name="A", album_title="B", source="request",
+        )
+        search_log_id = self._search_log_id(db, request_id)
+
+        result = db.persist_request_rejection_outcome(RequestRejectionOutcome(
+            request_id=request_id,
+            audit=TerminalDownloadAudit(
+                outcome="rejected",
+                soulseek_username="link-peer",
+                search_log_id=search_log_id,
+            ),
+            transition=transitions.RequestTransition.to_wanted_fields(
+                attempt_type="validation", fields={},
+            ),
+        ))
+
+        row = db.get_download_log_entry(result.download_log_id)
+        assert row is not None
+        self.assertEqual(row["search_log_id"], search_log_id)
+
+    def test_job_less_success_audit_round_trips_the_link(self) -> None:
+        db = make_db()
+        self.addCleanup(db.close)
+        request_id = db.add_request(
+            mb_release_id="jobless-success-link",
+            artist_name="A", album_title="B", source="request",
+        )
+        search_log_id = self._search_log_id(db, request_id)
+
+        result = db.persist_request_success_outcome(RequestSuccessOutcome(
+            request_id=request_id,
+            transition=transitions.RequestTransition.to_imported(
+                verified_lossless=False,
+            ),
+            audit=TerminalDownloadAudit(
+                outcome="success",
+                soulseek_username="link-peer",
+                search_log_id=search_log_id,
+            ),
+        ))
+
+        row = db.get_download_log_entry(result.download_log_id)
+        assert row is not None
+        self.assertEqual(row["search_log_id"], search_log_id)
+
+    def test_an_unlinked_terminal_audit_stays_null(self) -> None:
+        """The must-still-work control: no link supplied, no link written."""
+        db = make_db()
+        self.addCleanup(db.close)
+        request_id = db.add_request(
+            mb_release_id="jobless-unlinked",
+            artist_name="A", album_title="B", source="request",
+        )
+        result = db.persist_request_rejection_outcome(RequestRejectionOutcome(
+            request_id=request_id,
+            audit=TerminalDownloadAudit(
+                outcome="rejected", soulseek_username="link-peer"),
+            transition=transitions.RequestTransition.to_wanted_fields(
+                attempt_type="validation", fields={},
+            ),
+        ))
+        row = db.get_download_log_entry(result.download_log_id)
+        assert row is not None
+        self.assertIsNone(row["search_log_id"])
+
+
 class TestRequestRejectionOutcomeAtomicity(unittest.TestCase):
     """Real-PostgreSQL contract for the job-less rejection bundle (issue
     #1355 item 3): a job-less rejection's request transition, audit row,

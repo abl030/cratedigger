@@ -176,7 +176,7 @@ def album_request_row(raw: Mapping[str, object]) -> AlbumRequestRow:
 
 
 class DownloadLogRow(TypedDict):
-    """One ``SELECT * FROM download_log`` row (44 columns as of schema 071).
+    """One ``SELECT * FROM download_log`` row (45 columns as of schema 086).
 
     ``download_log`` doubles as the slskd audit trail AND the YouTube
     rescue queue (``source`` discriminates, migration 037), so only
@@ -239,6 +239,12 @@ class DownloadLogRow(TypedDict):
     # Migration 052 — exact validation/download row that produced a later
     # force-import or historical manual-import audit row (self-FK).
     source_download_log_id: int | None
+    # Migration 086 (issue #811) — the exact ``search_log`` row whose
+    # ``found`` outcome produced the grab this row audits. NULL on every
+    # row that is not a grab outcome (enqueue-time ``user_offline``,
+    # merge/delete audits, YouTube queue rows, force/local imports) and
+    # on every row written before the link existed.
+    search_log_id: int | None
 
 
 def download_log_row(raw: Mapping[str, object]) -> DownloadLogRow:

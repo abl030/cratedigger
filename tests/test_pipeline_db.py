@@ -76,9 +76,12 @@ from lib.pipeline_db.dashboard import (
 )
 from lib.pipeline_db.decisions import search_backoff_minutes
 from lib.pipeline_db.download_log import (
+    GRAB_OUTCOMES,
+    IMPORT_ACCEPTANCE_OUTCOMES,
     LINKED_IMPORT_OUTCOMES,
     LOG_FILTER_IMPORTED_OUTCOMES,
     LOG_FILTER_REJECTED_OUTCOMES,
+    WRITABLE_IMPORT_ACCEPTANCE_OUTCOMES,
 )
 from lib.pipeline_db.requests import (
     CAPTURE_DOWNLOAD_OUTCOMES,
@@ -110,6 +113,8 @@ from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
     REQUEST_CASCADE_RESET_TABLES,
     delete_all_rows,
+    make_download_file,
+    make_grab_list_entry,
     make_request_row,
 )
 
@@ -6434,6 +6439,407 @@ class TestGetSearchHistoryPage(unittest.TestCase):
             self.assertIn(col, row, f"missing column {col!r}")
 
 
+@requires_postgres
+class TestSearchToGrabLinkReads(unittest.TestCase):
+    """Issue #811: the reads that surface ``download_log.search_log_id``.
+
+    Covers ``log_download``'s own round trip (test-fidelity Rule A), the
+    history page's ``grab_*`` LEFT JOIN LATERAL, and the acquisition
+    summary over a world shaped like live request 986 — one successful
+    import, then a run of ``found`` searches each followed by a timeout
+    from the same peer.
+    """
+
+    def setUp(self):
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="grab-link-mbid",
+            artist_name="Dallas Crane", album_title="Twenty Four Seven",
+            source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def _search(self, outcome: str, candidates=None, **kwargs) -> int:
+        self.db.log_search(
+            self.req_id, query="q", outcome=outcome,
+            candidates=candidates, **kwargs)
+        newest = self.db.get_search_history(self.req_id)[0]["id"]
+        assert isinstance(newest, int)
+        return newest
+
+    def _stamp_download_log(self, ago: str) -> None:
+        """Age the newest ``download_log`` row by a fixed interval."""
+        self.db._execute(
+            f"UPDATE download_log SET created_at = NOW() - INTERVAL '{ago}' "
+            "WHERE id = (SELECT MAX(id) FROM download_log)")
+
+    def _stamp_search_log(self, ago: str) -> None:
+        """Age the newest ``search_log`` row by a fixed interval."""
+        self.db._execute(
+            f"UPDATE search_log SET created_at = NOW() - INTERVAL '{ago}' "
+            "WHERE id = (SELECT MAX(id) FROM search_log)")
+
+    def _candidate(self, **overrides):
+        from lib.quality import CandidateScore
+        base = {
+            "username": "anjingpaeh", "dir": "/music/album",
+            "filetype": "lossless", "matched_tracks": 11,
+            "total_tracks": 11, "avg_ratio": 0.98,
+            "missing_titles": [], "file_count": 11,
+        }
+        base.update(overrides)
+        return CandidateScore(**base)
+
+    def test_log_download_round_trips_the_search_log_link(self):
+        search_log_id = self._search("found")
+        log_id = self.db.log_download(
+            self.req_id, soulseek_username="anjingpaeh", filetype="flac",
+            outcome="timeout", search_log_id=search_log_id,
+        )
+        row = self.db.get_download_log_entry(log_id)
+        assert row is not None
+        self.assertEqual(row["search_log_id"], search_log_id)
+
+    def test_an_unlinked_download_log_row_keeps_a_null_link(self):
+        log_id = self.db.log_download(
+            self.req_id, soulseek_username="offline-peer",
+            outcome="user_offline",
+        )
+        row = self.db.get_download_log_entry(log_id)
+        assert row is not None
+        self.assertIsNone(row["search_log_id"])
+
+    def test_history_page_exposes_the_grab_for_a_linked_row(self):
+        linked = self._search("found")
+        log_id = self.db.log_download(
+            self.req_id, soulseek_username="anjingpaeh", filetype="flac",
+            outcome="timeout", error_message="remote queue timeout",
+            search_log_id=linked,
+        )
+        unlinked = self._search("no_match")
+
+        page = self.db.get_search_history_page(self.req_id, limit=10)
+        by_id = {row["id"]: row for row in page.rows}
+        self.assertEqual(by_id[linked]["grab_download_log_id"], log_id)
+        self.assertEqual(by_id[linked]["grab_outcome"], "timeout")
+        self.assertEqual(by_id[linked]["grab_filetype"], "flac")
+        self.assertEqual(
+            by_id[linked]["grab_soulseek_username"], "anjingpaeh")
+        self.assertEqual(
+            by_id[linked]["grab_error_message"], "remote queue timeout")
+        self.assertIsNotNone(by_id[linked]["grab_at"])
+        for column in ("grab_download_log_id", "grab_outcome",
+                       "grab_filetype", "grab_soulseek_username",
+                       "grab_error_message", "grab_at"):
+            self.assertIsNone(by_id[unlinked][column], column)
+
+    def test_history_page_reports_the_newest_row_of_a_multi_row_grab(self):
+        """One grab writes several audit rows; the freshest is the answer."""
+        linked = self._search("found")
+        self.db.log_download(
+            self.req_id, soulseek_username="anjingpaeh", filetype="flac",
+            outcome="timeout", search_log_id=linked)
+        newest = self.db.log_download(
+            self.req_id, soulseek_username="anjingpaeh", filetype="flac",
+            outcome="rejected", search_log_id=linked)
+        page = self.db.get_search_history_page(self.req_id, limit=10)
+        row = next(r for r in page.rows if r["id"] == linked)
+        self.assertEqual(row["grab_download_log_id"], newest)
+        self.assertEqual(row["grab_outcome"], "rejected")
+
+    def test_acquisition_summary_windows_on_the_last_successful_import(self):
+        # Pre-import history: a different peer, a different tier, a grab.
+        self._search("found", candidates=[self._candidate(
+            username="BigGray", filetype="mp3 320", matched_tracks=11)])
+        self.db.log_download(
+            self.req_id, soulseek_username="BigGray", filetype="mp3",
+            outcome="success")
+        self.db._execute(
+            "UPDATE download_log SET created_at = NOW() - INTERVAL '60 days' "
+            "WHERE id = (SELECT MAX(id) FROM download_log)")
+        self.db._execute(
+            "UPDATE search_log SET created_at = NOW() - INTERVAL '90 days' "
+            "WHERE request_id = %s", (self.req_id,))
+
+        # Post-import: three found searches, each followed by a timeout.
+        found_ids = []
+        for _ in range(3):
+            found_ids.append(self._search("found", candidates=[
+                self._candidate(),
+                self._candidate(
+                    username="second_peer", dir="/second/album",
+                    filetype="mp3 320", matched_tracks=7, avg_ratio=0.61),
+            ]))
+            self.db.log_download(
+                self.req_id, soulseek_username="anjingpaeh", filetype="flac",
+                outcome="timeout", error_message="remote queue timeout",
+                search_log_id=found_ids[-1])
+
+        summary = self.db.get_search_acquisition_summary(self.req_id)
+
+        self.assertEqual(summary.request_id, self.req_id)
+        self.assertIsNotNone(summary.since)
+        self.assertEqual(summary.since_reason, "last_import")
+        # The pre-import peer/tier are outside the window entirely.
+        self.assertEqual(
+            [(t.tier, t.count) for t in summary.candidate_tiers],
+            [("lossless", 3), ("mp3 320", 3)])
+        self.assertEqual(
+            [(g.filetype, g.count, g.last_outcome) for g in summary.grabs],
+            [("flac", 3, "timeout")])
+        self.assertEqual(summary.grabs_total, 3)
+        self.assertEqual(
+            [p.username for p in summary.peers],
+            ["anjingpaeh", "second_peer"])
+        self.assertEqual(summary.peers[0].best_matched_tracks, 11)
+        self.assertEqual(summary.peers[0].tier, "lossless")
+        self.assertEqual(summary.peers[0].attempts, 3)
+
+        assert summary.last_found is not None
+        self.assertEqual(summary.last_found.search_log_id, found_ids[-1])
+        self.assertEqual(summary.last_found.username, "anjingpaeh")
+        self.assertEqual(summary.last_found.tier, "lossless")
+        self.assertEqual(summary.last_found.matched_tracks, 11)
+        self.assertEqual(summary.last_found.total_tracks, 11)
+        assert summary.last_found.grab is not None
+        self.assertEqual(summary.last_found.grab.outcome, "timeout")
+        self.assertEqual(
+            summary.last_found.grab.error_message, "remote queue timeout")
+        # The grab this search actually produced, by id — not merely
+        # "some grab exists".
+        newest_grab = self.db.get_download_history(self.req_id)[0]
+        self.assertEqual(
+            summary.last_found.grab.download_log_id, newest_grab["id"])
+        self.assertIsNotNone(summary.last_found.grab.at)
+        self.assertIsNotNone(summary.last_found.at)
+        self.assertIsNotNone(summary.peers[0].last_at)
+        self.assertIsNotNone(summary.grabs[0].last_at)
+
+    def test_the_window_opens_at_a_force_import_not_only_a_success(self):
+        """Issue #811 review: acceptance is not spelled ``success`` only.
+
+        Force, local and manual imports write their own outcome labels
+        (``lib/dispatch/outcome_actions.py``'s ``outcome_label``), and a
+        ``success``-only window folded every pre-import search back into
+        the summary. Measured on the live DB 2026-09-09: 1,112 requests
+        whose ONLY acceptance is force/local/manual, plus 367 whose
+        newest acceptance is one of those over an older ``success``.
+        The world here is the second, harder shape — an older ``success``
+        the window must NOT reopen to.
+        """
+        # Ancient: an automation success, then a search under it.
+        self.db.log_download(
+            self.req_id, soulseek_username="BigGray", filetype="mp3",
+            outcome="success")
+        self._stamp_download_log("90 days")
+        self._search("found", candidates=[self._candidate(
+            username="ancient_peer", filetype="mp3 320")])
+        self._stamp_search_log("80 days")
+
+        # Newer: a force import, then the only searches that count.
+        self.db.log_download(
+            self.req_id, soulseek_username="operator", filetype="flac",
+            outcome="force_import")
+        self._stamp_download_log("30 days")
+        self._search("found", candidates=[self._candidate()])
+        self._stamp_search_log("10 days")
+
+        summary = self.db.get_search_acquisition_summary(self.req_id)
+        self.assertEqual(summary.since_reason, "last_import")
+        assert summary.since is not None
+        # The force import, not the older success.
+        newest = self.db.get_download_history(self.req_id)[0]
+        self.assertEqual(summary.since, newest["created_at"])
+        self.assertEqual(newest["outcome"], "force_import")
+        # Only the post-force-import search is in scope.
+        self.assertEqual(
+            [(t.tier, t.count) for t in summary.candidate_tiers],
+            [("lossless", 1)])
+        self.assertEqual(
+            [p.username for p in summary.peers], ["anjingpaeh"])
+
+    def test_last_found_reports_the_newest_row_of_a_multi_row_grab(self):
+        """One grab writes several audit rows; the freshest is the answer.
+
+        The identical LATERAL in ``get_search_history_page`` has its own
+        pin; this one is the acquisition summary's copy, whose only world
+        used to have a single linked row (issue #811 mutant runner, 1).
+        """
+        found = self._search("found", candidates=[self._candidate()])
+        self.db.log_download(
+            self.req_id, soulseek_username="anjingpaeh", filetype="flac",
+            outcome="timeout", search_log_id=found)
+        newest = self.db.log_download(
+            self.req_id, soulseek_username="anjingpaeh", filetype="flac",
+            outcome="rejected", search_log_id=found)
+
+        summary = self.db.get_search_acquisition_summary(self.req_id)
+        assert summary.last_found is not None
+        assert summary.last_found.grab is not None
+        self.assertEqual(summary.last_found.grab.download_log_id, newest)
+        self.assertEqual(summary.last_found.grab.outcome, "rejected")
+
+    def test_a_grab_group_reports_its_newest_outcome(self):
+        """``last_outcome`` is the freshest verdict for that filetype.
+
+        Every grab in the earlier worlds shared one outcome, so the
+        ordering inside ``ARRAY_AGG`` was unconstrained (mutant runner, 2).
+        """
+        self.db.log_download(
+            self.req_id, soulseek_username="anjingpaeh", filetype="flac",
+            outcome="timeout")
+        self.db.log_download(
+            self.req_id, soulseek_username="anjingpaeh", filetype="flac",
+            outcome="rejected")
+
+        summary = self.db.get_search_acquisition_summary(self.req_id)
+        self.assertEqual(
+            [(g.filetype, g.count, g.last_outcome) for g in summary.grabs],
+            [("flac", 2, "rejected")])
+
+    def test_a_youtube_row_is_not_a_slskd_grab(self):
+        """``source`` still gates the counter (mutant runner, 4).
+
+        A YouTube rescue's audit row can carry a username, so nothing but
+        the source discriminator keeps it out of the slskd grab tally.
+        """
+        self.db.log_download(
+            self.req_id, soulseek_username="anjingpaeh", filetype="flac",
+            outcome="timeout")
+        self.db.log_download(
+            self.req_id, soulseek_username="yt-uploader", filetype="opus",
+            outcome="rejected", source="youtube")
+
+        summary = self.db.get_search_acquisition_summary(self.req_id)
+        self.assertEqual(summary.grabs_total, 1)
+        self.assertEqual([g.filetype for g in summary.grabs], ["flac"])
+
+    def test_the_peer_roster_is_capped_and_ordered_by_attempts(self):
+        """Six peers in, five out, most-attempted first (mutant runner, 5)."""
+        # peer_0 scores in every search, peer_1 in all but one, and so on,
+        # so the attempts ordering is total and the cap has something to
+        # cut: peer_5 is the least-attempted and must be the one dropped.
+        for cut in range(6):
+            self._search("no_match", candidates=[
+                self._candidate(
+                    username=f"peer_{i}", dir=f"/peer_{i}/album",
+                    filetype="lossless", matched_tracks=11 - i)
+                for i in range(6) if i <= 5 - cut
+            ])
+
+        summary = self.db.get_search_acquisition_summary(self.req_id)
+        self.assertEqual(len(summary.peers), 5)
+        self.assertEqual(
+            [p.username for p in summary.peers],
+            ["peer_0", "peer_1", "peer_2", "peer_3", "peer_4"])
+        self.assertEqual(
+            [p.attempts for p in summary.peers], [6, 5, 4, 3, 2])
+
+    def test_only_grab_outcomes_count_as_grabs(self):
+        """Operator actions on this request are not downloads of it.
+
+        ``force_import`` (an operator re-import of a folder already on
+        disk) and ``curator_ban`` (a destructive action) both carry
+        ``source='slskd'`` and a username, so the old shape counted them.
+        """
+        self.db.log_download(
+            self.req_id, soulseek_username="anjingpaeh", filetype="flac",
+            outcome="timeout")
+        self.db.log_download(
+            self.req_id, soulseek_username="anjingpaeh", filetype="flac",
+            outcome="curator_ban")
+        self.db.log_download(
+            self.req_id, soulseek_username="operator", filetype="flac",
+            outcome="user_offline")
+
+        summary = self.db.get_search_acquisition_summary(self.req_id)
+        self.assertEqual(summary.grabs_total, 1)
+        self.assertEqual(
+            [(g.filetype, g.count, g.last_outcome) for g in summary.grabs],
+            [("flac", 1, "timeout")])
+
+    def test_a_found_search_with_no_linked_grab_reports_no_grab(self):
+        """``last_found.grab`` is None, not a stand-in, when nothing linked."""
+        self._search("found", candidates=[self._candidate()])
+        summary = self.db.get_search_acquisition_summary(self.req_id)
+        assert summary.last_found is not None
+        self.assertIsNone(summary.last_found.grab)
+
+    def test_last_found_and_peers_agree_on_the_best_candidate(self):
+        """The two queries spell the same five-key ordering; prove it holds.
+
+        ``last_found`` and ``peers`` each pick a "best" candidate with
+        their own copy of that ORDER BY (they are separate literal SQL
+        statements, deliberately — see the method docstring), so drift
+        between the two copies is exactly what this pins. The world is
+        chosen so a naive ``avg_ratio``-first ordering picks a DIFFERENT
+        peer, and so the winning peer also has a weaker second candidate
+        that a per-row ordering would pick instead.
+        """
+        self._search("found", candidates=[
+            # Highest ratio, fewest matched tracks: the decoy.
+            self._candidate(
+                username="ratio_peer", dir="/ratio/album",
+                filetype="mp3 320", matched_tracks=5, avg_ratio=0.99),
+            # Most matched tracks: the real best.
+            self._candidate(
+                username="matched_peer", dir="/matched/album",
+                filetype="lossless", matched_tracks=9, avg_ratio=0.40),
+            # Same peer, weaker candidate — must not become its tier.
+            self._candidate(
+                username="matched_peer", dir="/matched/lossy",
+                filetype="mp3 320", matched_tracks=3, avg_ratio=0.90),
+        ])
+        summary = self.db.get_search_acquisition_summary(self.req_id)
+
+        assert summary.last_found is not None
+        self.assertEqual(summary.last_found.username, "matched_peer")
+        self.assertEqual(summary.last_found.tier, "lossless")
+        self.assertEqual(summary.last_found.matched_tracks, 9)
+
+        winner = next(
+            p for p in summary.peers if p.username == "matched_peer")
+        self.assertEqual(winner.tier, summary.last_found.tier)
+        self.assertEqual(winner.best_matched_tracks, 9)
+        self.assertEqual(winner.attempts, 2)
+
+    def test_acquisition_summary_covers_all_history_without_an_import(self):
+        self._search("found", candidates=[self._candidate()])
+        summary = self.db.get_search_acquisition_summary(self.req_id)
+        self.assertIsNone(summary.since)
+        self.assertEqual(summary.since_reason, "request_created")
+        self.assertEqual(
+            [(t.tier, t.count) for t in summary.candidate_tiers],
+            [("lossless", 1)])
+
+    def test_acquisition_summary_ignores_pre_filter_skipped_candidates(self):
+        self._search("no_match", candidates=[
+            self._candidate(
+                username="noisy", dir="/noisy/album", filetype="mp3 320",
+                matched_tracks=0, avg_ratio=0.0, file_count=400,
+                pre_filter_skip=True),
+        ])
+        summary = self.db.get_search_acquisition_summary(self.req_id)
+        self.assertEqual(summary.candidate_tiers, [])
+        self.assertEqual(summary.peers, [])
+
+    def test_acquisition_summary_tolerates_a_null_candidates_column(self):
+        """Error rows write SQL NULL there; the unnest must not raise.
+
+        The guard's OTHER half — a non-array jsonb — has no world here on
+        purpose: no writer can produce one (measured live 2026-09-09,
+        zero non-array values), so it is fail-closed legislation for the
+        next writer rather than a reachable branch. See the method's own
+        docstring.
+        """
+        self._search("error")
+        summary = self.db.get_search_acquisition_summary(self.req_id)
+        self.assertEqual(summary.candidate_tiers, [])
+        self.assertIsNone(summary.last_found)
+
+
 class TestDashboardRowSerializers(unittest.TestCase):
     """Every dashboard row serializer maps each output key from the RIGHT
     input column.
@@ -7586,6 +7992,64 @@ class TestSharedOutcomeVocabularies(unittest.TestCase):
             if self._captured(suffix):
                 admitted.add(outcome)
         self.assertEqual(admitted, set(CAPTURE_DOWNLOAD_OUTCOMES))
+
+    def test_import_acceptance_outcomes_match_the_acquisition_window(self):
+        """Every acceptance outcome opens the window; nothing else does.
+
+        Driven against the WHOLE canonical taxonomy, so an outcome added
+        by a future migration is classified here rather than silently
+        left out of the window (issue #811 review).
+        """
+        admitted: set[str] = set()
+        for outcome in sorted(_ALL_DOWNLOAD_LOG_OUTCOMES):
+            request_id = self._request(f"acceptance-{outcome}")
+            self.db.log_download(request_id=request_id, outcome=outcome)
+            summary = self.db.get_search_acquisition_summary(request_id)
+            if summary.since is not None:
+                admitted.add(outcome)
+        self.assertEqual(admitted, set(IMPORT_ACCEPTANCE_OUTCOMES))
+
+    def test_grab_outcomes_match_the_acquisition_grab_counter(self):
+        """Only a real slskd transfer's verdicts count as a grab."""
+        admitted: set[str] = set()
+        for outcome in sorted(_ALL_DOWNLOAD_LOG_OUTCOMES):
+            request_id = self._request(f"grab-{outcome}")
+            self.db.log_download(
+                request_id=request_id, outcome=outcome,
+                soulseek_username="peer",
+            )
+            summary = self.db.get_search_acquisition_summary(request_id)
+            if summary.grabs_total:
+                admitted.add(outcome)
+        # An acceptance outcome is also its own window boundary, so it can
+        # never be inside its own window: subtract that overlap rather
+        # than pretending the counter rejects it.
+        self.assertEqual(
+            admitted,
+            set(GRAB_OUTCOMES) - set(IMPORT_ACCEPTANCE_OUTCOMES),
+        )
+
+    def test_the_writable_acceptance_set_is_the_historical_one_minus_manual(
+        self,
+    ):
+        """The refusal guard's set and the historical set stay bound.
+
+        ``lib/terminal_outcomes.py``'s successful-acceptance guard admits
+        only what a current writer can emit; the acquisition window asks
+        the historical question. Exactly one outcome separates them, and
+        it is the one migration 080 retired — if a future lane starts
+        writing ``manual_import``, or a new acceptance label appears in
+        only one of the two, this fails.
+        """
+        self.assertEqual(
+            set(IMPORT_ACCEPTANCE_OUTCOMES)
+            - set(WRITABLE_IMPORT_ACCEPTANCE_OUTCOMES),
+            {"manual_import"},
+        )
+        self.assertLess(
+            set(WRITABLE_IMPORT_ACCEPTANCE_OUTCOMES),
+            set(IMPORT_ACCEPTANCE_OUTCOMES),
+        )
 
     def test_capture_job_types_match_has_captured_history(self):
         admitted: set[str] = set()
@@ -14948,6 +15412,358 @@ class TestRecordConsumedSearchAttempt(unittest.TestCase):
                 req = self.db.get_request(self.req_id)
                 assert req is not None
                 self.assertEqual(req["failure_class"], fc)
+
+
+@requires_postgres
+class TestConsumedAttemptStampsDownloadState(unittest.TestCase):
+    """Issue #811: the search-to-grab link, written inside the search
+    transaction and guarded on the exact attempt it names.
+
+    The invariants, in the order the guard applies them:
+
+      * a stamp lands only on a row that is ``downloading`` with an
+        ``attempt_fingerprint`` equal to the caller's;
+      * a stamp writes ``search_log_id`` and nothing else;
+      * the ``search_log`` row is written whether or not the stamp lands.
+    """
+
+    FINGERPRINT = "abcd1234"
+
+    def setUp(self):
+        from lib.pipeline_db import ConsumedAttemptInput, SearchPlanItemInput
+        self.ConsumedAttemptInput = ConsumedAttemptInput
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id="stamp-mbid",
+            artist_name="A", album_title="B", source="request",
+        )
+        self.plan_id = self.db.create_successful_search_plan(
+            request_id=self.req_id,
+            generator_id="g1",
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="Q0",
+                canonical_query_key="q0")],
+        )
+        active = self.db.get_active_search_plan(self.req_id)
+        assert active is not None
+        self.active = active
+
+    def tearDown(self):
+        self.db.close()
+
+    def _state_json(self, fingerprint: str | None) -> str:
+        """A persisted download state through the production writer.
+
+        Built by ``build_active_download_state`` from a real
+        ``GrabListEntry``, not hand-spelled JSON, so the fingerprint the
+        guard compares is the one production would actually have written
+        (test-fidelity Rule C).
+        """
+        from lib.download import build_active_download_state
+        entry = make_grab_list_entry(
+            album_id=self.req_id,
+            files=[make_download_file(
+                filename="Music\\Album\\01.flac", username="peer")],
+        )
+        state = build_active_download_state(
+            entry, enqueued_at="2026-09-01T00:00:00+00:00")
+        return msgspec.structs.replace(
+            state, attempt_fingerprint=fingerprint).to_json()
+
+    def _claim(self, fingerprint: str | None) -> None:
+        assert self.db.set_downloading(
+            self.req_id, self._state_json(fingerprint),
+            expected_status="wanted",
+        )
+
+    def _attempt(self, **overrides: object):
+        base = self.ConsumedAttemptInput(
+            request_id=self.req_id,
+            plan_id=self.plan_id,
+            plan_item_id=self.active.items[0].id,
+            plan_ordinal=0,
+            plan_strategy="default",
+            plan_canonical_query_key="q0",
+            plan_repeat_group=None,
+            plan_generator_id="g1",
+            query="Q0",
+            outcome="found",
+            plan_item_count=1,
+            grab_attempt_fingerprint=self.FINGERPRINT,
+        )
+        return dataclasses.replace(base, **overrides)
+
+    def _state(self) -> dict[str, object]:
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        state = req["active_download_state"]
+        assert isinstance(state, dict)
+        return state
+
+    def test_matching_fingerprint_on_downloading_row_stamps_the_link(self):
+        self._claim(self.FINGERPRINT)
+        result = self.db.record_consumed_search_attempt(self._attempt())
+        self.assertTrue(result.download_state_stamped)
+        self.assertEqual(
+            self._state()["search_log_id"], result.search_log_id)
+
+    def test_mismatched_fingerprint_leaves_the_state_untouched(self):
+        self._claim("different")
+        before = self._state()
+        result = self.db.record_consumed_search_attempt(self._attempt())
+        self.assertFalse(result.download_state_stamped)
+        self.assertEqual(self._state(), before)
+        self.assertNotIn("search_log_id", self._state())
+
+    def test_a_row_that_never_claimed_is_never_stamped(self):
+        # Still ``wanted``, no state at all — nothing to stamp onto.
+        result = self.db.record_consumed_search_attempt(self._attempt())
+        self.assertFalse(result.download_state_stamped)
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertIsNone(req["active_download_state"])
+
+    def test_a_processing_row_is_never_stamped(self):
+        """The status guard's real production world (invariant 10).
+
+        ``processing`` RETAINS the download state, fingerprint and all —
+        the state is cleared last, by the terminal bundle — so a stale
+        search completing after the handoff meets a row whose fingerprint
+        matches. Only ``status='downloading'`` keeps the stamp out, and
+        it must: every mutation of an owned row is fenced by its exact
+        automation job, which this write is not.
+        """
+        self._claim(self.FINGERPRINT)
+        state = self._state()
+        handoff = self.db.handoff_automation_import(
+            request_id=self.req_id,
+            expected_enqueued_at=str(state["enqueued_at"]),
+            canonical_path="/processing/albums/stamp",
+            message="stamp guard fixture",
+        )
+        self.assertTrue(handoff.committed)
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["status"], "processing")
+        before = self._state()
+        self.assertEqual(before["attempt_fingerprint"], self.FINGERPRINT)
+
+        result = self.db.record_consumed_search_attempt(self._attempt())
+        self.assertFalse(result.download_state_stamped)
+        self.assertEqual(self._state(), before)
+
+    def test_attempt_without_a_fingerprint_never_stamps(self):
+        self._claim(self.FINGERPRINT)
+        before = self._state()
+        result = self.db.record_consumed_search_attempt(
+            self._attempt(grab_attempt_fingerprint=None))
+        self.assertFalse(result.download_state_stamped)
+        self.assertEqual(self._state(), before)
+
+    def test_the_search_row_is_written_in_every_case(self):
+        cases = [
+            ("matching", self.FINGERPRINT, self.FINGERPRINT),
+            ("mismatched", "different", self.FINGERPRINT),
+            ("no fingerprint supplied", self.FINGERPRINT, None),
+        ]
+        for label, claimed, supplied in cases:
+            with self.subTest(case=label):
+                db = make_db()
+                self.addCleanup(db.close)
+                req_id = db.add_request(
+                    mb_release_id=f"stamp-written-{label}",
+                    artist_name="A", album_title="B", source="request",
+                )
+                plan_id = db.create_successful_search_plan(
+                    request_id=req_id, generator_id="g1",
+                    items=[SearchPlanItemInput(
+                        ordinal=0, strategy="default", query="Q0")],
+                )
+                active = db.get_active_search_plan(req_id)
+                assert active is not None
+                from lib.download import build_active_download_state
+                entry = make_grab_list_entry(
+                    album_id=req_id,
+                    files=[make_download_file(
+                        filename="Music\\Album\\01.flac", username="peer")],
+                )
+                state = msgspec.structs.replace(
+                    build_active_download_state(
+                        entry, enqueued_at="2026-09-01T00:00:00+00:00"),
+                    attempt_fingerprint=claimed)
+                assert db.set_downloading(
+                    req_id, state.to_json(), expected_status="wanted")
+                result = db.record_consumed_search_attempt(
+                    self.ConsumedAttemptInput(
+                        request_id=req_id, plan_id=plan_id,
+                        plan_item_id=active.items[0].id, plan_ordinal=0,
+                        plan_strategy="default",
+                        plan_canonical_query_key=None,
+                        plan_repeat_group=None, plan_generator_id="g1",
+                        query="Q0", outcome="found", plan_item_count=1,
+                        grab_attempt_fingerprint=supplied,
+                    ))
+                rows = db.get_search_history(req_id)
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["id"], result.search_log_id)
+
+    def test_a_stale_completion_still_stamps_the_grab_it_produced(self):
+        """Cursor staleness is about the CURSOR, not about the grab.
+
+        The plan is regenerated mid-flight, so the completion is stale and
+        the cursor is left alone — but the download really did happen and
+        its state still names this attempt, so the link must land.
+        """
+        self._claim(self.FINGERPRINT)
+        self.db.supersede_search_plan_with_replacement(
+            request_id=self.req_id, generator_id="g2",
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="Qnew")],
+        )
+        result = self.db.record_consumed_search_attempt(self._attempt())
+        self.assertTrue(result.is_stale)
+        self.assertTrue(result.download_state_stamped)
+        self.assertEqual(
+            self._state()["search_log_id"], result.search_log_id)
+
+    def test_a_stamp_rewrites_no_other_state_field(self):
+        self._claim(self.FINGERPRINT)
+        before = self._state()
+        result = self.db.record_consumed_search_attempt(self._attempt())
+        self.assertTrue(result.download_state_stamped)
+        after = self._state()
+        self.assertEqual(
+            {k: v for k, v in after.items() if k != "search_log_id"},
+            before,
+        )
+
+
+@requires_postgres
+class TestConsumedAttemptStampParity(unittest.TestCase):
+    """The fake's stamp mirror answers what PostgreSQL answers (#811).
+
+    The generated lifecycle property patrols the FAKE's mirror; the eight
+    pins in ``TestConsumedAttemptStampsDownloadState`` patrol the real
+    UPDATE. Nothing bound the two, so a mirror that drifted would leave
+    the property patrolling a world production had left (issue #811
+    mutant runner, structural note).
+
+    One backend-agnostic world builder, three cells, both backends: the
+    guard's own three inputs (fingerprint match, mismatch, no claim).
+    """
+
+    #: ``(label, claimed fingerprint, supplied fingerprint, hand off?)``.
+    #: The fourth cell is the one that separates the guard's two halves:
+    #: ``processing`` RETAINS the state and its fingerprint, so only the
+    #: STATUS check can refuse it. Without it, widening either backend's
+    #: status guard survives — the other three cells are all decided by
+    #: the fingerprint half (measured: a fake-side status mutant survived
+    #: the first three-cell version of this pin).
+    WORLDS: ClassVar = (
+        ("matching fingerprint", "fp-alpha", "fp-alpha", False),
+        ("mismatched fingerprint", "fp-alpha", "fp-beta", False),
+        ("no claim at all", None, "fp-alpha", False),
+        ("handed off to processing", "fp-alpha", "fp-alpha", True),
+    )
+
+    @staticmethod
+    def _run_world(
+        db, *, claimed: str | None, supplied: str, mbid: str,
+        handoff: bool = False,
+    ):
+        """Seed and record through the REAL seams on whichever backend."""
+        from lib.download import build_active_download_state
+        from lib.pipeline_db import ConsumedAttemptInput
+
+        request_id = db.add_request(
+            "Parity Artist", "Stamp Album", "request", mb_release_id=mbid)
+        db.create_successful_search_plan(
+            request_id=request_id, generator_id="g-stamp",
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="Q0")],
+        )
+        active = db.get_active_search_plan(request_id)
+        assert active is not None
+        if claimed is not None:
+            entry = make_grab_list_entry(
+                album_id=request_id,
+                files=[make_download_file(
+                    filename="Music\\Album\\01.flac", username="peer")],
+            )
+            state = msgspec.structs.replace(
+                build_active_download_state(
+                    entry, enqueued_at="2026-09-01T00:00:00+00:00"),
+                attempt_fingerprint=claimed)
+            assert db.set_downloading(
+                request_id, state.to_json(), expected_status="wanted")
+            if handoff:
+                assert db.handoff_automation_import(
+                    request_id=request_id,
+                    expected_enqueued_at=state.enqueued_at,
+                    canonical_path=f"/processing/albums/{mbid}",
+                    message="stamp parity fixture",
+                ).committed
+        result = db.record_consumed_search_attempt(ConsumedAttemptInput(
+            request_id=request_id,
+            plan_id=active.plan.id,
+            plan_item_id=active.items[0].id,
+            plan_ordinal=0,
+            plan_strategy="default",
+            plan_canonical_query_key=None,
+            plan_repeat_group=None,
+            plan_generator_id="g-stamp",
+            query="Q0",
+            outcome="found",
+            plan_item_count=1,
+            grab_attempt_fingerprint=supplied,
+        ))
+        row = db.get_request(request_id)
+        assert row is not None
+        persisted = row["active_download_state"]
+        link = (
+            persisted.get("search_log_id")
+            if isinstance(persisted, dict) else None
+        )
+        return (
+            result.download_state_stamped,
+            # The ids themselves differ per backend (separate sequences),
+            # so compare the RELATIONSHIP the stamp asserts.
+            link == result.search_log_id,
+            link is None,
+        )
+
+    def test_both_backends_answer_the_same_for_every_guard_cell(self):
+        real = make_db()
+        self.addCleanup(real.close)
+        fake = FakePipelineDB()
+        for label, claimed, supplied, handoff in self.WORLDS:
+            with self.subTest(world=label):
+                mbid = f"stamp-parity-{label.replace(' ', '-')}"
+                self.assertEqual(
+                    self._run_world(
+                        real, claimed=claimed, supplied=supplied, mbid=mbid,
+                        handoff=handoff),
+                    self._run_world(
+                        fake, claimed=claimed, supplied=supplied, mbid=mbid,
+                        handoff=handoff),
+                )
+
+    def test_the_matching_world_is_the_only_one_that_stamps(self):
+        """Non-vacuity: the four cells are not all the same answer."""
+        real = make_db()
+        self.addCleanup(real.close)
+        answers = {
+            label: self._run_world(
+                real, claimed=claimed, supplied=supplied, handoff=handoff,
+                mbid=f"stamp-parity-live-{label.replace(' ', '-')}")[0]
+            for label, claimed, supplied, handoff in self.WORLDS
+        }
+        self.assertEqual(answers, {
+            "matching fingerprint": True,
+            "mismatched fingerprint": False,
+            "no claim at all": False,
+            "handed off to processing": False,
+        })
 
 
 @requires_postgres

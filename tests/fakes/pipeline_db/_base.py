@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from collections.abc import (
     Callable,
     Mapping,
@@ -478,6 +479,61 @@ class _FakePipelineDBBase:
             return None
         return self._evidence_by_id.get(evidence_id)
 
+
+    @staticmethod
+    def _decoded_download_state(
+        request: Mapping[str, object],
+    ) -> dict[str, object] | None:
+        """``album_requests.active_download_state`` as a plain dict.
+
+        Shared because two clusters read the same column: the transfer
+        ledger's fingerprint scope (#1196 item 1) and the search-plan
+        cluster's search-to-grab stamp (#811). The fake stores whatever
+        its writer handed over — ``set_downloading`` keeps the writer's
+        JSON string, a seeded fixture may inject an already-parsed dict —
+        so both shapes decode here. Anything else (SQL NULL, a non-object
+        jsonb, unparseable text) yields ``None``, matching a real
+        ``->>`` against a NULL or non-object column.
+        """
+        raw = request.get("active_download_state")
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (TypeError, ValueError):
+                return None
+        if not isinstance(raw, dict):
+            return None
+        return {str(k): v for k, v in raw.items()}
+
+    @classmethod
+    def _attempt_fingerprint_from_state(
+        cls,
+        request: Mapping[str, object],
+    ) -> str | None:
+        """Mirror ``active_download_state ->> 'attempt_fingerprint'``
+        (#1196 item 1) for the two shapes production ever writes: the
+        top-level state is SQL NULL (or a non-object value -- ``->>``
+        returns NULL for a NULL or non-object jsonb regardless of key,
+        matching ``None`` here), or the key is absent/JSON-null
+        (``->>`` also returns NULL, matching the ``dict.get`` miss
+        here). Does NOT distinguish a missing key from an explicit JSON
+        ``null`` -- ``->>`` does not either.
+
+        Known, deliberately UNRECONCILED divergence: if the
+        ``attempt_fingerprint`` JSON value were ever a non-string
+        scalar (a number, bool), real ``->>`` stringifies it (e.g.
+        ``42`` -> ``'42'``) rather than returning NULL, but this helper
+        returns ``None`` for that case. Unreachable in practice --
+        ``lib.download.build_active_download_state`` (the only
+        production writer) emits either a Python ``str`` or omits the
+        key entirely (``omit_defaults=True``), never a bare number or
+        bool -- so this divergence has no real-world state to exercise
+        it against."""
+        state = cls._decoded_download_state(request)
+        if state is None:
+            return None
+        value = state.get("attempt_fingerprint")
+        return value if isinstance(value, str) else None
 
     @staticmethod
     def _live_beets_child_refuses(lease: ExecutionLeaseSnapshot | None) -> bool:

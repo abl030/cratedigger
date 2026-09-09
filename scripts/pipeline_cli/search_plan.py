@@ -17,7 +17,11 @@ import msgspec
 from scripts.pipeline_cli._format import _json_default
 
 if TYPE_CHECKING:
-    from lib.pipeline_db import SearchPlanInspection, SearchPlanStats
+    from lib.pipeline_db import (
+        SearchAcquisitionSummary,
+        SearchPlanInspection,
+        SearchPlanStats,
+    )
     from lib.pipeline_db.rows import AlbumRequestRow
     from lib.search_plan_service import SearchPlanDB
 
@@ -50,6 +54,10 @@ class _SearchPlanShowDB(Protocol):
         prefetched_history: list[dict[str, Any]] | None = ...,
     ) -> SearchPlanStats: ...
 
+    def get_search_acquisition_summary(
+        self, request_id: int,
+    ) -> SearchAcquisitionSummary: ...
+
 
 # Search-plan exit codes come from the per-action tables in
 # ``lib.search_plan_service`` (SEARCH_PLAN_*_EXIT_CODES, derived from each
@@ -69,6 +77,7 @@ def cmd_search_plan_show(
     payload the web route emits, useful for scripting / future
     dashboard parity. Exit code 2 on missing request, 0 on found.
     """
+    from lib.config import read_runtime_config
     from lib.search_plan_inspection import (
         RequestNotFound,
         build_inspection_payload,
@@ -76,8 +85,13 @@ def cmd_search_plan_show(
     )
 
     include_stats = not getattr(args, "no_stats", False)
+    # Same runtime config the web route reads, so both surfaces report the
+    # same effective search scope (CLI ⇄ API symmetry).
+    cfg = read_runtime_config()
     payload = build_inspection_payload(
-        db, int(args.id), include_stats=include_stats)
+        db, int(args.id),
+        allowed_filetypes=cfg.allowed_filetypes,
+        include_stats=include_stats)
     if isinstance(payload, RequestNotFound):
         if getattr(args, "json", False):
             print(json.dumps({
@@ -508,8 +522,9 @@ def add_search_plan_subparser(
     sp_sub = p_sp.add_subparsers(dest="search_plan_command")
     p_sp_show = sp_sub.add_parser(
         "show",
-        help="Show active/failed plans, cursor, items, provenance, "
-             "legacy logs for one request")
+        help="Show the effective search scope, what has been acquired "
+             "since the last import, and the active/failed plans, cursor, "
+             "items, provenance and legacy logs for one request")
     p_sp_show.add_argument("id", type=int, help="Request ID")
     p_sp_show.add_argument("--json", action="store_true",
                             help="Print structured JSON instead of text")

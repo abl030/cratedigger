@@ -30,6 +30,7 @@ from lib.import_evidence import (
     classify_have_analysis_failure,
 )
 from lib.quality import (
+    ActiveDownloadState,
     DownloadInfo,
     QualityRankConfig,
     ValidationResult,
@@ -358,6 +359,7 @@ def _do_mark_done(
         final_format=dl_info.final_format,
         **_v0_probe_log_fields(dl_info),
         source_download_log_id=source_download_log_id,
+        search_log_id=dl_info.search_log_id,
     )
     if import_job_id is not None:
         return PendingImportTerminalOutcome(
@@ -515,6 +517,7 @@ def _record_rejection_and_maybe_requeue(
         import_result=dl_info.import_result,
         validation_result=validation_result,
         source_download_log_id=source_download_log_id,
+        search_log_id=dl_info.search_log_id,
         **_v0_probe_log_fields(dl_info),
     )
     if import_job_id is not None:
@@ -538,6 +541,42 @@ def _record_rejection_and_maybe_requeue(
         cooled_down_users=cooled_down_users,
         preserve_imported=preserve_imported,
     )
+
+
+def _automation_grab_search_link(
+    db: DispatchDB, request_id: int,
+) -> int | None:
+    """The search link of the grab an automation preview measured (#811).
+
+    Under invariant 10 the owner's ``active_download_state`` is still
+    attached for the whole ``processing`` lifetime — the terminal bundle
+    clears it LAST — so the ``search_log_id`` the search stamped is
+    readable here, even though this function's own arguments carry no
+    ``DownloadInfo``.
+
+    Scoped to the automation lane by its one caller. The force and local
+    lanes have no live grab state (their source is a folder already on
+    disk), and ``scripts/import_preview_worker.py``'s KTD1 forbids the
+    YouTube path from reading this column at all — calling this only
+    under ``automation_terminal_authority`` keeps every one of them on
+    exactly the behaviour they had.
+
+    Fail-soft by construction: enriching an audit row must never turn a
+    measurement failure into a crash, so any read problem yields None and
+    the row keeps the NULL it would have had.
+    """
+    try:
+        row = db.get_request(request_id)
+        raw = row.get("active_download_state") if row else None
+        if raw is None:
+            return None
+        return ActiveDownloadState.from_raw(raw).search_log_id
+    except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
+        logger.debug(
+            "Failed to read the search link for request %s while recording "
+            "a preview measurement failure", request_id,
+        )
+        return None
 
 
 def _record_preview_measurement_failed(
@@ -618,6 +657,13 @@ def _record_preview_measurement_failed(
             import_result=(
                 import_result.to_json() if import_result is not None else None
             ),
+            # Issue #811: this function holds no ``DownloadInfo``, but an
+            # automation preview failure IS a grab outcome, and the
+            # grab's own state is still attached to the owned request.
+            search_log_id=(
+                _automation_grab_search_link(db, request_id)
+                if automation_terminal_authority is not None else None
+            ),
         ),
         preview_status="measurement_failed",
         preview_result=preview_result or job_result,
@@ -678,6 +724,7 @@ def _record_have_analysis_error(
         error_message=raw_error,
         validation_result=validation_json,
         source_download_log_id=request.candidate_download_log_id,
+        search_log_id=dl_info.search_log_id,
     )
     transition = (
         transitions.RequestTransition.to_wanted_fields(

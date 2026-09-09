@@ -4719,6 +4719,235 @@ class TestCmdSearchPlanShow(unittest.TestCase):
         self.assertTrue(
             payload["currentness"]["current_generator_searchable"])
 
+    def test_search_plan_show_renders_the_effective_search_scope(self):
+        """Issue #811: the operator's "is lossless in force?" question.
+
+        Every rendered line is asserted, not just the headline: an
+        unasserted value renders whatever the code happens to compute,
+        which is exactly what a catalog mutant walks in through.
+        """
+        db, rid = self._seed_request()
+        self._create_active_plan(db, rid)
+        db.update_request_fields(
+            rid, search_filetype_override="lossless,mp3 v0",
+            target_format="flac", min_bitrate=320)
+        rc, out = self._run(db, rid)
+        self.assertEqual(rc, 0)
+        self.assertIn("Search scope:", out)
+        self.assertIn("quality override:  lossless,mp3 v0", out)
+        self.assertIn("target_format:     flac", out)
+        self.assertIn("min_bitrate:       320", out)
+        self.assertIn("decided by:        override", out)
+        self.assertIn("tiers searched:    lossless, mp3 v0", out)
+        self.assertIn("catch-all:         no", out)
+        self.assertIn("configured tiers:  flac, mp3", out)
+
+    def test_search_plan_show_renders_the_default_search_scope(self):
+        """The must-still-work control: no override anywhere.
+
+        The config's own tiers decide, catch-all is on, and the two
+        absent fields render their placeholders rather than ``None``.
+        """
+        db, rid = self._seed_request()
+        self._create_active_plan(db, rid)
+        rc, out = self._run(db, rid)
+        self.assertEqual(rc, 0)
+        self.assertIn("quality override:  (none)", out)
+        self.assertIn("target_format:     -", out)
+        self.assertIn("min_bitrate:       n/a", out)
+        self.assertIn("decided by:        config", out)
+        self.assertIn("tiers searched:    flac, mp3", out)
+        self.assertIn("catch-all:         yes", out)
+
+    def test_search_plan_show_renders_target_format_scope(self):
+        """The middle rung of the precedence ladder."""
+        db, rid = self._seed_request()
+        self._create_active_plan(db, rid)
+        db.update_request_fields(rid, target_format="lossless")
+        rc, out = self._run(db, rid)
+        self.assertEqual(rc, 0)
+        self.assertIn("decided by:        target_format", out)
+        self.assertIn("tiers searched:    lossless", out)
+        self.assertIn("catch-all:         no", out)
+
+    def test_search_plan_show_renders_an_empty_acquisition_window(self):
+        """No searches yet: every acquisition block says so explicitly."""
+        db, rid = self._seed_request()
+        self._create_active_plan(db, rid)
+        rc, out = self._run(db, rid)
+        self.assertEqual(rc, 0)
+        self.assertIn("since:             -  (request_created)", out)
+        self.assertIn("candidate tiers:   (none scored)", out)
+        self.assertIn("outside scope:     0", out)
+        self.assertIn("grabs:             0 total", out)
+        self.assertIn("last found:        (none in window)", out)
+        self.assertIn("peers:             (none scored)", out)
+
+    def test_search_plan_show_reports_a_found_search_with_no_linked_grab(self):
+        """A ``found`` search whose enqueue produced no audit row yet."""
+        from lib.quality import CandidateScore
+        db, rid = self._seed_request()
+        self._create_active_plan(db, rid)
+        db.log_search(
+            request_id=rid, query="q", outcome="found",
+            candidates=[CandidateScore(
+                username="peer", dir="/a/b", filetype="lossless",
+                matched_tracks=9, total_tracks=11, avg_ratio=0.9,
+                missing_titles=["Two"], file_count=9)],
+        )
+        rc, out = self._run(db, rid)
+        self.assertEqual(rc, 0)
+        self.assertIn("grab: (no linked download_log row)", out)
+        self.assertIn("peer=peer  tier=lossless  matched=9/11", out)
+
+    #: Fixed instants so every rendered timestamp is asserted by VALUE.
+    #: A rendered clock nobody pins renders whatever it happens to hold.
+    IMPORTED_AT = datetime(2026, 8, 1, 9, 0, tzinfo=UTC)
+    SEARCHED_AT = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
+    GRABBED_AT = datetime(2026, 9, 1, 10, 5, tzinfo=UTC)
+
+    def _seed_acquisition_world(self, db, rid) -> int:
+        """A prior import, then one found search and the grab it produced."""
+        from lib.quality import CandidateScore
+
+        db.log_download(
+            rid, soulseek_username="BigGray", filetype="mp3",
+            outcome="success")
+        db.download_logs[-1].created_at = self.IMPORTED_AT
+        db.log_search(
+            request_id=rid, query="q", outcome="found",
+            candidates=[
+                CandidateScore(
+                    username="anjingpaeh", dir="/a/b", filetype="lossless",
+                    matched_tracks=11, total_tracks=11, avg_ratio=0.97,
+                    missing_titles=[], file_count=11),
+                CandidateScore(
+                    username="second_peer", dir="/c/d", filetype="mp3 320",
+                    matched_tracks=7, total_tracks=11, avg_ratio=0.61,
+                    missing_titles=["Two"], file_count=8),
+            ],
+        )
+        db.search_logs[-1].created_at = self.SEARCHED_AT
+        # ``log_search`` writes no plan context; the executor's own seam
+        # (``record_consumed_search_attempt``) does, and ``strategy`` is
+        # rendered from it, so stamp a real one rather than pinning the
+        # placeholder a missing key would also produce.
+        db.search_logs[-1].plan_strategy = "album_year"
+        search_log_id = db.get_search_history(rid)[0]["id"]
+        assert isinstance(search_log_id, int)
+        db.log_download(
+            rid, soulseek_username="anjingpaeh", filetype="flac",
+            outcome="timeout", error_message="remote queue timeout",
+            search_log_id=search_log_id)
+        db.download_logs[-1].created_at = self.GRABBED_AT
+        return search_log_id
+
+    def test_search_plan_show_renders_acquisition_since_the_last_import(self):
+        db, rid = self._seed_request()
+        self._create_active_plan(db, rid)
+        search_log_id = self._seed_acquisition_world(db, rid)
+
+        rc, out = self._run(db, rid)
+        self.assertEqual(rc, 0)
+        self.assertIn("Acquisition:", out)
+        self.assertIn(
+            f"since:             {self.IMPORTED_AT.isoformat()}"
+            f"  (last_import)", out)
+        # Two tiers, so the separator between them is asserted too.
+        self.assertIn(
+            "candidate tiers:   lossless=1 mp3 320=1", out)
+        # No override on this request, so the config's own flac/mp3
+        # ladder is the scope and BOTH candidates fall outside it.
+        self.assertIn("outside scope:     2", out)
+        self.assertIn("grabs:             1 total", out)
+        self.assertIn(
+            f"flac  x1  last={self.GRABBED_AT.isoformat()}  (timeout)", out)
+        self.assertIn(
+            f"last found:        search_log_id={search_log_id}"
+            f"  at={self.SEARCHED_AT.isoformat()}"
+            f"  strategy=album_year", out)
+        self.assertIn("peer=anjingpaeh  tier=lossless  matched=11/11", out)
+        self.assertIn(
+            f"grab: download_log_id={db.download_logs[-1].id}"
+            f"  outcome=timeout  at={self.GRABBED_AT.isoformat()}", out)
+        self.assertIn("error: remote queue timeout", out)
+        self.assertIn("peers (2, by attempts):", out)
+        self.assertIn(
+            f"anjingpaeh  tier=lossless  best=11/11  attempts=1"
+            f"  last={self.SEARCHED_AT.isoformat()}", out)
+        self.assertIn(
+            f"second_peer  tier=mp3 320  best=7/11  attempts=1"
+            f"  last={self.SEARCHED_AT.isoformat()}", out)
+
+    def test_search_plan_show_renders_placeholders_for_absent_facts(self):
+        """Every ``or '-'`` branch, with the values production can omit.
+
+        A grab whose files never resolved an extension leaves
+        ``download_log.filetype`` NULL; a ``found`` search whose every
+        candidate was pre-filter-skipped leaves no scored candidate for
+        the best-peer facts. Both render placeholders, and a placeholder
+        nothing asserts is a placeholder that can quietly become wrong.
+        """
+        from lib.quality import CandidateScore
+        db, rid = self._seed_request()
+        self._create_active_plan(db, rid)
+        db.log_search(
+            request_id=rid, query="q", outcome="found",
+            candidates=[CandidateScore(
+                username="noisy", dir="/noisy/album", filetype="mp3 320",
+                matched_tracks=0, total_tracks=11, avg_ratio=0.0,
+                missing_titles=[], file_count=400, pre_filter_skip=True)],
+        )
+        search_log_id = db.get_search_history(rid)[0]["id"]
+        assert isinstance(search_log_id, int)
+        db.log_download(
+            rid, soulseek_username="peer", filetype=None,
+            outcome="timeout", search_log_id=search_log_id)
+
+        rc, out = self._run(db, rid)
+        self.assertEqual(rc, 0)
+        self.assertIn("      -  x1  last=", out)
+        self.assertIn("  strategy=-", out)
+        self.assertIn("peer=-  tier=-  matched=None/None", out)
+        self.assertIn("candidate tiers:   (none scored)", out)
+        self.assertIn("peers:             (none scored)", out)
+
+    def test_search_plan_show_json_acquisition_matches_the_rendered_text(self):
+        """The two surfaces read the same summary; pin the JSON values."""
+        db, rid = self._seed_request()
+        self._create_active_plan(db, rid)
+        search_log_id = self._seed_acquisition_world(db, rid)
+        rc, out = self._run(db, rid, json_out=True)
+        self.assertEqual(rc, 0)
+        acq = json.loads(out)["acquisition"]
+        self.assertEqual(acq["since"], self.IMPORTED_AT.isoformat())
+        self.assertEqual(acq["since_reason"], "last_import")
+        self.assertEqual(acq["last_found"]["search_log_id"], search_log_id)
+        self.assertEqual(
+            acq["last_found"]["at"], self.SEARCHED_AT.isoformat())
+        self.assertEqual(
+            acq["last_found"]["grab"]["at"], self.GRABBED_AT.isoformat())
+        self.assertEqual(
+            acq["grabs"][0]["last_at"], self.GRABBED_AT.isoformat())
+        self.assertEqual(
+            acq["peers"][0]["last_at"], self.SEARCHED_AT.isoformat())
+
+    def test_search_plan_show_json_carries_scope_and_acquisition(self):
+        db, rid = self._seed_request()
+        self._create_active_plan(db, rid)
+        db.update_request_fields(rid, search_filetype_override="lossless")
+        rc, out = self._run(db, rid, json_out=True)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        self.assertEqual(payload["search_scope"]["tiers"], ["lossless"])
+        self.assertEqual(payload["search_scope"]["source"], "override")
+        self.assertFalse(payload["search_scope"]["catch_all"])
+        self.assertEqual(
+            payload["request"]["search_filetype_override"], "lossless")
+        self.assertEqual(
+            payload["acquisition"]["since_reason"], "request_created")
+        self.assertEqual(payload["acquisition"]["grabs_total"], 0)
+
     def test_search_plan_show_human_marks_failures_and_retryable(self):
         db, rid = self._seed_request()
         # No active plan; one deterministic and one transient failure.

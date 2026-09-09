@@ -14,6 +14,9 @@ from lib.import_queue import (
 )
 from lib.pipeline_db._core import _PipelineDBBase
 from lib.pipeline_db._shared import (
+    ACQUISITION_PEER_LIMIT,
+    ACQUISITION_SINCE_LAST_IMPORT,
+    ACQUISITION_SINCE_REQUEST_CREATED,
     CURSOR_UPDATE_UNCHANGED,
     CURSOR_UPDATE_WRAPPED,
     PLAN_STATUS_ACTIVE,
@@ -21,6 +24,11 @@ from lib.pipeline_db._shared import (
     PLAN_STATUS_FAILED_TRANSIENT,
     PLAN_STATUS_SUPERSEDED,
     SEARCH_LOG_STAGE_PRE_ATTEMPT,
+    AcquisitionGrab,
+    AcquisitionGrabGroup,
+    AcquisitionLastFound,
+    AcquisitionPeer,
+    AcquisitionTierCount,
     ActiveSearchPlan,
     ConsumedAttemptInput,
     ConsumedAttemptResult,
@@ -28,6 +36,7 @@ from lib.pipeline_db._shared import (
     NonConsumingAttemptInput,
     ReplacedRequestMutationError,
     SaturationSummary,
+    SearchAcquisitionSummary,
     SearchLogHistoryPage,
     SearchPlanInspection,
     SearchPlanItemInput,
@@ -49,6 +58,10 @@ from lib.pipeline_db.decisions import (
     cursor_advance_decision,
     saturation_summary_from_counts,
     search_backoff_minutes,
+)
+from lib.pipeline_db.download_log import (
+    GRAB_OUTCOMES,
+    IMPORT_ACCEPTANCE_OUTCOMES,
 )
 from lib.search_classification import (
     SearchSummary as _SearchSummary,
@@ -304,6 +317,15 @@ class _SearchPlanMixin(_PipelineDBBase):
         ``limit`` is unconditionally cast to ``int`` and not range-checked
         here; callers (the route handler / CLI subcommand) own the
         ``[1, 200]`` clamp so the DB layer stays a thin SQL adapter.
+
+        Issue #811: every row also carries the grab that search produced,
+        via ``download_log.search_log_id`` (migration 086) — the NEWEST
+        linked row, since one grab can write several audit rows over its
+        life (a timeout, then a later terminal outcome). ``grab_*`` is
+        all-NULL on a search that never enqueued, on one whose stamp
+        never landed, and on every row from before the link existed. The
+        ``search_log`` columns stay a plain ``SELECT *`` so a future
+        forensic column reaches this page with no change here.
         """
         # +1 row to detect "more remains" without a second COUNT(*) round-trip.
         sql_limit = int(limit) + 1
@@ -311,10 +333,25 @@ class _SearchPlanMixin(_PipelineDBBase):
         # without being dropped on the next page. The strict-less option
         # would skip one row per boundary.
         cur = self._execute("""
-            SELECT * FROM search_log
-            WHERE request_id = %s
-              AND (%s::int IS NULL OR id <= %s)
-            ORDER BY id DESC
+            SELECT sl.*,
+                   grab.id AS grab_download_log_id,
+                   grab.outcome AS grab_outcome,
+                   grab.filetype AS grab_filetype,
+                   grab.soulseek_username AS grab_soulseek_username,
+                   grab.error_message AS grab_error_message,
+                   grab.created_at AS grab_at
+            FROM search_log sl
+            LEFT JOIN LATERAL (
+                SELECT dl.id, dl.outcome, dl.filetype,
+                       dl.soulseek_username, dl.error_message, dl.created_at
+                FROM download_log dl
+                WHERE dl.search_log_id = sl.id
+                ORDER BY dl.id DESC
+                LIMIT 1
+            ) grab ON TRUE
+            WHERE sl.request_id = %s
+              AND (%s::int IS NULL OR sl.id <= %s)
+            ORDER BY sl.id DESC
             LIMIT %s
         """, (request_id, before_id, before_id, sql_limit))
         rows = [dict(r) for r in cur.fetchall()]
@@ -326,6 +363,283 @@ class _SearchPlanMixin(_PipelineDBBase):
             next_before_id = extra_id
         return SearchLogHistoryPage(
             rows=rows, next_before_id=next_before_id,
+        )
+
+
+    def get_search_acquisition_summary(
+        self, request_id: int,
+    ) -> SearchAcquisitionSummary:
+        """What the search has found for one request, and what came of it.
+
+        The window opens at this request's newest ACCEPTANCE — any
+        ``IMPORT_ACCEPTANCE_OUTCOMES`` row, not just ``success`` — so an
+        upgrade request's summary describes the hunt for the NEXT copy,
+        not the peers that supplied the one already on disk. A
+        force/local/manual import is every bit as much "we got a copy"
+        as an automation success, and scoping to ``success`` alone
+        reported "all history" for 1,112 live requests whose only
+        acceptance is one of those (issue #811 review, measured
+        2026-09-09). With no acceptance at all the window is the
+        request's whole history.
+
+        ``grabs`` counts only ``GRAB_OUTCOMES`` — verdicts an actual
+        slskd transfer can reach. The narrower shape matters for the
+        same reason: a ``force_import`` row is an operator re-importing a
+        folder already on disk, and counting it as a grab would tell the
+        operator the pipeline downloaded something it never fetched.
+
+        Aggregation is SQL's: ``search_log.candidates`` is unnested with
+        ``jsonb_array_elements`` so a request with hundreds of scored
+        peers never materialises that JSONB in Python. The caller shapes
+        the result and decides what falls outside the configured search
+        scope — that needs the config this layer does not have.
+
+        Three recurring SQL shapes are written out in full in each query
+        below rather than shared through Python interpolation, because
+        composed SQL fails the replaced-write audit closed (it cannot
+        prove an interpolated statement does not reach ``album_requests``)
+        and a registered exception is a weaker guarantee than a literal:
+
+        * ``jsonb_array_elements(CASE WHEN jsonb_typeof(x.candidates) =
+          'array' THEN x.candidates END)`` — the unnest. Its NULL half is
+          load-bearing: ``candidates`` is SQL NULL on pre-attempt/error
+          rows (649 live rows), and a strict function over NULL
+          contributes zero rows rather than raising (verified against the
+          ephemeral PG). Its non-array half is fail-closed LEGISLATION,
+          not a live path — ``jsonb_array_elements`` errors on a non-array
+          jsonb, and the only writer,
+          ``msgspec.json.encode(list[CandidateScore])``, cannot produce
+          one: measured on the live corpus 2026-09-09, ``candidates`` is
+          ``array`` on 498,528 rows and NULL on 649, with zero non-array
+          values across 1,391,812 elements. It stays because the column is
+          plain jsonb and the next writer is not bound by that encoder.
+          The guard belongs in the function's own argument rather than in
+          a WHERE clause: a qual at the join level filters rows the
+          function has already been asked to produce, and in the
+          ``last_found`` query's LEFT JOIN LATERAL it could not reach the
+          input at all. With no ELSE the CASE yields NULL, so either
+          shape contributes zero elements.
+        * ``COALESCE((c->>'pre_filter_skip')::boolean, FALSE) = FALSE`` —
+          scored candidates only. The pre-filter's sampled rows record
+          peers the walk never browsed, so they are not evidence about a
+          tier or a peer.
+        * The five-key best-candidate ORDER BY. The last three keys are
+          what make it a TOTAL order — ``CandidateScore`` is one record
+          per ``(username, dir, filetype)``, so no two candidates tie on
+          all five — and ``last_found`` and ``peers`` must agree on which
+          candidate is "best", which
+          ``TestSearchToGrabLinkReads::test_last_found_and_peers_agree_on
+          _the_best_candidate`` pins behaviourally.
+        """
+        since_cur = self._execute(
+            """
+            SELECT MAX(created_at) AS since
+            FROM download_log
+            WHERE request_id = %s AND outcome = ANY(%s)
+            """,
+            (request_id, list(IMPORT_ACCEPTANCE_OUTCOMES)),
+        )
+        since_row = since_cur.fetchone()
+        since = since_row["since"] if since_row is not None else None
+        window = (since, since)
+
+        tiers_cur = self._execute(
+            """
+            SELECT c->>'filetype' AS tier, COUNT(*)::int AS n
+            FROM search_log sl
+            CROSS JOIN LATERAL jsonb_array_elements(
+                CASE WHEN jsonb_typeof(sl.candidates) = 'array'
+                     THEN sl.candidates END) AS c
+            WHERE sl.request_id = %s
+              AND (%s::timestamptz IS NULL OR sl.created_at > %s)
+              AND COALESCE((c->>'pre_filter_skip')::boolean, FALSE) = FALSE
+              AND c->>'filetype' IS NOT NULL
+            GROUP BY 1
+            ORDER BY n DESC, tier ASC
+            """,
+            (request_id, *window),
+        )
+        candidate_tiers = [
+            AcquisitionTierCount(tier=str(r["tier"]), count=int(r["n"]))
+            for r in tiers_cur.fetchall()
+        ]
+
+        grabs_cur = self._execute(
+            """
+            SELECT filetype,
+                   COUNT(*)::int AS n,
+                   MAX(created_at) AS last_at,
+                   (ARRAY_AGG(outcome ORDER BY id DESC))[1] AS last_outcome
+            FROM download_log
+            WHERE request_id = %s
+              AND source = 'slskd'
+              AND soulseek_username IS NOT NULL
+              AND outcome = ANY(%s)
+              AND (%s::timestamptz IS NULL OR created_at > %s)
+            GROUP BY filetype
+            ORDER BY n DESC, filetype ASC NULLS LAST
+            """,
+            (request_id, list(GRAB_OUTCOMES), *window),
+        )
+        grabs = [
+            AcquisitionGrabGroup(
+                filetype=(
+                    str(r["filetype"]) if r["filetype"] is not None else None),
+                count=int(r["n"]),
+                last_at=r["last_at"],
+                last_outcome=(
+                    str(r["last_outcome"])
+                    if r["last_outcome"] is not None else None),
+            )
+            for r in grabs_cur.fetchall()
+        ]
+
+        found_cur = self._execute(
+            """
+            WITH found AS (
+                SELECT sl.id, sl.created_at, sl.plan_strategy, sl.candidates
+                FROM search_log sl
+                WHERE sl.request_id = %s
+                  AND sl.outcome = 'found'
+                  AND (%s::timestamptz IS NULL OR sl.created_at > %s)
+                ORDER BY sl.id DESC
+                LIMIT 1
+            )
+            SELECT f.id AS search_log_id,
+                   f.created_at AS at,
+                   f.plan_strategy AS strategy,
+                   best.username,
+                   best.tier,
+                   best.matched_tracks,
+                   best.total_tracks,
+                   grab.id AS grab_download_log_id,
+                   grab.outcome AS grab_outcome,
+                   grab.error_message AS grab_error_message,
+                   grab.created_at AS grab_at
+            FROM found f
+            LEFT JOIN LATERAL (
+                SELECT c->>'username' AS username,
+                       c->>'filetype' AS tier,
+                       (c->>'matched_tracks')::int AS matched_tracks,
+                       (c->>'total_tracks')::int AS total_tracks
+                -- LATERAL, so it reads ``f``'s own column directly.
+                FROM jsonb_array_elements(
+                    CASE WHEN jsonb_typeof(f.candidates) = 'array'
+                         THEN f.candidates END) AS c
+                WHERE COALESCE((c->>'pre_filter_skip')::boolean, FALSE) = FALSE
+                ORDER BY COALESCE((c->>'matched_tracks')::int, -1) DESC,
+                         COALESCE((c->>'avg_ratio')::float, -1) DESC,
+                         c->>'username' ASC,
+                         c->>'filetype' ASC,
+                         c->>'dir' ASC
+                LIMIT 1
+            ) best ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT dl.id, dl.outcome, dl.error_message, dl.created_at
+                FROM download_log dl
+                WHERE dl.search_log_id = f.id
+                ORDER BY dl.id DESC
+                LIMIT 1
+            ) grab ON TRUE
+            """,
+            (request_id, *window),
+        )
+        found_row = found_cur.fetchone()
+        last_found: AcquisitionLastFound | None = None
+        if found_row is not None:
+            grab: AcquisitionGrab | None = None
+            if found_row["grab_download_log_id"] is not None:
+                grab = AcquisitionGrab(
+                    download_log_id=int(found_row["grab_download_log_id"]),
+                    outcome=(
+                        str(found_row["grab_outcome"])
+                        if found_row["grab_outcome"] is not None else None),
+                    error_message=(
+                        str(found_row["grab_error_message"])
+                        if found_row["grab_error_message"] is not None
+                        else None),
+                    at=found_row["grab_at"],
+                )
+            last_found = AcquisitionLastFound(
+                search_log_id=int(found_row["search_log_id"]),
+                at=found_row["at"],
+                strategy=(
+                    str(found_row["strategy"])
+                    if found_row["strategy"] is not None else None),
+                username=(
+                    str(found_row["username"])
+                    if found_row["username"] is not None else None),
+                tier=(
+                    str(found_row["tier"])
+                    if found_row["tier"] is not None else None),
+                matched_tracks=(
+                    int(found_row["matched_tracks"])
+                    if found_row["matched_tracks"] is not None else None),
+                total_tracks=(
+                    int(found_row["total_tracks"])
+                    if found_row["total_tracks"] is not None else None),
+                grab=grab,
+            )
+
+        peers_cur = self._execute(
+            """
+            SELECT c->>'username' AS username,
+                   (ARRAY_AGG(c->>'filetype' ORDER BY
+                        COALESCE((c->>'matched_tracks')::int, -1) DESC,
+                        COALESCE((c->>'avg_ratio')::float, -1) DESC,
+                        c->>'username' ASC,
+                        c->>'filetype' ASC,
+                        c->>'dir' ASC))[1] AS tier,
+                   (ARRAY_AGG((c->>'total_tracks')::int ORDER BY
+                        COALESCE((c->>'matched_tracks')::int, -1) DESC,
+                        COALESCE((c->>'avg_ratio')::float, -1) DESC,
+                        c->>'username' ASC,
+                        c->>'filetype' ASC,
+                        c->>'dir' ASC))[1] AS total_tracks,
+                   MAX((c->>'matched_tracks')::int) AS best_matched_tracks,
+                   COUNT(*)::int AS attempts,
+                   MAX(sl.created_at) AS last_at
+            FROM search_log sl
+            CROSS JOIN LATERAL jsonb_array_elements(
+                CASE WHEN jsonb_typeof(sl.candidates) = 'array'
+                     THEN sl.candidates END) AS c
+            WHERE sl.request_id = %s
+              AND (%s::timestamptz IS NULL OR sl.created_at > %s)
+              AND COALESCE((c->>'pre_filter_skip')::boolean, FALSE) = FALSE
+              AND c->>'username' IS NOT NULL
+            GROUP BY 1
+            ORDER BY attempts DESC, username ASC
+            LIMIT %s
+            """,
+            (request_id, *window, ACQUISITION_PEER_LIMIT),
+        )
+        peers = [
+            AcquisitionPeer(
+                username=str(r["username"]),
+                tier=str(r["tier"]) if r["tier"] is not None else None,
+                best_matched_tracks=(
+                    int(r["best_matched_tracks"])
+                    if r["best_matched_tracks"] is not None else None),
+                total_tracks=(
+                    int(r["total_tracks"])
+                    if r["total_tracks"] is not None else None),
+                attempts=int(r["attempts"]),
+                last_at=r["last_at"],
+            )
+            for r in peers_cur.fetchall()
+        ]
+
+        return SearchAcquisitionSummary(
+            request_id=request_id,
+            since=since,
+            since_reason=(
+                ACQUISITION_SINCE_LAST_IMPORT if since is not None
+                else ACQUISITION_SINCE_REQUEST_CREATED),
+            candidate_tiers=candidate_tiers,
+            grabs=grabs,
+            grabs_total=sum(g.count for g in grabs),
+            last_found=last_found,
+            peers=peers,
         )
 
 
@@ -1333,6 +1647,13 @@ class _SearchPlanMixin(_PipelineDBBase):
              ``stale`` with ``stale_reason='regenerated'`` (or
              ``'request_replaced'`` for a terminal ancestor) and
              ``execution_stage='stale_completion'``.
+          5. Issue #811: when the caller supplies a
+             ``grab_attempt_fingerprint``, stamp the new
+             ``search_log.id`` onto
+             ``album_requests.active_download_state`` for the row that is
+             still ``downloading`` with that exact fingerprint. This is
+             the ONE place the search-to-grab link is created, and it is
+             created in the same transaction as the search row it names.
 
         Either every write commits or none do. Callers must NOT separately
         call ``log_search`` for the same accepted attempt -- this method
@@ -1482,6 +1803,38 @@ class _SearchPlanMixin(_PipelineDBBase):
                 assert log_row is not None
                 search_log_id = int(log_row["id"])
 
+                # Issue #811: link this search row to the grab it
+                # produced, by stamping the new id onto the request's
+                # persisted download state. Deliberately NOT gated on
+                # staleness -- a stale completion means the CURSOR moved
+                # under us, not that the grab did not happen, and the
+                # fingerprint comparison below is what decides whether
+                # this search really produced the attempt now on the row.
+                # A fingerprint mismatch or a non-``downloading`` row is
+                # a zero-write, never an error: the download state is
+                # derived, the search row is the record.
+                download_state_stamped = False
+                if attempt.grab_attempt_fingerprint is not None:
+                    cur.execute(
+                        """
+                        UPDATE album_requests
+                        SET active_download_state =
+                                active_download_state
+                                || jsonb_build_object('search_log_id', %s::int),
+                            updated_at = %s
+                        WHERE id = %s
+                          AND status = 'downloading'
+                          AND active_download_state->>'attempt_fingerprint' = %s
+                        """,
+                        (
+                            search_log_id,
+                            now,
+                            attempt.request_id,
+                            attempt.grab_attempt_fingerprint,
+                        ),
+                    )
+                    download_state_stamped = cur.rowcount == 1
+
                 # Cursor + scheduler/backoff writes only when not stale.
                 if not is_stale:
                     cur.execute(
@@ -1594,6 +1947,7 @@ class _SearchPlanMixin(_PipelineDBBase):
                 new_next_ordinal=new_next_ordinal,
                 new_cycle_count=new_cycle,
                 is_stale=is_stale,
+                download_state_stamped=download_state_stamped,
             )
 
 

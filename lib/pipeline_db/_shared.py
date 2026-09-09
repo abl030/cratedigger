@@ -948,6 +948,17 @@ class ConsumedAttemptInput:
     # outcome a peer-absent search also writes. Persisted on
     # ``search_log.cross_request_conflict_request_ids`` (migration 079).
     cross_request_conflict_request_ids: tuple[int, ...] | None = None
+    # Issue #811: the attempt fingerprint of the grab this search
+    # produced, computed by the executor from the SAME
+    # ``find_result.grab_entry.files`` list the claim's own
+    # ``active_download_state.attempt_fingerprint`` was computed from
+    # (``lib.processing_paths.attempt_fingerprint_or_none``). Non-None
+    # only on a ``found`` outcome that actually enqueued. When present,
+    # ``record_consumed_search_attempt`` stamps the new ``search_log.id``
+    # onto that request's ``active_download_state`` -- guarded on the row
+    # still being ``downloading`` with this exact fingerprint, so a
+    # mismatch is a zero-write, never an error.
+    grab_attempt_fingerprint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1000,12 +1011,23 @@ class ConsumedAttemptResult:
     Tells the caller whether the cursor advanced, wrapped, or was treated
     as stale because the request had been regenerated mid-flight. The log
     row is always written (so usefulness stats stay complete).
+
+    ``download_state_stamped`` (issue #811) reports whether the
+    ``active_download_state.search_log_id`` stamp actually landed. False
+    covers every legitimate no-op -- no ``grab_attempt_fingerprint`` was
+    supplied, the request is no longer ``downloading``, or its persisted
+    fingerprint names a different attempt -- as well as the genuinely
+    lost link. It never raises: the search row is written either way.
+    ``cratedigger._log_search_result`` is its consumer, and warns when a
+    fingerprint WAS supplied and the stamp still did not land -- the only
+    operator-visible evidence that a grab lost its search link.
     """
     search_log_id: int
     cursor_update_status: str
     new_next_ordinal: int
     new_cycle_count: int
     is_stale: bool
+    download_state_stamped: bool = False
 
 
 @dataclass(frozen=True)
@@ -1023,6 +1045,122 @@ class SearchLogHistoryPage:
 
     rows: list[dict[str, object]]
     next_before_id: int | None
+
+
+# --- Acquisition summary (issue #811) ------------------------------------
+#
+# "What has the search actually been finding, and what came of it, SINCE
+# the last time this request was imported?" The window matters: after an
+# upgrade import the operator cares about what the search has seen since,
+# not about the peers that supplied the copy already on disk. With no
+# successful import the window is the request's whole history.
+
+
+@dataclass(frozen=True)
+class AcquisitionTierCount:
+    """How many scored candidates a search tier produced in the window.
+
+    ``tier`` is ``CandidateScore.filetype``, which
+    ``lib/matching.py::check_for_match`` sets to the ``allowed_filetype``
+    the walk was INVOKED with — so what it looks like depends on the
+    request. Under a quality override it is a tier name (``lossless``,
+    ``mp3 320``); with no override the walk iterates the config's own
+    ``allowed_filetypes``, which are plain extension names (``flac``,
+    ``mp3`` by default). Either way it is the search-side vocabulary,
+    which is why it is compared against ``search_scope.tiers`` rather
+    than against a downloaded file's extension.
+    """
+
+    tier: str
+    count: int
+
+
+@dataclass(frozen=True)
+class AcquisitionGrabGroup:
+    """One downloaded file type and how often the pipeline grabbed it.
+
+    ``filetype`` here is the extension ``_build_download_info`` derived
+    from the downloaded filenames and recorded on ``download_log`` —
+    what arrived, as opposed to ``AcquisitionTierCount.tier``'s
+    what-we-asked-for. The two coincide for a config-tier request and
+    diverge under an override (tier ``lossless``, filetype ``flac``), so
+    they are never compared. NULL on a row whose files never yielded an
+    extension.
+    """
+
+    filetype: str | None
+    count: int
+    last_at: datetime
+    last_outcome: str | None
+
+
+@dataclass(frozen=True)
+class AcquisitionGrab:
+    """The newest ``download_log`` row linked to one search row."""
+
+    download_log_id: int
+    outcome: str | None
+    error_message: str | None
+    at: datetime
+
+
+@dataclass(frozen=True)
+class AcquisitionLastFound:
+    """The newest ``found`` search in the window and what came of it.
+
+    The peer facts describe that search's best-matched SCORED candidate;
+    ``grab`` is the newest ``download_log`` row linked to it, or None when
+    the enqueue never produced one (or the link predates migration 086).
+    """
+
+    search_log_id: int
+    at: datetime
+    strategy: str | None
+    username: str | None
+    tier: str | None
+    matched_tracks: int | None
+    total_tracks: int | None
+    grab: AcquisitionGrab | None
+
+
+@dataclass(frozen=True)
+class AcquisitionPeer:
+    """One peer the matcher scored in the window, with its best result."""
+
+    username: str
+    tier: str | None
+    best_matched_tracks: int | None
+    total_tracks: int | None
+    attempts: int
+    last_at: datetime
+
+
+@dataclass(frozen=True)
+class SearchAcquisitionSummary:
+    """Everything the acquisition block on a search-plan view renders.
+
+    ``since`` is the newest successful import for this request, or None
+    when there has never been one; ``since_reason`` names which of those
+    two it is. Every count/list below covers rows STRICTLY after
+    ``since`` (all history when it is None).
+    """
+
+    request_id: int
+    since: datetime | None
+    since_reason: str
+    candidate_tiers: list[AcquisitionTierCount]
+    grabs: list[AcquisitionGrabGroup]
+    grabs_total: int
+    last_found: AcquisitionLastFound | None
+    peers: list[AcquisitionPeer]
+
+
+#: ``SearchAcquisitionSummary.since_reason`` values.
+ACQUISITION_SINCE_LAST_IMPORT = "last_import"
+ACQUISITION_SINCE_REQUEST_CREATED = "request_created"
+
+#: How many peers the acquisition summary surfaces.
+ACQUISITION_PEER_LIMIT = 5
 
 
 @dataclass(frozen=True)

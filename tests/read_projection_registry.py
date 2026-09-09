@@ -628,6 +628,9 @@ ALLOWLIST: dict[str, str] = {
     "get_saturation_summary":
         "typed SaturationSummary return — computed aggregate, no row "
         "projection",
+    "get_search_acquisition_summary":
+        "typed SearchAcquisitionSummary return — computed aggregate over "
+        "unnested candidates JSONB, no row projection",
     "get_search_plan_inspection":
         "typed inspection dataclass return — no raw SELECT dict projection",
     "get_search_plan_stats":
@@ -971,6 +974,43 @@ def _stamp_latest_search_log(
     )
 
 
+def _stamp_latest_download_log(
+    db: "PipelineDB | FakePipelineDB",
+    *,
+    created_at: datetime,
+) -> None:
+    """``_stamp_latest_search_log``'s ``download_log`` twin (issue #811).
+
+    ``log_download`` takes no ``created_at`` on either backend, and the
+    acquisition summary's whole window is decided by one ``download_log``
+    timestamp, so a window-crossing world has to be stamped after the
+    fact. ``MAX(id)`` IS the row just written: seeders run serially
+    against a database ``make_db()`` emptied, with no concurrent writer.
+    """
+    if isinstance(db, FakePipelineDB):
+        db.download_logs[-1].created_at = created_at
+        return
+    db._execute(
+        "UPDATE download_log SET created_at = %s "
+        "WHERE id = (SELECT MAX(id) FROM download_log)",
+        (created_at,),
+    )
+
+
+def _newest_search_log_id(
+    db: "PipelineDB | FakePipelineDB", request_id: int,
+) -> int:
+    """The id of the ``search_log`` row just written for ``request_id``.
+
+    ``log_search`` returns nothing on either backend, and the #811 link
+    needs a real ``search_log.id`` to point ``download_log`` at.
+    ``get_search_history`` is newest-first on both.
+    """
+    newest = db.get_search_history(request_id)[0]["id"]
+    assert isinstance(newest, int)
+    return newest
+
+
 def _candidate_scores(username: str) -> "list[CandidateScore]":
     return [CandidateScore(
         username=username, dir=f"/{username}/album", filetype="flac",
@@ -1135,6 +1175,98 @@ def _seed_value_get_saturation_summary(
     _stamp_latest_search_log(
         db, created_at=seed_anchor() - timedelta(days=5))
     return [dataclasses.asdict(db.get_saturation_summary(request_a))]
+
+
+def _seed_value_get_search_acquisition_summary(
+    db: "PipelineDB | FakePipelineDB",
+) -> "list[dict[str, Any]]":
+    """A world that straddles the acquisition window (issue #811).
+
+    One successful import sits between an early search and two later
+    ones, so every aggregate in the summary is different depending on
+    whether the ``since`` cut is applied: the pre-import search's peer and
+    tier must vanish, and the pre-import grab must not be counted. The
+    two in-window searches give the peer roster a genuine attempts
+    ordering (``peer_alpha`` twice, ``peer_beta`` once) and the newest
+    ``found`` row a real linked grab through
+    ``download_log.search_log_id``.
+
+    Every timestamp is stamped off ``seed_anchor()``, so ``since`` and
+    every ``*_at`` stay INSIDE the value comparison rather than being
+    excused as wall-clock noise.
+    """
+    import dataclasses
+
+    now = seed_anchor()
+    request_id = db.add_request(
+        "Value Parity Artist", "Acquisition Album", "request",
+        mb_release_id="acquisition-summary-value-parity")
+
+    # --- Before the import: must be excluded by the window. ---
+    db.log_search(
+        request_id, query="pre-import", outcome="found",
+        result_count=5, elapsed_s=1.0,
+        candidates=[CandidateScore(
+            username="peer_ancient", dir="/peer_ancient/album",
+            filetype="mp3 320", matched_tracks=10, total_tracks=10,
+            avg_ratio=0.99, missing_titles=[], file_count=10,
+        )])
+    _stamp_latest_search_log(
+        db, created_at=now - timedelta(days=30),
+        plan_strategy="ancient_strategy")
+    db.log_download(
+        request_id, soulseek_username="peer_ancient", filetype="mp3",
+        outcome="timeout")
+    _stamp_latest_download_log(db, created_at=now - timedelta(days=30))
+
+    db.log_download(
+        request_id, soulseek_username="peer_ancient", filetype="mp3",
+        outcome="success")
+    _stamp_latest_download_log(db, created_at=now - timedelta(days=20))
+
+    # --- After the import: the window the summary must report on. ---
+    db.log_search(
+        request_id, query="post-import wide", outcome="no_match",
+        result_count=7, elapsed_s=2.0,
+        candidates=[CandidateScore(
+            username="peer_alpha", dir="/peer_alpha/album",
+            filetype="lossless", matched_tracks=8, total_tracks=11,
+            avg_ratio=0.80, missing_titles=["Three"], file_count=9,
+        ), CandidateScore(
+            username="peer_skipped", dir="/peer_skipped/album",
+            filetype="mp3 320", matched_tracks=0, total_tracks=11,
+            avg_ratio=0.0, missing_titles=[], file_count=99,
+            pre_filter_skip=True,
+        )])
+    _stamp_latest_search_log(
+        db, created_at=now - timedelta(days=3),
+        plan_strategy="wide_strategy")
+
+    db.log_search(
+        request_id, query="post-import narrow", outcome="found",
+        result_count=4, elapsed_s=3.0,
+        candidates=[CandidateScore(
+            username="peer_alpha", dir="/peer_alpha/album",
+            filetype="lossless", matched_tracks=11, total_tracks=11,
+            avg_ratio=0.97, missing_titles=[], file_count=11,
+        ), CandidateScore(
+            username="peer_beta", dir="/peer_beta/album",
+            filetype="mp3 320", matched_tracks=6, total_tracks=11,
+            avg_ratio=0.55, missing_titles=["Two"], file_count=7,
+        )])
+    _stamp_latest_search_log(
+        db, created_at=now - timedelta(days=1),
+        plan_strategy="narrow_strategy")
+    found_id = _newest_search_log_id(db, request_id)
+
+    db.log_download(
+        request_id, soulseek_username="peer_alpha", filetype="flac",
+        outcome="timeout", error_message="remote queue timeout",
+        search_log_id=found_id)
+    _stamp_latest_download_log(db, created_at=now - timedelta(hours=20))
+
+    return [dataclasses.asdict(
+        db.get_search_acquisition_summary(request_id))]
 
 
 def _consume_next_plan_item(
@@ -1525,6 +1657,15 @@ VALUE_PARITY_REGISTRY: dict[str, ValueParityEntry] = {
     "get_saturation_summary": ValueParityEntry(
         seeder=_seed_value_get_saturation_summary,
     ),
+    "get_search_acquisition_summary": ValueParityEntry(
+        seeder=_seed_value_get_search_acquisition_summary,
+        exclusions=(
+            ValueExclusion("request_id", _EXCL_SURROGATE_ID),
+            ValueExclusion("last_found.search_log_id", _EXCL_SURROGATE_ID),
+            ValueExclusion(
+                "last_found.grab.download_log_id", _EXCL_SURROGATE_ID),
+        ),
+    ),
     "get_search_plan_stats": ValueParityEntry(
         seeder=_seed_value_get_search_plan_stats,
         exclusions=(
@@ -1661,8 +1802,8 @@ VALUE_PARITY_REGISTRY: dict[str, ValueParityEntry] = {
 #: SQL-owned aggregate, not a SELECT column list". A bounded substring test
 #: over hand-written rationale prose — deliberately NOT an inference about
 #: what a method does. The rationale grammar is hand-maintained data, like
-#: every other registry in this module; measured 2026-08-31 it selects
-#: exactly the six aggregate entries and nothing else.
+#: every other registry in this module; measured 2026-09-09 it selects
+#: exactly the seven aggregate entries and nothing else.
 COMPUTED_RATIONALE_MARKER = "computed"
 
 

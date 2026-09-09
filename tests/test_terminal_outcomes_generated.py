@@ -186,7 +186,34 @@ def assert_operator_stop_matches_terminal_acceptance(
         )
 
 
-def _terminal_command(request_id: int, job_id: int) -> ImportTerminalOutcome:
+def assert_persisted_search_link_matches(
+    *,
+    command_link: int | None,
+    persisted_link: int | None,
+) -> None:
+    """Issue #811: the audit row carries exactly the bundle's own link.
+
+    Two clauses. A bundle that named a search row and lost it silently
+    breaks the search-to-import trail the whole feature exists for; a
+    bundle that named none and gained one has invented provenance, which
+    is worse than none at all.
+    """
+    if command_link is not None and persisted_link != command_link:
+        raise AssertionError(
+            f"terminal bundle carried search_log_id={command_link!r} but the "
+            f"audit row persisted {persisted_link!r}")
+    if command_link is None and persisted_link is not None:
+        raise AssertionError(
+            f"terminal bundle carried no search link but the audit row "
+            f"persisted search_log_id={persisted_link!r}")
+
+
+def _terminal_command(
+    request_id: int,
+    job_id: int,
+    *,
+    search_log_id: int | None = None,
+) -> ImportTerminalOutcome:
     return ImportTerminalOutcome(
         request_id=request_id,
         import_job_id=job_id,
@@ -196,6 +223,7 @@ def _terminal_command(request_id: int, job_id: int) -> ImportTerminalOutcome:
         audit=TerminalDownloadAudit(
             outcome="rejected",
             validation_result='{"scenario":"generated_reject"}',
+            search_log_id=search_log_id,
         ),
         denylists=(TerminalDenylist("generated-peer", "generated"),),
         job=ImportJobTerminal(
@@ -463,6 +491,93 @@ class TestTerminalOutcomeGenerated(unittest.TestCase):
                 else 192
             ),
         )
+
+    @given(
+        linked=st.booleans(),
+        outcome=st.sampled_from(("found", "no_match")),
+        fail_after=st.sampled_from((None, 1, 2, 3, 4, 5)),
+    )
+    def test_terminal_bundle_persists_exactly_the_search_link_it_carries(
+        self, linked: bool, outcome: str, fail_after: int | None,
+    ) -> None:
+        """Issue #811: the link survives the bundle, or the bundle does not.
+
+        Crossed with the same write-boundary fault injection the
+        all-or-none property uses: an aborted bundle must leave no audit
+        row at all, and a committed one must carry the exact link the
+        command named — never a fabricated one.
+        """
+        class FaultDB(FakePipelineDB):
+            def _terminal_outcome_write_boundary(
+                self,
+                index: int,
+                label: str,
+                *,
+                _fail_after: int | None = fail_after,
+            ) -> None:
+                del label
+                if index == _fail_after:
+                    raise RuntimeError("generated terminal write failure")
+
+        db = FaultDB()
+        db.seed_request(make_request_row(
+            id=42, status="downloading",
+            active_download_state={"files": []},
+        ))
+        db.log_search(42, query="q", outcome=outcome)
+        search_log_id = db.get_search_history(42)[0]["id"]
+        assert isinstance(search_log_id, int)
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            payload={"download_log_id": 1, "failed_path": "/tmp/generated"},
+        )
+        db.mark_import_job_preview_importable(
+            job.id, preview_result={"ready": True})
+        claimed = claim_next_import_job(db, worker_id="generated-link")
+        assert claimed is not None
+
+        command_link = search_log_id if linked else None
+        command = _terminal_command(
+            42, claimed.id, search_log_id=command_link)
+        if fail_after is None:
+            db.persist_import_terminal_outcome(command)
+        else:
+            with self.assertRaisesRegex(RuntimeError, "generated terminal"):
+                db.persist_import_terminal_outcome(command)
+
+        if not db.download_logs:
+            # An aborted bundle wrote nothing; the all-or-none property
+            # owns that world.
+            return
+        assert_persisted_search_link_matches(
+            command_link=command_link,
+            persisted_link=db.download_logs[0].search_log_id,
+        )
+
+    def test_search_link_checker_trips_on_a_dropped_link(self) -> None:
+        with self.assertRaisesRegex(
+            AssertionError, r"carried search_log_id=7 but the audit row",
+        ):
+            assert_persisted_search_link_matches(
+                command_link=7, persisted_link=None)
+
+    def test_search_link_checker_trips_on_a_fabricated_link(self) -> None:
+        with self.assertRaisesRegex(
+            AssertionError, r"carried no search link but the audit row",
+        ):
+            assert_persisted_search_link_matches(
+                command_link=None, persisted_link=9)
+
+    def test_search_link_checker_is_quiet_on_a_faithful_write(self) -> None:
+        assert_persisted_search_link_matches(command_link=7, persisted_link=7)
+
+    def test_search_link_checker_is_quiet_when_neither_side_links(
+        self,
+    ) -> None:
+        """An unlinked bundle writing an unlinked row is the normal world."""
+        assert_persisted_search_link_matches(
+            command_link=None, persisted_link=None)
 
     def test_fake_transaction_is_unchanged_or_complete(self) -> None:
         for fail_after in (None, 1, 2, 3, 4, 5):

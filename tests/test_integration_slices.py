@@ -9,6 +9,7 @@ and _check_quality_gate_core run for real, not patched.
 """
 
 import configparser
+import dataclasses
 import json
 import os
 import shutil
@@ -4801,8 +4802,16 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         ctx = self._wire(cfg, slskd, db, album)
 
         # Stub slskd_do_enqueue so we do not exercise the real download path.
+        # Real ``DownloadFile``s, not MagicMocks: the accepted-file list
+        # is what ``_apply_find_download_result`` fingerprints (#811), and
+        # a MagicMock has no serialisable username/filename.
         with patch("lib.enqueue.slskd_do_enqueue", return_value=[
-            MagicMock(),
+            make_download_file(
+                filename="Music\\Album\\01 - Track One.flac",
+                id="tid-1", file_dir="Music\\Album", username="good_peer"),
+            make_download_file(
+                filename="Music\\Album\\02 - Track Two.flac",
+                id="tid-2", file_dir="Music\\Album", username="good_peer"),
         ]):
             result = cratedigger.search_for_album(album, ctx)
             grab_list: dict[Any, Any] = {}
@@ -4844,6 +4853,20 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         # future refactor of the AlbumRecord shape doesn't silently
         # NULL the column.
         self.assertEqual(row.expected_track_count, 2)
+        # Issue #811: the grab's attempt fingerprint reaches the DB seam.
+        # This is the only pin on the whole executor → ConsumedAttemptInput
+        # hop; without it the search-to-grab link is never offered and
+        # every stamp is a silent zero-write.
+        from lib.processing_paths import attempt_fingerprint_or_none
+        assert find_result.grab_entry is not None
+        self.assertEqual(
+            result.grab_attempt_fingerprint,
+            attempt_fingerprint_or_none(find_result.grab_entry.files))
+        self.assertIsNotNone(result.grab_attempt_fingerprint)
+        recorded = db.record_consumed_search_attempt_calls[0]
+        self.assertEqual(
+            recorded.grab_attempt_fingerprint,
+            result.grab_attempt_fingerprint)
 
     def test_unwild_variant_at_threshold(self):
         """Plan-item with strategy='unwild' produces an unwild query (post-U5).
@@ -5129,7 +5152,14 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         result = cratedigger.search_for_album(album, ctx)
         grab_list: dict[Any, Any] = {}
         from lib.enqueue import find_download
-        with patch("lib.enqueue.slskd_do_enqueue", return_value=[MagicMock()]):
+        # Real ``DownloadFile``s — see the same note in the default-variant
+        # slice above (#811 fingerprints this exact list).
+        with patch("lib.enqueue.slskd_do_enqueue", return_value=[
+            make_download_file(
+                filename="Music\\Disco\\01 - Disco Track.flac",
+                id="tid-d1", file_dir="Music\\Disco",
+                username="discog_peer"),
+        ]):
             find_result = find_download(album, ctx)
         cratedigger._apply_find_download_result(
             album, result, find_result, [], grab_list, ctx)
@@ -7189,6 +7219,46 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
             expected_execution_lease=lease,
             cleanup_receipt=cleanup_receipt,
         )
+
+    def test_automation_measurement_failure_carries_the_grab_link(self):
+        """Issue #811 review: no DownloadInfo here, but still a grab.
+
+        This helper's own arguments carry no ``DownloadInfo``, which is
+        why the audit row shipped with a NULL link — but invariant 10
+        keeps the owner's ``active_download_state`` attached for the
+        whole ``processing`` lifetime, so the link the search stamped is
+        readable at exactly this moment.
+        """
+        from lib.dispatch import _record_preview_measurement_failed
+        from lib.quality import MeasurementFailure
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, artist_name="Test", album_title="Album"))
+        source_path = "/Incoming/auto-import/Test - Album"
+        job = handoff_automation_owner(db, 42, canonical_path=source_path)
+        # The stamp a found search would have written on this attempt.
+        row = db.request(42)
+        raw = row["active_download_state"]
+        state = json.loads(str(raw)) if isinstance(raw, str) else dict(raw)
+        state["search_log_id"] = 4242
+        row["active_download_state"] = (
+            json.dumps(state) if isinstance(raw, str) else state)
+
+        _record_preview_measurement_failed(
+            db,
+            request_id=42,
+            import_job_id=job.id,
+            payload=MeasurementFailure(
+                reason="snapshot_stale", detail="mismatch after retry",
+                source_path=source_path),
+            automation_terminal_authority=(
+                self._automation_terminal_authority(
+                    db, job, source_path=source_path)),
+        )
+
+        self.assertEqual(db.download_logs[0].outcome, "measurement_failed")
+        self.assertEqual(db.download_logs[0].search_log_id, 4242)
 
     def test_measurement_failed_persists_without_denylisting_source(self):
         from lib.dispatch import _record_preview_measurement_failed
@@ -13416,6 +13486,471 @@ class TestTriageServiceSlice(unittest.TestCase):
         self.assertEqual(
             len(decoded.search_forensics.recent_entries), 1,
         )
+
+
+class TestSearchToGrabLinkPropagationSlice(unittest.TestCase):
+    """Issue #811: a stamped download state reaches every audit row.
+
+    Composes the REAL projections the two lanes actually use —
+    ``reconstruct_grab_list_entry`` → ``_build_download_info`` → the
+    writer — over one ``FakePipelineDB``, and asserts the persisted row,
+    not the call shape. The stamp itself is written by the DB
+    (``record_consumed_search_attempt``); this slice starts from a state
+    that already carries it, which is exactly what the poller and the
+    importer read back.
+    """
+
+    WITNESS = "2026-09-01T00:00:00+00:00"
+    SEARCH_LOG_ID = 4242
+
+    def _seeded(
+        self, *, search_log_id: int | None,
+    ) -> tuple[FakePipelineDB, GrabListEntry, DownloadInfo]:
+        """A ``downloading`` request, its reconstructed entry, and dl_info."""
+        import msgspec
+
+        from lib.dispatch.helpers import _build_download_info
+        from lib.download_reconstruction import reconstruct_grab_list_entry
+        from lib.quality import ActiveDownloadFileState, ActiveDownloadState
+
+        db = FakePipelineDB()
+        state = ActiveDownloadState(
+            filetype="flac",
+            enqueued_at=self.WITNESS,
+            # A real file, so ``_build_download_info`` takes its main
+            # branch rather than the empty-manifest early exit; the empty
+            # case has its own test below.
+            files=[ActiveDownloadFileState(
+                username="peer", filename="Music\\Album\\01.flac",
+                file_dir="Music\\Album", size=1000)],
+            search_log_id=search_log_id,
+        )
+        db.seed_request(make_request_row(
+            id=42, status="downloading",
+            active_download_state=msgspec.json.decode(state.to_json()),
+        ))
+        request = db.request(42)
+        entry = reconstruct_grab_list_entry(request, state)
+        return db, entry, _build_download_info(entry)
+
+    def test_reconstruction_carries_the_link_onto_download_info(self):
+        _db, entry, dl_info = self._seeded(search_log_id=self.SEARCH_LOG_ID)
+        self.assertEqual(entry.search_log_id, self.SEARCH_LOG_ID)
+        self.assertEqual(dl_info.search_log_id, self.SEARCH_LOG_ID)
+
+    def test_an_empty_manifest_still_carries_the_link(self):
+        """The link is a property of the attempt, not of its files.
+
+        ``_build_download_info`` early-exits on an empty file list; that
+        exit must not drop the attempt's own search link.
+        """
+        from lib.dispatch.helpers import _build_download_info
+        from lib.grab_list import GrabListEntry as _Entry
+
+        dl_info = _build_download_info(_Entry(
+            album_id=42, files=[], filetype="flac", title="Album",
+            artist="Artist", year="1991", mb_release_id="mb-uuid",
+            search_log_id=self.SEARCH_LOG_ID,
+        ))
+        self.assertEqual(dl_info.username, None)
+        self.assertEqual(dl_info.search_log_id, self.SEARCH_LOG_ID)
+
+    @staticmethod
+    def _album():
+        """A minimal real ``AlbumRecord`` — the merge step needs its id."""
+        from album_source import AlbumRecord
+        return AlbumRecord(
+            id=42, title="Album", release_date="1991-01-01T00:00:00Z",
+            artist_id=0, artist_name="Artist", foreign_artist_id="",
+            releases=[], db_request_id=42, db_source="request",
+            db_mb_release_id="mb-uuid",
+            db_search_filetype_override=None, db_target_format=None,
+        )
+
+    def test_the_claim_and_the_executor_agree_on_the_attempt_fingerprint(
+        self,
+    ):
+        """The stamp's whole guard rests on these two agreeing (#811).
+
+        ``build_active_download_state`` fingerprints the claim;
+        ``_apply_find_download_result`` fingerprints what the executor
+        reports for the SAME entry. If they ever diverge, every stamp
+        becomes a silent zero-write, so drive both real functions over
+        one entry and require the two values to be equal.
+        """
+        import cratedigger
+        from lib.download import build_active_download_state
+        from lib.enqueue import FindDownloadResult
+        from lib.search import SearchResult
+
+        entry = make_grab_list_entry(
+            album_id=42,
+            files=[
+                make_download_file(
+                    filename="Music\\Album\\01.flac", id="t1",
+                    file_dir="Music\\Album", username="peer"),
+                make_download_file(
+                    filename="Music\\Album\\02.flac", id="t2",
+                    file_dir="Music\\Album", username="peer"),
+            ],
+        )
+        claimed = build_active_download_state(entry)
+
+        result = SearchResult(album_id=42, success=True)
+        grab_list: dict[int, GrabListEntry] = {}
+        cratedigger._apply_find_download_result(
+            album=self._album(),
+            result=result,
+            find_result=FindDownloadResult(
+                outcome="found", grab_entry=entry),
+            failed_grab=[],
+            grab_list=grab_list,
+        )
+
+        self.assertIsNotNone(result.grab_attempt_fingerprint)
+        self.assertEqual(
+            result.grab_attempt_fingerprint, claimed.attempt_fingerprint)
+
+    def test_a_non_found_outcome_offers_no_fingerprint(self):
+        """Must-still-work control: only a grab can carry a link."""
+        import cratedigger
+        from lib.enqueue import FindDownloadResult
+        from lib.search import SearchResult
+
+        result = SearchResult(album_id=42, success=True)
+        cratedigger._apply_find_download_result(
+            album=self._album(),
+            result=result,
+            find_result=FindDownloadResult(
+                outcome="no_match", grab_entry=None),
+            failed_grab=[],
+        )
+        self.assertEqual(result.outcome, "no_match")
+        self.assertIsNone(result.grab_attempt_fingerprint)
+
+    def test_timeout_writer_persists_the_link(self):
+        from lib.download import _timeout_album
+
+        db, entry, _dl_info = self._seeded(search_log_id=self.SEARCH_LOG_ID)
+        entry.files = [make_download_file(
+            filename="01.flac", id="xfer-1", file_dir="Music\\Album",
+            username="peer", size=1000)]
+        ctx = make_ctx_with_fake_db(db)
+        with patch("lib.download.cancel_and_delete"):
+            self.assertTrue(_timeout_album(
+                entry, 42, "stalled", ctx,
+                expected_enqueued_at=self.WITNESS,
+            ))
+        self.assertEqual(db.download_logs[0].outcome, "timeout")
+        self.assertEqual(
+            db.download_logs[0].search_log_id, self.SEARCH_LOG_ID)
+
+    def test_job_less_rejection_bundle_persists_the_link(self):
+        from lib.dispatch import _record_rejection_and_maybe_requeue
+
+        db, _entry, dl_info = self._seeded(search_log_id=self.SEARCH_LOG_ID)
+        _record_rejection_and_maybe_requeue(
+            db=db, request_id=42, dl_info=dl_info,
+            detail="distance too high", error=None,
+            validation_result=make_validation_result(
+                distance=0.5, scenario="high_distance").to_json(),
+        )
+        self.assertEqual(db.download_logs[0].outcome, "rejected")
+        self.assertEqual(
+            db.download_logs[0].search_log_id, self.SEARCH_LOG_ID)
+
+    def test_job_less_success_bundle_persists_the_link(self):
+        from lib.dispatch import _do_mark_done
+
+        db, _entry, dl_info = self._seeded(search_log_id=self.SEARCH_LOG_ID)
+        _do_mark_done(
+            db=db, request_id=42, dl_info=dl_info,
+            distance=0.01, scenario="exact", dest_path="/staged/album",
+        )
+        self.assertEqual(db.download_logs[0].outcome, "success")
+        self.assertEqual(
+            db.download_logs[0].search_log_id, self.SEARCH_LOG_ID)
+
+    def _log_search_world(self, *, claimed_fingerprint: str):
+        """A claimed, downloading request with an active plan and a ctx.
+
+        Everything ``_log_search_result``'s consumed-attempt arm needs,
+        driven through the real production entry point.
+        """
+        from lib.pipeline_db import SearchPlanItemInput
+        from lib.search import PlanExecutionContext, SearchResult
+        from tests.helpers import make_active_download_state_json
+
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="Artist", album_title="Album", source="request",
+            mb_release_id="link-log-mbid")
+        db.create_successful_search_plan(
+            request_id=rid, generator_id="g1",
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="Q0")],
+        )
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        assert db.set_downloading(
+            rid,
+            make_active_download_state_json(
+                [], attempt_fingerprint=claimed_fingerprint),
+            expected_status="wanted",
+        )
+        item = active.items[0]
+        result = SearchResult(album_id=rid, success=True)
+        result.outcome = "found"
+        result.query = "Q0"
+        result.plan_execution = PlanExecutionContext(
+            plan_id=active.plan.id,
+            plan_item_id=item.id,
+            plan_ordinal=item.ordinal,
+            plan_strategy=item.strategy,
+            plan_canonical_query_key=item.canonical_query_key,
+            plan_repeat_group=item.repeat_group,
+            plan_generator_id=active.plan.generator_id,
+            plan_item_count=len(active.items),
+            cycle_count_snapshot=active.cycle_count,
+        )
+        return db, rid, result
+
+    def test_a_lost_search_link_is_reported_to_the_operator(self):
+        """Issue #811 review: the warning IS the evidence.
+
+        Nothing else surfaces a stamp that stopped landing — the search
+        row is written either way and the request keeps moving — so a
+        fingerprint drift would be invisible without this line.
+        """
+        import cratedigger
+
+        db, rid, result = self._log_search_world(
+            claimed_fingerprint="claimed-fp")
+        result.grab_attempt_fingerprint = "executor-fp"
+        album = dataclasses.replace(self._album(), db_request_id=rid, id=rid)
+
+        with self.assertLogs("cratedigger", level="WARNING") as captured:
+            cratedigger._log_search_result(
+                album, result, make_ctx_with_fake_db(db))
+
+        self.assertTrue(
+            any("SEARCH LINK NOT STAMPED" in line for line in captured.output),
+            captured.output)
+        self.assertTrue(
+            any(f"request {rid}" in line for line in captured.output),
+            captured.output)
+        self.assertTrue(
+            any("executor-fp" in line for line in captured.output),
+            captured.output)
+        # The search row still lands — the warning is about the link only.
+        self.assertEqual(len(db.get_search_history(rid)), 1)
+
+    def test_a_landed_stamp_reports_nothing(self):
+        """Quiet world: the fingerprints agree, so nothing is wrong."""
+        import cratedigger
+
+        db, rid, result = self._log_search_world(
+            claimed_fingerprint="agreed-fp")
+        result.grab_attempt_fingerprint = "agreed-fp"
+        album = dataclasses.replace(self._album(), db_request_id=rid, id=rid)
+
+        with self.assertNoLogs("cratedigger", level="WARNING"):
+            cratedigger._log_search_result(
+                album, result, make_ctx_with_fake_db(db))
+
+        row = db.get_request(rid)
+        assert row is not None
+        state = row["active_download_state"]
+        assert isinstance(state, dict)
+        self.assertIsNotNone(state["search_log_id"])
+
+    def test_a_search_with_no_grab_reports_nothing(self):
+        """Quiet world: no fingerprint supplied is the ordinary case.
+
+        Most searches never enqueue, so ``download_state_stamped`` is
+        False on nearly every call; warning on that would drown the real
+        signal.
+        """
+        import cratedigger
+
+        db, rid, result = self._log_search_world(
+            claimed_fingerprint="agreed-fp")
+        result.outcome = "no_match"
+        result.grab_attempt_fingerprint = None
+        album = dataclasses.replace(self._album(), db_request_id=rid, id=rid)
+
+        with self.assertNoLogs("cratedigger", level="WARNING"):
+            cratedigger._log_search_result(
+                album, result, make_ctx_with_fake_db(db))
+
+    def _stamp_link(self, db, rid: int) -> None:
+        """Write the link a search would have stamped onto the state."""
+        row = db.request(rid)
+        raw = row["active_download_state"]
+        state = json.loads(str(raw)) if isinstance(raw, str) else dict(raw)
+        state["search_log_id"] = self.SEARCH_LOG_ID
+        row["active_download_state"] = (
+            json.dumps(state) if isinstance(raw, str) else state)
+
+    def _preview_failure_request(self):
+        """A fresh request the preview-failure worlds below build on."""
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="Artist", album_title="Album", source="request",
+            mb_release_id="preview-link-mbid")
+        return db, rid
+
+    def test_the_owned_request_reader_returns_the_stamped_link(self):
+        """``_automation_grab_search_link`` over the real owned request.
+
+        The composed automation pin lives beside the preview slice that
+        already builds a real terminal authority
+        (``TestRecordPreviewMeasurementFailedSlice::
+        test_automation_measurement_failure_carries_the_grab_link``);
+        this pins the reader itself, including both fail-soft exits.
+        """
+        from lib.dispatch.outcome_actions import _automation_grab_search_link
+
+        db, rid = self._preview_failure_request()
+        handoff_automation_owner(db, rid)
+        self._stamp_link(db, rid)
+        self.assertEqual(
+            _automation_grab_search_link(db, rid), self.SEARCH_LOG_ID)
+
+        # No state at all (the request never claimed) — None, not a crash.
+        other = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="no-state")
+        self.assertIsNone(_automation_grab_search_link(db, other))
+        # An unknown request — the same fail-soft None.
+        self.assertIsNone(_automation_grab_search_link(db, 999_999))
+
+    def test_a_non_automation_preview_failure_writes_no_link(self):
+        """Must-still-work control: force/local/YouTube have no grab state.
+
+        Their source is a folder already on disk, and the YouTube lane is
+        forbidden from reading ``active_download_state`` at all
+        (``scripts/import_preview_worker.py`` KTD1) — so the read must
+        not happen just because a state happens to be present.
+        """
+        from lib.dispatch import _record_preview_measurement_failed
+        from lib.quality import MeasurementFailure
+        from tests.helpers import make_active_download_state_json
+
+        db, rid = self._preview_failure_request()
+        assert db.set_downloading(
+            rid,
+            make_active_download_state_json(
+                [], attempt_fingerprint="fp-alpha"),
+            expected_status="wanted",
+        )
+        # A link IS present on the row, so a read would find one — the
+        # point is that the non-automation lane must not look.
+        self._stamp_link(db, rid)
+        job = db.enqueue_import_job(
+            "force_import", request_id=rid,
+            payload={"download_log_id": 1, "failed_path": "/tmp/x"})
+
+        log_id = _record_preview_measurement_failed(
+            db,
+            request_id=rid,
+            import_job_id=job.id,
+            payload=MeasurementFailure(
+                reason="measurement_crashed", detail="ffmpeg died",
+                source_path="/tmp/x"),
+            requeue_to_wanted=False,
+        )
+        row = next(e for e in db.download_logs if e.id == log_id)
+        self.assertIsNone(row.search_log_id)
+
+    def test_have_analysis_error_persists_the_link(self):
+        """The third dl_info-carrying terminal site (mutant runner, 7)."""
+        from lib.dispatch.outcome_actions import _record_have_analysis_error
+        from tests.dispatch_helpers import make_dispatch_request
+
+        db, _entry, dl_info = self._seeded(search_log_id=self.SEARCH_LOG_ID)
+        _record_have_analysis_error(
+            make_dispatch_request(
+                request_id=42, dl_info=dl_info, path="/processing/albums/x"),
+            db,
+            raw_error="ffprobe exited 1",
+            installed_path="/Beets/Artist/Album",
+            snapshot_guard=None,
+        )
+        self.assertEqual(
+            db.download_logs[0].outcome, "have_analysis_error")
+        self.assertEqual(
+            db.download_logs[0].search_log_id, self.SEARCH_LOG_ID)
+
+    def test_the_local_completion_bundle_persists_the_link(self):
+        """The automation local-completion fallback (mutant runner, 8).
+
+        Its sibling ``_timeout_album`` was pinned; this one builds its own
+        ``TerminalDownloadAudit`` from the same reconstructed entry.
+        """
+        from lib.download import _local_completion_terminal_outcome
+        from lib.download_reconstruction import reconstruct_grab_list_entry
+        from lib.quality import ActiveDownloadState
+
+        # The real wanted -> downloading -> processing transcript, then
+        # the link a found search would have stamped on that attempt.
+        db, rid = self._preview_failure_request()
+        job = handoff_automation_owner(db, rid)
+        self._stamp_link(db, rid)
+        request = db.get_request(rid)
+        assert request is not None
+        state = ActiveDownloadState.from_raw(request["active_download_state"])
+        entry = reconstruct_grab_list_entry(request, state)
+
+        pending = _local_completion_terminal_outcome(
+            entry, state,
+            request_id=rid,
+            import_job_id=job.id,
+            transition=None,
+            outcome="failed",
+            detail="local processing failed",
+        )
+        self.assertEqual(pending.audit.search_log_id, self.SEARCH_LOG_ID)
+
+    def test_the_entry_to_state_projection_is_lossless_both_ways(self):
+        """The WRITE half of the round trip (mutant runner, 9).
+
+        ``reconstruct_grab_list_entry`` (state -> entry) was pinned;
+        ``build_active_download_state`` (entry -> state) was not, while
+        its own comment claims the projection is lossless in both
+        directions.
+        """
+        from lib.download import build_active_download_state
+        from lib.download_reconstruction import reconstruct_grab_list_entry
+
+        entry = make_grab_list_entry(
+            album_id=42,
+            files=[make_download_file(
+                filename="Music\\Album\\01.flac", username="peer")],
+            search_log_id=self.SEARCH_LOG_ID,
+        )
+        state = build_active_download_state(entry)
+        self.assertEqual(state.search_log_id, self.SEARCH_LOG_ID)
+
+        request = make_request_row(id=42, status="downloading")
+        self.assertEqual(
+            reconstruct_grab_list_entry(request, state).search_log_id,
+            entry.search_log_id,
+        )
+
+    def test_an_unstamped_state_writes_a_null_link(self):
+        """Must-still-work control: no stamp, no fabricated link."""
+        from lib.dispatch import _record_rejection_and_maybe_requeue
+
+        db, _entry, dl_info = self._seeded(search_log_id=None)
+        self.assertIsNone(dl_info.search_log_id)
+        _record_rejection_and_maybe_requeue(
+            db=db, request_id=42, dl_info=dl_info,
+            detail="distance too high", error=None,
+            validation_result=make_validation_result(
+                distance=0.5, scenario="high_distance").to_json(),
+        )
+        self.assertIsNone(db.download_logs[0].search_log_id)
 
 
 if __name__ == "__main__":

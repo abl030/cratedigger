@@ -951,5 +951,184 @@ class TestFakeSearchHistoryPage(unittest.TestCase):
         self.assertEqual(page.rows[0]["query"], "mine")
 
 
+class TestFakeSearchToGrabLink(unittest.TestCase):
+    """Issue #811 mirror: the fake's stamp guard and ``grab_*`` columns.
+
+    Each case here has a real-PostgreSQL twin in
+    ``tests/test_pipeline_db.py::TestConsumedAttemptStampsDownloadState``
+    / ``TestSearchToGrabLinkReads``; the fake exists to be no more
+    permissive than the SQL.
+    """
+
+    FINGERPRINT = "abcd1234"
+
+    def _db_with_plan(self) -> tuple[FakePipelineDB, int, int, int]:
+        from lib.pipeline_db import SearchPlanItemInput
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="stamp-fake",
+        )
+        plan_id = db.create_successful_search_plan(
+            request_id=rid, generator_id="g1",
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="default", query="Q0")],
+        )
+        active = db.get_active_search_plan(rid)
+        assert active is not None
+        return db, rid, plan_id, active.items[0].id
+
+    def _claim(self, db: FakePipelineDB, rid: int, fingerprint: str) -> None:
+        """Claim through the production state writer, not hand-typed JSON."""
+        import msgspec
+
+        from lib.download import build_active_download_state
+        from tests.helpers import make_download_file, make_grab_list_entry
+
+        entry = make_grab_list_entry(
+            album_id=rid,
+            files=[make_download_file(
+                filename="Music\\Album\\01.flac", username="peer")],
+        )
+        state = msgspec.structs.replace(
+            build_active_download_state(
+                entry, enqueued_at="2026-09-01T00:00:00+00:00"),
+            attempt_fingerprint=fingerprint)
+        assert db.set_downloading(
+            rid, state.to_json(), expected_status="wanted")
+
+    def _attempt(self, rid: int, plan_id: int, item_id: int, **overrides):
+        import dataclasses
+
+        from lib.pipeline_db import ConsumedAttemptInput
+        base = ConsumedAttemptInput(
+            request_id=rid, plan_id=plan_id, plan_item_id=item_id,
+            plan_ordinal=0, plan_strategy="default",
+            plan_canonical_query_key=None, plan_repeat_group=None,
+            plan_generator_id="g1", query="Q0", outcome="found",
+            plan_item_count=1,
+            grab_attempt_fingerprint=self.FINGERPRINT,
+        )
+        return dataclasses.replace(base, **overrides)
+
+    def _state(self, db: FakePipelineDB, rid: int) -> dict:
+        row = db.get_request(rid)
+        assert row is not None
+        state = row["active_download_state"]
+        assert isinstance(state, dict)
+        return state
+
+    def test_matching_fingerprint_stamps_the_link(self):
+        db, rid, plan_id, item_id = self._db_with_plan()
+        self._claim(db, rid, self.FINGERPRINT)
+        result = db.record_consumed_search_attempt(
+            self._attempt(rid, plan_id, item_id))
+        self.assertTrue(result.download_state_stamped)
+        self.assertEqual(
+            self._state(db, rid)["search_log_id"], result.search_log_id)
+
+    def test_mismatched_fingerprint_leaves_the_state_untouched(self):
+        db, rid, plan_id, item_id = self._db_with_plan()
+        self._claim(db, rid, "different")
+        before = dict(self._state(db, rid))
+        result = db.record_consumed_search_attempt(
+            self._attempt(rid, plan_id, item_id))
+        self.assertFalse(result.download_state_stamped)
+        self.assertEqual(self._state(db, rid), before)
+
+    def test_a_row_that_never_claimed_is_never_stamped(self):
+        db, rid, plan_id, item_id = self._db_with_plan()
+        result = db.record_consumed_search_attempt(
+            self._attempt(rid, plan_id, item_id))
+        self.assertFalse(result.download_state_stamped)
+        row = db.get_request(rid)
+        assert row is not None
+        self.assertIsNone(row["active_download_state"])
+
+    def test_a_processing_row_is_never_stamped(self):
+        """``processing`` retains the state AND its fingerprint (#898).
+
+        Only the status half of the guard keeps the stamp off an owned
+        row; the fingerprint half matches. Real-PG twin:
+        ``TestConsumedAttemptStampsDownloadState::
+        test_a_processing_row_is_never_stamped``.
+        """
+        db, rid, plan_id, item_id = self._db_with_plan()
+        self._claim(db, rid, self.FINGERPRINT)
+        handoff = db.handoff_automation_import(
+            request_id=rid,
+            expected_enqueued_at=str(self._state(db, rid)["enqueued_at"]),
+            canonical_path="/processing/albums/stamp",
+            message="stamp guard fixture",
+        )
+        self.assertTrue(handoff.committed)
+        row = db.get_request(rid)
+        assert row is not None
+        self.assertEqual(row["status"], "processing")
+        before = dict(self._state(db, rid))
+        self.assertEqual(before["attempt_fingerprint"], self.FINGERPRINT)
+
+        result = db.record_consumed_search_attempt(
+            self._attempt(rid, plan_id, item_id))
+        self.assertFalse(result.download_state_stamped)
+        self.assertEqual(self._state(db, rid), before)
+
+    def test_attempt_without_a_fingerprint_never_stamps(self):
+        db, rid, plan_id, item_id = self._db_with_plan()
+        self._claim(db, rid, self.FINGERPRINT)
+        before = dict(self._state(db, rid))
+        result = db.record_consumed_search_attempt(
+            self._attempt(rid, plan_id, item_id,
+                          grab_attempt_fingerprint=None))
+        self.assertFalse(result.download_state_stamped)
+        self.assertEqual(self._state(db, rid), before)
+
+    def test_the_search_row_is_written_even_when_the_stamp_misses(self):
+        db, rid, plan_id, item_id = self._db_with_plan()
+        self._claim(db, rid, "different")
+        result = db.record_consumed_search_attempt(
+            self._attempt(rid, plan_id, item_id))
+        self.assertFalse(result.download_state_stamped)
+        rows = db.get_search_history(rid)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], result.search_log_id)
+
+    def test_a_stamp_rewrites_no_other_state_field(self):
+        db, rid, plan_id, item_id = self._db_with_plan()
+        self._claim(db, rid, self.FINGERPRINT)
+        before = dict(self._state(db, rid))
+        db.record_consumed_search_attempt(
+            self._attempt(rid, plan_id, item_id))
+        after = self._state(db, rid)
+        self.assertEqual(
+            {k: v for k, v in after.items() if k != "search_log_id"}, before)
+
+    def test_history_page_carries_grab_columns(self):
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="grab-fake")
+        db.log_search(rid, query="found", outcome="found")
+        linked = db.get_search_history(rid)[0]["id"]
+        assert isinstance(linked, int)
+        log_id = db.log_download(
+            rid, soulseek_username="peer", filetype="flac",
+            outcome="timeout", error_message="remote queue timeout",
+            search_log_id=linked)
+        db.log_search(rid, query="miss", outcome="no_match")
+
+        rows = {r["id"]: r for r in db.get_search_history_page(
+            rid, limit=10).rows}
+        self.assertEqual(rows[linked]["grab_download_log_id"], log_id)
+        self.assertEqual(rows[linked]["grab_outcome"], "timeout")
+        self.assertEqual(rows[linked]["grab_filetype"], "flac")
+        self.assertEqual(rows[linked]["grab_soulseek_username"], "peer")
+        self.assertEqual(
+            rows[linked]["grab_error_message"], "remote queue timeout")
+        unlinked = next(i for i in rows if i != linked)
+        self.assertIsNone(rows[unlinked]["grab_download_log_id"])
+        self.assertIsNone(rows[unlinked]["grab_at"])
+
+
 if __name__ == "__main__":
     unittest.main()

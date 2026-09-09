@@ -136,6 +136,7 @@ from lib.enqueue import (
     find_download,
     prepare_find_download_context,
 )
+from lib.processing_paths import attempt_fingerprint_or_none
 from lib.quality import top_candidates_with_skip_split
 
 
@@ -822,7 +823,7 @@ def _log_search_result(
     if is_consumed and plan_execution is not None:
         scheduler_success = (outcome == "found")
         try:
-            db.record_consumed_search_attempt(
+            consumed = db.record_consumed_search_attempt(
                 ConsumedAttemptInput(
                     request_id=request_id,
                     plan_id=plan_execution.plan_id,
@@ -858,10 +859,44 @@ def _log_search_result(
                     expected_track_count=expected_track_count,
                     matcher_score_top1=matcher_score_top1,
                     query_template=query_template,
+                    # Issue #811: only a ``found`` attempt that reached
+                    # ownership carries one, so this is None on every
+                    # other outcome and the DB stamp is skipped.
+                    grab_attempt_fingerprint=result.grab_attempt_fingerprint,
                     cross_request_conflict_request_ids=(
                         cross_request_conflict_ids),
                 )
             )
+            if (
+                result.grab_attempt_fingerprint is not None
+                and not consumed.download_state_stamped
+            ):
+                # Issue #811: on the normal search path this warning is
+                # the operator-visible evidence that a grab lost its
+                # search link (the one other way a ``found`` grab can
+                # miss its stamp is an owner-path crash, which drains the
+                # result with ``log_search=False`` and is reported by that
+                # path's own ``logger.exception``). Reaching it
+                # means the request stopped being ``downloading`` between
+                # the claim and this write, or its persisted attempt
+                # fingerprint stopped matching the one the executor
+                # computed from the same files list. Not a routine
+                # no-op: a fingerprint is only ever supplied for a
+                # ``found`` outcome, and a claim the DB REFUSED breaks
+                # the enqueue walk into ``enqueue_failed`` -> outcome
+                # ``error`` (``lib/enqueue.py``'s ``claim.attempted and
+                # not claim.claimed`` arms), so it never carries one.
+                # The one benign path here is a context with no
+                # ``download_ownership`` writer wired at all, which no
+                # DB-backed production cycle uses.
+                logger.warning(
+                    "SEARCH LINK NOT STAMPED: request %s search_log_id=%s "
+                    "fingerprint=%s (the grab's download_log rows will "
+                    "carry no search_log_id)",
+                    request_id,
+                    consumed.search_log_id,
+                    result.grab_attempt_fingerprint,
+                )
         except Exception:
             logger.exception(
                 "record_consumed_search_attempt failed for request %s "
@@ -1009,6 +1044,15 @@ def _apply_find_download_result(
             raise AssertionError("found find_download result requires grab_list merge")
         if find_result.grab_entry is None:
             raise AssertionError("found find_download result requires grab entry")
+        # Issue #811: the exact attempt identity of the grab this search
+        # produced, derived from the SAME files list the ownership claim
+        # already fingerprinted (``lib.enqueue._claim_initial_download_
+        # ownership`` -> ``lib.download.build_active_download_state``),
+        # through the SAME shared projection. Never re-derived from the
+        # persisted state: reading it back would only prove the state
+        # round-tripped, not that THIS search produced THAT attempt.
+        result.grab_attempt_fingerprint = attempt_fingerprint_or_none(
+            find_result.grab_entry.files)
         grab_list[find_result.grab_entry.album_id] = find_result.grab_entry
         return
     result.outcome = "error" if find_result.outcome == "enqueue_failed" else "no_match"
