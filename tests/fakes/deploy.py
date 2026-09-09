@@ -451,7 +451,10 @@ class FakeDeployWorld:
             "GIT_CONFIG_NOSYSTEM": "1",
             "NIXOSCONFIG_TOKEN_FILE": str(self.token_file),
             "CRATEDIGGER_DEPLOY_POLL_SECONDS": "0",
-            "CRATEDIGGER_DEPLOY_TIMEOUT_SECONDS": "5",
+            # A deadline no loaded host can beat: the script's prelude alone
+            # took 11 s once at load average 45 and turned a green run into a
+            # timeout. Tests that need a timeout set 1 explicitly.
+            "CRATEDIGGER_DEPLOY_TIMEOUT_SECONDS": "60",
             "DEPLOY_FAKE_STATE": str(self.state_path),
             # Set on purpose: every fake records whether it still saw this,
             # proving the script drops the shared agent before any edge.
