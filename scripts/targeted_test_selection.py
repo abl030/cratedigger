@@ -1427,6 +1427,15 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         # source.
         "tests.test_unused_import_audit",
     ),
+    "scripts/run_tsc.sh": (
+        # The basename probe derives tests.test_run_tsc, which does not
+        # exist: this wrapper's dialect is pinned in
+        # tests.test_phase_parsers (the `bash scripts/run_tsc.sh` rerun
+        # command and the fileless-diagnostic owner both name it) and its
+        # place in the phase plan in tests.test_suite_coordinator.
+        "tests.test_phase_parsers",
+        "tests.test_suite_coordinator",
+    ),
     "scripts/run_tests.sh": (
         # All three read this file's source and pin a distinct property of
         # it: test_js_suite_audit that it still reaches the coordinator,

@@ -259,11 +259,12 @@ export function applySearchTargetAfterDiscography(rgEl) {
   if (!expandId) return;
   const source = state.searchTargetSource || state.browseSource;
   const identityKind = state.searchTargetIdentityKind || 'work';
-  const targetRow = /** @type {HTMLElement|undefined} */ (
-    Array.from(rgEl.querySelectorAll('.rg')).find(row =>
-      row.dataset.catalogueSource === source
-      && row.dataset.identityKind === identityKind
-      && row.dataset.catalogueId === String(expandId)));
+  const rows = /** @type {HTMLElement[]} */ (
+    Array.from(rgEl.querySelectorAll('.rg')));
+  const targetRow = rows.find(row =>
+    row.dataset.catalogueSource === source
+    && row.dataset.identityKind === identityKind
+    && row.dataset.catalogueId === String(expandId));
   if (!targetRow) return;
 
   // An ungrouped Discogs release is already the leaf. Ring + scroll it;
@@ -536,15 +537,25 @@ export function renderPressingRow(rel, ctx) {
  *   omit it because their namespaced expansion target is detached on re-render.
  * @param {boolean} [opts.pairingChecked] - Whether the artist compare
  *   produced the catalogue this row came from (issue #1366 part 2).
+ * @param {boolean} [opts.masterless] - The row is a masterless Discogs
+ *   release, so the expansion's identity level is the release itself.
+ *   Emitted into the row's own onclick by `renderRgRow` and read back by
+ *   `expansionOptsFromRow`.
+ * @param {import('./replace_offer.js').ReplacePairingState} [opts.pairing] -
+ *   Whether the compare that produced this row had landed. Absent means the
+ *   surface never ran one.
  * @param {{id: string, kind: 'work'|'release', source: 'mb'|'discogs', label: string}|null} [opts.paired] -
  *   The compare counterpart of this group on the other pathway, if any.
  */
 export async function loadReleaseGroup(id, el, opts = {}) {
   const source = opts.source || state.browseSource;
   const identityKind = opts.identityKind || (opts.masterless ? 'release' : 'work');
-  const relEl = opts.targetEl
+  // `nextElementSibling` is typed `Element`; the sibling a rendered row
+  // carries is the expansion `<div>` this function then writes HTML into.
+  const relEl = /** @type {HTMLElement|null} */ (
+    opts.targetEl
     || el?.nextElementSibling
-    || document.getElementById(catalogueDomId(source, identityKind, id));
+    || document.getElementById(catalogueDomId(source, identityKind, id)));
   if (!relEl) return;
   if (relEl.innerHTML) { relEl.innerHTML = ''; return; }
   relEl.innerHTML = '<div class="loading">Loading releases...</div>';

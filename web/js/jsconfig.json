@@ -1,0 +1,26 @@
+{
+  // The web UI is checked JavaScript, never compiled JavaScript: every
+  // module already carries `// @ts-check`, and `scripts/run_tsc.sh` runs
+  // tsc over this project as one canonical-suite phase. `jsconfig.json`
+  // rather than `tsconfig.json` says that in the file name — there is no
+  // build step here and no TypeScript source to emit (`.claude/rules/web.md`).
+  // Editors read this file too, so in-editor diagnostics and the gate see
+  // exactly the same options.
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "target": "es2022",
+    "module": "es2022",
+    "moduleResolution": "bundler",
+    "lib": ["es2022", "dom", "dom.iterable"],
+    // No npm, so no `node_modules/@types` to pull in. Spelling it empty
+    // keeps the project hermetic if a stray `node_modules` ever appears
+    // above the repository root, where tsc would otherwise find it.
+    "types": []
+  },
+  // The 31 modules plus `globals.d.ts`, which declares the cross-module
+  // `window.*` handlers `main.js` installs. `tests/*.mjs` is deliberately
+  // outside this project — see `docs/webui-primer.md`.
+  "include": ["*.js", "*.d.ts"]
+}

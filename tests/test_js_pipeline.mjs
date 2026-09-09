@@ -903,6 +903,35 @@ t.section('toggleDetail() withholds Replace on a frozen audit row');
     'a replaced row offers no Replace button');
 }
 
+t.section('toggleDetail() withholds Replace when the detail id is not a number');
+{
+  // `id` is `requestId || elId`. Every caller that passes a string elId
+  // ('dl-<n>', 'acquisition-<n>') also passes the numeric requestId, so
+  // this world is legislation rather than a live branch (#1390) — and it
+  // has to hold, because `renderReplaceButton` interpolates the id raw
+  // into the button's onclick, where 'dl-5' would be a syntax error.
+  // Bad Rip drops for the same reason and through the same `Number(id)`;
+  // the status row proves the composer ran rather than died.
+  const panel = element();
+  stubGlobals({
+    document: domStub({ 'dl-5': panel }),
+    fetch: async () => ({
+      ok: true, status: 200, json: async () => detailEnvelope(),
+    }),
+  });
+
+  await toggleDetail('dl-5');
+
+  t.excludes(panel.innerHTML, 'Failed to load details',
+    'the composer ran to completion');
+  t.contains(panel.innerHTML, 'class="p-actions"',
+    'the action row still renders');
+  t.excludes(panel.innerHTML, 'window.openReplacePicker',
+    'a non-numeric detail id yields no Replace button, not a broken onclick');
+  t.excludes(panel.innerHTML, 'window.banSource(',
+    'and Bad Rip drops with it, off the same coercion');
+}
+
 t.section('renderPipeline() paints the long-tail view as nav then worklist');
 {
   // The suite's other entry, and the reason `renderPipelineNav` gets direct

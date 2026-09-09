@@ -17,6 +17,19 @@ import {
   spectralWithheldPresentation,
 } from './quality_palette.js';
 
+/**
+ * The fields this module reads out of `GET /api/wrong-matches/triage/status`.
+ * The producer is `web/triage_runner.py::TriageStatusSnapshot`, which also
+ * carries `finished_at`; nothing here reads it.
+ *
+ * Five call sites used to spell this shape by hand and two had dropped
+ * `started_at`, which is the field the follow-guard keys ownership on
+ * (issue #1390).
+ *
+ * @typedef {{state: string, started_at: string|null, summary: Object|null,
+ *   error: string|null}} TriageSweepStatus
+ */
+
 /** @type {boolean} */
 let _loaded = false;
 /** @type {Object | null} */
@@ -1945,7 +1958,7 @@ export function releaseTriageFollow(startedAt) {
  * Fetch `/api/wrong-matches/triage/status` once. Never throws — returns
  * `undefined` on any transport/parse failure so callers can branch on
  * "could not determine" without their own try/catch.
- * @returns {Promise<{state: string, started_at: string|null, summary: Object|null, error: string|null}|undefined>}
+ * @returns {Promise<TriageSweepStatus|undefined>}
  */
 async function _fetchTriageStatus() {
   try {
@@ -1966,7 +1979,7 @@ async function _fetchTriageStatus() {
  * render-time attach path (`_deriveTriageButtonState`, which discovered
  * a sweep already running — issue #1106) so both land in exactly the
  * same place.
- * @param {{state: string, summary: Object|null, error: string|null}|null} status
+ * @param {TriageSweepStatus|null} status
  * @returns {Promise<void>}
  */
 async function _applyTriageTerminalState(status) {
@@ -2006,7 +2019,7 @@ async function _applyTriageTerminalState(status) {
  * sweep can still take over while `pollTriageStatus()` is in flight. A
  * result naming a different `started_at` is silently skipped here —
  * whichever follower legitimately owns that sweep will report it.
- * @param {{state: string, started_at: string|null, summary: Object|null, error: string|null}} [knownStatus]
+ * @param {TriageSweepStatus} [knownStatus]
  *   an already-fetched RUNNING status, when the caller has one (the
  *   render-time derive always does, from its own status fetch);
  *   omitted for the click path, which fetches it itself so it too can
@@ -2040,7 +2053,7 @@ async function _followTriageSweepToCompletion(knownStatus) {
  * caller must not block on it — that lands on the exact same terminal
  * handling the click path uses, with no confirm dialog. Any other
  * status just derives the idle shape off the CURRENT candidate count.
- * @param {{state: string, started_at: string|null, summary: Object|null, error: string|null}} status
+ * @param {TriageSweepStatus} status
  */
 function _applyTriageStatus(status) {
   if (status.state === 'running') {
@@ -2224,7 +2237,7 @@ export async function stopWrongMatchTriage() {
 
 /**
  * Poll the background sweep until it leaves the running state.
- * @returns {Promise<{state: string, summary: Object|null, error: string|null}|null>}
+ * @returns {Promise<TriageSweepStatus|null>}
  */
 async function pollTriageStatus() {
   // The sweep legitimately takes minutes when stale rows re-measure or

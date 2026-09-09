@@ -50,6 +50,11 @@ pkgs.mkShell {
     pkgs.util-linux          # flock for deploy-pin concurrency tests
     pkgs.zsh                 # executable zsh runbook contract tests
     pkgs.ruff                # flake-locked repo-wide lint toolchain
+    pkgs.typescript_5        # tsc for the web/js checked-JavaScript gate
+                             # (scripts/run_tsc.sh). The versioned attribute,
+                             # not `pkgs.typescript`, which now aliases the
+                             # 7.x Go rewrite; 5.9.3 is what issue #1390
+                             # measured the 48-error baseline against.
     testPythonEnv
     pkgs.sox                 # spectral analysis tests
     pkgs.ffmpeg              # ffprobe for bitrate measurement in quality tests

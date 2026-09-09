@@ -111,6 +111,34 @@
       ]
     }
   },
+  "ctdb_18_shifted_toc": {
+    "accuraterip": null,
+    "algorithm": "cd-rip-bit-verifier-v1",
+    "ctdb": {
+      "confidence": 18,
+      "crc32": 878082202,
+      "entry_id": "ctdb-entry-shifted",
+      "provider": "ctdb",
+      "response_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "response_toc_sectors": [
+        32,
+        502
+      ],
+      "response_toc_shift_sectors": 32,
+      "stride_samples": 5880,
+      "url": "https://db.cue.tools/lookup2.php?shifted=1"
+    },
+    "provenance": "measured",
+    "source_format": "flac",
+    "toc": {
+      "accuraterip_id": "000001d6-000003ac-02000601",
+      "leadout_sector": 470,
+      "musicbrainz_disc_id": "exact-shifted-disc-id",
+      "track_offsets_sectors": [
+        0
+      ]
+    }
+  },
   "ctdb_24": {
     "accuraterip": null,
     "algorithm": "cd-rip-bit-verifier-v1",

@@ -92,8 +92,13 @@ export function overrideToIntent(override) {
 }
 
 /**
- * HTML-escape a string. Works in both browser and Node.
- * @param {string|null|undefined} s
+ * HTML-escape a value. Works in both browser and Node.
+ *
+ * Numbers are in the domain on purpose: bitrates, counts and track numbers
+ * reach here straight off a payload, and the `String(s)` below has always
+ * coerced them. Objects are not, so an accidental `[object Object]` in the
+ * page still fails the type check.
+ * @param {string|number|null|undefined} s
  * @returns {string}
  */
 export function esc(s) {

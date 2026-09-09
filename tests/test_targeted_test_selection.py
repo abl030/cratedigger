@@ -1241,7 +1241,15 @@ class TestTargetedSuiteWiring(unittest.TestCase):
 
         self.assertEqual(
             tuple(phase.name for phase in phases),
-            ("js-syntax", "js-unit", "pyright", "ruff", "vulture", "python"),
+            (
+                "js-syntax",
+                "js-unit",
+                "tsc",
+                "pyright",
+                "ruff",
+                "vulture",
+                "python",
+            ),
         )
         python_phase = phases[-1]
         self.assertIs(python_phase.parser, python_tests.parse_failures)
