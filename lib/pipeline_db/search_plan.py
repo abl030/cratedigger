@@ -59,6 +59,10 @@ from lib.pipeline_db.decisions import (
     saturation_summary_from_counts,
     search_backoff_minutes,
 )
+from lib.pipeline_db.download_log import (
+    GRAB_OUTCOMES,
+    IMPORT_ACCEPTANCE_OUTCOMES,
+)
 from lib.search_classification import (
     SearchSummary as _SearchSummary,
 )
@@ -367,11 +371,22 @@ class _SearchPlanMixin(_PipelineDBBase):
     ) -> SearchAcquisitionSummary:
         """What the search has found for one request, and what came of it.
 
-        The window opens at the newest successful import for this request
-        (``download_log.outcome='success'``) so an upgrade request's
-        summary describes the hunt for the NEXT copy, not the peers that
-        supplied the one already on disk. With no successful import the
-        window is the request's whole history.
+        The window opens at this request's newest ACCEPTANCE — any
+        ``IMPORT_ACCEPTANCE_OUTCOMES`` row, not just ``success`` — so an
+        upgrade request's summary describes the hunt for the NEXT copy,
+        not the peers that supplied the one already on disk. A
+        force/local/manual import is every bit as much "we got a copy"
+        as an automation success, and scoping to ``success`` alone
+        reported "all history" for 1,112 live requests whose only
+        acceptance is one of those (issue #811 review, measured
+        2026-09-09). With no acceptance at all the window is the
+        request's whole history.
+
+        ``grabs`` counts only ``GRAB_OUTCOMES`` — verdicts an actual
+        slskd transfer can reach. The narrower shape matters for the
+        same reason: a ``force_import`` row is an operator re-importing a
+        folder already on disk, and counting it as a grab would tell the
+        operator the pipeline downloaded something it never fetched.
 
         Aggregation is SQL's: ``search_log.candidates`` is unnested with
         ``jsonb_array_elements`` so a request with hundreds of scored
@@ -412,9 +427,9 @@ class _SearchPlanMixin(_PipelineDBBase):
             """
             SELECT MAX(created_at) AS since
             FROM download_log
-            WHERE request_id = %s AND outcome = 'success'
+            WHERE request_id = %s AND outcome = ANY(%s)
             """,
-            (request_id,),
+            (request_id, list(IMPORT_ACCEPTANCE_OUTCOMES)),
         )
         since_row = since_cur.fetchone()
         since = since_row["since"] if since_row is not None else None
@@ -451,11 +466,12 @@ class _SearchPlanMixin(_PipelineDBBase):
             WHERE request_id = %s
               AND source = 'slskd'
               AND soulseek_username IS NOT NULL
+              AND outcome = ANY(%s)
               AND (%s::timestamptz IS NULL OR created_at > %s)
             GROUP BY filetype
             ORDER BY n DESC, filetype ASC NULLS LAST
             """,
-            (request_id, *window),
+            (request_id, list(GRAB_OUTCOMES), *window),
         )
         grabs = [
             AcquisitionGrabGroup(

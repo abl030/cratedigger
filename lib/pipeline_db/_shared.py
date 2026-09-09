@@ -1017,8 +1017,10 @@ class ConsumedAttemptResult:
     covers every legitimate no-op -- no ``grab_attempt_fingerprint`` was
     supplied, the request is no longer ``downloading``, or its persisted
     fingerprint names a different attempt -- as well as the genuinely
-    lost link. It is diagnostic, never an error: the search row is
-    written either way.
+    lost link. It never raises: the search row is written either way.
+    ``cratedigger._log_search_result`` is its consumer, and warns when a
+    fingerprint WAS supplied and the stamp still did not land -- the only
+    operator-visible evidence that a grab lost its search link.
     """
     search_log_id: int
     cursor_update_status: str
@@ -1058,8 +1060,15 @@ class SearchLogHistoryPage:
 class AcquisitionTierCount:
     """How many scored candidates a search tier produced in the window.
 
-    ``tier`` is ``CandidateScore.filetype`` — the tier the find_download
-    walk scored at (``lossless``, ``mp3 320``, ...), NOT a file extension.
+    ``tier`` is ``CandidateScore.filetype``, which
+    ``lib/matching.py::check_for_match`` sets to the ``allowed_filetype``
+    the walk was INVOKED with — so what it looks like depends on the
+    request. Under a quality override it is a tier name (``lossless``,
+    ``mp3 320``); with no override the walk iterates the config's own
+    ``allowed_filetypes``, which are plain extension names (``flac``,
+    ``mp3`` by default). Either way it is the search-side vocabulary,
+    which is why it is compared against ``search_scope.tiers`` rather
+    than against a downloaded file's extension.
     """
 
     tier: str
@@ -1070,9 +1079,13 @@ class AcquisitionTierCount:
 class AcquisitionGrabGroup:
     """One downloaded file type and how often the pipeline grabbed it.
 
-    ``filetype`` here IS the extension recorded on ``download_log`` (the
-    other half of the tier-versus-extension distinction above), and is
-    NULL on a row whose files never yielded one.
+    ``filetype`` here is the extension ``_build_download_info`` derived
+    from the downloaded filenames and recorded on ``download_log`` —
+    what arrived, as opposed to ``AcquisitionTierCount.tier``'s
+    what-we-asked-for. The two coincide for a config-tier request and
+    diverge under an override (tier ``lossless``, filetype ``flac``), so
+    they are never compared. NULL on a row whose files never yielded an
+    extension.
     """
 
     filetype: str | None

@@ -60,6 +60,10 @@ from lib.pipeline_db.decisions import (
     saturation_summary_from_counts,
     search_backoff_minutes,
 )
+from lib.pipeline_db.download_log import (
+    GRAB_OUTCOMES,
+    IMPORT_ACCEPTANCE_OUTCOMES,
+)
 from lib.search_classification import (
     SearchSummary as _SearchSummary,
 )
@@ -568,7 +572,8 @@ class _FakeSearchPlanMixin(_FakePipelineDBBase):
 
         imports = [
             entry for entry in self.download_logs
-            if entry.request_id == request_id and entry.outcome == "success"
+            if entry.request_id == request_id
+            and entry.outcome in IMPORT_ACCEPTANCE_OUTCOMES
         ]
         since = max((e.created_at for e in imports), default=None)
         scored = self._scored_candidates_since(request_id, since)
@@ -590,6 +595,7 @@ class _FakeSearchPlanMixin(_FakePipelineDBBase):
             if entry.request_id == request_id
             and entry.source == "slskd"
             and entry.soulseek_username is not None
+            and entry.outcome in GRAB_OUTCOMES
             and (since is None or entry.created_at > since)
         ]
         by_filetype: dict[str | None, list[DownloadLogRow]] = {}

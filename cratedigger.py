@@ -823,7 +823,7 @@ def _log_search_result(
     if is_consumed and plan_execution is not None:
         scheduler_success = (outcome == "found")
         try:
-            db.record_consumed_search_attempt(
+            consumed = db.record_consumed_search_attempt(
                 ConsumedAttemptInput(
                     request_id=request_id,
                     plan_id=plan_execution.plan_id,
@@ -867,6 +867,32 @@ def _log_search_result(
                         cross_request_conflict_ids),
                 )
             )
+            if (
+                result.grab_attempt_fingerprint is not None
+                and not consumed.download_state_stamped
+            ):
+                # Issue #811: this warning is the ONLY operator-visible
+                # evidence that a grab lost its search link. Reaching it
+                # means the request stopped being ``downloading`` between
+                # the claim and this write, or its persisted attempt
+                # fingerprint stopped matching the one the executor
+                # computed from the same files list. Not a routine
+                # no-op: a fingerprint is only ever supplied for a
+                # ``found`` outcome, and a claim the DB REFUSED breaks
+                # the enqueue walk into ``enqueue_failed`` -> outcome
+                # ``error`` (``lib/enqueue.py``'s ``claim.attempted and
+                # not claim.claimed`` arms), so it never carries one.
+                # The one benign path here is a context with no
+                # ``download_ownership`` writer wired at all, which no
+                # DB-backed production cycle uses.
+                logger.warning(
+                    "SEARCH LINK NOT STAMPED: request %s search_log_id=%s "
+                    "fingerprint=%s (the grab's download_log rows will "
+                    "carry no search_log_id)",
+                    request_id,
+                    consumed.search_log_id,
+                    result.grab_attempt_fingerprint,
+                )
         except Exception:
             logger.exception(
                 "record_consumed_search_attempt failed for request %s "

@@ -76,9 +76,12 @@ from lib.pipeline_db.dashboard import (
 )
 from lib.pipeline_db.decisions import search_backoff_minutes
 from lib.pipeline_db.download_log import (
+    GRAB_OUTCOMES,
+    IMPORT_ACCEPTANCE_OUTCOMES,
     LINKED_IMPORT_OUTCOMES,
     LOG_FILTER_IMPORTED_OUTCOMES,
     LOG_FILTER_REJECTED_OUTCOMES,
+    WRITABLE_IMPORT_ACCEPTANCE_OUTCOMES,
 )
 from lib.pipeline_db.requests import (
     CAPTURE_DOWNLOAD_OUTCOMES,
@@ -6466,6 +6469,18 @@ class TestSearchToGrabLinkReads(unittest.TestCase):
         assert isinstance(newest, int)
         return newest
 
+    def _stamp_download_log(self, ago: str) -> None:
+        """Age the newest ``download_log`` row by a fixed interval."""
+        self.db._execute(
+            f"UPDATE download_log SET created_at = NOW() - INTERVAL '{ago}' "
+            "WHERE id = (SELECT MAX(id) FROM download_log)")
+
+    def _stamp_search_log(self, ago: str) -> None:
+        """Age the newest ``search_log`` row by a fixed interval."""
+        self.db._execute(
+            f"UPDATE search_log SET created_at = NOW() - INTERVAL '{ago}' "
+            "WHERE id = (SELECT MAX(id) FROM search_log)")
+
     def _candidate(self, **overrides):
         from lib.quality import CandidateScore
         base = {
@@ -6601,6 +6616,72 @@ class TestSearchToGrabLinkReads(unittest.TestCase):
         self.assertIsNotNone(summary.last_found.at)
         self.assertIsNotNone(summary.peers[0].last_at)
         self.assertIsNotNone(summary.grabs[0].last_at)
+
+    def test_the_window_opens_at_a_force_import_not_only_a_success(self):
+        """Issue #811 review: acceptance is not spelled ``success`` only.
+
+        Force, local and manual imports write their own outcome labels
+        (``lib/dispatch/outcome_actions.py``'s ``outcome_label``), and a
+        ``success``-only window folded every pre-import search back into
+        the summary. Measured on the live DB 2026-09-09: 1,112 requests
+        whose ONLY acceptance is force/local/manual, plus 367 whose
+        newest acceptance is one of those over an older ``success``.
+        The world here is the second, harder shape — an older ``success``
+        the window must NOT reopen to.
+        """
+        # Ancient: an automation success, then a search under it.
+        self.db.log_download(
+            self.req_id, soulseek_username="BigGray", filetype="mp3",
+            outcome="success")
+        self._stamp_download_log("90 days")
+        self._search("found", candidates=[self._candidate(
+            username="ancient_peer", filetype="mp3 320")])
+        self._stamp_search_log("80 days")
+
+        # Newer: a force import, then the only searches that count.
+        self.db.log_download(
+            self.req_id, soulseek_username="operator", filetype="flac",
+            outcome="force_import")
+        self._stamp_download_log("30 days")
+        self._search("found", candidates=[self._candidate()])
+        self._stamp_search_log("10 days")
+
+        summary = self.db.get_search_acquisition_summary(self.req_id)
+        self.assertEqual(summary.since_reason, "last_import")
+        assert summary.since is not None
+        # The force import, not the older success.
+        newest = self.db.get_download_history(self.req_id)[0]
+        self.assertEqual(summary.since, newest["created_at"])
+        self.assertEqual(newest["outcome"], "force_import")
+        # Only the post-force-import search is in scope.
+        self.assertEqual(
+            [(t.tier, t.count) for t in summary.candidate_tiers],
+            [("lossless", 1)])
+        self.assertEqual(
+            [p.username for p in summary.peers], ["anjingpaeh"])
+
+    def test_only_grab_outcomes_count_as_grabs(self):
+        """Operator actions on this request are not downloads of it.
+
+        ``force_import`` (an operator re-import of a folder already on
+        disk) and ``curator_ban`` (a destructive action) both carry
+        ``source='slskd'`` and a username, so the old shape counted them.
+        """
+        self.db.log_download(
+            self.req_id, soulseek_username="anjingpaeh", filetype="flac",
+            outcome="timeout")
+        self.db.log_download(
+            self.req_id, soulseek_username="anjingpaeh", filetype="flac",
+            outcome="curator_ban")
+        self.db.log_download(
+            self.req_id, soulseek_username="operator", filetype="flac",
+            outcome="user_offline")
+
+        summary = self.db.get_search_acquisition_summary(self.req_id)
+        self.assertEqual(summary.grabs_total, 1)
+        self.assertEqual(
+            [(g.filetype, g.count, g.last_outcome) for g in summary.grabs],
+            [("flac", 1, "timeout")])
 
     def test_a_found_search_with_no_linked_grab_reports_no_grab(self):
         """``last_found.grab`` is None, not a stand-in, when nothing linked."""
@@ -7827,6 +7908,64 @@ class TestSharedOutcomeVocabularies(unittest.TestCase):
             if self._captured(suffix):
                 admitted.add(outcome)
         self.assertEqual(admitted, set(CAPTURE_DOWNLOAD_OUTCOMES))
+
+    def test_import_acceptance_outcomes_match_the_acquisition_window(self):
+        """Every acceptance outcome opens the window; nothing else does.
+
+        Driven against the WHOLE canonical taxonomy, so an outcome added
+        by a future migration is classified here rather than silently
+        left out of the window (issue #811 review).
+        """
+        admitted: set[str] = set()
+        for outcome in sorted(_ALL_DOWNLOAD_LOG_OUTCOMES):
+            request_id = self._request(f"acceptance-{outcome}")
+            self.db.log_download(request_id=request_id, outcome=outcome)
+            summary = self.db.get_search_acquisition_summary(request_id)
+            if summary.since is not None:
+                admitted.add(outcome)
+        self.assertEqual(admitted, set(IMPORT_ACCEPTANCE_OUTCOMES))
+
+    def test_grab_outcomes_match_the_acquisition_grab_counter(self):
+        """Only a real slskd transfer's verdicts count as a grab."""
+        admitted: set[str] = set()
+        for outcome in sorted(_ALL_DOWNLOAD_LOG_OUTCOMES):
+            request_id = self._request(f"grab-{outcome}")
+            self.db.log_download(
+                request_id=request_id, outcome=outcome,
+                soulseek_username="peer",
+            )
+            summary = self.db.get_search_acquisition_summary(request_id)
+            if summary.grabs_total:
+                admitted.add(outcome)
+        # An acceptance outcome is also its own window boundary, so it can
+        # never be inside its own window: subtract that overlap rather
+        # than pretending the counter rejects it.
+        self.assertEqual(
+            admitted,
+            set(GRAB_OUTCOMES) - set(IMPORT_ACCEPTANCE_OUTCOMES),
+        )
+
+    def test_the_writable_acceptance_set_is_the_historical_one_minus_manual(
+        self,
+    ):
+        """The refusal guard's set and the historical set stay bound.
+
+        ``lib/terminal_outcomes.py``'s successful-acceptance guard admits
+        only what a current writer can emit; the acquisition window asks
+        the historical question. Exactly one outcome separates them, and
+        it is the one migration 080 retired — if a future lane starts
+        writing ``manual_import``, or a new acceptance label appears in
+        only one of the two, this fails.
+        """
+        self.assertEqual(
+            set(IMPORT_ACCEPTANCE_OUTCOMES)
+            - set(WRITABLE_IMPORT_ACCEPTANCE_OUTCOMES),
+            {"manual_import"},
+        )
+        self.assertLess(
+            set(WRITABLE_IMPORT_ACCEPTANCE_OUTCOMES),
+            set(IMPORT_ACCEPTANCE_OUTCOMES),
+        )
 
     def test_capture_job_types_match_has_captured_history(self):
         admitted: set[str] = set()

@@ -117,9 +117,12 @@ success 0, not found 2, input/semantic violation 3, conflict 4, transient 5.
   function `find_download` calls, so "is my lossless override in force?"
   is answered by the executor's own resolution rather than by reading the
   override string. **Acquisition** then reports what the search has found
-  SINCE the request's last successful import (all history when there has
+  SINCE the request's last ACCEPTANCE — a force, local or manual import
+  counts, not only an automation `success` (all history when there has
   never been one): candidate tiers with counts, how many of those fell
-  outside the scope above, grabs by filetype with their latest outcome,
+  outside the scope above, grabs by filetype with their latest outcome
+  (only outcomes a real slskd transfer can reach, so an operator's
+  force-import or ban is not counted as a download),
   the newest `found` search with its best-matched peer and the exact
   `download_log` row that grab produced, and the top peers by attempts.
   `--json` emits the same two blocks as `search_scope` and `acquisition`,
