@@ -1638,26 +1638,37 @@ class TestShuffledOrder(unittest.TestCase):
         module alone yields targets with the same load names as the full
         run, and load names are the salt, so every shard's inner order is
         identical under the same seed."""
-        module_name = next(iter(HOTSPOT_SHARD_POLICIES))
-        listed = {module_name: list_module_test_ids(module_name, REPO_ROOT)}
         modules = discover_test_modules(REPO_ROOT / "tests", REPO_ROOT, "test*.py")
-        hotspot = [module for module in modules if module.name == module_name]
-
-        # build_test_targets is per module, so the full run's targets for
-        # this module are exactly what it builds from the module alone.
-        full_run = build_test_targets(schedule_modules(hotspot), listed)
-        replay = select_test_targets(modules, [module_name], listed_test_ids=listed)
-
-        full_salts = sorted(
-            "|".join(t.load_names or (t.test_name,))
-            for t in full_run
-            if t.module.name == module_name
+        # Both producers of a ``module::batch`` target name: the sharded
+        # hotspots and the isolated-method ones (``::remainder``), which
+        # reach ``hotspot_targets`` through different branches.
+        hotspot_names = sorted(
+            HOTSPOT_SHARD_POLICIES.keys() | HOTSPOT_ISOLATED_METHODS.keys()
         )
-        replay_salts = sorted(
-            "|".join(t.load_names or (t.test_name,)) for t in replay
-        )
-        self.assertTrue(full_salts, "the hotspot really shards")
-        self.assertEqual(replay_salts, full_salts)
+        for module_name in hotspot_names:
+            with self.subTest(module=module_name):
+                listed = {module_name: list_module_test_ids(module_name, REPO_ROOT)}
+                hotspot = [m for m in modules if m.name == module_name]
+
+                # build_test_targets is per module, so the full run's
+                # targets for this module are exactly what it builds from
+                # the module alone.
+                full_run = build_test_targets(schedule_modules(hotspot), listed)
+                replay = select_test_targets(
+                    modules, [module_name], listed_test_ids=listed
+                )
+
+                full_salts = sorted(
+                    "|".join(t.load_names or (t.test_name,)) for t in full_run
+                )
+                replay_salts = sorted(
+                    "|".join(t.load_names or (t.test_name,)) for t in replay
+                )
+                self.assertTrue(
+                    any("::" in t.test_name for t in full_run),
+                    "the hotspot really produces batch-named targets",
+                )
+                self.assertEqual(replay_salts, full_salts)
 
     def _run_alpha_with_expected(
         self, expected: tuple[str, ...]
