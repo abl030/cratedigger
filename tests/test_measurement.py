@@ -899,6 +899,152 @@ class TestMeasurePreimportState(unittest.TestCase):
         spectral_gate.assert_not_called()
         inspect_again.assert_not_called()
 
+    def test_nested_layout_skips_the_candidate_spectral_scan(self):
+        """A nested candidate is rejected on layout, so nothing reads its
+        spectral grade — issue #1378 item 3. Measured on doc2 before the
+        gate: 29s for a 12-track MP3 album, 22s of it the candidate scan,
+        to answer "flatten the folder"."""
+        from lib.config import CratediggerConfig
+        from lib.measurement import (
+            ExistingSpectralAuditLookup,
+            measure_preimport_state,
+        )
+
+        cfg = CratediggerConfig(audio_check_mode="off")
+        with patch(
+            "lib.measurement._iter_audio_files",
+            return_value=[Path("/tmp/album/Disc 1/01.flac")],
+        ), patch(
+            "lib.measurement._needs_spectral_check"
+        ) as spectral_gate:
+            measured = measure_preimport_state(
+                path="/tmp/album",
+                mb_release_id="exact-release",
+                label="Nested rip",
+                download_filetype="flac",
+                download_min_bitrate_bps=800_000,
+                download_is_vbr=False,
+                cfg=cfg,
+                spectral_detail_analyzer=lambda _path: self.fail(
+                    "a nested candidate must not be spectrally scanned"
+                ),
+                existing_spectral_resolver=lambda _release: (
+                    ExistingSpectralAuditLookup()
+                ),
+                aac_lattice_measure_fn=lambda _path: self.fail(
+                    "AAC authenticity must not run"
+                ),
+            )
+
+        self.assertEqual(measured.folder_layout, "nested")
+        self.assertIsNone(measured.download_spectral)
+        candidate = measured.spectral_audit.candidate
+        assert candidate is not None
+        self.assertFalse(candidate.attempted)
+        spectral_gate.assert_not_called()
+
+    def test_nested_layout_still_collects_the_have_side(self):
+        """Skipping the candidate scan must not cost the HAVE side its
+        collection: the tail two-sided fill still runs, so
+        ``persist_exact_current_spectral_from_attempt`` keeps its input
+        (reader finding, PR #1386 — the safety argument was asserted in prose
+        and pinned nowhere)."""
+        from lib.config import CratediggerConfig
+        from lib.measurement import (
+            ExistingSpectralAuditLookup,
+            measure_preimport_state,
+        )
+        from lib.quality import SpectralAnalysisDetail
+        from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
+
+        cfg = CratediggerConfig(audio_check_mode="off")
+        scanned: list[str] = []
+
+        def analyze(path: str) -> SpectralAnalysisDetail:
+            scanned.append(path)
+            return SpectralAnalysisDetail(
+                attempted=True,
+                grade="genuine",
+                bitrate_kbps=900,
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+            )
+
+        with patch(
+            "lib.measurement._iter_audio_files",
+            return_value=[Path("/tmp/album/Disc 1/01.flac")],
+        ):
+            measured = measure_preimport_state(
+                path="/tmp/album",
+                mb_release_id="exact-release",
+                label="Nested rip",
+                download_filetype="flac",
+                download_min_bitrate_bps=800_000,
+                download_is_vbr=False,
+                cfg=cfg,
+                spectral_detail_analyzer=analyze,
+                existing_spectral_resolver=lambda _release: (
+                    ExistingSpectralAuditLookup(
+                        path="/library/album", min_bitrate_kbps=900,
+                    )
+                ),
+            )
+
+        self.assertEqual(scanned, ["/library/album"])
+        self.assertEqual(measured.existing_spectral_path, "/library/album")
+        existing = measured.spectral_audit.existing
+        assert existing is not None
+        self.assertTrue(existing.attempted)
+        candidate = measured.spectral_audit.candidate
+        assert candidate is not None
+        self.assertFalse(candidate.attempted)
+
+    def test_flat_layout_still_runs_the_candidate_spectral_scan(self):
+        """Must-still-work control for the nested skip above: the same
+        world, one directory level flatter, is scanned as before."""
+        from lib.config import CratediggerConfig
+        from lib.measurement import (
+            ExistingSpectralAuditLookup,
+            measure_preimport_state,
+        )
+        from lib.quality import SpectralAnalysisDetail
+        from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
+
+        cfg = CratediggerConfig(audio_check_mode="off")
+        scanned: list[str] = []
+
+        def analyze(path: str) -> SpectralAnalysisDetail:
+            scanned.append(path)
+            return SpectralAnalysisDetail(
+                attempted=True,
+                grade="genuine",
+                bitrate_kbps=900,
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+            )
+
+        with patch(
+            "lib.measurement._iter_audio_files",
+            return_value=[Path("/tmp/album/01.flac")],
+        ):
+            measured = measure_preimport_state(
+                path="/tmp/album",
+                mb_release_id="exact-release",
+                label="Flat rip",
+                download_filetype="flac",
+                download_min_bitrate_bps=800_000,
+                download_is_vbr=False,
+                cfg=cfg,
+                spectral_detail_analyzer=analyze,
+                existing_spectral_resolver=lambda _release: (
+                    ExistingSpectralAuditLookup()
+                ),
+            )
+
+        self.assertEqual(measured.folder_layout, "flat")
+        self.assertEqual(scanned, ["/tmp/album"])
+        download_spectral = measured.download_spectral
+        assert download_spectral is not None
+        self.assertEqual(download_spectral.grade, "genuine")
+
 
 if __name__ == "__main__":
     unittest.main()
