@@ -37,6 +37,7 @@ import tempfile
 import unittest
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Literal, cast
 from unittest.mock import patch
 
@@ -57,7 +58,9 @@ from lib.import_evidence import ensure_current_evidence_for_action
 from lib.import_preview import measure_and_persist_candidate_evidence
 from lib.measurement import ExistingSpectralAuditLookup
 from lib.quality import (
+    EVIDENCE_SUBJECT_SOURCE,
     AlbumQualityEvidence,
+    AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
     EvidenceProvenance,
@@ -67,6 +70,7 @@ from lib.quality import (
 )
 from lib.quality_evidence import (
     backfill_current_evidence_from_album_info,
+    current_evidence_preserves_source_spectral,
     snapshot_audio_files,
     snapshot_fingerprint,
 )
@@ -1965,6 +1969,289 @@ class TestProofMintCheckersTripOnViolations(unittest.TestCase):
             "import", EvidenceBuildResultForTest(
                 evidence=object(), status="ready"),
         )
+
+
+# --- issue #1378 item 5: the spectral formula's dead fourth disjunct -------
+#
+# ``lib.pipeline_db.evidence._SPECTRAL_TUPLE_USE_INCOMING_SQL`` used to carry
+# a fourth OR-disjunct that replaced a stored ``installed``-subject spectral
+# tuple when the incoming row satisfied R19
+# (``current_evidence_preserves_source_spectral``). It could never decide a
+# write on its own: R19 demands an incoming ``source`` spectral subject, and
+# at ``lineage_version >= 4`` a spectral marker without a spectral grade is a
+# storage validation error, so ``EXCLUDED.spectral_grade IS NOT NULL``
+# (disjunct 2) already held. Every evidence row ``lib/quality_evidence.py``
+# builds carries ``CURRENT_EVIDENCE_LINEAGE_VERSION``, so that covers the
+# pipeline's writes; the removal's full argument, including the corpus-replay
+# writer, is in the constant's own comment. These two clauses patrol both
+# halves of the chain over the world space, so the day either half stops
+# holding this goes red instead of the removal silently changing what
+# production persists.
+
+#: (container, codec) pairs: three authoritative lossy shapes, one ambiguous
+#: container with a lossless codec, and one native lossless pair.
+_SUBSUMPTION_MEDIA: tuple[tuple[str, str], ...] = (
+    ("mp3", "mp3"),
+    ("m4a", "aac"),
+    ("opus", "opus"),
+    ("m4a", "alac"),
+    ("flac", "flac"),
+)
+_SUBSUMPTION_GRADES: tuple[str | None, ...] = (
+    None, "genuine", "marginal", "likely_transcode",
+)
+_SUBSUMPTION_SUBJECTS: tuple[EvidenceSubject | None, ...] = (
+    None, "installed", "source",
+)
+_SUBSUMPTION_PROVENANCES: tuple[EvidenceProvenance | None, ...] = (
+    None, "measured", "carried",
+)
+_SUBSUMPTION_CONVERTED_FROM: tuple[str | None, ...] = (
+    None, "", "flac", "alac", "mp3",
+)
+
+
+@dataclass(frozen=True)
+class SpectralSubsumptionWorld:
+    """One storable-or-not evidence shape around the R19 predicate."""
+
+    lineage_version: int
+    grade: str | None
+    bitrate_kbps: int | None
+    subject: EvidenceSubject | None
+    provenance: EvidenceProvenance | None
+    was_converted_from: str | None
+    media: tuple[str, str]
+    second_file_media: tuple[str, str] | None
+    format_label: str | None
+    storage_label: str | None
+
+
+@st.composite
+def spectral_subsumption_worlds(draw) -> SpectralSubsumptionWorld:
+    media = draw(st.sampled_from(_SUBSUMPTION_MEDIA))
+    # The label axis is drawn relative to the container so the authoritative
+    # lossy pair R19 needs stays reachable, without pinning the two together.
+    label = draw(st.sampled_from((media[1], media[1].upper(), "wma", None)))
+    return SpectralSubsumptionWorld(
+        lineage_version=draw(st.sampled_from((1, 3, 4, 5))),
+        grade=draw(st.sampled_from(_SUBSUMPTION_GRADES)),
+        bitrate_kbps=draw(st.sampled_from((None, 192))),
+        subject=draw(st.sampled_from(_SUBSUMPTION_SUBJECTS)),
+        provenance=draw(st.sampled_from(_SUBSUMPTION_PROVENANCES)),
+        was_converted_from=draw(st.sampled_from(_SUBSUMPTION_CONVERTED_FROM)),
+        media=media,
+        second_file_media=draw(
+            st.sampled_from((None, media, ("mp3", "mp3"), ("opus", "opus")))
+        ),
+        format_label=label,
+        storage_label=draw(st.sampled_from((label, media[1].upper(), None))),
+    )
+
+
+def _subsumption_evidence(
+    world: SpectralSubsumptionWorld,
+) -> AlbumQualityEvidence:
+    """Build the world verbatim — no builder fixup may launder it."""
+    media = [world.media]
+    if world.second_file_media is not None:
+        media.append(world.second_file_media)
+    files = [
+        AlbumQualityEvidenceFile(
+            relative_path=f"{ordinal:02d}.{codec}",
+            size_bytes=4096 + ordinal,
+            mtime_ns=1_700_000_000_000_000_000 + ordinal,
+            extension=container,
+            container=container,
+            codec=codec,
+        )
+        for ordinal, (container, codec) in enumerate(media)
+    ]
+    measurement = AudioQualityMeasurement(
+        min_bitrate_kbps=128,
+        avg_bitrate_kbps=130,
+        median_bitrate_kbps=129,
+        format=world.format_label,
+        spectral_grade=world.grade,
+        spectral_bitrate_kbps=world.bitrate_kbps,
+        spectral_subject=world.subject,
+        spectral_provenance=world.provenance,
+        was_converted_from=world.was_converted_from,
+    )
+    return AlbumQualityEvidence(
+        mb_release_id="subsumption-world",
+        snapshot_fingerprint=snapshot_fingerprint(files),
+        source_path="/staged/subsumption",
+        measurement=measurement,
+        measured_at=datetime(2026, 1, 1, tzinfo=UTC),
+        files=files,
+        codec=world.media[1],
+        container=world.media[0],
+        storage_format=world.storage_label,
+        lineage_version=world.lineage_version,
+        audio_file_count=len(files),
+    )
+
+
+def spectral_subsumption_violations(
+    evidence: AlbumQualityEvidence,
+) -> list[str]:
+    """Accumulate every broken link in the disjunct-4-is-dead chain.
+
+    Accumulating rather than raising on the first: the two clauses read
+    different halves of the same world, and a raise chain would let the
+    subject clause mask the grade clause on a world violating both.
+    """
+    violations: list[str] = []
+    preserves = current_evidence_preserves_source_spectral(evidence)
+    subject = evidence.measurement.spectral_subject
+    if preserves and subject != EVIDENCE_SUBJECT_SOURCE:
+        violations.append(
+            "R19 preservation must require a source spectral subject: "
+            f"{subject!r}"
+        )
+    if (
+        preserves
+        and evidence.lineage_version >= 4
+        and not evidence.storage_validation_errors()
+        and evidence.measurement.spectral_grade is None
+    ):
+        violations.append(
+            "a storable v4+ R19 row must carry a spectral grade"
+        )
+    return violations
+
+
+def assert_spectral_disjunct_four_stays_subsumed(
+    evidence: AlbumQualityEvidence,
+) -> None:
+    violations = spectral_subsumption_violations(evidence)
+    assert not violations, "; ".join(violations)
+
+
+class TestGeneratedSpectralDisjunctSubsumption(unittest.TestCase):
+    """#1378 item 5: the removed disjunct 4 can never decide a write."""
+
+    @example(
+        # The exact world disjunct 4 named, at the only lineage production
+        # writes. Its grade is what makes disjunct 2 fire, which is why
+        # disjunct 4 was redundant.
+        world=SpectralSubsumptionWorld(
+            lineage_version=5, grade="likely_transcode", bitrate_kbps=192,
+            subject="source", provenance="carried", was_converted_from="flac",
+            media=("mp3", "mp3"), second_file_media=None,
+            format_label="mp3", storage_label="MP3",
+        ),
+    )
+    @example(
+        # The decisive world for the grade clause: R19-shaped at v5 with no
+        # grade. Production refuses it (which is exactly why disjunct 4 was
+        # dead), so the clause stays quiet — but this is the ONLY cell where
+        # a defective validator can make it fire, and a suite-depth random
+        # sample misses it. Measured: deleting the "spectral markers require
+        # a spectral grade" clause from
+        # ``AudioQualityMeasurement.new_row_validation_errors`` leaves the
+        # property GREEN without this pin and RED with it.
+        world=SpectralSubsumptionWorld(
+            lineage_version=5, grade=None, bitrate_kbps=None,
+            subject="source", provenance="carried", was_converted_from="flac",
+            media=("mp3", "mp3"), second_file_media=None,
+            format_label="mp3", storage_label="MP3",
+        ),
+    )
+    @example(
+        # The same shape at v3, where R19 holds, the row IS storable, and
+        # the grade clause is correctly quiet: the two-axis pairing rule
+        # starts at lineage 4.
+        world=SpectralSubsumptionWorld(
+            lineage_version=3, grade=None, bitrate_kbps=None,
+            subject="source", provenance="carried", was_converted_from="flac",
+            media=("mp3", "mp3"), second_file_media=None,
+            format_label="mp3", storage_label="MP3",
+        ),
+    )
+    @given(world=spectral_subsumption_worlds())
+    def test_r19_never_outruns_the_incoming_grade(
+        self, world: SpectralSubsumptionWorld,
+    ) -> None:
+        assert_spectral_disjunct_four_stays_subsumed(
+            _subsumption_evidence(world))
+
+
+class TestSpectralSubsumptionCheckerTripsOnViolations(unittest.TestCase):
+    """Per-clause known-bad worlds for the subsumption checker (#1094)."""
+
+    @staticmethod
+    def _world(
+        *,
+        subject: EvidenceSubject | None,
+        grade: str | None,
+        lineage_version: int = 5,
+        r19_shaped: bool = True,
+    ) -> AlbumQualityEvidence:
+        return _subsumption_evidence(SpectralSubsumptionWorld(
+            lineage_version=lineage_version,
+            grade=grade,
+            bitrate_kbps=192 if grade is not None else None,
+            subject=subject,
+            provenance="carried" if subject is not None else None,
+            was_converted_from="flac" if r19_shaped else None,
+            media=("mp3", "mp3"), second_file_media=None,
+            format_label="mp3", storage_label="MP3",
+        ))
+
+    def test_source_subject_clause_trips_with_its_own_message(self) -> None:
+        """Clause 1: R19 holding for a non-source subject is accused."""
+        evidence = self._world(subject="installed", grade="genuine")
+        with patch(
+            "tests.test_evidence_generated."
+            "current_evidence_preserves_source_spectral",
+            return_value=True,
+        ), self.assertRaisesRegex(
+            AssertionError,
+            re.escape(
+                "R19 preservation must require a source spectral "
+                "subject: 'installed'"),
+        ):
+            assert_spectral_disjunct_four_stays_subsumed(evidence)
+
+    def test_grade_clause_trips_with_its_own_message(self) -> None:
+        """Clause 2: a storable v4+ R19 row with no grade is accused.
+
+        Clause 1 passes on this world — the subject IS ``source`` — so the
+        message proves clause 2 fired rather than a short-circuit.
+        """
+        evidence = self._world(subject="source", grade=None)
+        self.assertTrue(current_evidence_preserves_source_spectral(evidence))
+        with patch.object(
+            AlbumQualityEvidence,
+            "storage_validation_errors",
+            lambda _self: [],
+        ), self.assertRaisesRegex(
+            AssertionError,
+            re.escape("a storable v4+ R19 row must carry a spectral grade"),
+        ):
+            assert_spectral_disjunct_four_stays_subsumed(evidence)
+
+    def test_correct_worlds_stay_quiet(self) -> None:
+        """Q3: near-miss worlds where production is right get no accusation."""
+        # An installed subject with no lossless conversion: R19 is false, so
+        # clause 1 must not read the subject at all.
+        installed = self._world(
+            subject="installed", grade="genuine", r19_shaped=False)
+        self.assertFalse(current_evidence_preserves_source_spectral(installed))
+        assert_spectral_disjunct_four_stays_subsumed(installed)
+        # A pre-v4 R19 row legitimately stores with no grade: the two-axis
+        # pairing rule starts at lineage 4, and disjunct 1 of the SQL formula
+        # decides that write regardless.
+        pre_v4 = self._world(
+            subject="source", grade=None, lineage_version=3)
+        self.assertTrue(current_evidence_preserves_source_spectral(pre_v4))
+        self.assertEqual(pre_v4.storage_validation_errors(), [])
+        assert_spectral_disjunct_four_stays_subsumed(pre_v4)
+        # The R19 world production actually writes.
+        assert_spectral_disjunct_four_stays_subsumed(self._world(
+            subject="source", grade="likely_transcode"))
 
 
 if __name__ == "__main__":

@@ -759,27 +759,34 @@ class TestSpectralPreservationSqlFakeParity(unittest.TestCase):
     scoping only diverges on ``(preserved_source, own_request, *,
     merge)`` (issue #1355 WE1 review round, mutant runner finding M1).
 
-    Note on disjunct 4: for an incoming row with ``lineage_version >= 4``,
-    a ``spectral_subject`` set on the measurement forces a non-null
-    ``spectral_grade`` (``AudioQualityMeasurement.new_row_validation_
-    errors`` only enforces that pairing when its own ``two_axis`` flag is
-    true, which ``storage_validation_errors`` sets exactly for
-    ``lineage_version >= 4`` -- verified directly: a v3 evidence object
-    with ``spectral_subject="source"``, ``spectral_grade=None`` passes
+    Disjunct 4 is gone (issue #1378 item 5). WE1 recorded it as a logical
+    subset of disjunct 2 and #1378 removed it on that proof: for an
+    incoming row with ``lineage_version >= 4``, a ``spectral_subject`` set
+    on the measurement forces a non-null ``spectral_grade``
+    (``AudioQualityMeasurement.new_row_validation_errors`` only enforces
+    that pairing when its own ``two_axis`` flag is true, which
+    ``storage_validation_errors`` sets exactly for ``lineage_version >=
+    4`` -- verified directly: a v3 evidence object with
+    ``spectral_subject="source"``, ``spectral_grade=None`` passes
     ``storage_validation_errors()`` cleanly, while the identical shape at
     v4 fails with "spectral markers require a spectral grade"). So for
     any v4+ incoming row, satisfying ``current_evidence_preserves_source_
     spectral`` (which never itself inspects ``spectral_grade``) also
-    satisfies "incoming spectral grade present", making disjunct 4 a
-    logical subset of disjunct 2. ``_we1_incoming_evidence`` only ever
-    builds ``CURRENT_EVIDENCE_LINEAGE_VERSION`` (v5) rows, so every
-    incoming shape this test can construct is subject to that
-    subsumption; a legacy v1/v3 incoming row could in principle satisfy
-    disjunct 4 without disjunct 2, but production writers do not emit
-    that shape (v1/v3 are historical only -- the two-axis vocabulary
-    starts at v4). This is a property of the original four-disjunct
-    formula this refactor preserves verbatim, not something introduced
-    or fixed here.
+    satisfies "incoming spectral grade present". Every evidence row
+    ``lib/quality_evidence.py`` builds carries
+    ``CURRENT_EVIDENCE_LINEAGE_VERSION``, and ``_we1_incoming_evidence``
+    builds only v5 rows, so the subsumption covers every shape this test
+    can construct. A legacy v1/v3 incoming row could in principle satisfy
+    the removed disjunct without disjunct 2; the one writer that can carry
+    a historical lineage, ``scripts/decision_differential.py``'s corpus
+    replay, seeds each row under its own unique ``mb_release_id`` and so
+    never reaches ON CONFLICT at all (and the live corpus holds zero of
+    31,749 evidence rows with a spectral subject and no spectral grade,
+    measured 2026-09-09). The chain itself is patrolled by
+    ``tests.test_evidence_generated.
+    TestGeneratedSpectralDisjunctSubsumption``; the ``installed_measured``
+    x ``preserved_source_now`` example below is the world the disjunct
+    used to name, now decided by disjunct 2 alone.
     """
 
     @finite_generated_domain(
@@ -833,9 +840,10 @@ class TestSpectralPreservationSqlFakeParity(unittest.TestCase):
         incoming_shape="grade_absent", intent="replace",
     )
     @example(
-        # Disjunct 4 (see the class docstring on why it never decides
-        # alone): an installed-subject stored tuple is replaced once the
-        # incoming write is itself the R19-shaped derivative.
+        # The world the removed disjunct 4 named (see the class docstring):
+        # an installed-subject stored tuple is replaced when the incoming
+        # write is itself the R19-shaped derivative -- on that write's own
+        # grade, which is what made the disjunct redundant.
         stored_shape="installed_measured", ownership="own_request",
         incoming_shape="preserved_source_now", intent="replace",
     )
