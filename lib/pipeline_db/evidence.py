@@ -33,7 +33,6 @@ from lib.quality import (
 )
 from lib.quality_evidence import (
     SpectralWriteIntent,
-    current_evidence_preserves_source_spectral,
     snapshot_fingerprint,
 )
 
@@ -64,6 +63,29 @@ _PRESERVED_SOURCE_LOSSY_PAIRS_JSON = json.dumps([
 # just-committed row. Splicing one Python string into eight positions
 # keeps a policy change to one edit site without paying for that safety
 # with a second (Python-computed) SQL twin of the same policy.
+#
+# Issue #1378 item 5 removed a fourth disjunct from the second group: a
+# stored ``installed``-subject tuple replaced by an incoming row satisfying
+# R19 (``lib.quality_evidence.current_evidence_preserves_source_spectral``).
+# It could never decide a write on its own. R19 requires an incoming
+# ``spectral_subject`` of ``source``, and at ``lineage_version >= 4`` a
+# spectral marker without a spectral grade fails
+# ``storage_validation_errors`` before this statement runs -- and, if that
+# clause were ever lost, again at migration 055's
+# ``album_quality_evidence_spectral_shape`` CHECK. So
+# ``EXCLUDED.spectral_grade IS NOT NULL`` already held. Every evidence row
+# ``lib/quality_evidence.py`` builds carries
+# ``CURRENT_EVIDENCE_LINEAGE_VERSION``, so that covers every pipeline write.
+# The one writer that can carry a historical lineage,
+# ``scripts/decision_differential.py``'s corpus replay, seeds each row under
+# its own unique ``mb_release_id``, so it never reaches ON CONFLICT at all
+# (and the live corpus holds zero rows with a spectral subject and no
+# spectral grade, measured 2026-09-09 over 31,749 rows). The chain is
+# patrolled by
+# ``tests.test_evidence_generated.TestGeneratedSpectralDisjunctSubsumption``
+# and pinned at the write boundary by
+# ``tests.test_pipeline_db.TestAlbumQualityEvidenceStorage.
+# test_r19_incoming_without_a_grade_never_reaches_the_spectral_case``.
 _SPECTRAL_TUPLE_USE_INCOMING_SQL = """(
                         NOT (
                             (SELECT replace_spectral FROM write_policy)
@@ -82,14 +104,6 @@ _SPECTRAL_TUPLE_USE_INCOMING_SQL = """(
                                     SELECT 1 FROM album_requests AS current_owner
                                     WHERE current_owner.current_evidence_id =
                                         album_quality_evidence.id
-                                )
-                            )
-                            OR (
-                                album_quality_evidence.spectral_subject =
-                                    (SELECT subject_installed FROM write_policy)
-                                AND (
-                                    SELECT incoming_preserves_source_spectral
-                                    FROM write_policy
                                 )
                             )
                         )
@@ -287,12 +301,6 @@ class _EvidenceMixin(_PipelineDBBase):
             "legacy_unrecorded",
             "skipped",
         }
-        # Keep the PostgreSQL same-address merge aligned with the policy's
-        # single, manifest-aware R19 predicate. Provenance alone (V0/proof)
-        # must never erase a fresh installed-subject measurement.
-        incoming_preserves_source_spectral = (
-            current_evidence_preserves_source_spectral(evidence)
-        )
         file_rows = [
             {
                 "ordinal": ordinal,
@@ -313,9 +321,7 @@ class _EvidenceMixin(_PipelineDBBase):
                     %s::boolean AS replace_spectral,
                     %s::text[] AS lossless_source_codecs,
                     %s::jsonb AS lossy_media_pairs,
-                    %s::text AS subject_source,
-                    %s::text AS subject_installed,
-                    %s::boolean AS incoming_preserves_source_spectral
+                    %s::text AS subject_source
             ),
             existing_row AS MATERIALIZED (
                 -- Feeds preserved_current_source_spectral's own R19 shape
@@ -483,11 +489,12 @@ class _EvidenceMixin(_PipelineDBBase):
                     -- (genuine legitimately has no bitrate); an empty or
                     -- bitrate-only v4 stale writer preserves the whole
                     -- stored pair so it cannot erase an attempt-time scan;
-                    -- the R19 exception clears a stale installed-subject
-                    -- tuple when the incoming row is the exact
-                    -- irreplaceable lossy derivative it describes; and a
-                    -- legacy row is replaced wholesale during its v4
-                    -- rebuild, including when the new fact is absent.
+                    -- and a legacy row is replaced wholesale during its v4
+                    -- rebuild, including when the new fact is absent. An
+                    -- incoming R19 derivative clears a stale installed-
+                    -- subject tuple too, but on its own grade rather than
+                    -- a disjunct of its own -- see #1378 item 5 in the
+                    -- constant's comment.
                     -- issue #829 Phase 5 PR1: cliff_hz/codec_family/
                     -- ultrasonic_deficit_db/spectral_measurement_version are
                     -- measured in the SAME pass as spectral_grade, so they
@@ -784,8 +791,6 @@ class _EvidenceMixin(_PipelineDBBase):
                 sorted(EVIDENCE_LOSSLESS_CODECS),
                 _PRESERVED_SOURCE_LOSSY_PAIRS_JSON,
                 EVIDENCE_SUBJECT_SOURCE,
-                EVIDENCE_SUBJECT_INSTALLED,
-                incoming_preserves_source_spectral,
                 evidence.mb_release_id,
                 evidence.snapshot_fingerprint,
                 evidence.mb_release_id,

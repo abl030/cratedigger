@@ -80,9 +80,6 @@ class _FakeEvidenceMixin(_FakePipelineDBBase):
             raise ValueError("; ".join(errors))
         key = (evidence.mb_release_id, evidence.snapshot_fingerprint)
         existing = self.album_quality_evidence.get(key)
-        incoming_preserves_source_spectral = (
-            current_evidence_preserves_source_spectral(evidence)
-        )
         current_owned = (
             existing is not None
             and any(
@@ -116,8 +113,6 @@ class _FakeEvidenceMixin(_FakePipelineDBBase):
             )
         # Spectral is an atomic pair. A stale writer without a grade cannot
         # erase a successful attempt-time scan on the same audio snapshot.
-        # R19 is the exception: only an exact, known-lossy derivative clears
-        # a stored installed-subject tuple. Provenance alone is not enough.
         #
         # This condition mirrors the real SQL's CASE guard exactly (issue
         # #829 Phase 5 PR1 review round 2, should-fix 7) — it does NOT
@@ -128,6 +123,16 @@ class _FakeEvidenceMixin(_FakePipelineDBBase):
         # earlier draft of this fake added that extra precondition, which a
         # previous version of this comment claimed (wrongly) was already an
         # exact mirror.
+        #
+        # Issue #1378 item 5 dropped a third term from the inner group here
+        # (``incoming R19 AND stored subject == installed``), mirroring the
+        # SQL's own fourth disjunct. It sat under ``spectral_grade is
+        # None``, and R19 demands an incoming ``source`` spectral subject —
+        # which at ``lineage_version >= 4`` cannot coexist with a null
+        # grade, because ``storage_validation_errors`` above raises first.
+        # So the term could never change an outcome. The parity property in
+        # ``tests.test_evidence_transition_matrix_generated`` keeps this
+        # mirror and the real SQL honest.
         if (
             existing is not None
             and existing.lineage_version >= 4
@@ -138,11 +143,6 @@ class _FakeEvidenceMixin(_FakePipelineDBBase):
                     and not (
                         spectral_write_intent == "replace"
                         and not current_owned
-                    )
-                    and not (
-                        incoming_preserves_source_spectral
-                        and existing.measurement.spectral_subject
-                            == EVIDENCE_SUBJECT_INSTALLED
                     )
                 )
             )

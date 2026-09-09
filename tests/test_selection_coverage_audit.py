@@ -392,6 +392,12 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
         "tests.test_pipeline_db_decisions",
         "tests.test_pipeline_db_decisions_generated",
     ),
+    # The lib/pipeline_db/ prefix rule resolves PIPELINE_DB_NEIGHBOURS and
+    # the basename probe resolves tests.test_evidence_generated, masking the
+    # loss of the SQL-versus-fake spectral parity property.
+    "lib/pipeline_db/evidence.py": (
+        "tests.test_evidence_transition_matrix_generated",
+    ),
     # Basename probes resolve tests.test_current_library_evidence and its
     # generated sibling, masking the loss of the other nine importers.
     "lib/current_library_evidence.py": (
