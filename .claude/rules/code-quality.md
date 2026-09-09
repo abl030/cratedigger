@@ -1310,12 +1310,15 @@ rationale; never allowlist a pure decision.
     mutmut catalog tally discharges none of this quota: aimed shapes
     (argument swaps, past-fix reverts, adapter derivations, JS) are
     outside the catalog (#1317). Mechanical
-    discipline, not judgment: `PYTHONDONTWRITEBYTECODE=1`, its OWN
-    isolated worktree (mutant planting mutates production files — a
-    shared tree makes the reader read lies), every edit restored exactly
-    and proven restored (`git status --porcelain` empty; when the file
-    carries uncommitted work, restore by INVERSE EDIT — `git checkout
-    <file>` restores from HEAD and silently wipes that work, #1270),
+    discipline, not judgment: `PYTHONDONTWRITEBYTECODE=1`; a `git archive
+    <sha> | tar -x -C "$CLAUDE_JOB_DIR/tmp/<name>"` snapshot plus a
+    `-pristine` twin, never a live worktree (mutant planting mutates
+    production files — a shared tree makes the reader read lies — and a
+    subagent's shell stays pinned to its parent's worktree even after
+    `git worktree add`, so "its own worktree" was never real, #1378);
+    every edit restored by INVERSE EDIT and proven restored with
+    `diff -rq` against the twin (never `git checkout <file>`, which
+    restores from HEAD and silently wipes uncommitted work, #1270);
     and a final
     table where every row carries the actual command evidence for
     KILLED/SURVIVED — a prose claim of RED without output is the #1209

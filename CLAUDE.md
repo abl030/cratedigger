@@ -157,7 +157,7 @@ Wire-boundary types (harness, JSONB, subprocess stdout) are `msgspec.Struct`, no
 
 ## Deploying changes
 
-Push cratedigger (GitHub) → pin nixosconfig's `cratedigger-src` input to that exact revision on doc1 (`scripts/pin_nixosconfig.sh`, an `--override-input` pin — never a bare `nix flake update`, which only follows the input's branch tip) → signed commit + push nixosconfig to **Forgejo** (`git.ablz.au`; GitHub nixosconfig is a frozen fallback) → from doc1 run `fleet-deploy doc2` through the locked-sibling trigger, then poll and verify the exact fleet anchor. `cratedigger.service` has `restartIfChanged = false` (the timer picks up new code next cycle); web/migrate restart on switch. Before `nix/module.nix` changes, run `nix build .#checks.x86_64-linux.moduleVm`. Full sequence + verification in `.claude/rules/deploy.md`; the `deploy` skill runs it end-to-end.
+Merged `main` ships on its own: doc1's nightly rolling flake update pins the tip into nixosconfig (**Forgejo**, `git.ablz.au`; GitHub nixosconfig is a frozen fallback) and doc2 applies it the next morning, migrations included. Deploy by hand only when a change must be live now: from the shared checkout on doc1, `scripts/deploy.sh` pins, signs, pushes, triggers doc2's verified rebuild, waits, and checks the anchor, and then you check your change through the real CLI, API, or UI. `cratedigger.service` has `restartIfChanged = false` (the timer picks up new code next cycle); the workers and the migrate unit restart on the switch. Before `nix/module.nix` changes, run `nix build .#checks.x86_64-linux.moduleVm`. Rules: `.claude/rules/deploy.md`.
 
 **PR merges: use GitHub "Create a merge commit"** — never rebase- or squash-merge.
 
@@ -217,9 +217,9 @@ across client-local memory stores.
 
 ### Shared skills
 
-`deploy` (full deploy sequence) · `debug-download` (live audit trail) · `check`
+`deploy` (one-command deploy to doc2) · `debug-download` (live audit trail) · `check`
 (receipt-backed canonical suite) · `beets-docs` (pinned upstream reference) ·
-`orchestrate-issue` (isolated multi-PR implementation/review/deploy loop) ·
+`orchestrate-issue` (isolated multi-PR implementation/review loop) ·
 `meta-orchestrate` (register-scale parallel agent dispatch) · `unslop` (cut AI
 tells from prose)
 

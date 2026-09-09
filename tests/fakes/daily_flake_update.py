@@ -198,8 +198,8 @@ def main():
 # a script run directly as __main__, so leaving the shim body inline here
 # would recompile it from source on every fake command invocation; importing
 # it instead lets CPython write `__pycache__/_shim.cpython-*.pyc` once and
-# reuse it for the rest (issue #1156 item 5, same fix as item 4's
-# tests/fakes/deploy_pin.py). `-S` skips `site` for faster startup (issue
+# reuse it for the rest (issue #1156 item 5, the same fix item 4 applied to
+# the since-deleted deploy-pin fixture). `-S` skips `site` for faster startup (issue
 # #1156 item 5 also brings this sibling onto the #1152 startup fix). No
 # explicit sys.path manipulation: the interpreter inserts the running
 # script's own directory as sys.path[0] before user code executes, `-S`

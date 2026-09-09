@@ -8,7 +8,7 @@ One sentence (a short list if the change touches an eight-clause checker or simi
 
 ## Reviewer
 
-Independent review is two agents with disjoint jobs (`.claude/rules/code-quality.md` § "Pre-Commit Review Gate"): a READER that only reads, thinks, and prods production code (claim re-derivation, namespace cross-reference, composition seams, auditing the author's mutmut survivor dismissals — no mutants), and a MUTANT RUNNER that plants at least two mutants per new or changed test in its own isolated worktree, aimed at that test's named subject — not only at sites the author's sentence already covers, and including tests added to kill mutmut survivors — reporting each KILLED/SURVIVED with actual command evidence. A mutant that cites a scheduling change for a kill-both-phases test is the #1155 shape; a prose RED without output is the #1209 shape. One agent may do both only on a small, low-risk diff.
+Independent review is two agents with disjoint jobs (`.claude/rules/code-quality.md` § "Pre-Commit Review Gate"): a READER that only reads, thinks, and prods production code (claim re-derivation, namespace cross-reference, composition seams, auditing the author's mutmut survivor dismissals — no mutants), and a MUTANT RUNNER that plants at least two mutants per new or changed test on a `git archive` snapshot under the job tmp dir (never a live worktree), aimed at that test's named subject — not only at sites the author's sentence already covers, and including tests added to kill mutmut survivors — reporting each KILLED/SURVIVED with actual command evidence. A mutant that cites a scheduling change for a kill-both-phases test is the #1155 shape; a prose RED without output is the #1209 shape. One agent may do both only on a small, low-risk diff.
 
 ## Risk
 
