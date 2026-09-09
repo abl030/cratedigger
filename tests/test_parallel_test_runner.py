@@ -62,7 +62,6 @@ from scripts.run_python_tests import (
     _measure_available_memory_bytes,
     _measure_tempdir_available_bytes,
     _run_targets,
-    _run_test_target_child,
     _shuffle_failure_note,
     assert_exact_schedule,
     assert_exact_target_coverage,
@@ -1786,26 +1785,36 @@ class TestShuffledOrder(unittest.TestCase):
                 "    def test_c(self):\n        pass\n",
                 encoding="utf-8",
             )
-            sys.path.insert(0, str(root))
-            self.addCleanup(sys.path.remove, str(root))
-            self.addCleanup(
-                lambda: [
-                    sys.modules.pop(name)
-                    for name in list(sys.modules)
-                    if name.startswith("fixture_child_order")
-                ]
-            )
             result_path = root / "result.json"
-            with patch.dict(os.environ, {SHUFFLE_SEED_ENV: "1"}):
-                exit_code = _run_test_target_child(
-                    ("fixture_child_order.test_alpha",),
-                    0,
-                    result_path,
-                    selected_test_ids=ids,
-                )
+            # The runner's own child protocol, as `_run_test_target` speaks
+            # it, in a fresh interpreter: no in-process sys.path mutation
+            # (the dual-load audit forbids inserting a temp dir), and the
+            # fixture package is visible only to that child.
+            env = {
+                **os.environ,
+                SHUFFLE_SEED_ENV: "1",
+                "PYTHONPATH": os.pathsep.join([str(root), str(REPO_ROOT)]),
+            }
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(RUNNER),
+                    "--_run-target",
+                    msgspec.json.encode(("fixture_child_order.test_alpha",)).decode(),
+                    "0",
+                    str(result_path),
+                    msgspec.json.encode(ids).decode(),
+                ],
+                cwd=REPO_ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
             child = msgspec.json.decode(result_path.read_bytes(), type=ChildTargetResult)
 
-        self.assertEqual(exit_code, 0)
         self.assertTrue(child.successful)
         self.assertEqual(child.test_ids, expected_order, "reported in run order")
         ran_order = tuple(
