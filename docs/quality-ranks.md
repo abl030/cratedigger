@@ -334,6 +334,16 @@ mirror withholds an opinion where production measured, never the reverse):
    issue #829 Phase 5 PR2b removed, so the divergence is recorded on both
    docstrings rather than closed.
 
+Those two are divergences between the two *helpers*, and the "never the
+reverse" reading holds at that level: `spectral_gate_trigger` mirrors
+`_needs_spectral_check` and only that, and this section's layout skip does
+not touch either. At the level of scan SELECTION the mirror does now say
+`would_run` for a nested MP3 that production skips — but that answer is
+unreachable, because `full_pipeline_decision` early-returns through
+`preimport_nested_gate` before `spectral_gate_trigger` is ever called, so
+the simulator's `stage0_spectral_gate` stays `None` for exactly the albums
+the skip covers.
+
 The one remaining *evidence* bypass is an exact CD-rip bit verification,
 which is stronger evidence than a spectral estimate rather than an
 assumption about one.
@@ -342,9 +352,11 @@ The other stop is not a bypass at all: a **nested folder layout** skips the
 candidate scan because every decider already rejects on the layout fact
 (`candidate_preimport_reject_fact`, `full_pipeline_decision_from_evidence`,
 and the classify surface's four-fact block all answer `nested_layout`
-without reading a spectral field), so the scan can change no outcome. It
-only makes the synchronous classify surface wait: measured on doc2 before
-the skip, `pipeline-cli import-preview` took 29s on a 12-track nested MP3
+without reading a spectral field), so the scan can change no outcome. The
+motivating cost is the synchronous classify surface, though the skip applies
+in both preview lanes — the background preview worker stops paying it too,
+along with the AAC lattice capture, whose own gate needs a candidate grade.
+Measured on doc2 before the skip, `pipeline-cli import-preview` took 29s on a 12-track nested MP3
 album and 24s on a 12-track nested FLAC one, and timing the same albums'
 stages directly put 22s and 16-19s of that in the candidate scan — all to
 answer "flatten the folder" (issue #1378 item 3). Measuring the MP3 album

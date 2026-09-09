@@ -4068,16 +4068,16 @@ class TestNestedCandidateSpectralCostThroughTheLane(unittest.TestCase):
         ))
         return db
 
-    def _tree(self, *, nested: bool) -> str:
+    def _tree(self, *, nested: bool, extension: str = "mp3") -> str:
         fixture = os.path.join(
             os.path.dirname(__file__), "fixtures", "audio_hash",
-            "sine_440.mp3",
+            f"sine_440.{extension}",
         )
         source = tempfile.mkdtemp(dir=_PREVIEW_SOURCE_ROOT)
         self.addCleanup(shutil.rmtree, source, ignore_errors=True)
         album = os.path.join(source, "Disc 1") if nested else source
         os.makedirs(album, exist_ok=True)
-        shutil.copy(fixture, os.path.join(album, "01 - Track.mp3"))
+        shutil.copy(fixture, os.path.join(album, f"01 - Track.{extension}"))
         return source
 
     def _run(self, source: str, scanned: list[str]):
@@ -4119,11 +4119,36 @@ class TestNestedCandidateSpectralCostThroughTheLane(unittest.TestCase):
 
         self.assertEqual(preview.decision, "nested_layout")
         self.assertEqual(preview.verdict, "confident_reject")
+        # The whole operator-visible payload, not just the decision: the PR
+        # claims this return is byte-identical across the skip, and a mutant
+        # runner found `detail` and `cleanup_eligible` guarded only by a
+        # test elsewhere in this file (PR #1386).
+        self.assertEqual(
+            preview.detail,
+            "Audio files are in subdirectories — flatten the folder "
+            "before import.",
+        )
+        self.assertTrue(preview.cleanup_eligible)
+        self.assertEqual(preview.stage_chain, ["preimport:nested_layout"])
         self.assertEqual(
             scanned, [],
             "a nested candidate must not pay a per-track spectral scan "
             "to be told to flatten the folder",
         )
+
+    def test_nested_lossless_candidate_is_not_reported_as_a_failed_scan(self):
+        """The skip arms ``_lossless_candidate_spectral_failure``, which reads
+        exactly ``not candidate.attempted`` on a lossless candidate and says
+        "lossless candidate spectral analysis did not run". Before the skip
+        that string was unreachable for a healthy nested FLAC. It stays
+        unreachable only because the four-fact block returns first, and
+        nothing else pinned that ordering (reader finding, PR #1386)."""
+        scanned: list[str] = []
+        preview = self._run(self._tree(nested=True, extension="flac"), scanned)
+
+        self.assertEqual(preview.decision, "nested_layout")
+        self.assertEqual(preview.verdict, "confident_reject")
+        self.assertEqual(scanned, [])
 
     def test_flat_candidate_still_pays_for_its_spectral_evidence(self):
         """Must-still-work control: the skip is keyed on layout alone, so a

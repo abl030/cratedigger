@@ -1012,20 +1012,27 @@ def measure_preimport_state(
     #     (``candidate_preimport_reject_fact``,
     #     ``full_pipeline_decision_from_evidence``, and the classify
     #     surface's own four-fact block all answer ``nested_layout`` without
-    #     reading a spectral field), so the scan can change no outcome. It
-    #     only makes a synchronous operator surface wait: measured on doc2,
-    #     the classify lane took 29s on a 12-track nested MP3 album, 22s of
-    #     it this scan, to answer "flatten the folder" (issue #1378 item 3).
-    #     The CD-rip call above is already layout-gated at this same site,
-    #     though for its own reason — a nested tree cannot be one disc's
-    #     table of contents — so a layout-gated capture is not a new shape
-    #     here.
+    #     reading a spectral field), so the scan can change no outcome. The
+    #     motivating cost is the synchronous classify surface — measured on
+    #     doc2, it took 29s on a 12-track nested MP3 album, 22s of it this
+    #     scan, to answer "flatten the folder" (issue #1378 item 3) — but
+    #     the skip applies in both lanes, so the background preview worker
+    #     stops paying it too, along with the AAC lattice capture below,
+    #     whose gate needs a candidate grade. The CD-rip call above is
+    #     already layout-gated at this same site, though for its own reason
+    #     — a nested tree cannot be one disc's table of contents — so a
+    #     layout-gated capture is not a new shape here.
     #
-    # This is a work skip, not a precedence change. ``audio_corrupt`` and
-    # ``bad_audio_hash`` outrank a nested layout and both return above this
-    # point, so the fact that survives here is exactly ``nested_layout``;
-    # the corrupt branch keeps its own attempt audit, which issue #1030
-    # pinned as evidence about files the operator may re-download.
+    # No decision changes. ``audio_corrupt`` and ``bad_audio_hash`` outrank a
+    # nested layout and both return above this point, so the fact that
+    # survives here is exactly ``nested_layout``; the corrupt branch keeps
+    # its own attempt audit, which issue #1030 pinned as evidence about files
+    # the operator may re-download. Persisted evidence CONTENT does change on
+    # the measure-and-persist lane: a nested candidate's row now carries no
+    # candidate spectral tuple and no lattice, and an existing row at the
+    # same content address is merged rather than replaced. No such row has
+    # ever existed (0 of 31,750 on 2026-09-09), and the decider exits on
+    # ``nested_layout`` before reading one.
     download_spectral: SpectralMeasurement | None = None
     existing_spectral: SpectralMeasurement | None = None
     existing_min_bitrate: int | None = None

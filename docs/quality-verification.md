@@ -279,6 +279,17 @@ is decision-relevant, since the dominating proof that makes admission safe
 above exists only on lossless bytes. Those rows need the unusable grade
 cleared rather than admitted; see issue #1167.
 
+Measurement skips the candidate scan for one more shape, added by issue #1378
+item 3: a **nested folder layout**, which every decider rejects on before
+reading a spectral field. It strands nothing. A nested row reaches persistence
+with no candidate grade and no candidate bitrate at all, so
+`spectral_generation_stale` (`lib/quality_evidence.py`) — which requires
+`spectral_grade is not None or spectral_bitrate_kbps is not None` — never
+calls it stale, and the #1162 livelock shape cannot form. The row is also
+unreachable by policy: `full_pipeline_decision_from_evidence` exits on
+`nested_layout` before any spectral field is read. Live population of such
+rows on 2026-09-09: zero, of 31,750.
+
 ### 1. VBR V0 source probe (implemented)
 
 After lossless-to-V0 conversion, the resulting bitrate reveals source quality:
