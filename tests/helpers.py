@@ -463,11 +463,20 @@ def make_active_download_file_state(
 def make_active_download_state_json(
     files: list[ActiveDownloadFileState],
     filetype: str = "flac",
+    attempt_fingerprint: str | None = None,
 ) -> str:
+    """A claim-time download state as its JSONB writer form.
+
+    ``attempt_fingerprint`` defaults to ``None`` (the shape every existing
+    caller wants); pass one when the test needs the exact attempt identity
+    the cross-request guard (#1196) and the search-to-grab stamp (#811)
+    both key on.
+    """
     return ActiveDownloadState(
         filetype=filetype,
         enqueued_at="2026-07-01T00:00:00+00:00",
         files=files,
+        attempt_fingerprint=attempt_fingerprint,
     ).to_json()
 
 

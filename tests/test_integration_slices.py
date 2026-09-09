@@ -13433,5 +13433,106 @@ class TestTriageServiceSlice(unittest.TestCase):
         )
 
 
+class TestSearchToGrabLinkPropagationSlice(unittest.TestCase):
+    """Issue #811: a stamped download state reaches every audit row.
+
+    Composes the REAL projections the two lanes actually use —
+    ``reconstruct_grab_list_entry`` → ``_build_download_info`` → the
+    writer — over one ``FakePipelineDB``, and asserts the persisted row,
+    not the call shape. The stamp itself is written by the DB
+    (``record_consumed_search_attempt``); this slice starts from a state
+    that already carries it, which is exactly what the poller and the
+    importer read back.
+    """
+
+    WITNESS = "2026-09-01T00:00:00+00:00"
+    SEARCH_LOG_ID = 4242
+
+    def _seeded(self, *, search_log_id: int | None) -> tuple[Any, Any, Any]:
+        """A ``downloading`` request, its reconstructed entry, and dl_info."""
+        import msgspec
+
+        from lib.dispatch.helpers import _build_download_info
+        from lib.download_reconstruction import reconstruct_grab_list_entry
+        from lib.quality import ActiveDownloadState
+
+        db = FakePipelineDB()
+        state = ActiveDownloadState(
+            filetype="flac",
+            enqueued_at=self.WITNESS,
+            files=[],
+            search_log_id=search_log_id,
+        )
+        db.seed_request(make_request_row(
+            id=42, status="downloading",
+            active_download_state=msgspec.json.decode(state.to_json()),
+        ))
+        request = db.request(42)
+        entry = reconstruct_grab_list_entry(request, state)
+        return db, entry, _build_download_info(entry)
+
+    def test_reconstruction_carries_the_link_onto_download_info(self):
+        _db, entry, dl_info = self._seeded(search_log_id=self.SEARCH_LOG_ID)
+        self.assertEqual(entry.search_log_id, self.SEARCH_LOG_ID)
+        self.assertEqual(dl_info.search_log_id, self.SEARCH_LOG_ID)
+
+    def test_timeout_writer_persists_the_link(self):
+        from lib.download import _timeout_album
+
+        db, entry, _dl_info = self._seeded(search_log_id=self.SEARCH_LOG_ID)
+        entry.files = [make_download_file(
+            filename="01.flac", id="xfer-1", file_dir="Music\\Album",
+            username="peer", size=1000)]
+        ctx = make_ctx_with_fake_db(db)
+        with patch("lib.download.cancel_and_delete"):
+            self.assertTrue(_timeout_album(
+                entry, 42, "stalled", ctx,
+                expected_enqueued_at=self.WITNESS,
+            ))
+        self.assertEqual(db.download_logs[0].outcome, "timeout")
+        self.assertEqual(
+            db.download_logs[0].search_log_id, self.SEARCH_LOG_ID)
+
+    def test_job_less_rejection_bundle_persists_the_link(self):
+        from lib.dispatch import _record_rejection_and_maybe_requeue
+
+        db, _entry, dl_info = self._seeded(search_log_id=self.SEARCH_LOG_ID)
+        _record_rejection_and_maybe_requeue(
+            db=db, request_id=42, dl_info=dl_info,
+            detail="distance too high", error=None,
+            validation_result=make_validation_result(
+                distance=0.5, scenario="high_distance").to_json(),
+        )
+        self.assertEqual(db.download_logs[0].outcome, "rejected")
+        self.assertEqual(
+            db.download_logs[0].search_log_id, self.SEARCH_LOG_ID)
+
+    def test_job_less_success_bundle_persists_the_link(self):
+        from lib.dispatch import _do_mark_done
+
+        db, _entry, dl_info = self._seeded(search_log_id=self.SEARCH_LOG_ID)
+        _do_mark_done(
+            db=db, request_id=42, dl_info=dl_info,
+            distance=0.01, scenario="exact", dest_path="/staged/album",
+        )
+        self.assertEqual(db.download_logs[0].outcome, "success")
+        self.assertEqual(
+            db.download_logs[0].search_log_id, self.SEARCH_LOG_ID)
+
+    def test_an_unstamped_state_writes_a_null_link(self):
+        """Must-still-work control: no stamp, no fabricated link."""
+        from lib.dispatch import _record_rejection_and_maybe_requeue
+
+        db, _entry, dl_info = self._seeded(search_log_id=None)
+        self.assertIsNone(dl_info.search_log_id)
+        _record_rejection_and_maybe_requeue(
+            db=db, request_id=42, dl_info=dl_info,
+            detail="distance too high", error=None,
+            validation_result=make_validation_result(
+                distance=0.5, scenario="high_distance").to_json(),
+        )
+        self.assertIsNone(db.download_logs[0].search_log_id)
+
+
 if __name__ == "__main__":
     unittest.main()
