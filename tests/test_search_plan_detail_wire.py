@@ -28,7 +28,6 @@ import re
 import sys
 import unittest
 from pathlib import Path
-from typing import ClassVar
 from unittest.mock import patch
 
 import msgspec
@@ -123,16 +122,13 @@ def _plan_rows(html: str) -> dict[str, list[str]]:
 class TestSearchPlanDetailPageWire(_WebServerCase):
     """Real rows → real routes → real ``renderDetailPage``."""
 
-    worker: ClassVar[NodeJsonlWorker]
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        super().setUpClass()
-        cls.worker = NodeJsonlWorker(_DETAIL_PAGE_WORKER, cwd=REPO_ROOT)
-        cls.addClassCleanup(cls.worker.close)
-
     def setUp(self) -> None:
         super().setUp()
+        # One child per test method, per the worker's own convention: the
+        # renderer module carries its own state (the Attempts filter), so
+        # a shared child would carry one test's module state into the next.
+        self.worker = NodeJsonlWorker(_DETAIL_PAGE_WORKER, cwd=REPO_ROOT)
+        self.addCleanup(self.worker.close)
         self.db = PipelineDB(TEST_DSN)
         self.addCleanup(self.db.close)
         delete_all_rows(self.db, REQUEST_CASCADE_RESET_TABLES)
