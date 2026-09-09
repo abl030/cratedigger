@@ -41,3 +41,17 @@ before self-correcting — content-identical, branch reattached). The workable
 protocol remains: sequence the reviewers (reader first, runner second, never
 concurrent in one tree), freeze orchestrator edits, git-proven restores, and
 the orchestrator re-verifies HEAD + branch attachment + clean status after.
+
+Addendum (2026-09-09, #1378 deploy trim): MEASURED with a haiku probe spawned
+from a worktree-pinned session — `Agent(isolation: "worktree")` gave the
+subagent its OWN worktree on its own branch, and its test write landed there,
+not in the parent's tree. Three opus implementers then ran that way in
+parallel and merged their PRs (#1385, #1386, #1388) without touching the
+parent worktree. So the pinning above is not reproducing on the current
+harness; keep verifying with a probe when it matters. The mutant-runner
+protocol is now fixed in `orchestrate-issue`'s "Running agents" section: a
+`git archive <sha>` snapshot plus a `-pristine` twin under `$CLAUDE_JOB_DIR/tmp`,
+never a live worktree, restores proven with `diff -rq`. One new hazard: every
+subagent shares the parent's `$CLAUDE_JOB_DIR/tmp`, and one overwrote my
+`pr_body.md` draft with its own — give each agent a unique subdirectory in
+its brief. Related: [[project-deploy-trim-2026-09]].
