@@ -315,8 +315,36 @@ def _reducer_purity_worlds(draw: Any) -> dict[str, Any]:
     }
 
 
-def _run_reducer_purity(world: dict[str, Any]) -> None:
-    now = datetime(2026, 1, 1, 0, 10, tzinfo=UTC)
+#: Phases only the #1405 identity property below draws: the one branch
+#: whose state really is ``None``, and the three timeout branches the
+#: 10,000-second config every other phase uses can never reach.
+_IDENTITY_ONLY_PHASES = (
+    "missing_state",
+    "remote_queue_timeout",
+    "stalled_timeout",
+    "all_errored",
+)
+_IDENTITY_PHASES = _REDUCER_PHASES + _IDENTITY_ONLY_PHASES
+
+_REDUCER_NOW = datetime(2026, 1, 1, 0, 10, tzinfo=UTC)
+
+
+def _build_reducer_world(
+    world: dict[str, Any],
+) -> tuple[
+    ActiveDownloadState | None,
+    PollCycleSnapshot,
+    PollCycleConfig,
+    PollCycleDecision,
+]:
+    """One reducer world: the persisted state, what slskd shows this
+    cycle, the policy config, and the decision the phase must reach.
+
+    Shared by both reducer properties below so a phase is described once.
+    The returned decision is asserted by every caller: a world that
+    stops reaching its own branch is a silently narrowed patrol, not a
+    pass.
+    """
     file = ActiveDownloadFileState(
         username="user",
         filename="Album\\01.flac",
@@ -331,9 +359,16 @@ def _run_reducer_purity(world: dict[str, Any]) -> None:
         enqueued_at="2026-01-01T00:00:00+00:00",
         last_progress_at="2026-01-01T00:09:30+00:00",
         files=[file],
+        attempt_fingerprint=world.get("attempt_fingerprint"),
+        search_log_id=world.get("search_log_id"),
     )
     phase = world["phase"]
     expected = PollCycleDecision.in_progress
+    cfg = PollCycleConfig(
+        remote_queue_timeout=10_000,
+        stalled_timeout=10_000,
+        max_file_retries=5,
+    )
     snapshot = PollCycleSnapshot(files=[PollFileSnapshot(
         transfer_id="tx-1",
         state="InProgress",
@@ -378,19 +413,63 @@ def _run_reducer_purity(world: dict[str, Any]) -> None:
             )],
         )
         expected = PollCycleDecision.complete
-
-    state_before = _state_shape(state)
-    snapshot_before = _snapshot_shape(snapshot)
-    result = reduce_poll_cycle(
-        state,
-        snapshot,
-        now,
-        PollCycleConfig(
-            remote_queue_timeout=10_000,
+    elif phase == "missing_state":
+        # The reset branch: nothing was persisted, so there is no
+        # identity to carry and no file count to match.
+        return (
+            None,
+            PollCycleSnapshot(files=[]),
+            cfg,
+            PollCycleDecision.reset_missing_state,
+        )
+    elif phase == "remote_queue_timeout":
+        # "Queued, Remotely" is a non-progress state, so the progress
+        # witness stays put and only the elapsed clock decides.
+        snapshot = PollCycleSnapshot(files=[PollFileSnapshot(
+            transfer_id="tx-1",
+            state="Queued, Remotely",
+            bytes_transferred=world["prev_bytes"],
+        )])
+        cfg = PollCycleConfig(
+            remote_queue_timeout=300,
             stalled_timeout=10_000,
             max_file_retries=5,
-        ),
-    )
+        )
+        expected = PollCycleDecision.timeout_remote_queue
+    elif phase == "stalled_timeout":
+        # Same state, same bytes: no progress observed, so the 30s since
+        # ``last_progress_at`` is idle time against a 10s tolerance.
+        state.files[0] = msgspec.structs.replace(
+            state.files[0], last_state="InProgress")
+        snapshot = PollCycleSnapshot(files=[PollFileSnapshot(
+            transfer_id="tx-1",
+            state="InProgress",
+            bytes_transferred=world["prev_bytes"],
+        )])
+        cfg = PollCycleConfig(
+            remote_queue_timeout=10_000,
+            stalled_timeout=10,
+            max_file_retries=5,
+        )
+        expected = PollCycleDecision.timeout_stalled
+    elif phase == "all_errored":
+        snapshot = PollCycleSnapshot(files=[PollFileSnapshot(
+            transfer_id="tx-1",
+            state="Completed, Errored",
+            bytes_transferred=world["prev_bytes"],
+            exception=world["exception"],
+        )])
+        expected = PollCycleDecision.timeout_all_errored
+
+    return state, snapshot, cfg, expected
+
+
+def _run_reducer_purity(world: dict[str, Any]) -> None:
+    state, snapshot, cfg, expected = _build_reducer_world(world)
+    assert state is not None
+    state_before = _state_shape(state)
+    snapshot_before = _snapshot_shape(snapshot)
+    result = reduce_poll_cycle(state, snapshot, _REDUCER_NOW, cfg)
     assert result.verdict.decision == expected
     assert_reducer_inputs_unchanged(
         state_before=state_before,
@@ -424,6 +503,182 @@ class TestReducerInputPurityCheckerTripsOnViolations(unittest.TestCase):
                 snapshot_before={"files": [{"state": "InProgress"}]},
                 snapshot_after={"files": [{"state": "Completed, Errored"}]},
             )
+
+
+# ============================================================================
+# #1405-I1 -- a poll cycle never rewrites the attempt's own identity
+# ============================================================================
+#
+# ``attempt_fingerprint`` (#1196 item 1) and ``search_log_id`` (#811) are
+# set once per attempt, by the claim and by the search-row stamp, and are
+# never derivable from a poll observation. Every reducer rebuild goes
+# through ``_copy_download_state`` and the poller writes the WHOLE state
+# back (``update_download_state_if_downloading``), so a field that helper
+# forgets is erased on the first cycle after claim -- which is exactly
+# what #1405 measured in production for ``search_log_id``.
+
+
+def assert_attempt_identity_survives_the_cycle(
+    *,
+    before: ActiveDownloadState | None,
+    after: ActiveDownloadState | None,
+) -> None:
+    """The reducer carries an attempt's identity, or has no state at all.
+
+    Four clauses, accumulated rather than short-circuited so a world
+    violating several exercises each one.
+    """
+    violations: list[str] = []
+    if before is None and after is not None:
+        violations.append(
+            "reducer fabricated state for a missing-state reset")
+    if before is not None and after is None:
+        violations.append(
+            "reducer dropped the state of a persisted attempt")
+    if before is not None and after is not None:
+        if after.attempt_fingerprint != before.attempt_fingerprint:
+            violations.append(
+                "reducer rewrote attempt_fingerprint: "
+                f"{before.attempt_fingerprint!r} -> "
+                f"{after.attempt_fingerprint!r}")
+        if after.search_log_id != before.search_log_id:
+            violations.append(
+                "reducer rewrote search_log_id: "
+                f"{before.search_log_id!r} -> {after.search_log_id!r}")
+    if violations:
+        raise AssertionError("; ".join(violations))
+
+
+@st.composite
+def _reducer_identity_worlds(draw: Any) -> dict[str, Any]:
+    return {
+        "phase": draw(st.sampled_from(_IDENTITY_PHASES)),
+        "prev_bytes": draw(st.integers(min_value=0, max_value=1_000_000)),
+        "retry_count": draw(st.integers(min_value=0, max_value=4)),
+        "exception": draw(st.one_of(st.none(), st.sampled_from(_EXCEPTIONS))),
+        "attempt_fingerprint": draw(st.one_of(
+            st.none(),
+            st.text(alphabet="0123456789abcdef", min_size=1, max_size=16),
+        )),
+        "search_log_id": draw(st.one_of(
+            st.none(), st.integers(min_value=1, max_value=2_000_000))),
+    }
+
+
+def _run_reducer_identity(world: dict[str, Any]) -> None:
+    state, snapshot, cfg, expected = _build_reducer_world(world)
+    # An independent copy, so an in-place mutation of the input cannot
+    # launder the comparison into a tautology. (That the reducer never
+    # mutates its inputs is the separate property above.)
+    before = None if state is None else msgspec.convert(
+        msgspec.to_builtins(state), type=ActiveDownloadState)
+    result = reduce_poll_cycle(state, snapshot, _REDUCER_NOW, cfg)
+    assert result.verdict.decision == expected
+    assert_attempt_identity_survives_the_cycle(
+        before=before, after=result.state)
+
+
+class TestGeneratedReducerCarriesAttemptIdentity(unittest.TestCase):
+    @example(world={
+        # The measured #1405 world: a stamped link on an ordinary
+        # progress cycle, the first poll after the claim.
+        "phase": "progress", "prev_bytes": 0, "retry_count": 0,
+        "exception": None, "attempt_fingerprint": "9dff7841",
+        "search_log_id": 563143,
+    })
+    @given(world=_reducer_identity_worlds())
+    def test_reduce_poll_cycle_never_rewrites_attempt_identity(self, world):
+        _run_reducer_identity(world)
+
+
+class TestAttemptIdentityCheckerTripsOnViolations(unittest.TestCase):
+    """Per-clause proof (docs/generated-testing.md "Per-clause proof").
+
+    Q1 for each clause is below; Q3 (the clause stays quiet where
+    production is right) follows in the same class.
+    """
+
+    @staticmethod
+    def _state(**overrides: Any) -> ActiveDownloadState:
+        values: dict[str, Any] = {
+            "filetype": "flac",
+            "enqueued_at": "2026-01-01T00:00:00+00:00",
+            "files": [ActiveDownloadFileState(
+                username="user", filename="Album\\01.flac",
+                file_dir="Album", size=1_000_000)],
+            "attempt_fingerprint": "9dff7841",
+            "search_log_id": 563143,
+        }
+        values.update(overrides)
+        return ActiveDownloadState(**values)
+
+    def test_trips_when_the_reset_branch_fabricates_state(self):
+        with self.assertRaisesRegex(AssertionError, "fabricated state"):
+            assert_attempt_identity_survives_the_cycle(
+                before=None, after=self._state())
+
+    def test_trips_when_a_persisted_attempt_loses_its_state(self):
+        with self.assertRaisesRegex(AssertionError, "dropped the state"):
+            assert_attempt_identity_survives_the_cycle(
+                before=self._state(), after=None)
+
+    def test_trips_when_the_fingerprint_is_rewritten(self):
+        with self.assertRaisesRegex(
+            AssertionError, "rewrote attempt_fingerprint",
+        ):
+            assert_attempt_identity_survives_the_cycle(
+                before=self._state(),
+                after=self._state(attempt_fingerprint=None))
+
+    def test_trips_when_the_search_link_is_rewritten(self):
+        """The exact #1405 defect, fed straight to the checker."""
+        with self.assertRaisesRegex(AssertionError, "rewrote search_log_id"):
+            assert_attempt_identity_survives_the_cycle(
+                before=self._state(),
+                after=self._state(search_log_id=None))
+
+    def test_stays_quiet_for_the_real_reset_branch(self):
+        """Q3 for the fabrication clause: no state in, no state out."""
+        assert_attempt_identity_survives_the_cycle(before=None, after=None)
+
+    def test_stays_quiet_when_only_the_observation_fields_change(self):
+        """Q3 for all three state clauses.
+
+        The clauses read two fields and ignore every other dimension, so
+        prove they stay silent on the world a correct poll cycle really
+        produces: new bytes, a new state, a fresh progress witness, a
+        bumped retry count, a published canonical path.
+        """
+        before = self._state()
+        assert_attempt_identity_survives_the_cycle(
+            before=before,
+            after=self._state(
+                files=[ActiveDownloadFileState(
+                    username="user", filename="Album\\01.flac",
+                    file_dir="Album", size=1_000_000,
+                    retry_count=3, bytes_transferred=999,
+                    last_state="Completed, Succeeded",
+                    last_exception="Read error: Connection reset by peer",
+                    local_path="/downloads/Album/01.flac")],
+                last_progress_at="2026-01-01T00:10:00+00:00",
+                processing_started_at="2026-01-01T00:11:00+00:00",
+                current_path="/processing/albums/Album"),
+        )
+
+    def test_stays_quiet_when_an_unstamped_attempt_stays_unstamped(self):
+        """Q3 for both identity clauses, other half.
+
+        ``None`` is a real production value on both fields -- the
+        empty-files edge case, a claim whose search row was never
+        recorded, a state persisted before the field existed -- and must
+        not read as a rewrite when the observation fields move.
+        """
+        assert_attempt_identity_survives_the_cycle(
+            before=self._state(attempt_fingerprint=None, search_log_id=None),
+            after=self._state(
+                attempt_fingerprint=None, search_log_id=None,
+                last_progress_at="2026-01-01T00:10:00+00:00"),
+        )
 
 
 # ============================================================================
