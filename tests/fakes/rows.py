@@ -34,6 +34,9 @@ class DownloadLogRow:
     # Migration 052: exact validation/download row that produced a later
     # force-import or historical manual-import audit row.
     source_download_log_id: int | None = None
+    # Migration 085 (issue #811): the search_log row whose ``found``
+    # outcome produced this grab. NULL on every non-grab row.
+    search_log_id: int | None = None
     # Migration 037 — source discriminator + YT-specific JSONB blob.
     # ``source`` defaults to ``'slskd'`` matching the production NOT NULL
     # DEFAULT. ``youtube_metadata`` is NULL unless this row was written

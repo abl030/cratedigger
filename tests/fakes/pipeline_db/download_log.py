@@ -105,6 +105,7 @@ class _FakeDownloadLogMixin(_FakePipelineDBBase):
                      transfer_detail: Any = None,
                      source_download_log_id: int | None = None,
                      source: str = "slskd",
+                     search_log_id: int | None = None,
                      **extra: Any) -> int:
         """Record a download_log row.
 
@@ -189,6 +190,7 @@ class _FakeDownloadLogMixin(_FakePipelineDBBase):
             candidate_contributor_usernames=normalized_contributors,
             source_download_log_id=source_download_log_id,
             source=source,
+            search_log_id=search_log_id,
             extra=auxiliary,
         ))
         return new_log_id
@@ -447,6 +449,9 @@ class _FakeDownloadLogMixin(_FakePipelineDBBase):
                 else None
             ),
             "source_download_log_id": entry.source_download_log_id,
+            # Migration 085 (issue #811) — the search row that produced
+            # this grab. Part of ``dl.*``, so every reader sees it.
+            "search_log_id": entry.search_log_id,
             "original_beets_distance": next(
                 (
                     origin.beets_distance

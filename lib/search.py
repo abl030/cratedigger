@@ -104,6 +104,16 @@ class SearchResult:
     # cross-request decline from genuine network absence; empty on every
     # search that never hit the guard.
     cross_request_conflict_ids: tuple[int, ...] = ()
+    # Issue #811: the attempt fingerprint of the grab this search
+    # produced. Copied from ``find_result.grab_entry.files`` through
+    # ``lib.processing_paths.attempt_fingerprint_or_none`` -- the SAME
+    # projection ``lib.download.build_active_download_state`` used at
+    # claim time, over the SAME files list, so the two agree by
+    # construction rather than by a second formula. Non-None only on a
+    # ``found`` outcome; ``cratedigger._log_search_result`` forwards it
+    # so the DB can link the new ``search_log`` row to the download
+    # state that search produced.
+    grab_attempt_fingerprint: str | None = None
     # NOTE: ``rejection_reason`` (U11 R22) and ``matcher_score_top1``
     # (U11 R26) are NOT carried on SearchResult. The log site in
     # ``cratedigger.py::_log_search_result`` reconstructs both from

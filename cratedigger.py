@@ -136,6 +136,7 @@ from lib.enqueue import (
     find_download,
     prepare_find_download_context,
 )
+from lib.processing_paths import attempt_fingerprint_or_none
 from lib.quality import top_candidates_with_skip_split
 
 
@@ -858,6 +859,10 @@ def _log_search_result(
                     expected_track_count=expected_track_count,
                     matcher_score_top1=matcher_score_top1,
                     query_template=query_template,
+                    # Issue #811: only a ``found`` attempt that reached
+                    # ownership carries one, so this is None on every
+                    # other outcome and the DB stamp is skipped.
+                    grab_attempt_fingerprint=result.grab_attempt_fingerprint,
                     cross_request_conflict_request_ids=(
                         cross_request_conflict_ids),
                 )
@@ -1009,6 +1014,15 @@ def _apply_find_download_result(
             raise AssertionError("found find_download result requires grab_list merge")
         if find_result.grab_entry is None:
             raise AssertionError("found find_download result requires grab entry")
+        # Issue #811: the exact attempt identity of the grab this search
+        # produced, derived from the SAME files list the ownership claim
+        # already fingerprinted (``lib.enqueue._claim_initial_download_
+        # ownership`` -> ``lib.download.build_active_download_state``),
+        # through the SAME shared projection. Never re-derived from the
+        # persisted state: reading it back would only prove the state
+        # round-tripped, not that THIS search produced THAT attempt.
+        result.grab_attempt_fingerprint = attempt_fingerprint_or_none(
+            find_result.grab_entry.files)
         grab_list[find_result.grab_entry.album_id] = find_result.grab_entry
         return
     result.outcome = "error" if find_result.outcome == "enqueue_failed" else "no_match"

@@ -87,6 +87,17 @@ class TerminalDownloadAudit:
     existing_v0_probe_avg_bitrate: int | None = None
     existing_v0_probe_median_bitrate: int | None = None
     source_download_log_id: int | None = None
+    # Issue #811: the ``search_log`` row whose ``found`` outcome produced
+    # the grab this audit row describes (``download_log.search_log_id``,
+    # migration 085). Copied from ``DownloadInfo.search_log_id`` at every
+    # construction site that has the grab's own download info in scope.
+    # None where no such state exists: the preview measurement-failure
+    # bundle (no ``DownloadInfo`` at all -- see
+    # ``_record_preview_measurement_failed``) and the non-automation
+    # import-job failure diagnostic (``import_job_failure_outcome``,
+    # whose job payload names an ORIGIN ``download_log`` row rather than
+    # a live grab).
+    search_log_id: int | None = None
 
 
 @dataclass(frozen=True)

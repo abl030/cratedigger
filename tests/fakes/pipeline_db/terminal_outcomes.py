@@ -633,6 +633,7 @@ class _FakeTerminalOutcomesMixin(_FakePipelineDBBase):
                     audit.existing_v0_probe_median_bitrate
                 ),
                 source_download_log_id=audit.source_download_log_id,
+                search_log_id=audit.search_log_id,
             )
             boundary("download_log")
             cooled: set[str] = set()
@@ -748,6 +749,7 @@ class _FakeTerminalOutcomesMixin(_FakePipelineDBBase):
                     audit.existing_v0_probe_median_bitrate
                 ),
                 source_download_log_id=audit.source_download_log_id,
+                search_log_id=audit.search_log_id,
             )
             boundary("download_log")
         except Exception:

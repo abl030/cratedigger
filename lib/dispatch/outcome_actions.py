@@ -358,6 +358,7 @@ def _do_mark_done(
         final_format=dl_info.final_format,
         **_v0_probe_log_fields(dl_info),
         source_download_log_id=source_download_log_id,
+        search_log_id=dl_info.search_log_id,
     )
     if import_job_id is not None:
         return PendingImportTerminalOutcome(
@@ -515,6 +516,7 @@ def _record_rejection_and_maybe_requeue(
         import_result=dl_info.import_result,
         validation_result=validation_result,
         source_download_log_id=source_download_log_id,
+        search_log_id=dl_info.search_log_id,
         **_v0_probe_log_fields(dl_info),
     )
     if import_job_id is not None:
@@ -678,6 +680,7 @@ def _record_have_analysis_error(
         error_message=raw_error,
         validation_result=validation_json,
         source_download_log_id=request.candidate_download_log_id,
+        search_log_id=dl_info.search_log_id,
     )
     transition = (
         transitions.RequestTransition.to_wanted_fields(

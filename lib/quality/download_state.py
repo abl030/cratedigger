@@ -329,6 +329,24 @@ class ActiveDownloadState(msgspec.Struct, omit_defaults=True):
     # cross-request enqueue guard to the owner's CURRENT attempt by exact
     # identity instead of a clock comparison.
     attempt_fingerprint: str | None = None
+    # Issue #811: the exact ``search_log`` row whose ``found`` outcome
+    # produced this grab. Stamped ONCE, by
+    # ``PipelineDB.record_consumed_search_attempt``, inside the same
+    # transaction that INSERTs that search row -- guarded on
+    # ``status='downloading'`` AND an exact ``attempt_fingerprint`` match,
+    # so a stamp can only ever land on the attempt the search produced.
+    # The claim runs BEFORE the search row exists (``lib.enqueue``
+    # claims, then ``find_download`` returns, then
+    # ``cratedigger._log_search_result`` records), which is why this is a
+    # follow-up stamp rather than a claim-time field. ``None`` for a
+    # claim whose search row was never recorded (a crash between the two),
+    # for states persisted before this field existed
+    # (``omit_defaults=True`` decodes a missing key as ``None``), and for
+    # the empty-files edge case that has no fingerprint to match on.
+    # Read back by ``lib.download_reconstruction.reconstruct_grab_list_
+    # entry`` so every ``download_log`` row this grab later writes can
+    # carry ``download_log.search_log_id`` (migration 085).
+    search_log_id: int | None = None
 
     def to_json(self) -> str:
         return msgspec.json.encode(self).decode()
@@ -642,3 +660,10 @@ class DownloadInfo:
     # V0 probe evidence
     v0_probe: V0ProbeEvidence | None = None
     existing_v0_probe: V0ProbeEvidence | None = None
+    # Issue #811: the ``search_log`` row this grab came from, carried from
+    # ``GrabListEntry.search_log_id`` by ``lib.dispatch.helpers.
+    # _build_download_info`` and written to ``download_log.search_log_id``
+    # (migration 085). None for every non-grab lane -- force import,
+    # local import, the manifest guard's username-only info -- because
+    # those have no grab state in scope.
+    search_log_id: int | None = None

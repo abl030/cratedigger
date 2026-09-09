@@ -87,4 +87,5 @@ def reconstruct_grab_list_entry(
         db_search_filetype_override=request.get("search_filetype_override"),
         db_target_format=request.get("target_format"),
         import_folder=state.current_path,
+        search_log_id=state.search_log_id,
     )

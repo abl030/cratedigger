@@ -648,6 +648,17 @@ class _DownloadLogMixin(_PipelineDBBase):
                      # audit, ...); this comment is scoped to the terminal-
                      # outcome writers only, not every caller.
                      source: str = "slskd",
+                     # Migration 085 (issue #811). Only a grab-originated
+                     # row carries one: the caller reads it off the
+                     # attempt's own ``DownloadInfo``/``GrabListEntry``,
+                     # which got it from the persisted
+                     # ``active_download_state``. Every other direct
+                     # caller of this method leaves it NULL because no
+                     # search produced that row -- the enqueue-time
+                     # ``user_offline`` audit (written before the search
+                     # row exists at all), the merge audit, and the
+                     # library-delete audit.
+                     search_log_id: int | None = None,
                      ) -> int:
         beets_distance_value, beets_scenario_value = derive_validation_log_columns(
             validation_result,
@@ -674,10 +685,10 @@ class _DownloadLogMixin(_PipelineDBBase):
                 v0_probe_avg_bitrate, v0_probe_median_bitrate,
                 existing_v0_probe_kind, existing_v0_probe_min_bitrate,
                 existing_v0_probe_avg_bitrate, existing_v0_probe_median_bitrate,
-                transfer_detail, source_download_log_id, source
+                transfer_detail, source_download_log_id, source, search_log_id
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                       %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """, (
             request_id, soulseek_username, normalized_contributors,
@@ -699,6 +710,7 @@ class _DownloadLogMixin(_PipelineDBBase):
             if transfer_detail is not None else None,
             source_download_log_id,
             source,
+            search_log_id,
         ))
         row = cur.fetchone()
         self.conn.commit()

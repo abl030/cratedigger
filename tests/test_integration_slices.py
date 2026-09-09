@@ -4801,8 +4801,16 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         ctx = self._wire(cfg, slskd, db, album)
 
         # Stub slskd_do_enqueue so we do not exercise the real download path.
+        # Real ``DownloadFile``s, not MagicMocks: the accepted-file list
+        # is what ``_apply_find_download_result`` fingerprints (#811), and
+        # a MagicMock has no serialisable username/filename.
         with patch("lib.enqueue.slskd_do_enqueue", return_value=[
-            MagicMock(),
+            make_download_file(
+                filename="Music\\Album\\01 - Track One.flac",
+                id="tid-1", file_dir="Music\\Album", username="good_peer"),
+            make_download_file(
+                filename="Music\\Album\\02 - Track Two.flac",
+                id="tid-2", file_dir="Music\\Album", username="good_peer"),
         ]):
             result = cratedigger.search_for_album(album, ctx)
             grab_list: dict[Any, Any] = {}
@@ -5129,7 +5137,14 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         result = cratedigger.search_for_album(album, ctx)
         grab_list: dict[Any, Any] = {}
         from lib.enqueue import find_download
-        with patch("lib.enqueue.slskd_do_enqueue", return_value=[MagicMock()]):
+        # Real ``DownloadFile``s — see the same note in the default-variant
+        # slice above (#811 fingerprints this exact list).
+        with patch("lib.enqueue.slskd_do_enqueue", return_value=[
+            make_download_file(
+                filename="Music\\Disco\\01 - Disco Track.flac",
+                id="tid-d1", file_dir="Music\\Disco",
+                username="discog_peer"),
+        ]):
             find_result = find_download(album, ctx)
         cratedigger._apply_find_download_result(
             album, result, find_result, [], grab_list, ctx)

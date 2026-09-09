@@ -32,6 +32,12 @@ class GrabListEntry:
     db_source: str | None = None           # "request" or "redownload"
     db_search_filetype_override: str | None = None
     db_target_format: str | None = None
+    # Issue #811: the ``search_log`` row whose ``found`` outcome produced
+    # this grab, read back off the persisted ``active_download_state`` by
+    # ``lib.download_reconstruction.reconstruct_grab_list_entry``. None on
+    # a freshly planned entry (the search row does not exist yet at claim
+    # time) and on any attempt whose stamp never landed.
+    search_log_id: int | None = None
 
     # Transient: process_completed_album
     import_folder: str | None = None

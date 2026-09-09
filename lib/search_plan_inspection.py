@@ -9,6 +9,7 @@ API contract: add a key here, update the contract test in
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any, Protocol
@@ -17,6 +18,7 @@ import msgspec
 
 from lib.pipeline_db import (
     ActiveSearchPlan,
+    SearchAcquisitionSummary,
     SearchPlanInspection,
     SearchPlanItemRow,
     SearchPlanRow,
@@ -25,6 +27,7 @@ from lib.pipeline_db import (
     SearchPlanStatsGroup,
     jsonb_to_builtins,
 )
+from lib.quality import effective_search_tiers
 from lib.search import SEARCH_PLAN_GENERATOR_ID
 
 # Number of legacy (plan_id IS NULL) ``search_log`` rows to surface as
@@ -61,6 +64,10 @@ class _DBLike(Protocol):
         self, request_id: int, *, current_only: bool = ...,
         prefetched_history: list[dict[str, Any]] | None = ...,
     ) -> SearchPlanStats: ...
+
+    def get_search_acquisition_summary(
+        self, request_id: int,
+    ) -> SearchAcquisitionSummary: ...
 
 
 @dataclass(frozen=True)
@@ -180,10 +187,75 @@ def _stats_to_dict(stats: SearchPlanStats) -> dict[str, Any]:
     }
 
 
+def _acquisition_to_dict(
+    summary: SearchAcquisitionSummary, scope_tiers: Sequence[str],
+) -> dict[str, Any]:
+    """Project the acquisition summary, scoring tiers against the scope.
+
+    ``candidates_outside_scope`` is computed HERE rather than in SQL:
+    what counts as in-scope is ``effective_search_tiers``' answer for
+    this request's overrides plus the runtime config, and the DB layer
+    has neither.
+    """
+    in_scope = set(scope_tiers)
+    last_found = summary.last_found
+    return {
+        "since": _iso(summary.since),
+        "since_reason": summary.since_reason,
+        "candidate_tiers": [
+            {"tier": t.tier, "count": t.count} for t in summary.candidate_tiers
+        ],
+        "candidates_outside_scope": sum(
+            t.count for t in summary.candidate_tiers if t.tier not in in_scope
+        ),
+        "grabs": [
+            {
+                "filetype": g.filetype,
+                "count": g.count,
+                "last_at": _iso(g.last_at),
+                "last_outcome": g.last_outcome,
+            }
+            for g in summary.grabs
+        ],
+        "grabs_total": summary.grabs_total,
+        "last_found": (
+            None if last_found is None else {
+                "search_log_id": last_found.search_log_id,
+                "at": _iso(last_found.at),
+                "strategy": last_found.strategy,
+                "username": last_found.username,
+                "tier": last_found.tier,
+                "matched_tracks": last_found.matched_tracks,
+                "total_tracks": last_found.total_tracks,
+                "grab": (
+                    None if last_found.grab is None else {
+                        "download_log_id": last_found.grab.download_log_id,
+                        "outcome": last_found.grab.outcome,
+                        "error_message": last_found.grab.error_message,
+                        "at": _iso(last_found.grab.at),
+                    }
+                ),
+            }
+        ),
+        "peers": [
+            {
+                "username": p.username,
+                "tier": p.tier,
+                "best_matched_tracks": p.best_matched_tracks,
+                "total_tracks": p.total_tracks,
+                "attempts": p.attempts,
+                "last_at": _iso(p.last_at),
+            }
+            for p in summary.peers
+        ],
+    }
+
+
 def build_inspection_payload(
     db: _DBLike,
     request_id: int,
     *,
+    allowed_filetypes: Sequence[str],
     current_generator_id: str = SEARCH_PLAN_GENERATOR_ID,
     legacy_log_head_limit: int = LEGACY_LOG_HEAD_LIMIT,
     include_stats: bool = True,
@@ -193,6 +265,13 @@ def build_inspection_payload(
     The returned dict is JSON-serialisable (datetimes → ISO strings,
     everything else is dict/list/primitive) so both the API and CLI
     ``--json`` mode emit it directly.
+
+    ``allowed_filetypes`` is the runtime config's ``allowed_filetypes``
+    (``CratediggerConfig.allowed_filetypes``) — required, not defaulted,
+    because ``search_scope`` claims to report the tiers the executor
+    would really walk, and a stand-in default would report a scope no
+    cycle uses. It is the same third argument
+    ``lib/enqueue.py::find_download`` hands ``effective_search_tiers``.
 
     Currentness is computed against ``current_generator_id`` per the
     plan's Currentness Model:
@@ -241,6 +320,20 @@ def build_inspection_payload(
     deterministic_failed = inspection.latest_failed_deterministic
     transient_failed = inspection.latest_failed_transient
 
+    # Issue #811: the operator's headline question on this view is "is my
+    # lossless override actually in force?", so the effective tier ladder
+    # is computed through the SAME function the executor uses rather than
+    # re-read from the override string.
+    override = req.get("search_filetype_override")
+    target_format = req.get("target_format")
+    configured_tiers = list(allowed_filetypes)
+    scope_tiers, catch_all = effective_search_tiers(
+        override, target_format, configured_tiers,
+    )
+    acquisition = _acquisition_to_dict(
+        db.get_search_acquisition_summary(request_id), scope_tiers,
+    )
+
     payload: dict[str, Any] = {
         "request_id": request_id,
         "request": {
@@ -252,7 +345,30 @@ def build_inspection_payload(
             "discogs_release_id": req.get("discogs_release_id"),
             "year": req.get("year"),
             "source": req.get("source"),
+            "search_filetype_override": override,
+            "target_format": target_format,
+            "min_bitrate": req.get("min_bitrate"),
+            "search_attempts": req.get("search_attempts"),
+            "created_at": _iso(req.get("created_at")),
+            "last_attempt_at": _iso(req.get("last_attempt_at")),
+            "next_retry_after": _iso(req.get("next_retry_after")),
         },
+        "search_scope": {
+            "override": override,
+            "target_format": target_format,
+            "min_bitrate": req.get("min_bitrate"),
+            "tiers": scope_tiers,
+            "catch_all": catch_all,
+            "configured_tiers": configured_tiers,
+            # Which of the three inputs decided the ladder — the same
+            # precedence ``effective_search_tiers`` applies.
+            "source": (
+                "override" if override
+                else "target_format" if target_format
+                else "config"
+            ),
+        },
+        "acquisition": acquisition,
         "current_generator_id": current_generator_id,
         "currentness": {
             "is_wanted": is_wanted,
@@ -399,6 +515,96 @@ def _item_lines(item: dict[str, Any]) -> list[str]:
     return out
 
 
+def _render_search_scope_lines(scope: dict[str, object]) -> list[str]:
+    """The tier ladder this request's next search will actually walk."""
+    tiers = [str(t) for t in _as_list(scope.get("tiers"))]
+    configured = [str(t) for t in _as_list(scope.get("configured_tiers"))]
+    return [
+        _heading("Search scope:"),
+        f"    quality override:  {scope.get('override') or '(none)'}",
+        f"    target_format:     {scope.get('target_format') or '-'}",
+        f"    min_bitrate:       {_fmt_num(scope.get('min_bitrate'))}",
+        f"    decided by:        {scope.get('source')}",
+        f"    tiers searched:    {', '.join(tiers) if tiers else '(none)'}",
+        f"    catch-all:         {_fmt_bool(scope.get('catch_all'))}",
+        f"    configured tiers:  "
+        f"{', '.join(configured) if configured else '(none)'}",
+    ]
+
+
+def _render_acquisition_lines(acq: dict[str, object]) -> list[str]:
+    """What the search has found since the last import, and its fate."""
+    lines = [_heading("Acquisition:")]
+    since = acq.get("since")
+    lines.append(
+        f"    since:             {_fmt_iso(since)}"
+        f"  ({acq.get('since_reason')})")
+
+    tiers = _as_list(acq.get("candidate_tiers"))
+    if not tiers:
+        lines.append("    candidate tiers:   (none scored)")
+    else:
+        rendered = " ".join(
+            f"{_as_dict(t).get('tier')}={_as_dict(t).get('count')}"
+            for t in tiers)
+        lines.append(f"    candidate tiers:   {rendered}")
+    lines.append(
+        f"    outside scope:     {acq.get('candidates_outside_scope')}")
+
+    grabs = _as_list(acq.get("grabs"))
+    lines.append(f"    grabs:             {acq.get('grabs_total')} total")
+    for raw in grabs:
+        grab = _as_dict(raw)
+        lines.append(
+            f"      {grab.get('filetype') or '-'}"
+            f"  x{grab.get('count')}"
+            f"  last={_fmt_iso(grab.get('last_at'))}"
+            f"  ({grab.get('last_outcome')})")
+
+    found_raw = acq.get("last_found")
+    if found_raw is None:
+        lines.append("    last found:        (none in window)")
+    else:
+        found = _as_dict(found_raw)
+        lines.append(
+            f"    last found:        "
+            f"search_log_id={found.get('search_log_id')}"
+            f"  at={_fmt_iso(found.get('at'))}"
+            f"  strategy={found.get('strategy') or '-'}")
+        lines.append(
+            f"      peer={found.get('username') or '-'}"
+            f"  tier={found.get('tier') or '-'}"
+            f"  matched={found.get('matched_tracks')}"
+            f"/{found.get('total_tracks')}")
+        grab_raw = found.get("grab")
+        if grab_raw is None:
+            lines.append("      grab: (no linked download_log row)")
+        else:
+            grab = _as_dict(grab_raw)
+            lines.append(
+                f"      grab: download_log_id={grab.get('download_log_id')}"
+                f"  outcome={grab.get('outcome')}"
+                f"  at={_fmt_iso(grab.get('at'))}")
+            if grab.get("error_message"):
+                lines.append(f"        error: {grab.get('error_message')}")
+
+    peers = _as_list(acq.get("peers"))
+    if not peers:
+        lines.append("    peers:             (none scored)")
+    else:
+        lines.append(f"    peers ({len(peers)}, by attempts):")
+        for raw in peers:
+            peer = _as_dict(raw)
+            lines.append(
+                f"      {peer.get('username')}"
+                f"  tier={peer.get('tier') or '-'}"
+                f"  best={peer.get('best_matched_tracks')}"
+                f"/{peer.get('total_tracks')}"
+                f"  attempts={peer.get('attempts')}"
+                f"  last={_fmt_iso(peer.get('last_at'))}")
+    return lines
+
+
 def render_human_lines(payload: dict[str, Any]) -> list[str]:
     """Render the inspection payload as human-readable lines.
 
@@ -421,6 +627,9 @@ def render_human_lines(payload: dict[str, Any]) -> list[str]:
         f"  Discogs Release:          {req.get('discogs_release_id') or '-'}")
     lines.append(
         f"  Current generator id:     {payload['current_generator_id']}")
+
+    lines.extend(_render_search_scope_lines(_as_dict(payload["search_scope"])))
+    lines.extend(_render_acquisition_lines(_as_dict(payload["acquisition"])))
 
     lines.append(_heading("Currentness:"))
     lines.append(f"    wanted:                       {_fmt_bool(cu['is_wanted'])}")

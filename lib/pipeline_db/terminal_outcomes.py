@@ -752,11 +752,11 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 v0_probe_avg_bitrate, v0_probe_median_bitrate,
                 existing_v0_probe_kind, existing_v0_probe_min_bitrate,
                 existing_v0_probe_avg_bitrate, existing_v0_probe_median_bitrate,
-                source_download_log_id
+                source_download_log_id, search_log_id
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s
             )
             RETURNING id
             """,
@@ -777,6 +777,7 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 audit.existing_v0_probe_avg_bitrate,
                 audit.existing_v0_probe_median_bitrate,
                 audit.source_download_log_id,
+                audit.search_log_id,
             ),
         )
         row = cur.fetchone()
@@ -826,7 +827,8 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 existing_v0_probe_kind, existing_v0_probe_min_bitrate,
                 existing_v0_probe_avg_bitrate, existing_v0_probe_median_bitrate,
                 source, source_download_log_id, candidate_evidence_id,
-                candidate_contributor_usernames, candidate_evidence_direct
+                candidate_contributor_usernames, candidate_evidence_direct,
+                search_log_id
             ) SELECT
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
@@ -851,7 +853,8 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                       AND candidate_evidence_id IS NOT NULL
                 ) AND COALESCE(CARDINALITY(
                     (SELECT usernames FROM contributor_identity)
-                ), 0) > 0
+                ), 0) > 0,
+                %s
             RETURNING id, (SELECT EXISTS (SELECT 1 FROM origin)) AS origin_exists
             """,
             (
@@ -900,6 +903,7 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 request_id,
                 import_job_id,
                 request_id,
+                audit.search_log_id,
             ),
         )
         row = cur.fetchone()

@@ -197,7 +197,9 @@ def _build_download_info(album_data: GrabListEntry) -> DownloadInfo:
     """Extract audio quality metadata from album files for download logging."""
     files = album_data.files
     if not files:
-        return DownloadInfo()
+        # Issue #811: the search link is a property of the attempt, not of
+        # its files, so it survives the empty-manifest early exit.
+        return DownloadInfo(search_log_id=album_data.search_log_id)
     usernames = {f.username for f in files if f.username}
     filetypes = {f.filename.split(".")[-1].lower() for f in files if "." in f.filename}
     bitrates = [f.bitRate for f in files if f.bitRate is not None]
@@ -213,4 +215,5 @@ def _build_download_info(album_data: GrabListEntry) -> DownloadInfo:
         sample_rate=max(sample_rates) if sample_rates else None,
         bit_depth=max(bit_depths) if bit_depths else None,
         is_vbr=any(vbr_flags) if vbr_flags else None,
+        search_log_id=album_data.search_log_id,
     )

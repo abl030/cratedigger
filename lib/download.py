@@ -209,6 +209,14 @@ def build_active_download_state(
         processing_started_at=None,
         current_path=None,
         attempt_fingerprint=attempt_fingerprint_or_none(entry.files),
+        # Issue #811: carried straight through so the entry -> state
+        # projection is lossless in both directions
+        # (``reconstruct_grab_list_entry`` is the other half). Every
+        # production caller today passes a freshly planned entry, whose
+        # value is None because the search row does not exist yet at
+        # claim time -- the link is stamped later, by
+        # ``record_consumed_search_attempt``.
+        search_log_id=entry.search_log_id,
     )
 
 
@@ -489,6 +497,7 @@ def _timeout_album(
             outcome="timeout",
             error_message=reason,
             transfer_detail=transfer_detail,
+            search_log_id=dl_info.search_log_id,
         )
         for username in extract_usernames(entry.files):
             if db.check_and_apply_cooldown(username):
@@ -708,6 +717,7 @@ def _local_completion_terminal_outcome(
             beets_detail=detail,
             outcome=outcome,
             error_message=error_message,
+            search_log_id=dl_info.search_log_id,
         ),
     )
 

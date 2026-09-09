@@ -32,14 +32,20 @@ def get_pipeline_search_plan(
     included by default; pass ``stats=0`` to suppress it for a leaner
     payload (the show endpoint stays a single contract).
     """
+    from lib.config import read_runtime_config
     from lib.search_plan_inspection import (
         RequestNotFound,
         build_inspection_payload,
     )
     include_stats = params.get("stats", ["1"])[0] != "0"
     db = runtime().db()
+    # The effective search scope is config-dependent, so this route reads
+    # the runtime config exactly like its search-plan siblings.
+    cfg = read_runtime_config()
     payload = build_inspection_payload(
-        db, int(req_id_str), include_stats=include_stats)
+        db, int(req_id_str),
+        allowed_filetypes=cfg.allowed_filetypes,
+        include_stats=include_stats)
     if isinstance(payload, RequestNotFound):
         h._error("Not found", 404)
         return
