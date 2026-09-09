@@ -6564,6 +6564,7 @@ class TestSearchToGrabLinkReads(unittest.TestCase):
 
         summary = self.db.get_search_acquisition_summary(self.req_id)
 
+        self.assertEqual(summary.request_id, self.req_id)
         self.assertIsNotNone(summary.since)
         self.assertEqual(summary.since_reason, "last_import")
         # The pre-import peer/tier are outside the window entirely.
@@ -6591,6 +6592,22 @@ class TestSearchToGrabLinkReads(unittest.TestCase):
         self.assertEqual(summary.last_found.grab.outcome, "timeout")
         self.assertEqual(
             summary.last_found.grab.error_message, "remote queue timeout")
+        # The grab this search actually produced, by id — not merely
+        # "some grab exists".
+        newest_grab = self.db.get_download_history(self.req_id)[0]
+        self.assertEqual(
+            summary.last_found.grab.download_log_id, newest_grab["id"])
+        self.assertIsNotNone(summary.last_found.grab.at)
+        self.assertIsNotNone(summary.last_found.at)
+        self.assertIsNotNone(summary.peers[0].last_at)
+        self.assertIsNotNone(summary.grabs[0].last_at)
+
+    def test_a_found_search_with_no_linked_grab_reports_no_grab(self):
+        """``last_found.grab`` is None, not a stand-in, when nothing linked."""
+        self._search("found", candidates=[self._candidate()])
+        summary = self.db.get_search_acquisition_summary(self.req_id)
+        assert summary.last_found is not None
+        self.assertIsNone(summary.last_found.grab)
 
     def test_last_found_and_peers_agree_on_the_best_candidate(self):
         """The two queries spell the same five-key ordering; prove it holds.

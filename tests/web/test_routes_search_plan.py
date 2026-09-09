@@ -313,6 +313,13 @@ class TestPipelineSearchPlanContract(_FakeDbWebServerCase):
                     username="lossy_peer", dir="/b/album",
                     filetype="mp3 320", matched_tracks=6, total_tracks=11,
                     avg_ratio=0.5, missing_titles=["Two"], file_count=7),
+                # A second out-of-scope tier so the outside-scope count is
+                # asymmetric: with one in and one out, inverting the
+                # membership test gives the same number either way.
+                CandidateScore(
+                    username="ogg_peer", dir="/c/album",
+                    filetype="opus", matched_tracks=4, total_tracks=11,
+                    avg_ratio=0.4, missing_titles=["Two"], file_count=5),
             ],
         )
         search_log_id = self.db.get_search_history(100)[0]["id"]
@@ -332,8 +339,12 @@ class TestPipelineSearchPlanContract(_FakeDbWebServerCase):
         self.assertEqual(scope["source"], "override")
         self.assertEqual(scope["min_bitrate"], 320)
         self.assertEqual(data["request"]["search_attempts"], 9)
+        self.assertEqual(data["request"]["min_bitrate"], 320)
+        self.assertEqual(data["request"]["target_format"], None)
         self.assertEqual(
             data["request"]["created_at"], "2026-05-01T00:00:00+00:00")
+        self.assertEqual(
+            data["request"]["last_attempt_at"], "2026-09-01T03:00:00+00:00")
         self.assertEqual(
             data["request"]["next_retry_after"], "2026-09-01T04:00:00+00:00")
 
@@ -342,11 +353,21 @@ class TestPipelineSearchPlanContract(_FakeDbWebServerCase):
         self.assertEqual(acq["since_reason"], "request_created")
         self.assertEqual(
             acq["candidate_tiers"],
-            [{"tier": "lossless", "count": 1}, {"tier": "mp3 320", "count": 1}])
-        # The mp3 candidate falls outside the lossless-only scope.
-        self.assertEqual(acq["candidates_outside_scope"], 1)
+            [{"tier": "lossless", "count": 1},
+             {"tier": "mp3 320", "count": 1},
+             {"tier": "opus", "count": 1}])
+        # Both lossy candidates fall outside the lossless-only scope.
+        self.assertEqual(acq["candidates_outside_scope"], 2)
         self.assertEqual(acq["grabs_total"], 1)
         self.assertEqual(acq["grabs"][0]["filetype"], "flac")
+        self.assertEqual(acq["grabs"][0]["count"], 1)
+        self.assertEqual(acq["grabs"][0]["last_outcome"], "timeout")
+        # Every timestamp reaches the wire as an ISO string, not a
+        # datetime the JSON encoder would have died on and not a null.
+        self.assertIsInstance(acq["grabs"][0]["last_at"], str)
+        self.assertIsInstance(acq["last_found"]["at"], str)
+        self.assertIsInstance(acq["last_found"]["grab"]["at"], str)
+        self.assertIsInstance(acq["peers"][0]["last_at"], str)
         _assert_required_fields(
             self, acq["last_found"],
             self.ACQUISITION_LAST_FOUND_REQUIRED_FIELDS,
@@ -365,7 +386,11 @@ class TestPipelineSearchPlanContract(_FakeDbWebServerCase):
                 "search-plan acquisition.peers[]")
         self.assertEqual(
             [p["username"] for p in acq["peers"]],
-            ["anjingpaeh", "lossy_peer"])
+            ["anjingpaeh", "lossy_peer", "ogg_peer"])
+        self.assertEqual(acq["peers"][0]["tier"], "lossless")
+        self.assertEqual(acq["peers"][0]["best_matched_tracks"], 11)
+        self.assertEqual(acq["peers"][0]["total_tracks"], 11)
+        self.assertEqual(acq["peers"][0]["attempts"], 1)
 
     # -- 404 missing request --
 

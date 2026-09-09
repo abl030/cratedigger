@@ -386,11 +386,16 @@ class _SearchPlanMixin(_PipelineDBBase):
         and a registered exception is a weaker guarantee than a literal:
 
         * ``jsonb_array_elements(CASE WHEN jsonb_typeof(x.candidates) =
-          'array' THEN x.candidates END)`` — the unnest. ``candidates`` is
-          SQL NULL on pre-attempt/error rows and the function raises on a
-          non-array, and a WHERE clause cannot guard a lateral expression,
-          so the CASE (with no ELSE, so a non-array yields NULL) makes
-          either shape contribute zero elements instead of erroring.
+          'array' THEN x.candidates END)`` — the unnest. ``candidates``
+          is SQL NULL on pre-attempt/error rows (a strict function over
+          NULL contributes zero rows, verified against the ephemeral PG)
+          and the function ERRORS on a non-array jsonb. The guard belongs
+          in the function's own argument rather than in a WHERE clause:
+          a qual at the join level is a filter on rows the function has
+          already been asked to produce, and in the ``last_found``
+          query's LEFT JOIN LATERAL it could not reach the input at all.
+          With no ELSE the CASE yields NULL, so a non-array contributes
+          zero elements instead of raising.
         * ``COALESCE((c->>'pre_filter_skip')::boolean, FALSE) = FALSE`` —
           scored candidates only. The pre-filter's sampled rows record
           peers the walk never browsed, so they are not evidence about a
