@@ -214,6 +214,19 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_slskd_searches",
         "tests.test_slskd_sweep_exception_contracts",
     ),
+    "lib/quality/download_state.py": (
+        # The lib/quality/ prefix rule resolves the three decision-album
+        # modules, so this file is never zero-neighbour -- and none of
+        # them touches the poll-cycle reducer that lives here. Its real
+        # coverage is named for the reducer and for the download-failure
+        # invariants, neither of which the basename probes
+        # (tests.test_download_state / _generated) can find. Issue #1405
+        # shipped a live defect in this file's copy helper; the modules
+        # below are the pin and the property that now patrol it.
+        # Maskable -- pinned in MASKABLE_ENTRY_PINS.
+        "tests.test_download_reducer",
+        "tests.test_download_errors_generated",
+    ),
     "lib/measurement.py": (
         # The basename probe resolves tests.test_measurement on its own, so
         # this file is never zero-neighbour — but the ONLY coverage of

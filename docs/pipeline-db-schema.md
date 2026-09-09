@@ -1150,11 +1150,19 @@ A key inside the `album_requests.active_download_state` JSONB, declared on
 `lib/quality/download_state.py::ActiveDownloadState` (`omit_defaults=True`,
 so it is absent rather than `null` until stamped). It is the in-flight half
 of the `download_log.search_log_id` link documented above: the DB stamps it
-once, from `record_consumed_search_attempt`, and every audit row this grab
-later writes reads it back through
-`reconstruct_grab_list_entry`. It is cleared with the rest of the state when
-the request leaves `downloading`/`processing`, so it never outlives the
-attempt it describes.
+once, from `record_consumed_search_attempt`, and is carried unchanged across
+every poll-cycle rewrite (the same clause `attempt_fingerprint` above
+carries, and for the same reason) so that every audit row this grab later
+writes reads it back through `reconstruct_grab_list_entry`. That clause is
+load-bearing, not decorative: the poller CASes the whole state back on every
+cycle, so the reducer's rebuild
+(`lib/quality/download_state.py::_copy_download_state`) is what has to
+preserve it. Issue #1405 is what happens when it does not — the copy was
+written field by field without this key, every stamp was erased on the first
+cycle that rebuilt the state, and every `download_log` row landed with a NULL
+link. Both fields are now carried structurally rather than by name. It is
+cleared with the rest of the state when the request leaves
+`downloading`/`processing`, so it never outlives the attempt it describes.
 
 ### `search_log` reads that surface the grab
 
