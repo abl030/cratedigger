@@ -14,7 +14,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
-from web import discogs
+from lib import discogs_api as discogs
 
 
 class _DiscogsMirror:
@@ -115,7 +115,7 @@ class TestDiscogsArtistGlobalConcurrency(unittest.TestCase):
     def _run_calls(self, calls: int, *, handler_exit_delay: float = 0) -> _DiscogsMirror:
         mirror = _DiscogsMirror(delay=0.03, handler_exit_delay=handler_exit_delay)
         with mirror as base, patch.object(discogs, "DISCOGS_API_BASE", base), patch(
-            "web.discogs._cache.memoize_meta", side_effect=lambda _key, fetch: fetch(),
+            "lib.discogs_api._cache.memoize_meta", side_effect=lambda _key, fetch: fetch(),
         ), concurrent.futures.ThreadPoolExecutor(max_workers=calls) as executor:
             results = list(executor.map(discogs.get_artist_releases, range(1, calls + 1)))
         self.assertEqual(results, [[] for _ in range(calls)])
@@ -126,7 +126,7 @@ class TestDiscogsArtistGlobalConcurrency(unittest.TestCase):
         mirror = _DiscogsMirror()
         with mirror as base, patch.object(discogs, "DISCOGS_API_BASE", base), patch.object(
             discogs, "_on_mirror_request", lambda: attempts.append("discogs"),
-        ), patch("web.discogs._cache.memoize_meta", side_effect=lambda _key, fetch: fetch()):
+        ), patch("lib.discogs_api._cache.memoize_meta", side_effect=lambda _key, fetch: fetch()):
             self.assertEqual(discogs.get_artist_releases(1), [])
         self.assertEqual(attempts, ["discogs", "discogs"])
 
@@ -180,7 +180,7 @@ class TestDiscogsArtistGlobalConcurrency(unittest.TestCase):
     def test_one_fast_failure_does_not_wait_for_a_slow_sibling(self) -> None:
         mirror = _DiscogsMirror(delay=1, fail_masters=True)
         with mirror as base, patch.object(discogs, "DISCOGS_API_BASE", base), patch(
-            "web.discogs._cache.memoize_meta", side_effect=lambda _key, fetch: fetch(),
+            "lib.discogs_api._cache.memoize_meta", side_effect=lambda _key, fetch: fetch(),
         ):
             started = time.monotonic()
             with self.assertRaises(urllib.error.HTTPError) as raised:

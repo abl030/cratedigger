@@ -14,6 +14,7 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
+from lib import discogs_api, mb_api
 from lib.config import read_runtime_config
 from lib.pipeline_db import PipelineDB
 from lib.pipeline_db.rows import AlbumRequestRow
@@ -77,8 +78,6 @@ from lib.release_payload import (
     release_tracks,
 )
 from lib.set_intent_service import SET_INTENT_HTTP_STATUS, set_lossless_intent
-from web import discogs as discogs_api
-from web import mb as mb_api
 
 
 def _transition_applied_or_respond(

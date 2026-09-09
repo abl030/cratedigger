@@ -9,7 +9,7 @@ from lib.artist_releases import (
 )
 
 if TYPE_CHECKING:
-    from web.mb import _MBReleaseFullJSON, _MBTrackFullJSON
+    from lib.mb_api import _MBReleaseFullJSON, _MBTrackFullJSON
 
 
 class _TrackSpec(TypedDict, total=False):
@@ -35,7 +35,7 @@ def _release(
 ) -> "_MBReleaseFullJSON":
     """Build a fake MB release dict matching the shape from the API.
 
-    Matches ``web.mb._MBReleaseFullJSON`` exactly (the type
+    Matches ``lib.mb_api._MBReleaseFullJSON`` exactly (the type
     ``lib.artist_releases`` now declares its input as) — ``number`` is a
     **string** at the wire (MB's printed label, e.g. ``"A1"`` for vinyl;
     issue #1355 item 5 corrected the type this fixture used to claim) and

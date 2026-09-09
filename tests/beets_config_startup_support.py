@@ -163,7 +163,7 @@ def _snapshot_web_process_state() -> tuple[object, ...]:
     """
     from beets import config as active_beets_config
 
-    from web import cache
+    from lib import redis_cache as cache
     from web.runtime import runtime
 
     try:
@@ -274,7 +274,7 @@ def _exercise_real_rejection_and_restart(
 ) -> None:
     """Reject, repair, and restart one real top-level application."""
     from lib import config as runtime_config_module
-    from web import cache
+    from lib import redis_cache as cache
 
     world = BeetsContractWorld(role=case.role)
     saved_umask = os.umask(0o027) if case.role == "main" else None
@@ -385,7 +385,7 @@ def _exercise_real_rejection_and_restart(
         if prior_web_globals is not None:
             from beets import config as active_beets_config
 
-            from web import cache
+            from lib import redis_cache as cache
 
             (
                 server.mb_api.MB_API_BASE,

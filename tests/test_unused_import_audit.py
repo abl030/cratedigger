@@ -490,6 +490,97 @@ class TestUnusedImportAudit(unittest.TestCase):
             test_control.stdout + test_control.stderr,
         )
 
+    def test_web_layer_import_ban_uses_real_ruff(self) -> None:
+        """`lib/` may not import `web` in any of the three import shapes.
+
+        Issue #1389 moved the MusicBrainz and Discogs mirror clients into
+        `lib/` and deleted the imports six `lib` modules used to dodge the
+        cycle; this ban is what stops the cycle coming back. All three
+        shapes are spelled out because the deleted imports used two of them
+        (ten `from web.x import y`, one `from web import x`) and nothing
+        stops the third being written next.
+
+        The two controls are the other half: an ignored file may import
+        `web` freely, and a `scripts/` file that is NOT one of the three
+        named grants may not.
+        """
+        findings = ruff_findings({
+            "lib/layering.py": (
+                "import web.mb as mirror\n\n"
+                "from web.classify import proof_gate_projection\n\n"
+                "print(mirror, proof_gate_projection)\n\n\n"
+                "def load():\n"
+                "    from web import server\n\n"
+                "    return server\n"
+            ),
+        })
+        self.assertEqual(
+            [finding["code"] for finding in findings],
+            ["TID251", "TID251", "TID251"],
+        )
+        web_control = subprocess.run(
+            [
+                "bash",
+                "scripts/run_ruff.sh",
+                "--stdin-filename",
+                "web/routes/control.py",
+                "-",
+            ],
+            cwd=REPO_ROOT,
+            input="from web.runtime import runtime\n\nprint(runtime)\n",
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(
+            web_control.returncode,
+            0,
+            web_control.stdout + web_control.stderr,
+        )
+        # The `scripts/` grants are three named files, not the root. Only
+        # the exact-dict pin above notices a widening to `scripts/**` in the
+        # config; this is the behavioural half — an unlisted script that
+        # reaches into `web` is still refused.
+        unlisted_script = subprocess.run(
+            [
+                "bash",
+                "scripts/run_ruff.sh",
+                "--stdin-filename",
+                "scripts/unlisted_helper.py",
+                "-",
+            ],
+            cwd=REPO_ROOT,
+            input="from web.classify import LogEntry\n\nprint(LogEntry)\n",
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(
+            unlisted_script.returncode,
+            1,
+            unlisted_script.stdout + unlisted_script.stderr,
+        )
+        self.assertIn("TID251", unlisted_script.stdout)
+        granted_script = subprocess.run(
+            [
+                "bash",
+                "scripts/run_ruff.sh",
+                "--stdin-filename",
+                "scripts/render_differential.py",
+                "-",
+            ],
+            cwd=REPO_ROOT,
+            input="from web.classify import LogEntry\n\nprint(LogEntry)\n",
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(
+            granted_script.returncode,
+            0,
+            granted_script.stdout + granted_script.stderr,
+        )
+
     def test_ruff_toolchain_comes_from_locked_nixpkgs(self) -> None:
         result = subprocess.run(
             ["ruff", "--version"],
@@ -520,13 +611,27 @@ class TestUnusedImportAudit(unittest.TestCase):
             ["B", "BLE001", "DTZ", "TID251"],
         )
         self.assertNotIn("ignore", config["lint"])
+        # Issue #1389 added the `web` ban and, with it, four ignores. Both
+        # bans are TID251, so an ignore added for one relaxes the other on
+        # the same files — which is why the three `web`-importing scripts
+        # are listed one by one rather than as `scripts/**`, and why the
+        # only wholesale grant is `web/**` (24 of its 36 modules import
+        # their own package, measured 2026-09-09; naming them would go
+        # stale on the next route added). That grant does cost the `tests`
+        # ban across the web tree, which nothing there uses today.
+        # `harness/**` is deliberately absent: the harness imports no `web`
+        # module at all, so granting it would buy nothing for the same cost.
         self.assertEqual(
             config["lint"]["per-file-ignores"],
             {
+                "scripts/pipeline_cli/api_mutations.py": ["TID251"],
+                "scripts/render_differential.py": ["TID251"],
                 "scripts/run_fuzz_tests.py": ["TID251"],
                 "scripts/run_python_tests.py": ["TID251"],
+                "scripts/web_dev_server.py": ["TID251"],
                 "tests/**": ["TID251"],
                 "tools/vulture/whitelist.py": ["B018", "F821"],
+                "web/**": ["TID251"],
             },
         )
         self.assertEqual(
@@ -534,6 +639,13 @@ class TestUnusedImportAudit(unittest.TestCase):
             {
                 "tests": {
                     "msg": "Runtime code must not import test-only modules.",
+                },
+                "web": {
+                    "msg": (
+                        "web/ is the top of the stack: lib/ must not import "
+                        "it. The MusicBrainz and Discogs mirror clients live "
+                        "in lib/ (#1389)."
+                    ),
                 },
             },
         )

@@ -7,14 +7,16 @@ from dataclasses import dataclass
 
 import msgspec
 
+from lib.accusation_flags import (
+    AccusationFlags,
+    evidence_column_accusation_flags,
+)
 from lib.json_narrow import json_dict
 from lib.pipeline_db._shared import CURRENT_EVIDENCE_PREFIX
 from web.classify import (
-    AccusationFlags,
     ClassifiedEntry,
     LogEntry,
     _classify_log_entry,
-    evidence_column_accusation_flags,
     proof_gate_projection,
 )
 

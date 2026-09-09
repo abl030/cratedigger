@@ -206,7 +206,7 @@ class FakeYTMusic:
 # ---------------------------------------------------------------------------
 # Mirror-adapter lookup fakes (test-fidelity Rule B).
 #
-# ``web/mb.py::get_release`` and ``web/discogs.py::get_release`` RAISE
+# ``lib/mb_api.py::get_release`` and ``lib/discogs_api.py::get_release`` RAISE
 # ``urllib.error.HTTPError(404)`` when the id is absent — they NEVER return
 # ``None``. A test that fakes a miss with ``lambda mbid: None`` simulates a
 # code path production never produces. This was the round-1 P0 of the

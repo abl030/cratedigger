@@ -325,10 +325,10 @@ def _mb_api() -> str:
 
     Reads [MusicBrainz] api_base from the runtime config (rendered by the
     NixOS module; public musicbrainz.org default) instead of a second
-    hardcoded mirror URL drifting from web/mb.py's.
+    hardcoded mirror URL drifting from lib/mb_api.py's.
     """
+    from lib.api_bases import mb_ws2_base
     from lib.config import read_runtime_config
-    from web.api_bases import mb_ws2_base
     return mb_ws2_base(read_runtime_config().musicbrainz_api_base)
 
 
@@ -528,7 +528,7 @@ def _cmd_add_discogs(
 
     print(f"  Fetching Discogs release {discogs_id}...")
     try:
-        from web import discogs as discogs_api
+        from lib import discogs_api
         # fresh=True for the same reason as the web add path
         # (web/routes/pipeline_mutations.py): this call persists
         # artist/title/track metadata into the pipeline DB, so it must

@@ -284,7 +284,7 @@ class TestBeetsDistanceRouteContract(_FakeDbWebServerCase):
             "lib.beets_distance.compute_beets_distance",
             side_effect=_fake_compute,
         ), patch(
-            "web.discogs.get_release",
+            "lib.discogs_api.get_release",
             return_value=discogs_release,
         ) as discogs_get:
             status, data = self._get("/api/beets-distance/100/2048516")

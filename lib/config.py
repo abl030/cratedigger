@@ -155,7 +155,7 @@ class CratediggerConfig:
     # enforced by lib.beets_config_contract before effective-config loading.
     beets_secret_include: str = ""
 
-    # One MB value for every consumer (tier-2 plan U6 / KTD6): web/mb.py,
+    # One MB value for every consumer (tier-2 plan U6 / KTD6): lib/mb_api.py,
     # pipeline-cli lookups and DatabaseSource track population derive from this
     # origin; deployment-owned Beets config must select its own matching origin
     # (scheme://host[:port], no path). Public MB default = functional-but-slow

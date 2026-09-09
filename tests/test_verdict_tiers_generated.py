@@ -78,6 +78,13 @@ from hypothesis import strategies as st
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
+from lib.accusation_flags import (
+    ACCUSATION_WITHHELD_AUDIT_ONLY_CODEC,
+    ACCUSATION_WITHHELD_CODEC_UNRESOLVED,
+    AccusationFlags,
+    evidence_accusation_flags,
+    evidence_column_accusation_flags,
+)
 from lib.pipeline_db._shared import (
     CANDIDATE_EVIDENCE_PREFIX,
     CURRENT_EVIDENCE_PREFIX,
@@ -117,15 +124,7 @@ from lib.quality.decisions import (
     ultrasonic_proof_leg,
 )
 from scripts.pipeline_cli.quality import _print_proof_gate_verdict
-from web.classify import (
-    ACCUSATION_WITHHELD_AUDIT_ONLY_CODEC,
-    ACCUSATION_WITHHELD_CODEC_UNRESOLVED,
-    AccusationFlags,
-    ProofGateProjection,
-    evidence_accusation_flags,
-    evidence_column_accusation_flags,
-    proof_gate_projection,
-)
+from web.classify import ProofGateProjection, proof_gate_projection
 
 _CODEC_FAMILIES = ("mp3", "aac", "opus", "vorbis", "lossless", "other")
 _AUDIT_ONLY_FAMILIES = ("aac", "opus", "other")

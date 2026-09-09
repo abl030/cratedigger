@@ -275,8 +275,8 @@ class TestRequestCreationGenerated(unittest.TestCase):
         )
         service = RequestCreationService(db, CratediggerConfig())
         with (
-            patch("web.mb.get_release_group_year", return_value=1991),
-            patch("web.discogs.get_master_releases", return_value={"first_release_date": "1991"}),
+            patch("lib.mb_api.get_release_group_year", return_value=1991),
+            patch("lib.discogs_api.get_master_releases", return_value={"first_release_date": "1991"}),
         ):
             first = service.create_or_resume(creation)
         assert first.request_id is not None
@@ -287,8 +287,8 @@ class TestRequestCreationGenerated(unittest.TestCase):
             self.assertEqual(db.request(first.request_id)["status"], "initializing")
             db.phase = None
             with (
-                patch("web.mb.get_release_group_year", return_value=1991),
-                patch("web.discogs.get_master_releases", return_value={"first_release_date": "1991"}),
+                patch("lib.mb_api.get_release_group_year", return_value=1991),
+                patch("lib.discogs_api.get_master_releases", return_value={"first_release_date": "1991"}),
             ):
                 second = service.create_or_resume(creation)
             self.assertEqual(second.outcome, "resumed")
@@ -305,7 +305,7 @@ class TestRequestCreationGenerated(unittest.TestCase):
         ):
             with self.subTest(signal=signal):
                 db = FakePipelineDB()
-                with patch("web.mb.get_release_group_year", return_value=1991):
+                with patch("lib.mb_api.get_release_group_year", return_value=1991):
                     result = RequestCreationService(db, CratediggerConfig()).create_or_resume(
                         _creation("known-bad", discogs=False,
                                   tracks=[

@@ -1,6 +1,6 @@
 """Shared fan-out lifecycle for independent, cancellable jobs.
 
-``web/mb.py``, ``web/discogs.py``, and ``web/routes/browse.py`` each fan out
+``lib/mb_api.py``, ``lib/discogs_api.py``, and ``web/routes/browse.py`` each fan out
 a handful of independent upstream calls (MusicBrainz browse pages, Discogs
 masters/appearances, the MB+Discogs compare skeleton) and want the same
 policy: run every job concurrently, but the moment one raises, stop waiting

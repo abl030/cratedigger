@@ -68,6 +68,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+# ``mb_api`` as a module, not its two pacing helpers as names: the sweep
+# below resolves them at CALL time, which is the seam
+# ``tests/test_mb_canonical.py`` patches to prove this module reuses the MB
+# client's slot and public-etiquette clock.
+from lib import mb_api
+from lib.api_bases import mb_ws2_base
 from lib.json_narrow import json_dict
 from lib.release_identity import detect_release_source, normalize_release_id
 
@@ -144,13 +150,11 @@ def _fetch_json(url: str) -> object:
     # many historically tagged releases. Reuse the MB client's slot and
     # public-etiquette clock rather than giving canonical redirects a second,
     # unpaced HTTP lane.
-    from web.mb import _mirror_semaphore, _wait_for_public_musicbrainz
-
     request = urllib.request.Request(url)
     request.add_header("User-Agent", _USER_AGENT)
     request.add_header("Connection", "close")
-    with _mirror_semaphore(url):
-        _wait_for_public_musicbrainz(url)
+    with mb_api._mirror_semaphore(url):
+        mb_api._wait_for_public_musicbrainz(url)
         with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS) as response:
             body = response.read(_MAX_RESPONSE_BYTES + 1)
             final_url = response.url
@@ -373,8 +377,6 @@ def configure_canonical_release_lookup(cfg: CratediggerConfig) -> None:
     A blank base leaves resolution inert rather than silently reaching out to
     public MusicBrainz from a deployment that configured a mirror on purpose.
     """
-    from web.api_bases import mb_ws2_base
-
     origin = (cfg.musicbrainz_api_base or "").strip()
     if not origin:
         logger.warning(

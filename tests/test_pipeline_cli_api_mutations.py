@@ -440,22 +440,22 @@ class TestApiMutationCli(unittest.TestCase):
                 "scripts.pipeline_cli.youtube._RedisYoutubeCache",
                 return_value=_NoopRedisCache(),
             ), patch(
-                "web.mb.get_release",
+                "lib.mb_api.get_release",
                 side_effect=AssertionError(
                     "cached dispatch must not fetch an MB release",
                 ),
             ) as mb_release, patch(
-                "web.mb.get_release_group_releases",
+                "lib.mb_api.get_release_group_releases",
                 side_effect=AssertionError(
                     "cached dispatch must not fetch an MB release group",
                 ),
             ) as mb_group, patch(
-                "web.discogs.get_release",
+                "lib.discogs_api.get_release",
                 side_effect=AssertionError(
                     "cached dispatch must not fetch a Discogs release",
                 ),
             ) as discogs_release, patch(
-                "web.discogs.get_master_releases",
+                "lib.discogs_api.get_master_releases",
                 side_effect=AssertionError(
                     "cached dispatch must not fetch a Discogs master",
                 ),

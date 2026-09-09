@@ -24,6 +24,7 @@ import logging
 import msgspec
 from pydantic import BaseModel, Field
 
+from lib import discogs_api, mb_api
 from lib.youtube_album_service import (
     OUTCOME_HTTP_STATUS,
     resolve_youtube_album,
@@ -35,8 +36,6 @@ from lib.youtube_ingest_service import (
     default_youtube_ingest_service_factory,
 )
 from lib.youtube_transport import build_youtube_client as _build_youtube_client
-from web import discogs as discogs_api
-from web import mb as mb_api
 from web.routes._pydantic import parse_body
 from web.routes._registry import (
     RouteHandler,
@@ -66,7 +65,7 @@ __all__ = [
 
 
 class _RedisYoutubeCache:
-    """Adapt ``web/cache.py``'s Redis client to the
+    """Adapt ``lib/redis_cache.py``'s Redis client to the
     ``BeetsDistanceCache`` protocol.
 
     The service-side keys already carry the ``youtube:album:`` /
@@ -83,7 +82,7 @@ class _RedisYoutubeCache:
 
     def __init__(self) -> None:
         try:
-            from web import cache as _cache_mod
+            from lib import redis_cache as _cache_mod
             self._redis = getattr(_cache_mod, "_redis", None)
         except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             self._redis = None
@@ -97,7 +96,7 @@ class _RedisYoutubeCache:
             return None
         if raw is None:
             return None
-        # web/cache.py initialises Redis with ``decode_responses=True``,
+        # lib/redis_cache.py initialises Redis with ``decode_responses=True``,
         # so ``get`` returns str. Encode to bytes for the protocol.
         if isinstance(raw, str):
             return raw.encode("utf-8")

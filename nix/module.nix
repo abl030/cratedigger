@@ -1655,7 +1655,7 @@ in {
         example = "http://mb-mirror.lan:5200";
         description = ''
           MusicBrainz API origin (scheme://host[:port], no path) — ONE value
-          threaded to all consumers (tier-2 plan U6/KTD6): web/mb.py
+          threaded to all consumers (tier-2 plan U6/KTD6): lib/mb_api.py
           (via immutable runtime config [MusicBrainz] api_base, read at cratedigger-web
           startup by configure_api_bases_from_runtime_config()), pipeline-cli
           release lookups, and DatabaseSource track population. The external

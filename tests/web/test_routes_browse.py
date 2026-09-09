@@ -486,7 +486,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
 
     def test_artist_compare_calls_the_shared_parallel_fanout_owner(self):
         """Regression guard for issue #1355 WE5: this module must reach
-        ``web.parallel_fanout``'s shared owner rather than falling back to
+        ``lib.parallel_fanout``'s shared owner rather than falling back to
         a private per-module copy of the same lifecycle."""
         calls: list[tuple[frozenset, int]] = []
 
@@ -1486,7 +1486,7 @@ class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
 
     def test_discogs_routes_return_503_mirror_required_when_base_unset(self):
         """R13: no mirror configured -> a clear mirror-required 503 from the
-        REAL web/discogs.py (raised at URL construction, before any network),
+        REAL lib/discogs_api.py (raised at URL construction, before any network),
         not a broken upstream fetch. Discogs browse is mirror-required; MB
         browse is unaffected."""
         for path in ("/api/discogs/search?q=test",

@@ -633,25 +633,78 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.web.test_wrong_match_queue_view",
         "tests.web.test_routes_imports",
     ),
-    # web/discogs.py has no derivable neighbours: neither
-    # tests.test_web_discogs nor tests.web.test_discogs exists on disk
-    # (same mechanism as wrong_match_file_service.py above). It also
-    # carries a coupling no derivation can see: the release cache-key
-    # string is pinned by a bare literal in tests/test_web_dev_server.py,
-    # and the #1262 v2→v3 bump shipped a RED tree that diff-derived
-    # selection called green — both independent reviewers caught it,
-    # selection could not (issue #1263 item 2). This list is a qualified
-    # subset, not full coverage: several other modules import
-    # web.discogs directly (test_discogs_fail_closed, the artist-bulk /
-    # pressing-provenance / artist-compare generated modules) — the
-    # entry names the modules whose subjects a solo web/discogs.py diff
-    # most plausibly regresses, mutant-qualified at review time
-    # (formats/status, artist releases, cache key, mirror concurrency).
-    "web/discogs.py": (
+    # The four entries below are the mirror-client closure issue #1389
+    # moved out of web/ into lib/ (web/discogs.py -> lib/discogs_api.py,
+    # and so on). Under web/ they resolved zero neighbours, because
+    # basename:web/*.py derives tests.test_web_<stem> / tests.web.test_
+    # <stem>; under lib/ the basename probe is tests.test_<stem>, which
+    # resolves lib/discogs_api.py's own two modules and neither of the
+    # other two files' — so lib/discogs_api.py's entry is now an ADDITION
+    # to a resolving path (hence its MASKABLE_ENTRY_PINS pin) while
+    # lib/api_bases.py's and lib/artist_search.py's remain the only thing
+    # standing between those paths and the lib/ row's refusal. The moved
+    # pair whose test modules were renamed with them
+    # (lib/parallel_fanout.py, lib/redis_cache.py) need no entry at all:
+    # tests/test_parallel_fanout.py and tests/test_redis_cache.py, plus
+    # both _generated siblings, are exactly what the probe derives.
+    #
+    # lib/discogs_api.py carries a coupling no derivation can see: the
+    # release cache-key string is pinned by a bare literal in
+    # tests/test_web_dev_server.py, and the #1262 v2→v3 bump shipped a RED
+    # tree that diff-derived selection called green — both independent
+    # reviewers caught it, selection could not (issue #1263 item 2). This
+    # list is a qualified subset, not full coverage: several other modules
+    # import lib.discogs_api directly (test_discogs_fail_closed, the
+    # artist-bulk / pressing-provenance / artist-compare generated
+    # modules) — the entry names the modules whose subjects a solo
+    # lib/discogs_api.py diff most plausibly regresses, mutant-qualified at
+    # review time (formats/status, artist releases, cache key, mirror
+    # concurrency).
+    "lib/discogs_api.py": (
         "tests.test_discogs_api",
         "tests.test_discogs_api_generated",
         "tests.test_web_dev_server",
         "tests.test_discogs_artist_concurrency",
+    ),
+    "lib/artist_search.py": (
+        # Verified: tests/test_artist_identity_search_generated.py imports
+        # merge_exact_artist_identities from lib.artist_search.
+        "tests.test_artist_identity_search_generated",
+    ),
+    "lib/api_bases.py": (
+        # Verified by reading each import. tests/test_mb_artist_pagination_
+        # generated.py imports PUBLIC_MB_WS2_BASE directly and asserts
+        # against it. tests/test_web_dev_server_generated.py imports the
+        # whole module, reads PUBLIC_MB_ORIGIN, and mutates
+        # lib.api_bases.PUBLIC_MB_WS2_BASE as a seam — its deterministic
+        # sibling tests/test_web_dev_server.py is named alongside it.
+        # tests/test_pipeline_cli.py::
+        # test_non_quarantine_main_still_configures_mirror_api_bases is the
+        # only one that reaches configure_api_bases_from_runtime_config
+        # itself, the module's one process-startup wiring function (see its
+        # own module docstring) — not a claim that it is the only name any
+        # test imports from this module, which the first two entries above
+        # disprove.
+        "tests.test_mb_artist_pagination_generated",
+        "tests.test_web_dev_server_generated",
+        "tests.test_web_dev_server",
+        "tests.test_pipeline_cli",
+    ),
+    "lib/accusation_flags.py": (
+        # The audit-only accusation derivation issue #1389 moved out of
+        # web/classify.py. No tests.test_accusation_flags exists, so the
+        # basename probe resolves nothing and the lib/ row would refuse the
+        # path without this entry. Verified by reading each import:
+        # tests/test_verdict_tiers_generated.py imports the whole family
+        # from lib.accusation_flags (V4's cross-surface agreement property
+        # and its known-bad self-tests), and tests/test_pipeline_db.py
+        # imports evidence_column_accusation_flags to assert the real-PG
+        # joins feed it (the wrong-match column blocks and the long-tail
+        # worklist chip). tests.test_verdict_tiers is deliberately absent:
+        # it imports nothing from this module, and expand_test_selection
+        # pairs it in anyway as the _generated module's sibling.
+        "tests.test_verdict_tiers_generated",
+        "tests.test_pipeline_db",
     ),
     # web/server.py resolves nothing on its own: neither tests.test_server
     # nor tests.web.test_server exists (found while moving its module
@@ -686,16 +739,17 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.web.test_server_threading",
         "tests.web.test_server_endpoints",
     ),
-    # The nine entries below (including web/index_document.py, appended
-    # after library_artist_service.py) were found by issue #1355 item 8's
-    # population of WEB_MODULES_WITHOUT_SELECTION_COVERAGE: each resolved
+    # The six entries below (including web/index_document.py, appended
+    # after library_artist_service.py) are what remains under web/ of the
+    # nine that issue #1355 item 8's population of
+    # WEB_MODULES_WITHOUT_SELECTION_COVERAGE found: each resolved
     # zero neighbours (neither tests.test_web_<stem> nor
     # tests.web.test_<stem> exists), but each has real coverage under a
-    # name the basename probe cannot derive. Every neighbour below was
+    # name the basename probe cannot derive. The other three (mb.py,
+    # discogs.py, api_bases.py) left web/ with issue #1389 and are grouped
+    # with the rest of the moved closure above. Every neighbour below was
     # verified by READING the referencing test — its own import statement
-    # where one exists, the real call path where it does not (api_bases.py's
-    # tests.test_pipeline_cli entry, and tests.test_web_dev_server, a named
-    # deterministic sibling that imports nothing from the module itself) —
+    # where one exists, the real call path where it does not —
     # never by grepping the filename. web/overlay.py's stem collides with
     # the unrelated tests/test_overlay.py (which imports
     # web.routes._overlay, not web.overlay), so a bare tests.test_<stem>
@@ -711,40 +765,11 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_classify_producer_audit",
         "tests.test_classify_producer_audit_generated",
     ),
-    "web/mb.py": (
-        # Verified: tests/test_mb_api.py's import block reads
-        # ``from web.mb import (...)``.
-        "tests.test_mb_api",
-    ),
-    "web/artist_search.py": (
-        # Verified: tests/test_artist_identity_search_generated.py imports
-        # merge_exact_artist_identities from web.artist_search.
-        "tests.test_artist_identity_search_generated",
-    ),
     "web/download_history_view.py": (
         # Verified: both modules import build_recents_download_log_rows (or
         # its siblings) from web.download_history_view directly.
         "tests.test_web_recents",
         "tests.test_web_recents_generated",
-    ),
-    "web/api_bases.py": (
-        # Verified by reading each import. tests/test_mb_artist_pagination_
-        # generated.py imports PUBLIC_MB_WS2_BASE directly and asserts
-        # against it. tests/test_web_dev_server_generated.py imports the
-        # whole module, reads PUBLIC_MB_ORIGIN, and mutates
-        # web.api_bases.PUBLIC_MB_WS2_BASE as a seam — its deterministic
-        # sibling tests/test_web_dev_server.py is named alongside it.
-        # tests/test_pipeline_cli.py::
-        # test_non_quarantine_main_still_configures_mirror_api_bases is the
-        # only one that reaches configure_api_bases_from_runtime_config
-        # itself, the module's one process-startup wiring function (see its
-        # own module docstring) — not a claim that it is the only name any
-        # test imports from this module, which the first two entries below
-        # disprove.
-        "tests.test_mb_artist_pagination_generated",
-        "tests.test_web_dev_server_generated",
-        "tests.test_web_dev_server",
-        "tests.test_pipeline_cli",
     ),
     "web/library_album_row.py": (
         # Verified: tests/test_library_album_row.py imports
@@ -2223,10 +2248,18 @@ PREFIX_RULES: tuple[SelectionRule, ...] = (
     ),
     SelectionRule(
         name="prefix:harness/",
-        description="harness code regresses the real-beets drift gate",
+        description=(
+            "harness code regresses the real-beets drift gate and the "
+            "Beets-interpreter import boundary"
+        ),
         prefixes=("harness/",),
         exact_paths=("lib/beets.py",),
-        neighbours=("tests.test_harness_beets2_contract",),
+        neighbours=(
+            "tests.test_harness_beets2_contract",
+            # Issue #1389: three harness files may import no `lib`/`web`
+            # module, and an added import is exactly a harness/ edit.
+            "tests.test_harness_interpreter_boundary",
+        ),
     ),
     SelectionRule(
         name="prefix:lib/quality/",

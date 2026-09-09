@@ -496,7 +496,7 @@ t.section('loadReleaseGroup() composed path — a real match still enables the b
 
 /**
  * A Discogs release under a master carries no release_group_id field of
- * its own — web/discogs.py's get_master_releases never puts one on its
+ * its own — lib/discogs_api.py's get_master_releases never puts one on its
  * child rows, unlike the single-release endpoint synthesizeMasterlessRow
  * reads from. Its only lookup key is the master id itself, reached
  * through loadReleaseGroup's own parentRgId fallback — the same

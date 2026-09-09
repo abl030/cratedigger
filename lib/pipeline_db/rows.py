@@ -424,7 +424,7 @@ class WrongMatchCandidateRow(TypedDict):
     # for the per-entry chip, the installed copy's for the group badge.
     # Projected by ``accusation_evidence_columns`` under the two shared
     # alias prefixes and read back by
-    # ``web/classify.py::evidence_column_accusation_flags``.
+    # ``lib/accusation_flags.py::evidence_column_accusation_flags``.
     _evidence_format: str | None
     _evidence_spectral_grade: str | None
     _evidence_spectral_bitrate: int | None

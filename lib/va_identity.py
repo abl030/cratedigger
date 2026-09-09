@@ -2,13 +2,13 @@
 
 Single declaration site for the upstream-mirror IDs that identify
 "Various Artists" releases / artists across MusicBrainz and Discogs.
-Both ``web/mb.py`` / ``web/discogs.py`` and ``lib/field_resolver_service.py``
+Both ``lib/mb_api.py`` / ``lib/discogs_api.py`` and ``lib/field_resolver_service.py``
 read from here so the values can never drift apart between the
 ingestion path and the resolver/generator paths.
 
 Pre-consolidation the same constants existed in three places
-(``lib/field_resolver_service.py`` redeclared what ``web/mb.py`` and
-``web/discogs.py`` already had). ce-code-review flagged the duplication
+(``lib/field_resolver_service.py`` redeclared what ``lib/mb_api.py`` and
+``lib/discogs_api.py`` already had). ce-code-review flagged the duplication
 on PR #370.
 
 The values themselves are upstream-mirror facts:

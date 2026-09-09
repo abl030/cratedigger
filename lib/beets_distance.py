@@ -17,7 +17,7 @@ Speed: the dominant cost is reading tags off N audio files via beets'
 file's tag fields keyed by ``(absolute_path, mtime, size)``; subsequent
 calls reconstruct lightweight ``Item`` instances from the cache and
 never touch the filesystem again. MB releases are fetched through the
-existing web/mb.py memoiser (24h TTL). The distance compute itself is
+existing lib/mb_api.py memoiser (24h TTL). The distance compute itself is
 microseconds once both sides are in memory.
 
 The module surface is a pure service function plus its typed result:

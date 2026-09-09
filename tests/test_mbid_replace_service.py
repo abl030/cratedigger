@@ -34,6 +34,7 @@ from lib.beets_delete import (
     run_beets_delete,
 )
 from lib.config import CratediggerConfig
+from lib.discogs_api import DiscogsMirrorNotConfigured
 from lib.mbid_replace_service import (
     REPLACE_REASON_CROSS_PATHWAY_TARGET,
     REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
@@ -52,6 +53,8 @@ from lib.mbid_replace_service import (
     RESULT_TRANSIENT,
     RESULT_WRONG_STATE,
     MbidReplaceService,
+    _default_discogs_lookup,
+    _default_mb_lookup,
 )
 from lib.pipeline_db import MbidCollisionError, SupersedeRaceError
 from lib.release_identity import ReleaseIdentity
@@ -60,7 +63,6 @@ from tests.beets_world import BeetsWorld, BeetsWorldRelease
 from tests.dispatch_helpers import handoff_automation_owner
 from tests.fakes import FakeBeetsDB, FakePipelineDB, FakeSlskdAPI
 from tests.helpers import make_request_row, seed_visible_wrong_match
-from web.discogs import DiscogsMirrorNotConfigured
 
 # NOTE: must be a valid MB release id per ``detect_release_source``
 # (lib/release_identity.py regex) — the service rejects malformed MBIDs
@@ -146,7 +148,7 @@ def _fake_discogs_payload(
     country: str | None = "JP",
     tracks: list[dict] | None = None,
 ) -> dict:
-    """Mirror of ``web.discogs.get_release``'s normalized shape.
+    """Mirror of ``lib.discogs_api.get_release``'s normalized shape.
 
     ``master`` maps to the ``release_group_id`` key (the mirror remaps
     ``master_id`` there); ``None`` models a masterless release.
@@ -869,7 +871,7 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
 
     def test_mirror_canonical_case_is_normalised_too(self):
         """The mirror's own ``id`` is normalised like the typed target.
-        Fail-closed legislation: ``web/mb.py::get_release`` passes the MB
+        Fail-closed legislation: ``lib/mb_api.py::get_release`` passes the MB
         API's id through and MusicBrainz serves lowercase, so no producer
         emits this today; were one to, an uppercase canonical must neither
         read as a redirect (which would run the collision re-check on a
@@ -919,7 +921,7 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         asked for — which must already be the canonical form, or an
         uppercase paste would be written verbatim. The payload here
         carries an empty ``id`` (the mirror Struct's default, the shape
-        ``web/mb.py`` really emits for a missing one) so that fallback is
+        ``lib/mb_api.py`` really emits for a missing one) so that fallback is
         the path under test."""
         db = FakePipelineDB()
         self._seed_old(db)
@@ -3010,6 +3012,34 @@ class TestReplaceDBProtocolParity(unittest.TestCase):
 
         self.assertTrue(issubclass(MbidReplaceDB, WrongMatchDeleteDB))
         self.assertTrue(issubclass(MbidReplaceDB, SearchPlanDB))
+
+
+class TestDefaultMirrorLookupsResolveAtCallTime(unittest.TestCase):
+    """The two default lookups read their mirror function off the MODULE.
+
+    `web/routes/release_identity_routes.py` constructs `MbidReplaceService`
+    with no lookups, so these defaults are the production path for the
+    Replace route. Issue #1389 moved the clients into `lib/` and converted
+    both wrappers from a function-local import to a module attribute read;
+    a bare `from lib.mb_api import get_release` would compile and pass
+    every other test in this file while freezing the pre-patch function,
+    which is exactly what these two assertions refuse.
+    """
+
+    def test_mb_default_reads_lib_mb_api_at_call_time(self) -> None:
+        sentinel: dict[str, object] = {"id": "mb-sentinel"}
+        with patch("lib.mb_api.get_release", return_value=sentinel) as mb:
+            self.assertIs(_default_mb_lookup("mbid-1", fresh=True), sentinel)
+        mb.assert_called_once_with("mbid-1", fresh=True)
+
+    def test_discogs_default_reads_lib_discogs_api_at_call_time(self) -> None:
+        sentinel: dict[str, object] = {"id": "discogs-sentinel"}
+        with patch(
+            "lib.discogs_api.get_release", return_value=sentinel,
+        ) as discogs:
+            self.assertIs(
+                _default_discogs_lookup(4242, fresh=False), sentinel)
+        discogs.assert_called_once_with(4242, fresh=False)
 
 
 if __name__ == "__main__":

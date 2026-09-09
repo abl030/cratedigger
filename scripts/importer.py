@@ -1191,9 +1191,9 @@ def _build_runtime_context(
     which cannot be constructed without naming an ownership writer.
     """
     from album_source import DatabaseSource
+    from lib.api_bases import mb_ws2_base
     from lib.config import read_runtime_config
     from lib.context import CratediggerContext, WorkerCollaborators
-    from web.api_bases import mb_ws2_base
 
     cfg = read_runtime_config()
     source = DatabaseSource(

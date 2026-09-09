@@ -475,8 +475,8 @@ class TestRealFetchProducesTheEnvelope(unittest.TestCase):
         with _mirror() as base:
             url = self._url(base, CURRENT)
             with (
-                patch("web.mb._mirror_semaphore", return_value=nullcontext()) as slot,
-                patch("web.mb._wait_for_public_musicbrainz") as pace,
+                patch("lib.mb_api._mirror_semaphore", return_value=nullcontext()) as slot,
+                patch("lib.mb_api._wait_for_public_musicbrainz") as pace,
             ):
                 envelope = _fetch_json(url)
 

@@ -9,14 +9,15 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
+from lib import discogs_api as discogs
+from lib import redis_cache as cache
 from tests.test_discogs_fail_closed import (
     PUBLIC_FAIL_CLOSED_DISCOGS_ADAPTERS,
     LeafDiscogsMirror,
     assert_missing_discogs_blocks,
     call_public_cached_adapter,
 )
-from tests.test_web_cache import FakeRedis
-from web import cache, discogs
+from tests.test_redis_cache import FakeRedis
 
 _QUERY = st.text(
     alphabet=st.characters(min_codepoint=ord("a"), max_codepoint=ord("z")),
@@ -46,7 +47,7 @@ class TestGeneratedPublicDiscogsFailClosed(unittest.TestCase):
             cache._redis = FakeRedis()
             discogs.DISCOGS_API_BASE = "https://discogs-mirror.test"
             with patch(
-                "web.discogs.urllib.request.urlopen",
+                "lib.discogs_api.urllib.request.urlopen",
                 side_effect=mirror.urlopen,
             ):
                 call_public_cached_adapter(

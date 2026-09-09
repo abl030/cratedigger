@@ -68,7 +68,7 @@ live proof rather than closed.
 | CD-SEC-05 | Low | Internal exception strings reflected in HTTP 500 bodies | `web/server.py` |
 | CD-SEC-06 | Medium | Removed: notifier TLS fallback now fails closed | `lib/util.py` |
 | CD-SEC-07 | Low | Unbounded request body read + JSON parse (memory-exhaustion DoS) | `web/server.py` |
-| CD-SEC-08 | Low | Unvalidated MB `id` interpolated into the mirror URL (request-shaping) | `web/routes/browse.py`, `web/mb.py` |
+| CD-SEC-08 | Low | Unvalidated MB `id` interpolated into the mirror URL (request-shaping) | `web/routes/browse.py`, `lib/mb_api.py` |
 | CD-SEC-09 | Low | Latent identifier-interpolation SQLi footguns (hardcoded today) | `lib/pipeline_db/requests.py`, `lib/pipeline_db/dashboard.py` |
 | CD-SEC-10 | Low | Unescaped controlled-vocabulary metadata in a few JS rows | `web/js/discography.js`, `web/js/library.js`, `web/js/wrong-matches.js` |
 | CD-SEC-11 | Medium | Remediated: no-follow descriptor authority for materialize, explorer, and stream | `lib/fs_authority.py`, `web/wrong_match_file_service.py` |
@@ -518,9 +518,10 @@ low.
 
 `web/routes/browse.py` validates `raw_id.isdigit()` only for the Discogs source;
 for the MusicBrainz source the id is passed straight into the URL builder in
-`web/mb.py`, which interpolates it into the release path with no `quote` and no
-UUID check. A crafted id can reshape the path/query sent to the internal MB
-mirror. There is no arbitrary-host SSRF (the origin is fixed config) and urllib
+`lib/mb_api.py` (this module sat under the web layer when the audit ran;
+issue #1389 moved it), which interpolates it into the release path with no
+`quote` and no UUID check. A crafted id can reshape the path/query sent to the
+internal MB mirror. There is no arbitrary-host SSRF (the origin is fixed config) and urllib
 rejects control chars, so severity is low.
 
 - **Remediation:** UUID-validate MB ids before dispatch (mirroring the Discogs

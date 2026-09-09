@@ -160,11 +160,10 @@ class TestPythonPathCarriesOnlyRepoRoot(unittest.TestCase):
 
     All internal imports use the qualified form ``from lib.X import Y`` /
     ``from web.X import Y``, so the repo root on PYTHONPATH is sufficient.
-    Adding the sub-directories promotes our internal modules (``lib/beets.py``,
-    ``web/discogs.py``, ``web/classify.py``) to top-level names, where they
-    shadow the real ``beets``, ``discogs_client`` and anything else a
-    subprocess might import. The beet subprocess has historically been
-    the first victim because its wrapper does ``from beets.ui import main``.
+    Adding the sub-directories promotes our internal modules to top-level
+    names, where they shadow the real distribution of the same name —
+    ``lib/beets.py`` over ``beets`` is the one that has actually bitten,
+    because the beet subprocess's wrapper does ``from beets.ui import main``.
     """
 
     # Matches any ``export PYTHONPATH=...${src}/<subdir>...``

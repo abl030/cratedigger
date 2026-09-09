@@ -1,4 +1,4 @@
-"""Tests for the web metadata cache — the `meta:` namespace.
+"""Tests for the mirror metadata cache — the `meta:` namespace.
 
 The `meta:` namespace caches PURE MusicBrainz / Discogs metadata only.
 It is deliberately separate from the old routing-level `web:` namespace
@@ -111,7 +111,7 @@ class RaisingRedis(FakeRedis):
 class _CacheTestBase(unittest.TestCase):
 
     def setUp(self) -> None:
-        from web import cache
+        from lib import redis_cache as cache
         self.cache = cache
         self.fake = FakeRedis()
         self._saved = cache._redis

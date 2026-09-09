@@ -1,8 +1,9 @@
-"""MusicBrainz API helpers — shared between pipeline_cli and web server.
+"""MusicBrainz mirror HTTP client — shared by the pipeline, CLI, and web.
 
 All queries hit the MusicBrainz API at MB_API_BASE (public MB by default; the local mirror in production). The pure-metadata
-responses are memoized via `cache.memoize_meta()` at 24h TTL so the
-web UI can render multiple cards per page without hammering the mirror.
+responses are memoized via `redis_cache.memoize_meta()` at 24h TTL so
+the web UI can render multiple cards per page without hammering the
+mirror.
 
 The cache layer intentionally sits here — not at the HTTP routing
 level — because route handlers enrich each response with per-user
@@ -10,6 +11,13 @@ pipeline/library overlay state (`pipeline_status`, `in_library`, …).
 Caching the post-overlay response baked that state into Redis and
 leaked stale badges when the pipeline updated Postgres outside the
 web UI's POST invalidation paths. See issue #101.
+
+This module lived at ``web/mb.py`` until issue #1389. Five ``lib``
+modules consumed it without importing it at module scope, to dodge the
+resulting cycle — four through function-local imports, and
+``lib/artist_releases.py`` through a ``TYPE_CHECKING``-only one it
+keeps for its own reason. It is a mirror client, not a web surface, so
+it sits under ``lib`` and the other four are ordinary top-level imports.
 """
 
 import json
@@ -23,19 +31,18 @@ from typing import Any, Protocol, TypedDict
 
 import msgspec
 
+# ``redis_cache``, never ``peer_cache``: the metadata namespace here is a
+# different mechanism from the pipeline's peer folder cache.
+from lib import redis_cache as _cache
+from lib.api_bases import PUBLIC_MB_ORIGIN, PUBLIC_MB_WS2_BASE
 from lib.artist_catalogue import (
     ArtistCatalogueRow,
     ArtistProvenance,
     ArtistStructuralType,
 )
+from lib.artist_search import merge_exact_artist_identities
 from lib.json_narrow import is_object_list, is_str_object_dict
-
-# Use the `web.` package-qualified path to keep the web metadata cache
-# separate from the pipeline's peer-cache implementation.
-from web import cache as _cache
-from web.api_bases import PUBLIC_MB_ORIGIN, PUBLIC_MB_WS2_BASE
-from web.artist_search import merge_exact_artist_identities
-from web.parallel_fanout import parallel_results
+from lib.parallel_fanout import parallel_results
 
 # Default: public MusicBrainz (functional but rate-limited ~1 req/s).
 # Production points this at the local mirror via the module's
@@ -109,7 +116,7 @@ def _wait_for_public_musicbrainz(url: str) -> None:
 # VA short-circuit (web/js/browse.js) to keep VA off the artist-view path
 # (the MB artist→release-group endpoint takes ~23s for VA). Single
 # declaration site at ``lib/va_identity.py`` — re-exported here so the
-# existing ``from web.mb import VA_ARTIST_MBID`` imports keep working.
+# existing ``from lib.mb_api import VA_ARTIST_MBID`` imports keep working.
 from lib.va_identity import (
     MB_VA_ARTIST_MBID as VA_ARTIST_MBID,
 )
@@ -431,7 +438,7 @@ class _MBArtistReleasesWithRecordingsResponse(msgspec.Struct, rename="kebab"):
 # ``get_artist_releases_with_recordings`` returns a plain dict per release,
 # built by ``_release_full_to_json_dict`` from the validated
 # ``_MBReleaseFullStruct`` above, so ``lib.artist_releases`` —
-# deliberately decoupled from any ``web.mb`` runtime import — keeps
+# deliberately decoupled from any ``lib.mb_api`` runtime import — keeps
 # consuming ``.get(key, default)``-style dicts. Not a bare
 # ``msgspec.to_builtins`` passthrough: that call alone would leave a
 # null ``country``/``status``/``release_group``/track ``recording`` as

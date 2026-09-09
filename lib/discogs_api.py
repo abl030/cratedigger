@@ -1,15 +1,18 @@
-"""Discogs mirror API helpers — shared between pipeline_cli and web server.
+"""Discogs mirror HTTP client — shared by the pipeline, CLI, and web.
 
 All queries hit the local Discogs mirror (DISCOGS_API_BASE; mirror-required,
 see require_mirror_configured).
 Response shapes are normalized to match what the frontend expects,
-mirroring web/mb.py where possible.
+mirroring lib/mb_api.py where possible.
 
-Pure-metadata responses are memoized via `cache.memoize_meta()` at
-24h TTL. See web/mb.py and web/cache.py for rationale — the cache
+Pure-metadata responses are memoized via `redis_cache.memoize_meta()` at
+24h TTL. See lib/mb_api.py and lib/redis_cache.py for rationale — the cache
 layer sits at the API helper level, not at the HTTP routing level,
 so that per-user pipeline / library overlay state is never baked
 into Redis (issue #101).
+
+This module lived at ``web/discogs.py`` until issue #1389; see
+``lib/mb_api.py``'s docstring for why both clients sit under ``lib``.
 """
 
 import hashlib
@@ -25,14 +28,14 @@ from typing import Any, Literal
 
 import msgspec
 
+from lib import redis_cache as _cache
 from lib.artist_catalogue import ArtistCatalogueRow
+from lib.artist_search import ArtistHit, merge_exact_artist_identities
 from lib.discogs_positions import (
     normalize_release_tracks as _normalize_release_tracks,
 )
 from lib.json_narrow import is_str_object_dict, json_list
-from web import cache as _cache
-from web.artist_search import ArtistHit, merge_exact_artist_identities
-from web.parallel_fanout import parallel_results
+from lib.parallel_fanout import parallel_results
 
 # Mirror-REQUIRED (tier-2 plan U6, R13): these endpoints (/api/search,
 # /api/masters/<id>, ...) and the msgspec response Structs are the Rust
@@ -95,7 +98,7 @@ def _mirror_semaphore(url: str) -> threading.BoundedSemaphore:
 # card when a release credits this ID. Stored as a string for consistent
 # comparison against `artist_id` fields, which are always normalised to str.
 # Single declaration site at ``lib/va_identity.py`` — re-exported here so
-# the existing ``from web.discogs import VA_ARTIST_ID`` imports keep working.
+# the existing ``from lib.discogs_api import VA_ARTIST_ID`` imports keep working.
 from lib.va_identity import (
     DISCOGS_VA_ARTIST_ID as VA_ARTIST_ID,
 )
@@ -667,7 +670,7 @@ def get_release_raw(release_id: int, *, fresh: bool = False) -> dict[str, object
     rationale as ``_DiscogsReleaseDetail``'s own docstring), fields wider
     than any narrow slice this module could safely declare without
     becoming a moving target every time that consumer needs one more
-    field. Mirrors ``web.mb.get_release_raw``'s identical carve-out.
+    field. Mirrors ``lib.mb_api.get_release_raw``'s identical carve-out.
     """
     # Configuration admission precedes the cache lookup: a warm entry must
     # never turn an unavailable mirror into a silently usable source.

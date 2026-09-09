@@ -26,10 +26,10 @@ def http_error(
 
 
 class FakeMBLookup:
-    """Callable stand-in for ``web.mb.get_release`` with the REAL exception
+    """Callable stand-in for ``lib.mb_api.get_release`` with the REAL exception
     contract.
 
-    Production ``web.mb.get_release(mbid)`` raises
+    Production ``lib.mb_api.get_release(mbid)`` raises
     ``urllib.error.HTTPError(code=404)`` for an absent MBID and returns a
     slim release dict for a present one — it NEVER returns ``None``. Faking
     a miss with ``lambda mbid: None`` is the test-fidelity Rule B
@@ -77,10 +77,10 @@ class FakeMBLookup:
 
 
 class FakeDiscogsLookup:
-    """Callable stand-in for ``web.discogs.get_release`` with the REAL
+    """Callable stand-in for ``lib.discogs_api.get_release`` with the REAL
     exception contract — the Discogs analogue of :class:`FakeMBLookup`.
 
-    Production ``web.discogs.get_release(release_id)`` raises
+    Production ``lib.discogs_api.get_release(release_id)`` raises
     ``urllib.error.HTTPError(404)`` for an absent id (the mirror's ``_get``
     propagates ``urlopen``'s ``HTTPError`` directly — no retry) and never
     returns ``None``.

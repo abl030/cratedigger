@@ -24,7 +24,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
-from web.discogs import DiscogsArtistCatalogueIncomplete, get_artist_releases
+from lib.discogs_api import DiscogsArtistCatalogueIncomplete, get_artist_releases
 
 _PRIMARY_TYPES = ("Album", "EP", "Single")
 _PROVENANCE = ("ordinary", "promo", "unofficial")
@@ -207,10 +207,10 @@ def _run_consumer(
             )
         raise AssertionError(f"unexpected legacy or fallback URL: {url}")
 
-    with patch("web.discogs.DISCOGS_API_BASE", "https://mirror.test"), patch(
-        "web.discogs._get", side_effect=get,
+    with patch("lib.discogs_api.DISCOGS_API_BASE", "https://mirror.test"), patch(
+        "lib.discogs_api._get", side_effect=get,
     ), patch(
-        "web.discogs._cache.memoize_meta",
+        "lib.discogs_api._cache.memoize_meta",
         side_effect=lambda _key, fetch: fetch(),
     ):
         return msgspec.to_builtins(get_artist_releases(82730))

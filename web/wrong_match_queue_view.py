@@ -17,6 +17,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Protocol
 
+from lib.accusation_flags import evidence_column_accusation_flags
 from lib.import_queue import ForceImportPayload, ImportJob, YoutubeImportPayload
 from lib.pipeline_db._shared import (
     CANDIDATE_EVIDENCE_PREFIX,
@@ -30,10 +31,7 @@ from lib.quality import _is_explicit_label
 from lib.util import observe_failed_path
 from lib.validation_envelope import decode_validation_envelope
 from lib.wrong_matches import wrong_match_row_is_visible
-from web.classify import (
-    average_quality_label,
-    evidence_column_accusation_flags,
-)
+from web.classify import average_quality_label
 from web.wrong_match_file_service import (
     source_dirs_from_validation_result,
     target_candidate,

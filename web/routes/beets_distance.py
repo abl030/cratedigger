@@ -5,17 +5,16 @@ Split from web/routes/pipeline.py (#522).
 
 import msgspec
 
+from lib import discogs_api, mb_api
 from lib.release_identity import detect_release_source
-from web import discogs as discogs_api
-from web import mb as mb_api
 from web.routes._registry import RouteHandler, RouteRegistration, pattern_route
 from web.runtime import runtime
 
 
 class _RedisFingerprintCache:
-    """Adapt ``web/cache.py``'s Redis client to the ``BeetsDistanceCache`` protocol.
+    """Adapt ``lib/redis_cache.py``'s Redis client to the ``BeetsDistanceCache`` protocol.
 
-    Our fingerprints are msgspec-encoded bytes, while ``web/cache.py``
+    Our fingerprints are msgspec-encoded bytes, while ``lib/redis_cache.py``
     targets JSON-serialisable dicts/lists — so we bypass the JSON
     wrapping and talk to the Redis client directly. Falls back to a
     no-op cache when Redis is unavailable so single-call dev shells
@@ -23,7 +22,7 @@ class _RedisFingerprintCache:
     """
 
     def __init__(self) -> None:
-        from web import cache as _cache_mod
+        from lib import redis_cache as _cache_mod
         self._redis = getattr(_cache_mod, "_redis", None)
 
     def get(self, key: str):
@@ -35,7 +34,7 @@ class _RedisFingerprintCache:
             return None
         if raw is None:
             return None
-        # web/cache.py initialises Redis with ``decode_responses=True``,
+        # lib/redis_cache.py initialises Redis with ``decode_responses=True``,
         # so ``get`` returns str. msgspec.json.decode handles bytes;
         # encoding is cheap.
         if isinstance(raw, str):

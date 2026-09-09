@@ -966,7 +966,7 @@ All six operator surfaces that paint a spectral grade carry it:
 - `pipeline-cli quality`, for the candidate and the installed HAVE.
 
 There is ONE server-side rule,
-`web/classify.py::accusation_flags`, reached through three input adapters:
+`lib/accusation_flags.py::accusation_flags`, reached through three input adapters:
 `evidence_accusation_flags` (a whole `AlbumQualityEvidence`, what the
 request-detail route loads), `evidence_column_accusation_flags` (a joined
 column block under either alias prefix, what Wrong Matches and the

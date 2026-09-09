@@ -9,7 +9,7 @@ import logging
 
 from pydantic import BaseModel, Field
 
-from lib import transitions
+from lib import discogs_api, mb_api, transitions
 from lib.beets_db import (
     BEETS_AUTHORITY_UNAVAILABLE_MESSAGE as CURRENT_BEETS_UNAVAILABLE_MESSAGE,
 )
@@ -33,8 +33,6 @@ from lib.replace_status import (
     RESOLVE_STATUS_RESOLVED,
     RESOLVE_STATUS_TRANSIENT,
 )
-from web import discogs as discogs_api
-from web import mb as mb_api
 from web.routes._pydantic import parse_body
 from web.routes._registry import RouteHandler, RouteRegistration, pattern_route
 from web.runtime import runtime
@@ -192,7 +190,7 @@ def post_pipeline_resolve_rg(
     if release_source == "discogs":
         discogs_id_num = int(normalize_release_id(mb_release_id))
 
-        from web.discogs import DiscogsMirrorNotConfigured
+        from lib.discogs_api import DiscogsMirrorNotConfigured
 
         # Bypass the 24h meta cache — this write path can persist the
         # resolved master into the pipeline DB, so it must read live

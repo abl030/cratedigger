@@ -17,7 +17,7 @@ without it, and how the operator's instances are stood up.
 ## Public-MusicBrainz degraded mode (supported)
 
 The stranger default (`musicbrainz.apiBase = "https://musicbrainz.org"`)
-threads through Cratedigger's `web/mb.py` browse, `pipeline-cli` lookups, and
+threads through Cratedigger's `lib/mb_api.py` browse, `pipeline-cli` lookups, and
 pipeline track population. The external Beets owner must configure its own
 matching `musicbrainz.host/https/ratelimit` policy (public ⇒ ratelimit 1); the
 Cratedigger module never rewrites Beets configuration.
@@ -48,13 +48,13 @@ The operator runs the official MusicBrainz mirror stack in dedicated CT 100
 
 **Endgame note:** the long-term plan is `mb-api` — a sibling Rust project
 reimplementing the observed WS/2 subset (XML for musicbrainzngs/beets,
-JSON for `web/mb.py`) against Discogs-style full-dump re-imports, with
+JSON for `lib/mb_api.py`) against Discogs-style full-dump re-imports, with
 golden-diff verification against the running mirror. When it lands it
 replaces this, the hardest section of the runbook.
 
 ## Discogs mirror (mirror-required for browse)
 
-`web/discogs.py` speaks the **Rust mirror's** endpoint shape
+`lib/discogs_api.py` speaks the **Rust mirror's** endpoint shape
 (`/api/search`, `/api/masters/<id>`, ...) and response schema. Public
 api.discogs.com does not serve that API, so there is **no public
 fallback**: without a mirror, Discogs browse returns a clear 503

@@ -156,7 +156,7 @@ def musicbrainz_manifest(
         not isinstance(redirect, CanonicalReleaseRedirected)
         or redirect.survivor != raw_release_id
     ):
-        # ``web.mb`` follows a 301 before returning its raw body. A body ID
+        # ``lib.mb_api`` follows a 301 before returning its raw body. A body ID
         # alone is not proof that it represents this installed release: the
         # canonical resolver separately observes the transport redirect and
         # names its survivor. Discogs has no equivalent identity pathway.

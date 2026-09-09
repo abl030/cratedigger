@@ -80,8 +80,8 @@ def _json_text(value: object) -> str:
 def parse_mb_first_release_year(data: dict[str, object]) -> int | None:
     """Parse the 4-digit year from an MB release-group ``first-release-date``.
 
-    Used by ``web/mb.py::get_release_group_year``; the resolver service
-    goes through that same web client. Returns ``None`` for
+    Used by ``lib/mb_api.py::get_release_group_year``; the resolver service
+    goes through that same mirror client. Returns ``None`` for
     missing/short/non-numeric prefixes.
     """
     date = data.get("first-release-date", "")

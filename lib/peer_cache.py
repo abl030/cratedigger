@@ -1,8 +1,8 @@
 """Redis-backed peer cache for the pipeline.
 
-This module is deliberately separate from ``web.cache``. The web cache uses
-JSON/text Redis values; peer directory payloads are binary msgpack compressed
-with zstd.
+This module is deliberately separate from ``lib.redis_cache``. That cache
+uses JSON/text Redis values; peer directory payloads are binary msgpack
+compressed with zstd.
 """
 
 from __future__ import annotations

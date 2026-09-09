@@ -66,15 +66,15 @@ EXTERNAL_AUTH_NOTICE = (
 if __name__ == "__main__" or "web.server" not in sys.modules:
     sys.modules["web.server"] = sys.modules[__name__]
 
+from lib import discogs_api as _discogs
+from lib import mb_api
+from lib import redis_cache as cache
 from lib.beets_startup import BeetsStartupError, enforce_beets_startup
 from lib.config import (
     resolve_startup_config_paths,
 )
 from lib.json_narrow import is_str_object_dict as _is_str_object_dict
 from lib.pipeline_db import PipelineDB
-from web import cache
-from web import discogs as _discogs
-from web import mb as mb_api
 from web.index_document import render_index_document
 from web.request_security import (
     CHANNEL_HEADER,
@@ -415,7 +415,7 @@ class Handler(BaseHTTPRequestHandler):
     # wrote to Postgres outside the web UI's POST paths.
     #
     # The pure MB/Discogs metadata that this cache used to cover is now
-    # memoized one layer down, inside web/mb.py and web/discogs.py, at
+    # memoized one layer down, inside lib/mb_api.py and lib/discogs_api.py, at
     # the `meta:` namespace (24h TTL). Local-DB overlays (check_pipeline,
     # check_beets_library) run on every request — cheap single-SQL
     # lookups that no longer need caching.
@@ -740,9 +740,9 @@ def main() -> int:
     # pipeline-cli and the youtube worker make); the flags are a dev-only
     # override for a manual invocation and win when set.
     # Config carries ORIGINS; the flag carries the full MB base incl.
-    # /ws/2 (KTD6). Discogs stays unset without a mirror — web/discogs.py
+    # /ws/2 (KTD6). Discogs stays unset without a mirror — lib/discogs_api.py
     # then serves a clear 503 mirror-required (R13).
-    from web.api_bases import configure_api_bases_from_runtime_config
+    from lib.api_bases import configure_api_bases_from_runtime_config
     configure_api_bases_from_runtime_config()
     if args.mb_api:
         mb_api.MB_API_BASE = args.mb_api

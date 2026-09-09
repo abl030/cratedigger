@@ -52,6 +52,13 @@ from urllib.error import URLError
 
 import msgspec
 
+# Imported as modules, never as bare functions: the defaults below resolve
+# ``get_release`` at CALL time, so a test patching ``lib.mb_api.get_release``
+# still reaches the default lookup (a from-import would freeze the
+# pre-patch function at import time).
+from lib import discogs_api, mb_api
+from lib.discogs_api import DiscogsMirrorNotConfigured
+
 if TYPE_CHECKING:
     from lib.pipeline_db._shared import ProcessingOwnerProjection
     from lib.pipeline_db.rows import AlbumRequestRow
@@ -256,12 +263,12 @@ class _ResolvedTarget:
 MBLookup = Callable[..., dict[str, object]]
 """Signature: ``mb_lookup(mbid, *, fresh: bool=False) -> dict[str, object]``
 (the one payload shape both mirrors emit; fields are read through
-``lib.release_payload``). The default is ``web.mb.get_release``; tests
+``lib.release_payload``). The default is ``lib.mb_api.get_release``; tests
 inject a fake."""
 
 DiscogsLookup = Callable[..., dict[str, object]]
 """Signature: ``discogs_lookup(release_id: int, *, fresh: bool=False) ->
-dict``. The default is ``web.discogs.get_release``; tests inject a fake
+dict``. The default is ``lib.discogs_api.get_release``; tests inject a fake
 that raises the real ``HTTPError``/``URLError``/``DiscogsMirrorNotConfigured``
 on failure paths (test-fidelity Rule B)."""
 
@@ -285,19 +292,15 @@ BeetsDBFactory = Callable[[], ReplaceBeetsDB]
 
 
 def _default_mb_lookup(mbid: str, *, fresh: bool = False) -> dict[str, object]:
-    """Default MB-mirror lookup. Imported lazily so the service module
-    doesn't pull in ``web.mb``'s urllib transport at import time."""
-    from web.mb import get_release
-    return get_release(mbid, fresh=fresh)
+    """Default MB-mirror lookup."""
+    return mb_api.get_release(mbid, fresh=fresh)
 
 
 def _default_discogs_lookup(
     release_id: int, *, fresh: bool = False,
 ) -> dict[str, object]:
-    """Default Discogs-mirror lookup. Imported lazily so the service
-    module doesn't pull in ``web.discogs``'s transport at import time."""
-    from web.discogs import get_release
-    return get_release(release_id, fresh=fresh)
+    """Default Discogs-mirror lookup."""
+    return discogs_api.get_release(release_id, fresh=fresh)
 
 
 def _default_beets_db_factory() -> ReplaceBeetsDB:
@@ -1018,8 +1021,6 @@ class MbidReplaceService:
         branch ALSO logs a warning so a real bug in the mirror client no
         longer presents identically to bad operator input.
         """
-        from web.discogs import DiscogsMirrorNotConfigured
-
         try:
             data = self.discogs_lookup(release_id_num, fresh=True)
         except DiscogsMirrorNotConfigured as exc:

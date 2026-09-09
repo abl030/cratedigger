@@ -8,7 +8,7 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
-from web.discogs import _DiscogsFormat, _status_from_formats
+from lib.discogs_api import _DiscogsFormat, _status_from_formats
 
 
 def _expected_status(*, promo: bool, unofficial: bool) -> str:

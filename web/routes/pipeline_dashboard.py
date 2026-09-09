@@ -10,6 +10,7 @@ import os
 
 import msgspec
 
+from lib import redis_cache as cache_api
 from lib.disk_coverage_service import disk_coverage
 from lib.library_completeness_snapshot import (
     read_library_completeness_snapshot,
@@ -18,7 +19,6 @@ from lib.library_completeness_snapshot import (
 from lib.retag_divergence_census_snapshot import (
     read_retag_divergence_census_snapshot,
 )
-from web import cache as cache_api
 from web.routes._registry import RouteHandler, RouteRegistration, route
 from web.runtime import runtime
 

@@ -136,7 +136,7 @@ class World:
     collision: Collision
     canonical_shape: CanonicalShape = "target"
     # The mirror answered with an empty ``id`` (the mirror Struct's default,
-    # the shape web/mb.py really emits for a missing one), so the service
+    # the shape lib/mb_api.py really emits for a missing one), so the service
     # falls back to the id it asked for as the canonical (only meaningful
     # when the mirror is not redirecting: the answer IS the typed target).
     mirror_omits_id: bool = False

@@ -33,7 +33,7 @@ from scripts.web_dev_server import (
 )
 from tests.fakes import FakeBeetsDB
 from tests.helpers import make_web_runtime
-from tests.test_web_cache import FakeRedis
+from tests.test_redis_cache import FakeRedis
 from web.runtime import install_runtime, runtime
 
 INSECURE_AUTH_WARNING_COPY = (
@@ -668,7 +668,7 @@ class WebDevServerLiveDbErrorMappingTest(unittest.TestCase):
 
     def test_discogs_mirror_not_configured_maps_to_503_not_500(self):
         import web.server as web_server
-        from web.discogs import DiscogsMirrorNotConfigured
+        from lib.discogs_api import DiscogsMirrorNotConfigured
 
         def _raise(h, params):
             raise DiscogsMirrorNotConfigured("no mirror configured")
@@ -757,22 +757,22 @@ class WebDevServerLiveDbMetadataIntegrationTest(unittest.TestCase):
     """The real live-db compare route must use its configured mirrors."""
 
     def setUp(self) -> None:
-        import web.cache
-        import web.discogs
-        import web.mb
+        import lib.discogs_api
+        import lib.mb_api
+        import lib.redis_cache
         import web.server
 
         self.dsn = os.environ["TEST_DB_DSN"]
-        self.web_discogs = web.discogs
-        self.web_cache = web.cache
-        self.web_mb = web.mb
+        self.web_discogs = lib.discogs_api
+        self.web_cache = lib.redis_cache
+        self.web_mb = lib.mb_api
         self.web_server = web.server
-        self.saved_redis = web.cache._redis
+        self.saved_redis = lib.redis_cache._redis
         self.metadata_cache = FakeRedis()
-        web.cache._redis = self.metadata_cache
+        lib.redis_cache._redis = self.metadata_cache
         self.saved_metadata = (
-            web.mb.MB_API_BASE,
-            web.discogs.DISCOGS_API_BASE,
+            lib.mb_api.MB_API_BASE,
+            lib.discogs_api.DISCOGS_API_BASE,
         )
         # `configure_live_db` installs one WebRuntime on a process-lived
         # ExitStack instead of writing six module globals (#1313), so the

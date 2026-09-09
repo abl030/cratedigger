@@ -13,6 +13,8 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+from lib import discogs_api, mb_api
+from lib.api_bases import configure_api_bases_from_runtime_config
 from lib.beets_db import open_beets_db
 from lib.beets_startup import BeetsStartupError, enforce_beets_startup
 from lib.config import resolve_startup_config_paths
@@ -27,8 +29,6 @@ from lib.mb_canonical import (
     configure_canonical_release_lookup,
     production_tagged_canonical_release_fn,
 )
-from web import discogs, mb
-from web.api_bases import configure_api_bases_from_runtime_config
 
 logger = logging.getLogger("cratedigger-library-completeness")
 EXIT_BEETS_UNAVAILABLE = 1
@@ -95,8 +95,8 @@ def main() -> int:
     try:
         with open_beets_db(config=cfg) as beets:
             snapshot = publish_library_completeness_census(
-                path, beets, fetch_musicbrainz_raw=mb.get_release_raw,
-                fetch_discogs_raw=lambda release_id: discogs.get_release_raw(int(release_id)),
+                path, beets, fetch_musicbrainz_raw=mb_api.get_release_raw,
+                fetch_discogs_raw=lambda release_id: discogs_api.get_release_raw(int(release_id)),
                 resolve_musicbrainz_redirect=production_tagged_canonical_release_fn(),
             )
     except Exception:

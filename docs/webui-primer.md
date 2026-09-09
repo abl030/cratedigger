@@ -70,12 +70,23 @@ depends on.
 
 ## Files
 
+The browse tab's two mirror clients are NOT web files. They sit under
+`lib/` because far more than the web server calls them: `pipeline-cli`,
+the YouTube ingest worker, the completeness census, and the Replace,
+field-resolution and YouTube-album services. (The main pipeline cycle is
+not among them — `album_source.py` speaks to the same mirrors through its
+own urllib calls against the configured bases.) Issue #1389 moved them
+here and Ruff's TID251 ban now refuses a `lib`→`web` import, so the
+dependency runs one way only.
+
 | File | Purpose |
 |------|---------|
 | `web/server.py` | HTTP server, route dispatch tables, and startup: builds one `WebRuntime` and installs it around the serve loop |
 | `web/runtime.py` | The frozen `WebRuntime` every route reads through `runtime()` — admitted config, injected handles, per-thread DB handles |
-| `web/mb.py` | MusicBrainz API helpers (search, artist discography, releases) |
-| `web/discogs.py` | Discogs mirror API helpers (search, artist releases, master pressings) |
+| `lib/mb_api.py` | MusicBrainz mirror client (search, artist discography, releases) |
+| `lib/discogs_api.py` | Discogs mirror client (search, artist releases, master pressings) |
+| `lib/api_bases.py` | Process-startup wiring for both clients' mirror origins |
+| `lib/redis_cache.py` | The Redis client behind the clients' `meta:` metadata namespace and the routes' `web:` invalidation groups (`lib/peer_cache.py` has its own, for a different subject) |
 | `web/index.html` | Frontend HTML shell and inline CSS |
 | `web/js/` | Vanilla JavaScript ES modules |
 

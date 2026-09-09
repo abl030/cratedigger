@@ -175,8 +175,8 @@ class TestRequestCreationService(unittest.TestCase):
     def test_discogs_creation_does_not_fetch_musicbrainz(self) -> None:
         db = FakePipelineDB()
         with (
-            patch("web.mb.get_release", side_effect=AssertionError("MusicBrainz fetch")),
-            patch("web.mb.get_release_group_year", side_effect=AssertionError("MusicBrainz fetch")),
+            patch("lib.mb_api.get_release", side_effect=AssertionError("MusicBrainz fetch")),
+            patch("lib.mb_api.get_release_group_year", side_effect=AssertionError("MusicBrainz fetch")),
         ):
             result = self._service(db).create_or_resume(_input(discogs=True))
 
