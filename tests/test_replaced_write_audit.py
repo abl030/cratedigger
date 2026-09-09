@@ -74,7 +74,11 @@ class _AlbumRequestUpdate:
 # ratchet does not infer parameter dataflow: transition SQL must use the
 # canonical direct call grammar below.
 _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
-    ("lib/pipeline_db/_core.py", "472331a54ebaf9a6"): (
+    # Re-pinned 2026-09-09: the enclosing execute wrapper now binds the
+    # caught libpq error (`as exc`) and chains it into OwnerSessionLost
+    # (`from exc`, flake8-bugbear B904 via #1322); the forwarded SQL and
+    # parameters are unchanged, so the rationales stand.
+    ("lib/pipeline_db/_core.py", "66fe24eb3159d4c4"): (
         (
             "shared execute wrapper forwards caller-owned SQL with the caller's "
             "unchanged positional or mapping parameters"
@@ -84,7 +88,7 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "unchanged positional or mapping parameters outside atomic scopes"
         ),
     ),
-    ("lib/pipeline_db/_core.py", "04ca6be85bb75a81"): (
+    ("lib/pipeline_db/_core.py", "6420f3f43e2ae9fb"): (
         (
             "shared execute wrapper forwards parameterless caller-owned SQL"
         ),

@@ -27,7 +27,8 @@ fakes and helpers—the subject under assertion is the boundary.
 `scripts/daily_flake_update.sh` is the Nixpkgs-reference unattended entry
 point. It checks out current `main`, advances only the `nixpkgs` node in
 `flake.lock`, and runs the deterministic suite (which owns both Pyright
-contracts), the
+contracts), the same suite again in a seeded random test order (the
+`shuffled_suite` stage — see "Order is a separate axis" below), the
 `beetsStableCandidate` aggregate (every non-tip flake check plus the complete
 reviewed Beets-release matrix), the default lifecycle hammer, the
 20,000-example fuzz burst, and the mirror-harness smoke. The moving tip build,
@@ -185,6 +186,7 @@ source scanner.
 | `tests/test_evidence_media_identity_generated.py` | temporary Beets-shaped SQLite through `BeetsDB.get_album_info` → current-evidence propagation → final policy projection | the generated input inventory comes from the real native-format and alias producer surface, while an independently authored policy inventory fails closed on unknown canonical outputs; MP3, AAC, ALAC, FLAC, Opus, Vorbis, WAV, and WMA cross the outer adapter with a NULL analyzer generation and assert the final projected grade itself. Deterministic mixed M4A and OGG albums prove the aggregate format set withholds stale source grades. Known-bad final-policy bypass and unknown-alias inputs qualify both checkers. |
 | `tests/test_preview_failure_evidence_generated.py` | `process_claimed_preview_job` plus failure-point current-evidence preparation/enrichment | every producer stage that terminates as `measurement_failed` reaches one lifecycle owner: request-owned failures always persist their job/audit and diagnostic; an exact readable installed release links a complete pre-attempt HAVE snapshot regardless of stage or job type; missing identity, absent/unreadable HAVE, and preparation/enrichment faults stay fail-soft without fabricating evidence |
 | `tests/test_spectral_attempt_audit_generated.py` | production HAVE authorization, both attempt-audit adapters, preview writer/persistence round-trips, and real automation/force-import dispatch consumers | candidate and HAVE authorization remain independent across automation and force jobs: each complete matching snapshot with a decision-usable grade projects its own persisted spectral fact without another scan, while changed, incomplete, or unusable HAVE evidence takes the existing measurement-and-persistence path; the generated installed-codec matrix includes Beets' canonical OGG → Vorbis label; ordinary installed evidence needs the current analyzer generation, whereas a recognised preserved source grade may retain NULL/old/future provenance without scanning the derivative; blank/error/unknown grades never enter policy; the Iron & Wine witness drives automation dispatch and terminal cleanup, while a separate slice drives force-import dispatch |
+| `tests/test_measurement_generated.py` | `measure_preimport_state` over real trees of real fixture audio, with the sox/ffmpeg analyzer injected through its sanctioned kwarg-DI seam | the candidate spectral scan boundary (issue #1378 item 3): a clean nested-layout candidate is never scanned and carries no grade — every decider rejects it on the layout fact without reading one — while a flat spectral-eligible candidate always is, an uncalibrated codec never is, a scan that happened always reaches `download_spectral`, and a corrupt candidate keeps the attempt audit issue #1030 pinned, in either layout. Worlds place 0, some, or all tracks below the album root, so the mixed album that separates `any` from `all` in the layout derivation is drawn. The reported layout is checked independently so a mutant that answers `flat` everywhere cannot satisfy the skip clauses; codec eligibility is written down in the test rather than read back from `_needs_spectral_check`; and the flat clause reads `cd_rip_verification` so a future persist-lane world cannot make it accuse a proven rip |
 | `tests/test_lossless_lineage_check_generated.py` | migration 073's real PostgreSQL lineage schema plus role-aware FakePipelineDB writer-order worlds | fresh candidate truth clears unowned legacy conversion lineage at the same content address without erasing a co-referenced current row; action-time, CLI, decision-differential, Recents, and Wrong Matches candidate projections all withhold current-only lineage from a shared row; current-evidence rebuilds preserve conversion lineage for an unchanged installed snapshot in either spectral/rebuild order; installed spectral measurements and output lineage may coexist; the exact manifest-aware R19 predicate alone determines whether a carried source spectral fact is reusable, failing closed for native, mixed, or unresolved output |
 | `tests/test_slskd_events_generated.py` | `ingest_download_file_events` (event stamping — the ONLY source of completed-file locations) | stamping oracle (newest decodable event per key in the new-events window, nothing else); totality + exactly-once over wild feeds (dup ids, garbage timestamps, undecodable payloads, pruned/absent cursors, rows leaving `downloading` mid-ingest); duplicate-id invariance (mid-pagination shape); issue #898 PR1 current-incarnation classification across reused/different keys, event times before/at/after the exact `enqueued_at` witness, candidate shadowing, lost witnessed writes, cursor hold/replay, and idempotent ledger effects |
 | `tests/test_download_incarnation_generated.py` | `FakePipelineDB.update_download_state_if_downloading` plus `lib.download._admit_download_incarnations` | issue #898 PR1 integrated invariant: after B replaces A at the same request/path, delayed enqueue/event/harvest/poll whole-state payloads carrying A's witness leave B and its row metadata byte-for-byte unchanged, while current B payloads succeed; post-event polling admits only refreshed exact `(request_id, enqueued_at)` pairs captured before the transfer snapshot, preserves refreshed order and original witness text, and excludes same-ID B replacements, departed/new rows, and missing/empty/malformed/invalid state. Missing status/stored-witness/outgoing-witness predicates and request-ID-only admission independently qualify the checkers. Event timing/cursor generation remains in `test_slskd_events_generated.py`; downstream processing, filesystem, importer, and terminal side-effect ownership is the explicit PR2 boundary |
@@ -519,6 +521,53 @@ Run a randomized burst whenever quality policy changes:
 nix-shell --run "bash scripts/fuzz_burst.sh"                    # all generated modules
 nix-shell --run "bash scripts/fuzz_burst.sh tests.test_quality_generated"  # subset
 ```
+
+### Order is a separate axis
+
+The fuzz tier moves Hypothesis entropy with the test order fixed. The
+nightly `shuffled_suite` stage (issue #1322) moves test order with entropy
+fixed: `--shuffle-seed N` on `scripts/run_python_tests.py`, or the
+`CRATEDIGGER_SHUFFLE_SEED` variable the stage sets, shuffles the tests inside
+every target and the target schedule across workers, while the Hypothesis
+profile stays on the derandomized `suite` tier. Each stage owns exactly one
+variable, so a red night is attributable without a rerun.
+
+What a shuffle can and cannot reach: every target already runs in its own
+fresh interpreter, so module-level state cannot leak between targets. The
+shuffle probes order INSIDE a target (module-level caches, class fixtures,
+tests that assume an earlier test warmed something) and, across targets, the
+order in which they share a persistent worker's private PostgreSQL and the
+suite's scratch `TMPDIR`.
+
+**Triage rule:** a target that is red under a seed and green in the
+fixed-order suite is a test-isolation defect in the test, never a production
+finding. Every failure block carries the seed and the exact replay command,
+the indexed detail the bundle keeps carries the seed, and the terminal
+`FAILED` line is tagged. The replay selects the failing target's MODULE
+(a hotspot shard's own `module::batch` name is not a selector): rerunning
+the module re-derives the same shards with the same load names, and each
+target's salt is its own load names, so the order inside every target
+replays identically. Only the order across targets belongs to the whole
+run's schedule.
+
+```bash
+CRATEDIGGER_SHUFFLE_SEED=<seed> nix-shell --run \
+  "python3 scripts/run_python_tests.py --test tests.test_X"
+```
+
+The exact-ID coverage guard on audited hotspot shards compares IDs as a
+multiset, so a reordered child still proves nothing was dropped, invented,
+or duplicated. The stage runs the whole canonical suite for its admission
+lock and failure bundle; the five order-blind phases it repeats run on the
+coordinator's leading thread concurrently with the Python phase, so they
+contend for its CPU rather than adding serial wall time. Measured before
+the stage existed (2026-09-09): two seeds
+over about 11.8k tests each found one real coupling, a one-slot process
+cache in `lib/util.py` that `tests/test_util.py` depended on other tests
+warming first, fixed in the same PR; the first rehearsal of the stage then
+found that the seed leaks into fixture-spawned scripts, which the gate
+scripts and `tests/fakes/subprocess_env.py` now scrub. Two seeds is a small
+sample; do not read a rate into it.
 
 Loading a tier is an **import side effect**, so every module that uses
 Hypothesis must import the profile module itself — at module level, and

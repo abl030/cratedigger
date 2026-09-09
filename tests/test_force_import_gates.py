@@ -651,6 +651,13 @@ class TestAudioFailuresPreserveSubdirContext(unittest.TestCase):
     collapse ``CD1/01.mp3`` and ``CD2/01.mp3`` into the same entry.
     """
 
+    def setUp(self):
+        # Issue #1322: a bare ``sp.run`` mock would otherwise leave a
+        # MagicMock in lib.util._ffmpeg_version's process-wide cache.
+        from tests.helpers import cold_ffmpeg_version_probe
+
+        cold_ffmpeg_version_probe(self)
+
     def test_nested_failures_keep_subdir_in_name(self):
         import os
         from unittest.mock import patch

@@ -18,12 +18,13 @@ import json
 import os
 import stat
 import tempfile
+import unittest
 from collections.abc import Callable, Generator, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import msgspec
 import requests
@@ -1096,3 +1097,38 @@ def seed_visible_wrong_match(
         path=path,
         parent=parent,
     )
+
+
+def cold_ffmpeg_version_cache(case: unittest.TestCase) -> None:
+    """Start and finish ``case`` with ``lib.util._ffmpeg_version`` cold.
+
+    Issue #1322: that probe is a one-slot process cache, and ``lib.util.sp``
+    IS the ``subprocess`` module, so a bare ``patch("lib.util.sp.run")``
+    also answers ``sp.check_output`` and leaves a ``MagicMock``-derived
+    "version" in the cache for every later test in the process. The
+    shuffled nightly suite caught one test crashing on it whenever it ran
+    first; a neighbouring real-probe assertion would pass vacuously on it.
+    Use this variant when the test wants the REAL probe (real ffmpeg in
+    the dev shell); ``cold_ffmpeg_version_probe`` when it does not.
+    """
+    from lib.util import _ffmpeg_version
+
+    _ffmpeg_version.cache_clear()
+    case.addCleanup(_ffmpeg_version.cache_clear)
+
+
+def cold_ffmpeg_version_probe(
+    case: unittest.TestCase,
+    *,
+    version: bytes = b"ffmpeg version test\n",
+) -> None:
+    """``cold_ffmpeg_version_cache`` plus a fixed answer for the probe.
+
+    The probe is mocked at ``lib.util.sp.check_output``, the same
+    process-wide module attribute the ``sp.run`` mocks reach through, so it
+    is scoped to ``case`` by cleanup exactly like the cache.
+    """
+    cold_ffmpeg_version_cache(case)
+    version_probe = patch("lib.util.sp.check_output", return_value=version)
+    version_probe.start()
+    case.addCleanup(version_probe.stop)

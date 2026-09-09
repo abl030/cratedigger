@@ -22,7 +22,7 @@ flock 9
 work_root=$(mktemp -d "${TMPDIR:-/tmp}/cratedigger-beets-tip.XXXXXX")
 checkout="$work_root/repo"
 trap 'rm -rf -- "$work_root"' EXIT
-unset TEST_DB_DSN BEETSDIR CRATEDIGGER_RUNTIME_CONFIG
+unset TEST_DB_DSN BEETSDIR CRATEDIGGER_RUNTIME_CONFIG CRATEDIGGER_SHUFFLE_SEED
 
 git clone --quiet --branch "$branch" --single-branch "$repository" "$checkout"
 cd "$checkout"

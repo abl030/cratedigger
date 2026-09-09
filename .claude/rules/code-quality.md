@@ -629,7 +629,7 @@ gate behind `scripts/run_final_gate.sh` — which since #1278 item 6 sets the
 var in the environment of the `nix develop` child it launches from Python
 rather than shelling out through an `env` prefix,
 `scripts/daily_flake_update.sh`'s
-`deterministic_suite` stage, and `scripts/daily_beets_tip_update.sh`, which
+`deterministic_suite` and `shuffled_suite` stages, and `scripts/daily_beets_tip_update.sh`, which
 runs the same suite through `nix develop .#tip` — grep for BOTH
 `nix-shell --run` and `nix develop`, since only the daily-gate stages still
 enter the shell the legacy way) sets
@@ -804,7 +804,8 @@ admission CYCLE inside their own admission loop (a cycle can admit up to
 Honestly stated (independent review F6/F7): in the daily gate specifically
 this preflight is a near-duplicate of a check that already ran seconds
 earlier — `scripts/daily_flake_update.sh` scopes
-`CRATEDIGGER_SUITE_OWNS_HEADROOM=1` to its `deterministic_suite` stage
+`CRATEDIGGER_SUITE_OWNS_HEADROOM=1` to its `deterministic_suite` and
+`shuffled_suite` stages
 only, so the `world_model`/`generated_fuzz`/`mirror_harness` stages still
 hit `scripts/test_tmpfs.sh`'s shell-entry guard on the SAME root with the
 SAME env var and the SAME flat 1 GiB default before either coordinator's

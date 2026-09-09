@@ -9,8 +9,16 @@ target-version = "py313"
 extend-exclude = ["mutants"]
 
 [lint]
+# Issue #1322 measured every Ruff family against the whole tree before
+# enabling any: these three found zero present-day bugs (full bugbear had
+# three cosmetic hits, fixed in the same change; DTZ and BLE001 had none)
+# and are kept as legislation against future drift, not as a finding.
+# The style families (SIM, C4, RET, PERF, RUF, TRY) were rejected there
+# with their numbers; do not add them without a new measurement.
 extend-select = [
-  "B905",
+  "B",       # flake8-bugbear: mutable defaults, loop-variable capture, raise-from
+  "BLE001",  # blind `except Exception`: every broad except must say why (`# noqa: BLE001`)
+  "DTZ",     # naive datetimes in a pipeline built on tz-aware timestamps
   "TID251",
 ]
 
