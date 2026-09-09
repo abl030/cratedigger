@@ -2146,15 +2146,31 @@ class TestGeneratedSpectralDisjunctSubsumption(unittest.TestCase):
     @example(
         # The decisive world for the grade clause: R19-shaped at v5 with no
         # grade. Production refuses it (which is exactly why disjunct 4 was
-        # dead), so the clause stays quiet — but this is the ONLY cell where
-        # a defective validator can make it fire, and a suite-depth random
-        # sample misses it. Measured: deleting the "spectral markers require
-        # a spectral grade" clause from
-        # ``AudioQualityMeasurement.new_row_validation_errors`` leaves the
-        # property GREEN without this pin and RED with it.
+        # dead), so the clause stays quiet — but only 672 of this strategy's
+        # 345,600 cells (0.19%) can make it fire under a defective
+        # validator, so a suite-depth sample misses it on most runs.
+        # Measured: deleting the "spectral markers require a spectral grade"
+        # clause from ``AudioQualityMeasurement.new_row_validation_errors``
+        # leaves the property GREEN without this pin and RED with it.
         world=SpectralSubsumptionWorld(
             lineage_version=5, grade=None, bitrate_kbps=None,
             subject="source", provenance="carried", was_converted_from="flac",
+            media=("mp3", "mp3"), second_file_media=None,
+            format_label="mp3", storage_label="MP3",
+        ),
+    )
+    @example(
+        # The same cell with only ONE marker set. The validation clause the
+        # subsumption leans on reads
+        # ``spectral_subject is not None OR spectral_provenance is not None``,
+        # so a world carrying BOTH cannot tell that ``or`` from an ``and``:
+        # the pin above stayed green while the mutated validator let this
+        # exact shape become storable, and the property only caught it at
+        # fuzz depth (mutant runner finding, #1378 review round). R19 never
+        # reads provenance, so dropping it keeps the world R19-shaped.
+        world=SpectralSubsumptionWorld(
+            lineage_version=5, grade=None, bitrate_kbps=None,
+            subject="source", provenance=None, was_converted_from="flac",
             media=("mp3", "mp3"), second_file_media=None,
             format_label="mp3", storage_label="MP3",
         ),

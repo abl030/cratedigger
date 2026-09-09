@@ -10730,12 +10730,16 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         ``skipped`` identically for ``preserve_existing_audio_validation``,
         but every test drove the pair through ``legacy_unrecorded`` only —
         mutating the ``"skipped"`` literal survived the whole selection
-        (mutmut breadth pass, #1378). Nothing in production writes a
-        ``skipped`` report today: ``skipped_audio_validation_report`` is
-        exported with no caller, for disabled audio validation. So this
-        pins the preserve set as legislation for that future writer, the
-        way the ``legacy_unrecorded`` sibling above pins the arm that does
-        fire — not a live scenario.
+        (mutmut breadth pass, #1378). The arm is config-reachable, not
+        hypothetical: ``lib.util.validate_audio`` returns
+        ``outcome="skipped"`` whenever ``cfg.audio_check_mode == "off"``,
+        and ``measure_preimport_state`` puts that report straight onto the
+        evidence it persists. Under ``[Beets Validation] audio_check =
+        off`` every write carries it, so this branch decides every merge.
+        (The ``skipped_audio_validation_report`` constructor has no caller;
+        the outcome has a different producer, which is why greping the
+        constructor name says nothing.) doc2 runs the ``normal`` default
+        today.
         """
         from lib.quality import skipped_audio_validation_report
 
@@ -10793,6 +10797,38 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         self.assertTrue(preserved.audio_corrupt)
         self.assertEqual(preserved.audio_error, evidence.audio_error)
         self.assertFalse(preserved.files[0].decode_ok)
+
+    def test_a_stored_skipped_report_has_nothing_worth_preserving(self):
+        """The other half of the same set, on the stored side.
+
+        The merge preserves the stored report only when the incoming one is
+        weak AND the stored one is not — ``album_quality_evidence.
+        audio_validation->>'outcome' NOT IN ('legacy_unrecorded',
+        'skipped')``. The sibling above drives the ``EXCLUDED`` half;
+        dropping ``'skipped'`` from the stored half survived all 46 tests of
+        this class (mutant runner finding, #1378 review round), because
+        nothing ever stored a ``skipped`` report and then wrote over it.
+        Under ``audio_check = off`` (see the sibling) that is every write.
+        """
+        from lib.quality import skipped_audio_validation_report
+
+        weak_incoming = legacy_unrecorded_audio_validation_report()
+        evidence = self._seed(
+            mb_release_id="mbid-stored-skipped-weak",
+            audio_validation=skipped_audio_validation_report(),
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+
+        self.db.upsert_album_quality_evidence(msgspec.structs.replace(
+            evidence, audio_validation=weak_incoming,
+        ))
+
+        merged = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert merged is not None
+        self.assertEqual(merged.audio_validation, weak_incoming)
 
     def test_strong_writer_replaces_decode_ok_on_the_same_address(self):
         """Issue #1355 Batch E (E1, reader finding): the sibling test above

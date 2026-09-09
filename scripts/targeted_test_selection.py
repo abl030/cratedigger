@@ -108,11 +108,12 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         # tests.test_evidence_generated, so nothing raises. The deterministic
         # pins on _SPECTRAL_TUPLE_USE_INCOMING_SQL — the constant spliced
         # into all eight spectral CASE expressions in this module — live in
-        # tests.test_pipeline_db and were already selected; the exhaustive
-        # real-PG-versus-fake parity property over that constant's whole
-        # decision domain was not, because its module is named for the
-        # transition matrix rather than for this file (issue #1378 item 5,
-        # which edited the constant without selecting it).
+        # tests.test_pipeline_db and were already selected; the
+        # real-PG-versus-fake parity property, exhaustive over its own
+        # enumerated stored/ownership/incoming/intent domain, was not,
+        # because its module is named for the transition matrix rather than
+        # for this file (issue #1378 item 5, which edited the constant
+        # without selecting it).
         "tests.test_evidence_transition_matrix_generated",
     ),
     "lib/convergence.py": (

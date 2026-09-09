@@ -3903,11 +3903,12 @@ class TestDropDeadSlskdBitrateMigration(unittest.TestCase):
 class TestDropEvidenceFileContentDigestMigration(unittest.TestCase):
     """Migration 085 removes the never-written ``content_sha256`` column.
 
-    Migration 068 added it for a snapshot-reuse guard nothing ever built:
-    no Python reads or writes the column, and the live population was 60
-    non-null values against 338,834 NULLs (measured 2026-09-09). The full
-    column list is asserted rather than the one absence, so a wider ``DROP
-    COLUMN`` typo fails here instead of in the evidence decoder.
+    Migration 068 added it for a snapshot-reuse guard nothing ever built.
+    Nothing in the current tree reads or writes it; the live population was
+    60 non-null values against 338,834 NULLs (measured 2026-09-09), residue
+    of the reverted "Reuse exact HAVE evidence during preview" work. The
+    full column list is asserted rather than the one absence, so a wider
+    ``DROP COLUMN`` typo fails here instead of in the evidence decoder.
     """
 
     def test_records_085_and_drops_only_content_sha256(self) -> None:
