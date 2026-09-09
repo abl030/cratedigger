@@ -23,7 +23,8 @@
 # Environment (defaults are production; tests override them):
 #   NIXOSCONFIG_TOKEN_FILE              Forgejo push token file
 #   CRATEDIGGER_DEPLOY_POLL_SECONDS     seconds between nixos-upgrade polls
-#   CRATEDIGGER_DEPLOY_TIMEOUT_SECONDS  bound on the nixos-upgrade wait
+#   CRATEDIGGER_DEPLOY_TIMEOUT_SECONDS  bound on each of the two nixos-upgrade
+#                                       waits (an in-flight run, then ours)
 set -euo pipefail
 
 # The fleet trigger selects its own private key and must never be cached
@@ -52,9 +53,9 @@ die() {
 }
 
 cleanup() {
-  # The pin worktree is private and dirty by construction (a detached HEAD
-  # carrying the pin commit), so --force is the only way to remove it;
-  # nothing in it is ever the operator's work.
+  # cleanup also runs on the failure paths, where the private pin worktree
+  # still holds an uncommitted flake.lock edit or nix debris, so removal
+  # needs --force; nothing in it is ever the operator's work.
   if [[ -n "$worktree" ]]; then
     git -C "$NIXOSCONFIG_REPO" worktree remove --force "$worktree" \
       >/dev/null 2>&1 || rm -rf "$worktree"

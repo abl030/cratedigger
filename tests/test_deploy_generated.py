@@ -34,7 +34,7 @@ OUTCOME_MESSAGES = {
     "changed": "invocation changed mid-deploy",
     "failed": "nixos-upgrade failed",
     "unexpected": "unexpected nixos-upgrade state",
-    "timeout": "timed out after",
+    "timeout": "waiting for nixos-upgrade on doc2",
 }
 
 

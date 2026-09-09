@@ -8,7 +8,9 @@
   `hosts.nix`, builds from its root-owned clone, and switches, migrations
   included. The daily Cratedigger gate on doc1 (05:05) clones `main`'s tip
   into a fresh checkout and tests it against current nixpkgs unstable,
-  paging on red; it neither reads the pin nor runs before the switch. Leave
+  paging on red: it tests the tip, not the pinned revision (only the gate's
+  own runner script comes from the pin), and it never gates the switch,
+  which with doc2's jitter can still be running when it starts. Leave
   `main` green when you merge; nothing re-gates it before it ships.
 - Deploy by hand only when a change must be live now. The whole runbook is
   `scripts/deploy.sh`, run from the shared checkout on doc1: it pins

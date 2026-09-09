@@ -149,7 +149,8 @@ class TestDeployScript(unittest.TestCase):
         proc = self.world.run()
 
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("already running on doc2; waiting", proc.stdout)
+        # Announced once, not once per poll.
+        self.assertEqual(proc.stdout.count("already running on doc2; waiting"), 1)
         names = self._event_names()
         active_reads = [
             index for index, event in enumerate(self.world.events())

@@ -130,8 +130,11 @@ def _evaluate_mode_worlds() -> dict[str, dict[str, object]]:
     ``tests/test_nix_module.py`` (``tests/test_js_harness.mjs``'s transient
     in-repo fixture under ``tests/_harness_fixtures``), and this module now
     shares its remedy: the preamble loads the flake as ``git+file://<root>``
-    when ``.git`` exists (falling back to the plain path in a ``git
-    archive`` snapshot, where nothing runs concurrently), whose snapshot
+    when ``.git`` exists (falling back, in a ``git archive`` snapshot, to
+    the filtered ``builtins.path`` copy this module used before, which now
+    also excludes ``tests/_harness_fixtures`` but stays exposed to any
+    other untracked churn, since a suite run there still runs its phases
+    concurrently), whose snapshot
     carries every tracked file's working-tree content -- uncommitted edits
     included, measured -- and no untracked path at all, and the worlds take
     the module's default ``src`` (``runtimeSrc``, computed inside that
@@ -154,7 +157,13 @@ def _evaluate_mode_worlds() -> dict[str, dict[str, object]]:
         f = builtins.getFlake (
           if builtins.pathExists ./.git
           then "git+file://" + toString ./.
-          else toString ./.
+          else builtins.unsafeDiscardStringContext (toString (builtins.path {{
+            path = toString ./.;
+            filter = path: type:
+              baseNameOf path != "__pycache__"
+              && baseNameOf path != "_harness_fixtures";
+            name = "cratedigger-nix-eval-source";
+          }}))
         );
         lib = f.inputs.nixpkgs.lib;
         modulePkgs = import f.inputs.nixpkgs {{

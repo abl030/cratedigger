@@ -747,8 +747,7 @@ pkgs.testers.nixosTest {
       # the wrapper-render seam: we assert the flag lands in the ExecStart.
       youtubeIngest.sourceAddress = "10.0.2.15";
       # Render the real NixOS-managed timer while keeping it far from firing:
-      # the module's timer wiring is exercised, and no scenario below wants
-      # a cycle starting on its own.
+      # no scenario below wants a cycle starting on its own.
       timer = {
         enable = true;
         onBootSec = "1d";
@@ -1307,11 +1306,14 @@ pkgs.testers.nixosTest {
         "&& systemctl show cratedigger.service --property=ActiveState --value "
         "| grep -Eqx 'inactive|failed'"
     )
-    admissions_after_release_cycle = machine.succeed(
+    # The unit leaving activating proves systemd's bookkeeping, not that
+    # journald has the admission line yet (the same settle this file waits
+    # for everywhere else it counts admissions); the count must land on
+    # exactly one, never two.
+    machine.wait_until_succeeds(
         "journalctl -b -u cratedigger.service -o cat "
-        "| grep -c 'Beets configuration admitted for main' || true"
-    ).strip()
-    assert admissions_after_release_cycle == "1", admissions_after_release_cycle
+        "| grep -c 'Beets configuration admitted for main' | grep -qx 1"
+    )
 
     # The timer-owned main service must survive both a healthy restart and a
     # failed restart of an external readiness producer. Hold one live

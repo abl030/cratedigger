@@ -267,8 +267,11 @@ _NIX_EVAL_CACHE: dict[str, dict[str, object] | Exception] = {}
 #: these worlds can see it, which fails loudly rather than silently. A tree
 #: with no ``.git`` at all (a ``git archive`` snapshot, which is where the
 #: mutant runner works) cannot be fetched as ``git+file``, so the preamble
-#: falls back to the plain path there: no concurrent phase runs in such a
-#: snapshot, so the race this guards against cannot occur in it.
+#: falls back to #1248's filtered ``builtins.path`` copy there, now
+#: excluding the two churn paths seen so far (``__pycache__`` and
+#: ``tests/_harness_fixtures``). That fallback is weaker, not safe: a
+#: suite run in such a snapshot still runs its phases concurrently, and any
+#: other untracked churn under the tree can still race the walk.
 
 
 def _cached_nix_eval_json(expression: str) -> dict[str, object]:
@@ -429,7 +432,13 @@ def _shared_module_worlds_web_auth_matrix_part1() -> dict[str, object]:
         f = builtins.getFlake (
           if builtins.pathExists ./.git
           then "git+file://" + toString ./.
-          else toString ./.
+          else builtins.unsafeDiscardStringContext (toString (builtins.path {
+            path = toString ./.;
+            filter = path: type:
+              baseNameOf path != "__pycache__"
+              && baseNameOf path != "_harness_fixtures";
+            name = "cratedigger-nix-eval-source";
+          }))
         );
         lib = f.inputs.nixpkgs.lib;
         modulePkgs = import f.inputs.nixpkgs {
@@ -653,7 +662,13 @@ def _shared_module_worlds_web_auth_matrix_part2() -> dict[str, object]:
         f = builtins.getFlake (
           if builtins.pathExists ./.git
           then "git+file://" + toString ./.
-          else toString ./.
+          else builtins.unsafeDiscardStringContext (toString (builtins.path {
+            path = toString ./.;
+            filter = path: type:
+              baseNameOf path != "__pycache__"
+              && baseNameOf path != "_harness_fixtures";
+            name = "cratedigger-nix-eval-source";
+          }))
         );
         lib = f.inputs.nixpkgs.lib;
         modulePkgs = import f.inputs.nixpkgs {
@@ -1096,7 +1111,13 @@ def _shared_module_worlds_rest() -> dict[str, object]:
         f = builtins.getFlake (
           if builtins.pathExists ./.git
           then "git+file://" + toString ./.
-          else toString ./.
+          else builtins.unsafeDiscardStringContext (toString (builtins.path {
+            path = toString ./.;
+            filter = path: type:
+              baseNameOf path != "__pycache__"
+              && baseNameOf path != "_harness_fixtures";
+            name = "cratedigger-nix-eval-source";
+          }))
         );
         lib = f.inputs.nixpkgs.lib;
         modulePkgs = import f.inputs.nixpkgs {
@@ -1897,10 +1918,16 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
         expression = r'''
           let
             f = builtins.getFlake (
-          if builtins.pathExists ./.git
-          then "git+file://" + toString ./.
-          else toString ./.
-        );
+              if builtins.pathExists ./.git
+              then "git+file://" + toString ./.
+              else builtins.unsafeDiscardStringContext (toString (builtins.path {
+                path = toString ./.;
+                filter = path: type:
+                  baseNameOf path != "__pycache__"
+                  && baseNameOf path != "_harness_fixtures";
+                name = "cratedigger-nix-eval-source";
+              }))
+            );
             modulePkgs = import f.inputs.nixpkgs {
               system = builtins.currentSystem;
             };
