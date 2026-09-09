@@ -3,7 +3,7 @@
 - [Tier-2 packaging plan](project_tier2_packaging.md) — COMPLETE 2026-07-04: doc2 cutover verified live; HM beets gone; sudo for cratedigger-beet
 - [beets 2.12 migration](project_beets_2_12_migration.md) — 2026-06-29: beets bump broke ALL imports two ways; harness mocks hid the drift; real-beets contract test now guards it
 - [Use nix-shell](feedback_use_nix_shell.md) — All Python/test commands must run inside nix-shell, never bare python3
-- [No draft PRs](feedback_no_draft_prs.md) — never `--draft`; review-clean = ready; merge (merge commit) and deploy without stopping to ask
+- [No draft PRs](feedback_no_draft_prs.md) — never `--draft`; review-clean = ready; merge (merge commit) without stopping to ask; deploy only for user-facing live proof
 - [TDD](feedback_tdd.md) — Strict TDD: tests first, then implementation, verify at each step
 - [Finish the job](feedback_finish_the_job.md) — Wire up new functionality end-to-end — don't leave infrastructure disconnected
 - [Never defer work](feedback_never_defer_work.md) — Don't split adjacent fixes into follow-up issues; scope them into the same PR
@@ -19,8 +19,8 @@
 - [No homelab-specific process rules](feedback_no_homelab_specific_process_rules.md) — don't add rule steps that only make sense for doc1/doc2; #1079 closed for exactly that
 - [Pyright on the full repo](feedback_pyright_full_repo.md) — Pyright runs on the whole repo; fix pre-existing errors in the same pass
 - [No skipped tests](feedback_no_skipped_tests.md) — Skipped/gated tests are forbidden; `test_skip_audit.py` enforces it
-- [Deploy via master worktree](feedback_deploy_via_master_worktree.md) — doc2 deploys from nixosconfig master; if dirty, do flake bumps in a throwaway worktree
-- [Forgejo cutover deploy flow](project_forgejo_cutover_deploy_flow.md) — 2026-06-10: nixosconfig deploys via Forgejo + fleet-update, GitHub frozen; signed commits required
+- [Deploy via master worktree](feedback_deploy_via_master_worktree.md) — never commit in a dirty ~/nixosconfig checkout; scripts/deploy.sh pins from a detached temp worktree off origin/master
+- [Forgejo cutover deploy flow](project_forgejo_cutover_deploy_flow.md) — 2026-06-10: nixosconfig deploys via Forgejo + fleet-update, GitHub frozen; signed commits required; since 2026-09-09 scripts/deploy.sh drives the whole leg through forgejo-auth.sh
 - [CI only runs GitGuardian](project_ci_only_gitguardian.md) — tests/dead-code/pyright are NOT gated in CI; a green PR check ≠ green suite, so verify locally
 - [.bak file bug](project_bak_bug.md) — RESOLVED: mp3val -f caused it, fixed with -nb; rename repair deliberately removed
 - [slskd concurrency limits](project_slskd_concurrency.md) — SemaphoreSlim(1,1) on API, maximumConcurrentSearches=2, batch searches in pairs
@@ -116,9 +116,9 @@
 - [#1278 item 7 fake delegation shipped](project_1278_item7_fake_delegation.md) — PRs #1289/#1291/#1293 live 2026-08-31; extraction-vs-value-parity split; PG POWER overflow fixed; 8 mutant survivors pinned
 - [#1278 pt9 root-coverage rule shipped](project_1278_pt9_root_coverage_rule.md) — PR #1294 live 2026-08-31; audit self-vacation lesson: anchor scope columns externally; new fallback-backed entries need MASKABLE_ENTRY_PINS
 - [#1278 wx3 dashboard composer SHIPPED](project_1278_wx3_dashboard_composer.md) — PR #1296 live-verified 2026-08-31; composer takes (navHtml,data,el); 36 mutants killed; swept #1293-#1295
-- [Live means verified deploy](feedback_live_means_verified_deploy.md) — memory says "merged" until the deploy chain verifies; flake.lock pin is the authority
+- [Live means verified deploy](feedback_live_means_verified_deploy.md) — "merged" is the normal end state since the nightly roll; "live" needs a deploy.sh pass or the next-morning pin check; flake.lock pin is the authority
 - [#1278 wx4 wrong-match queue view SHIPPED](project_1278_wx4_wrong_match_queue_view.md) — PR #1304 live-verified 2026-08-31; projection extracted with Protocol+injected collaborators; byte-identical differential; 40 mutants, 1 survivor pinned
-- [Review mutants target changed expressions](feedback_review_mutants_and_worktree_pinning.md) — mutate the diff's changed expressions first; kill claims need the failing TEST ID; subagents are pinned to the parent's worktree
+- [Review mutants target changed expressions](feedback_review_mutants_and_worktree_pinning.md) — mutate the diff's changed expressions first; kill claims need the failing TEST ID; runners work on archive snapshots under the job tmp dir (2026-09-09 probe: isolation:worktree DID give a subagent its own worktree)
 - [#1278 wx6 beets_compat split SHIPPED](project_1278_wx6_beets_compat_split.md) — PR #1310 live-verified 2026-08-31, Worth-exploring list COMPLETE; era premise refuted by measurement; MagicMock parent-attr trap; from beets import X ignores sys.modules stubs
 - [#1278 hygiene items SHIPPED](project_1278_hygiene_items_shipped.md) — PRs #1308+#1309 live-verified 2026-08-31; match_transfer_id NOT deletable (demoted); job-kind registry 14/15 sites; preview-worker db:Any deferred with measurement; count errors were the round defect class
 - [#1278 register CLOSED](project_1278_register_closed.md) — 2026-08-31 residual sweep PR #1311 live; candidate 1 -> #1312; V6 harness-scoping + Pyright-finishes-kwarg-sweeps lessons
@@ -127,4 +127,4 @@
 - [mutmut ADOPTED](project_mutmut_evaluation.md) — PRs #1318+#1320 merged 2026-09-01; #1317 closed; whole-repo convergence register OPEN at #1321
 - [Git measurement hazards](feedback_git_measurement_hazards.md) — reset --soft vs advanced origin/main stages reverts; git log --all counts abandoned branches
 - [#1355 register CLOSED](project_1355_partial_run.md) — 2026-09-04: 20 PRs live-verified (f2b62801/4ecd9b98); WE7 declined; #1366 feature, #1378 reflection; nightly rolling bot deploys main; three-at-a-time OK
-- [Deploy trim 2026-09](project_deploy_trim_2026_09.md) — 2026-09-09 (#1276/#1378): merged main ships nightly; deploy by hand only for user-facing live proof via `scripts/deploy.sh`; hold helper, cycle verifier, pin receipts deleted; orchestration skills never deploy
+- [Deploy trim 2026-09](project_deploy_trim_2026_09.md) — 2026-09-09 (#1276/#1378, PR #1387): merged main ships nightly; deploy by hand only for user-facing live proof via `scripts/deploy.sh`; hold helper, cycle verifier, pin receipts deleted; orchestration skills never deploy; subagents sharing $CLAUDE_JOB_DIR/tmp collide on generic filenames, give each its own subdir

@@ -1,6 +1,6 @@
 ---
 name: no-draft-prs
-description: Never open draft PRs — a reviewed PR is ready; merge and deploy without stopping
+description: Never open draft PRs — a reviewed PR is ready; merge without stopping to ask (deploy only when the change is user-facing and needs live proof)
 metadata: 
   node_type: memory
   type: feedback
@@ -11,4 +11,4 @@ Never open PRs as drafts (2026-07-11, PR #610: "why are we doing drafts all of a
 
 **Why:** A reviewed change is ready for a normal PR. A draft adds a pointless approval round-trip for a single-operator repo.
 
-**How to apply:** After the review loop is clean, `gh pr create` (no `--draft`), then merge via "Create a merge commit" ([[gh-merge-from-worktree-gotcha]] — verify with `gh pr view --json state`, don't retry on exit 1 from a worktree) and run the full deploy sequence ([[forgejo-cutover-deploy-flow]]). Don't stop to ask between review-clean and deployed.
+**How to apply:** After the review loop is clean, `gh pr create` (no `--draft`), then merge via "Create a merge commit" ([[gh-merge-from-worktree-gotcha]] — verify with `gh pr view --json state`, don't retry on exit 1 from a worktree). Don't stop to ask between review-clean and merged. "Deploy" in the 2026-07 quote is now the nightly roll ([[project-deploy-trim-2026-09]]): run `scripts/deploy.sh` only when the change is user-facing and you need to see it live.
