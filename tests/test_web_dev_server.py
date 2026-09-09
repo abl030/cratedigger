@@ -35,6 +35,12 @@ from tests.fakes import FakeBeetsDB
 from tests.helpers import make_web_runtime
 from tests.test_redis_cache import FakeRedis
 from web.runtime import install_runtime, runtime
+from web.static_assets import (
+    ICON_ASSETS,
+    JS_CONTENT_TYPE,
+    WEB_ROOT,
+    resolve_static_file,
+)
 
 INSECURE_AUTH_WARNING_COPY = (
     "Authentication is disabled for this Cratedigger instance."
@@ -1134,3 +1140,111 @@ class ConfigureLiveDbReadOnlyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WebDevServerStaticParityTest(unittest.TestCase):
+    """The dev server's static surface is production's, not a wider one.
+
+    #1390 residual 8. Measured on 2026-09-09 before this class existed, the
+    dev server answered 200 to ``/server.py``, ``/routes/pipeline.py``,
+    ``/classify.py``, ``/js/../server.py``, ``/js/jsconfig.json``,
+    ``/js/globals.d.ts`` and ``/index.html``; ``web/server.py`` 404s every
+    one. It also 204'd ``/favicon.ico`` and 404'd the three PNG icons that
+    production serves out of ``web/assets/``. A dev server that answers a
+    URL production refuses is an instrument reading high, and the browser
+    screenshot loop in ``docs/solutions/ui-dev-server-screenshot-loop.md``
+    is exactly what reads it.
+    """
+
+    def setUp(self) -> None:
+        config = DevConfig(
+            data="fixture",
+            scenario="peers",
+            prod_base_url="https://music.ablz.au",
+            dsn=None,
+            beets_db=None,
+            mb_api=None,
+            discogs_api=None,
+            redis_host=None,
+            redis_port=6379,
+        )
+        self.server = DevHTTPServer(("127.0.0.1", 0), DevHandler, config)
+        self.thread = threading.Thread(
+            target=self.server.serve_forever, daemon=True,
+        )
+        self.thread.start()
+        self.base = f"http://127.0.0.1:{self.server.server_port}"
+        self.addCleanup(self.thread.join, 2)
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+
+    def _status(self, path: str) -> int:
+        try:
+            with urlopen(f"{self.base}{path}", timeout=10) as response:
+                return response.status
+        except HTTPError as exc:
+            with exc:
+                exc.read()
+            return exc.code
+
+    def test_repository_files_outside_the_static_rule_are_404(self) -> None:
+        # Every path here really exists under web/ and really was served.
+        for path in (
+            "/server.py",
+            "/routes/pipeline.py",
+            "/classify.py",
+            "/index.html",
+            "/js/../server.py",
+            "/js/jsconfig.json",
+            "/js/globals.d.ts",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(
+                    (WEB_ROOT / path.lstrip("/")).resolve().is_file(),
+                    "this path must name a real file, or the 404 below "
+                    "proves nothing about the rule",
+                )
+                self.assertEqual(self._status(path), 404)
+
+    def test_the_static_rule_serves_what_production_serves(self) -> None:
+        with urlopen(f"{self.base}/js/main.js", timeout=10) as response:
+            body = response.read()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(
+                response.headers["Content-Type"], JS_CONTENT_TYPE)
+        self.assertEqual(body, (WEB_ROOT / "js" / "main.js").read_bytes())
+
+        for path, (filename, content_type) in ICON_ASSETS.items():
+            with self.subTest(path=path):
+                with urlopen(f"{self.base}{path}", timeout=10) as response:
+                    icon = response.read()
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(
+                        response.headers["Content-Type"], content_type)
+                self.assertEqual(
+                    icon, (WEB_ROOT / "assets" / filename).read_bytes())
+
+    def test_a_js_path_with_no_file_behind_it_is_404(self) -> None:
+        self.assertEqual(self._status("/js/no-such-module.js"), 404)
+
+    def test_the_index_is_still_served_at_the_root(self) -> None:
+        with urlopen(f"{self.base}/", timeout=10) as response:
+            self.assertEqual(response.status, 200)
+            self.assertIn("DEV fixture:peers", response.read().decode())
+
+    def test_watched_files_hold_only_what_the_browser_can_fetch(self) -> None:
+        # #1390 residual 8's second half: jsconfig.json and globals.d.ts
+        # change what tsc checks, never what the page loads, so a reload on
+        # either would show the operator nothing. The glob is what keeps
+        # them out; widening it to `*` fails here.
+        watched = self.server.watched_files()
+        self.assertIn(WEB_ROOT / "index.html", watched)
+        js_watched = [p for p in watched if p.parent == WEB_ROOT / "js"]
+        self.assertTrue(js_watched)
+        for path in js_watched:
+            with self.subTest(path=path.name):
+                self.assertIsNotNone(
+                    resolve_static_file(f"/js/{path.name}"),
+                    f"{path.name} is watched for reload but the server "
+                    "will not serve it",
+                )

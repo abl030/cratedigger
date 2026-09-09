@@ -10,7 +10,6 @@ import os
 import socket
 import socketserver
 import sys
-from typing import ClassVar
 
 # Script-mode Python puts this file's directory (web/) at sys.path[0]
 # (production boots `python .../web/server.py` from the systemd wrapper),
@@ -110,6 +109,7 @@ from web.routes._registry import (
     merge_registries,
 )
 from web.runtime import WebRuntime, install_runtime, runtime
+from web.static_assets import StaticFile, resolve_static_file
 
 # Single merged registry (#496): each route module exports one
 # ``ROUTES: list[RouteRegistration]`` next to its handlers; this is the
@@ -324,53 +324,31 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _html(self, path: str) -> None:
-        if path == "index.html":
-            body = _rendered_index_document(runtime().insecure_mode)
-        else:
-            html_path = os.path.join(os.path.dirname(__file__), path)
-            with open(html_path, "rb") as f:
-                body = f.read()
+    def _index(self) -> None:
+        """Serve the one HTML document this server has.
+
+        It used to take a path and join it under `web/` for anything but
+        `index.html`. That branch had no caller in the repository and no
+        rule bounding what it would have served, which is the shape
+        `web/static_assets.py` exists to keep out of this handler (#1390).
+        """
+        body = _rendered_index_document(runtime().insecure_mode)
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
-    # Browser icon assets (#161). Allowlist keyed by URL path — no
-    # filesystem-derived names, so no traversal surface.
-    _STATIC_ASSETS: ClassVar = {
-        "/favicon.ico": ("favicon.ico", "image/x-icon"),
-        "/favicon-16x16.png": ("favicon-16x16.png", "image/png"),
-        "/favicon-32x32.png": ("favicon-32x32.png", "image/png"),
-        "/apple-touch-icon.png": ("apple-touch-icon.png", "image/png"),
-    }
-
-    def _static_asset(self, url_path: str) -> None:
-        """Serve an allowlisted icon asset from web/assets/."""
-        filename, content_type = self._STATIC_ASSETS[url_path]
-        asset_path = os.path.join(os.path.dirname(__file__), "assets", filename)
-        with open(asset_path, "rb") as f:
-            body = f.read()
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "public, max-age=86400")
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _static_js(self, path: str) -> None:
-        """Serve a JS file from the web/js/ directory."""
-        js_path = os.path.join(os.path.dirname(__file__), "js", os.path.basename(path))
-        if not os.path.isfile(js_path):
+    def _static_file(self, static: StaticFile) -> None:
+        """Serve one file `web/static_assets.py` resolved, or 404 a miss."""
+        if not static.path.is_file():
             self._error("Not found", 404)
             return
-        with open(js_path, "rb") as f:
-            body = f.read()
+        body = static.path.read_bytes()
         self.send_response(200)
-        self.send_header("Content-Type", "application/javascript; charset=utf-8")
+        self.send_header("Content-Type", static.content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Cache-Control", static.cache_control)
         self.end_headers()
         self.wfile.write(body)
 
@@ -437,14 +415,11 @@ class Handler(BaseHTTPRequestHandler):
         params = parse_qs(parsed.query)
 
         try:
-            # Serve static JS modules
-            if path.startswith("/js/") and path.endswith(".js"):
-                self._static_js(path[4:])
-                return
-
-            # Browser icon assets
-            if path in self._STATIC_ASSETS:
-                self._static_asset(path)
+            # Static JS modules and the allowlisted browser icons, under
+            # the one rule scripts/web_dev_server.py serves too.
+            static = resolve_static_file(path)
+            if static is not None:
+                self._static_file(static)
                 return
 
             # Check local method (index)
@@ -580,7 +555,7 @@ class Handler(BaseHTTPRequestHandler):
     # ── GET handlers ─────────────────────────────────────────────────
 
     def _get_index(self, params: dict[str, list[str]]) -> None:
-        self._html("index.html")
+        self._index()
 
 
 def main() -> int:
