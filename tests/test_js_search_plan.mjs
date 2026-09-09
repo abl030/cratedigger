@@ -2374,6 +2374,66 @@ async function withRaceFixture(impl) {
   });
 }
 
+// #811 — Load older appends only rows the active filter admits, while
+// the snapshot keeps every loaded row so All can still show them.
+{
+  await withRaceFixture(async (ctx) => {
+    /** @type {string[]} */
+    const appended = [];
+    /** @type {any} */
+    const wrap = {
+      innerHTML: '', remove() {},
+      querySelector(/** @type {string} */ sel) {
+        return sel.includes('button') ? { disabled: false } : null;
+      },
+    };
+    /** @type {any} */
+    const tbody = {
+      insertAdjacentHTML(/** @type {string} */ _pos, /** @type {string} */ html) {
+        appended.push(html);
+      },
+      closest() { return { querySelector() { return wrap; } }; },
+    };
+    const render = renderSearchPlanDetail(42);
+    ctx.fetchQueue[0].resolve(fakeOkResponse(makeDetailInspection()));
+    ctx.fetchQueue[1].resolve(fakeOkResponse({
+      rows: makeHistoryRows(), next_before_id: 12300,
+    }));
+    ctx.fetchQueue[2].resolve(fakeOkResponse(makeLibraryPayload()));
+    await render;
+
+    ctx.document.querySelector = (/** @type {string} */ sel) => {
+      if (sel.includes('sp-attempts-tbody')) return tbody;
+      if (sel.includes('sp-load-older-wrap')) return wrap;
+      return null;
+    };
+    const older = {
+      ...makeHistoryRows()[0],
+      id: 11000, plan_strategy: 'OLDER-BORING',
+      rejection_reason: null,
+      candidates: [{ username: 'p', pre_filter_skip: true }],
+    };
+    const olderInteresting = {
+      ...makeHistoryRows()[1], id: 11001, plan_strategy: 'OLDER-FOUND',
+    };
+    const page = searchPlanLoadOlder(42, 12300);
+    ctx.fetchQueue[3].resolve(fakeOkResponse({
+      rows: [older, olderInteresting], next_before_id: null,
+    }));
+    await page;
+    t.equal(appended.length, 1, 'load older: one insert for the page');
+    t.contains(appended[0], 'OLDER-FOUND',
+      'load older: an interesting older row is appended under the default filter');
+    t.excludes(appended[0], 'OLDER-BORING',
+      'load older: an uninteresting older row is NOT appended under that filter');
+
+    searchPlanSetAttemptsFilter(42, 'all');
+    t.contains(ctx.getInnerHtml(), 'OLDER-BORING',
+      'load older: the snapshot kept the filtered-out row for the All view');
+    searchPlanSetAttemptsFilter(42, 'interesting');
+  });
+}
+
 // F2 — toggleSearchPlanSummary: two concurrent calls for the same id
 // must trigger exactly ONE fetch (deduplication).
 {
