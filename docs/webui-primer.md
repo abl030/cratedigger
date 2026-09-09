@@ -105,9 +105,15 @@ Three things to know when it goes red:
 - **`querySelector`-family results are `Element`.** Reading `.dataset` or
   `.value`, or passing one to an `HTMLElement` parameter, needs the JSDoc
   cast the modules already use — `/** @type {HTMLElement|null} */ (…)`.
-  Prefer casting at the query so the whole downstream is typed. Do not
-  narrow with `instanceof HTMLElement`: the Node test runner defines no such
-  global, so it would throw in exactly the suites that exercise the renderer.
+  Prefer casting at the query so the whole downstream is typed. Reach for
+  `instanceof HTMLElement` only where no `.mjs` suite can reach the line:
+  the Node test runner defines no such global (measured on node 24.19.0,
+  `typeof HTMLElement` is `undefined`, and `x instanceof undefined` throws
+  `TypeError`), so it throws wherever a suite does drive the code. Two
+  sites predate the gate and sit in that safe corner — `web/js/main.js:55`
+  and `web/js/replace_picker.js:576`, both reading `document.activeElement`
+  behind a fetch response no suite drives. tsc accepts the shape, so
+  nothing mechanical stops a third; the cast is the default.
 - **A stale JSDoc typedef is a documentation bug, not a checker
   complaint.** 14 of the original 48 were fields the server really sends
   (`status` from `web/routes/pipeline_mutations.py`, `started_at` from

@@ -597,11 +597,15 @@ export async function toggleDetail(elId, requestId) {
       html += renderReplaceButton({
         mode: 'standard',
         // Same `Number(id)` the action state above already applies to the
-        // same value. `id` is `requestId || elId` and is a number on every
-        // reachable path — every caller passing a string elId ('dl-<n>',
-        // 'acquisition-<n>') also passes the numeric requestId — but where
-        // it is not, NaN drops the button rather than interpolating a
-        // string into its onclick, and Bad Rip drops with it.
+        // same value. `id` is `requestId || elId`; every caller passing a
+        // string elId ('dl-<n>' from recents.js, 'acquisition-<n>',
+        // 'lib-<n>') passes a request id alongside it that
+        // `download_log.request_id INTEGER NOT NULL` (migration 001)
+        // guarantees is a number, so this is a number on every reachable
+        // path. Where it somehow is not, NaN is falsy and
+        // `renderReplaceButton` returns '' rather than interpolating a
+        // string into its onclick; Bad Rip drops with it, off this same
+        // coercion.
         sourceRequestId: Number(id),
         releaseGroupId: req.mb_release_group_id || null,
         sourceLabel: `${req.artist_name || ''} — ${req.album_title || ''}`,

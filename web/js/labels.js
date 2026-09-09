@@ -476,10 +476,9 @@ export function renderLabelDetail(containerEl, payload) {
   const hasAnySubLabel = allReleases.some((r) => r.sub_label_name);
   /** @type {any} */ (containerEl)._hasAnySubLabel = hasAnySubLabel;
 
-  // Initialise / preserve filters in state. Default off everywhere.
-  if (!state.labelFilters) {
-    state.labelFilters = { yearMin: null, yearMax: null, format: '', hideHeld: false };
-  }
+  // `state.labelFilters` is initialised at module load (state.js) and every
+  // assignment to it is an object literal, so it is never falsy — the
+  // `|| {}` initialiser that used to sit here was vacuous (issue #1390).
   /** @type {LabelFilters} */
   const filters = state.labelFilters;
 
@@ -596,7 +595,7 @@ export function renderLabelRows(containerEl) {
   const rows = /** @type {any} */ (containerEl)._releases || [];
   const hasAnySubLabel = /** @type {any} */ (containerEl)._hasAnySubLabel;
   /** @type {LabelFilters} */
-  const filters = state.labelFilters || { yearMin: null, yearMax: null, format: '', hideHeld: false };
+  const filters = state.labelFilters;
   const filtered = applyLabelFilters(rows, filters);
   const sorted = sortByYearDesc(filtered);
   const visible = sorted.slice(0, MAX_RENDERED);
