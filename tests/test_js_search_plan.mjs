@@ -594,17 +594,35 @@ function makeAcquisition(overrides = {}) {
 }
 
 /**
+ * One `beets_tracks` item, shaped as `web/routes/pipeline.py` emits it
+ * from the resolved album's Beets items (measured live against request
+ * 986 on 2026-09-09: `MP3 / 320000 / 48000 / 0` on all 11 tracks).
+ */
+function makeBeetsTrack(overrides = {}) {
+  return {
+    title: 'A Track', track: 1, disc: 1, length: 166.8,
+    format: 'LIBFORMAT', bitrate: 320000, samplerate: 48000, bitdepth: 0,
+    ...overrides,
+  };
+}
+
+/**
  * `GET /api/pipeline/<id>` — the third fetch the detail page makes.
  * Field names measured live against request 986 on 2026-09-09:
- * `current_library.{state,path}` and
- * `request.{final_format,min_bitrate,current_spectral_grade,
- * verified_lossless,beets_scenario}`, plus `history[]` rows carrying
- * `outcome` / `created_at` / `soulseek_username`.
+ * `current_library.{state,path}`, `beets_tracks[]` (the library's own
+ * format authority), and
+ * `request.{min_bitrate,current_spectral_grade,verified_lossless,
+ * beets_scenario}`, plus `history[]` rows carrying `outcome` /
+ * `created_at` / `soulseek_username`.
+ *
+ * `request.final_format` is seeded here deliberately, with a value that
+ * must never appear on the page: on 986 it is null while Beets holds
+ * real facts, so a renderer reading it is reading the wrong authority.
  */
 function makeLibraryPayload(overrides = {}) {
   return {
     request: {
-      final_format: 'LIBFORMAT',
+      final_format: 'REQUESTFORMAT',
       min_bitrate: 320,
       current_spectral_grade: 'LIBGRADE',
       verified_lossless: false,
@@ -619,6 +637,11 @@ function makeLibraryPayload(overrides = {}) {
       path: '/lib/LIBPATH/2000 - Test Album',
       ...(overrides.current_library || {}),
     },
+    beets_tracks: overrides.beets_tracks ?? [
+      makeBeetsTrack({ track: 1 }),
+      makeBeetsTrack({ track: 2 }),
+      makeBeetsTrack({ track: 3 }),
+    ],
     history: overrides.history ?? [
       { outcome: 'rejected', created_at: '2026-05-01T00:00:00Z',
         soulseek_username: 'REJECTEDPEER' },
@@ -886,7 +909,20 @@ function fragment(html, startMarker, endMarker) {
     history: [], nextBeforeId: null, library: makeLibraryPayload(),
   });
   const lib = fragment(unique, 'In the library now', 'Is the override holding?');
-  t.contains(lib, 'LIBFORMAT', 'library: request.final_format rendered');
+  // Beets is the library authority: the format facts come from
+  // `beets_tracks`, never from the request row's own `final_format`.
+  t.contains(lib, 'LIBFORMAT',
+    'library: the Beets item format is rendered');
+  t.excludes(lib, 'REQUESTFORMAT',
+    'library: request.final_format is NOT the format authority');
+  t.contains(lib, '320k',
+    'library: the minimum Beets bitrate renders as NNNk (bps in this payload)');
+  t.contains(lib, '48 kHz',
+    'library: the Beets samplerate renders in kHz');
+  t.contains(lib, '3 tracks',
+    'library: the Beets item count is the track count');
+  t.excludes(lib, '-bit',
+    'library: a zero bitdepth (MP3 and friends) is omitted, not printed');
   t.contains(lib, 'LIBGRADE', 'library: request.current_spectral_grade rendered');
   t.contains(lib, 'LIBSCENARIO', 'library: request.beets_scenario rendered');
   t.contains(lib, 'LIBPATH', 'library: current_library.path rendered');
@@ -896,6 +932,53 @@ function fragment(html, startMarker, endMarker) {
     'library: a non-success history row is NOT read for the import peer');
   t.contains(lib, '2026-04-06',
     'library: the success row created_at supplies the import date');
+
+  // A lossless album: bitdepth is real and shows, and the numeric facts
+  // take the worst track rather than the first.
+  const lossless = renderDetailPage({
+    inspection: makeDetailInspection(),
+    history: [], nextBeforeId: null,
+    library: makeLibraryPayload({
+      beets_tracks: [
+        makeBeetsTrack({ format: 'FLAC', bitrate: 1_010_000, samplerate: 44100, bitdepth: 24 }),
+        makeBeetsTrack({ format: 'FLAC', bitrate: 900_000, samplerate: 44100, bitdepth: 16 }),
+      ],
+    }),
+  });
+  const losslessLib = fragment(lossless, 'In the library now', 'Is the override holding?');
+  t.contains(losslessLib, 'FLAC · 900k · 44 kHz · 16-bit · 2 tracks',
+    'library: a homogeneous album renders one codec and the worst track’s numbers');
+
+  // A mixed album names every codec with its count, commonest first.
+  const mixed = renderDetailPage({
+    inspection: makeDetailInspection(),
+    history: [], nextBeforeId: null,
+    library: makeLibraryPayload({
+      beets_tracks: [
+        makeBeetsTrack({ format: 'ODDFMT', bitrate: 128000 }),
+        makeBeetsTrack({ format: 'LIBFORMAT' }),
+        makeBeetsTrack({ format: 'LIBFORMAT' }),
+      ],
+    }),
+  });
+  const mixedLib = fragment(mixed, 'In the library now', 'Is the override holding?');
+  t.contains(mixedLib, 'LIBFORMAT &times;2, ODDFMT &times;1',
+    'library: a mixed album names each codec with its count, commonest first');
+  t.contains(mixedLib, '128k',
+    'library: a mixed album reports the lowest bitrate present');
+
+  // An empty beets_tracks array measures nothing, so say which state we
+  // are in rather than invent facts.
+  const noTracks = renderDetailPage({
+    inspection: makeDetailInspection(),
+    history: [], nextBeforeId: null,
+    library: makeLibraryPayload({ beets_tracks: [] }),
+  });
+  const noTracksLib = fragment(noTracks, 'In the library now', 'Is the override holding?');
+  t.excludes(noTracksLib, 'REQUESTFORMAT',
+    'library: an empty beets_tracks does NOT fall back to request.final_format');
+  t.excludes(noTracksLib, 'LIBPATH',
+    'library: an empty beets_tracks renders no HAVE strip');
 
   const verified = renderDetailPage({
     inspection: makeDetailInspection(),

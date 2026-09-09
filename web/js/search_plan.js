@@ -1012,6 +1012,64 @@ function renderScopeColumn(scope) {
 }
 
 /**
+ * Summarize the Beets items of the resolved album into one line of
+ * measured format facts.
+ *
+ * Beets is the library authority (CLAUDE.md), and `beets_tracks` is
+ * what `web/routes/pipeline.py` emits from the resolved album's items:
+ * `{title, track, disc, length, format, bitrate, samplerate, bitdepth}`.
+ * The request row's own `final_format` is NOT a substitute — it is null
+ * on request 986 while every Beets item there reads MP3 / 320000 /
+ * 48000, which is exactly the album the quality override on that
+ * request exists for.
+ *
+ * Codec counts are named whenever an album is not homogeneous
+ * (`MP3 &times;10, FLAC &times;1`), highest count first. The numeric
+ * facts take the MINIMUM across items, ignoring zero and absent
+ * values: the album is only as good as its worst track, and `bitdepth`
+ * is 0 on every codec that does not carry one. `bitrate` is bits per
+ * second on this payload, so it renders as `NNNk`.
+ *
+ * Returns HTML, already escaped — the `&times;` separators are markup.
+ *
+ * @param {Array<Object>} tracks  A non-empty `beets_tracks` array.
+ * @returns {string}
+ */
+function summarizeBeetsTracks(tracks) {
+  /** @type {Map<string, number>} */
+  const byFormat = new Map();
+  /** @type {(current: number|null, raw: unknown) => number|null} */
+  const lower = (currentMin, raw) => {
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value <= 0) return currentMin;
+    return (currentMin === null || value < currentMin) ? value : currentMin;
+  };
+  /** @type {number|null} */ let bitrate = null;
+  /** @type {number|null} */ let samplerate = null;
+  /** @type {number|null} */ let bitdepth = null;
+  for (const item of tracks) {
+    if (!item || typeof item !== 'object') continue;
+    const format = item.format ? String(item.format) : 'unknown';
+    byFormat.set(format, (byFormat.get(format) || 0) + 1);
+    bitrate = lower(bitrate, item.bitrate);
+    samplerate = lower(samplerate, item.samplerate);
+    bitdepth = lower(bitdepth, item.bitdepth);
+  }
+  const formats = Array.from(byFormat.entries())
+    .sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]));
+  /** @type {string[]} */
+  const parts = [];
+  parts.push(formats.length === 1
+    ? esc(formats[0][0])
+    : formats.map(([format, count]) => `${esc(format)} &times;${esc(String(count))}`).join(', '));
+  if (bitrate !== null) parts.push(`${esc(String(Math.round(bitrate / 1000)))}k`);
+  if (samplerate !== null) parts.push(`${esc(String(Math.round(samplerate / 1000)))} kHz`);
+  if (bitdepth !== null) parts.push(`${esc(String(bitdepth))}-bit`);
+  parts.push(`${esc(String(tracks.length))} track${tracks.length === 1 ? '' : 's'}`);
+  return parts.join(' · ');
+}
+
+/**
  * Render the right "In the library now" column from the per-request
  * pipeline payload (`GET /api/pipeline/<id>`).
  *
@@ -1031,18 +1089,18 @@ function renderLibraryColumn(library) {
   }
   const current = library.current_library || {};
   const request = library.request || {};
-  if (current.state !== 'unique') {
+  const tracks = Array.isArray(library.beets_tracks) ? library.beets_tracks : [];
+  // `beets_tracks` is the Beets items of the resolved album, and Beets
+  // is the library authority. The route emits it only for a `unique`
+  // resolution, so an absent or empty array and a non-unique state are
+  // the same case: nothing measured, say which state we are in.
+  if (current.state !== 'unique' || tracks.length === 0) {
     const state = typeof current.state === 'string' ? current.state : 'unknown';
     return `<div class="sp-scope-col">${label}
       <div class="sp-have-unavailable">${esc(humanizeToken(state))}</div>
     </div>`;
   }
-  const fmt = request.final_format
-    ? String(request.final_format)
-    : 'format unrecorded';
-  const floor = (typeof request.min_bitrate === 'number')
-    ? ` · floor ${request.min_bitrate} kbps`
-    : '';
+  const facts = summarizeBeetsTracks(tracks);
   /** @type {string[]} */
   const proof = [];
   if (request.current_spectral_grade) proof.push(String(request.current_spectral_grade));
@@ -1061,7 +1119,7 @@ function renderLibraryColumn(library) {
   return `<div class="sp-scope-col">${label}
     <div class="sp-have">
       <span class="sp-have-tag">HAVE</span>
-      <span class="sp-have-fmt">${esc(fmt)}${esc(floor)}${proof.length ? ` <span class="sp-have-spec">${esc(proof.join(' · '))}</span>` : ''}</span>
+      <span class="sp-have-fmt">${facts}${proof.length ? ` <span class="sp-have-spec">${esc(proof.join(' · '))}</span>` : ''}</span>
       <span class="sp-have-tag">FROM</span>
       <span class="sp-have-fmt">${from}</span>
     </div>

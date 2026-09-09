@@ -872,7 +872,16 @@ depends on.
   and next eligible time; **Searching for** — the effective tier ladder as
   lit / struck chips (plus an `any` chip bound to catch-all) beside the
   override, bitrate floor and target format, and **In the library now**, the
-  compact HAVE strip; **Is the override holding?** — check rows keyed ✓ or !
+  compact HAVE strip. That strip's format facts come from the per-request
+  route's `beets_tracks` — Beets is the library authority — as the codecs
+  present with their counts when an album is mixed, then the lowest bitrate,
+  samplerate and non-zero bitdepth across its items, then the track count;
+  the request row's own `final_format` is not read (it is null on request
+  986 while every Beets item there reads MP3 / 320000 / 48000). The
+  spectral grade and verified-lossless flag still come from the request.
+  A non-`unique` resolution, or a `unique` one the route sent no
+  `beets_tracks` for, renders the state word instead of invented facts;
+  **Is the override holding?** — check rows keyed ✓ or !
   on candidates scored outside the scope, grabs by filetype and their last
   outcome, the last found folder with the outcome of the grab it produced,
   and the peers seen; **Plan** — the slot list and the per-slot tallies as
