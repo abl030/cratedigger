@@ -4852,6 +4852,20 @@ class TestSearchForensicsCaptureSlice(unittest.TestCase):
         # future refactor of the AlbumRecord shape doesn't silently
         # NULL the column.
         self.assertEqual(row.expected_track_count, 2)
+        # Issue #811: the grab's attempt fingerprint reaches the DB seam.
+        # This is the only pin on the whole executor → ConsumedAttemptInput
+        # hop; without it the search-to-grab link is never offered and
+        # every stamp is a silent zero-write.
+        from lib.processing_paths import attempt_fingerprint_or_none
+        assert find_result.grab_entry is not None
+        self.assertEqual(
+            result.grab_attempt_fingerprint,
+            attempt_fingerprint_or_none(find_result.grab_entry.files))
+        self.assertIsNotNone(result.grab_attempt_fingerprint)
+        recorded = db.record_consumed_search_attempt_calls[0]
+        self.assertEqual(
+            recorded.grab_attempt_fingerprint,
+            result.grab_attempt_fingerprint)
 
     def test_unwild_variant_at_threshold(self):
         """Plan-item with strategy='unwild' produces an unwild query (post-U5).
@@ -13456,13 +13470,18 @@ class TestSearchToGrabLinkPropagationSlice(unittest.TestCase):
 
         from lib.dispatch.helpers import _build_download_info
         from lib.download_reconstruction import reconstruct_grab_list_entry
-        from lib.quality import ActiveDownloadState
+        from lib.quality import ActiveDownloadFileState, ActiveDownloadState
 
         db = FakePipelineDB()
         state = ActiveDownloadState(
             filetype="flac",
             enqueued_at=self.WITNESS,
-            files=[],
+            # A real file, so ``_build_download_info`` takes its main
+            # branch rather than the empty-manifest early exit; the empty
+            # case has its own test below.
+            files=[ActiveDownloadFileState(
+                username="peer", filename="Music\\Album\\01.flac",
+                file_dir="Music\\Album", size=1000)],
             search_log_id=search_log_id,
         )
         db.seed_request(make_request_row(
@@ -13477,6 +13496,96 @@ class TestSearchToGrabLinkPropagationSlice(unittest.TestCase):
         _db, entry, dl_info = self._seeded(search_log_id=self.SEARCH_LOG_ID)
         self.assertEqual(entry.search_log_id, self.SEARCH_LOG_ID)
         self.assertEqual(dl_info.search_log_id, self.SEARCH_LOG_ID)
+
+    def test_an_empty_manifest_still_carries_the_link(self):
+        """The link is a property of the attempt, not of its files.
+
+        ``_build_download_info`` early-exits on an empty file list; that
+        exit must not drop the attempt's own search link.
+        """
+        from lib.dispatch.helpers import _build_download_info
+        from lib.grab_list import GrabListEntry as _Entry
+
+        dl_info = _build_download_info(_Entry(
+            album_id=42, files=[], filetype="flac", title="Album",
+            artist="Artist", year="1991", mb_release_id="mb-uuid",
+            search_log_id=self.SEARCH_LOG_ID,
+        ))
+        self.assertEqual(dl_info.username, None)
+        self.assertEqual(dl_info.search_log_id, self.SEARCH_LOG_ID)
+
+    @staticmethod
+    def _album():
+        """A minimal real ``AlbumRecord`` — the merge step needs its id."""
+        from album_source import AlbumRecord
+        return AlbumRecord(
+            id=42, title="Album", release_date="1991-01-01T00:00:00Z",
+            artist_id=0, artist_name="Artist", foreign_artist_id="",
+            releases=[], db_request_id=42, db_source="request",
+            db_mb_release_id="mb-uuid",
+            db_search_filetype_override=None, db_target_format=None,
+        )
+
+    def test_the_claim_and_the_executor_agree_on_the_attempt_fingerprint(
+        self,
+    ):
+        """The stamp's whole guard rests on these two agreeing (#811).
+
+        ``build_active_download_state`` fingerprints the claim;
+        ``_apply_find_download_result`` fingerprints what the executor
+        reports for the SAME entry. If they ever diverge, every stamp
+        becomes a silent zero-write, so drive both real functions over
+        one entry and require the two values to be equal.
+        """
+        import cratedigger
+        from lib.download import build_active_download_state
+        from lib.enqueue import FindDownloadResult
+        from lib.search import SearchResult
+
+        entry = make_grab_list_entry(
+            album_id=42,
+            files=[
+                make_download_file(
+                    filename="Music\\Album\\01.flac", id="t1",
+                    file_dir="Music\\Album", username="peer"),
+                make_download_file(
+                    filename="Music\\Album\\02.flac", id="t2",
+                    file_dir="Music\\Album", username="peer"),
+            ],
+        )
+        claimed = build_active_download_state(entry)
+
+        result = SearchResult(album_id=42, success=True)
+        grab_list: dict[int, GrabListEntry] = {}
+        cratedigger._apply_find_download_result(
+            album=self._album(),
+            result=result,
+            find_result=FindDownloadResult(
+                outcome="found", grab_entry=entry),
+            failed_grab=[],
+            grab_list=grab_list,
+        )
+
+        self.assertIsNotNone(result.grab_attempt_fingerprint)
+        self.assertEqual(
+            result.grab_attempt_fingerprint, claimed.attempt_fingerprint)
+
+    def test_a_non_found_outcome_offers_no_fingerprint(self):
+        """Must-still-work control: only a grab can carry a link."""
+        import cratedigger
+        from lib.enqueue import FindDownloadResult
+        from lib.search import SearchResult
+
+        result = SearchResult(album_id=42, success=True)
+        cratedigger._apply_find_download_result(
+            album=self._album(),
+            result=result,
+            find_result=FindDownloadResult(
+                outcome="no_match", grab_entry=None),
+            failed_grab=[],
+        )
+        self.assertEqual(result.outcome, "no_match")
+        self.assertIsNone(result.grab_attempt_fingerprint)
 
     def test_timeout_writer_persists_the_link(self):
         from lib.download import _timeout_album
