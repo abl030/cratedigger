@@ -131,7 +131,7 @@ success 0, not found 2, input/semantic violation 3, conflict 4, transient 5.
   `download_log` row each search produced — so a run of `found` searches
   that all timed out is visible as such instead of as unexplained
   repetition. All-NULL on searches that never enqueued and on rows
-  predating migration 085.
+  predating migration 086.
 - `import-job-recovery show` prints read-only exact-owner, liveness, completion,
   library, and cleanup evidence. It remains useful for historical
   `recovery_required` rows, which startup convergence handles automatically

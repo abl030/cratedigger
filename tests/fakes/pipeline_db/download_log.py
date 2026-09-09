@@ -449,7 +449,7 @@ class _FakeDownloadLogMixin(_FakePipelineDBBase):
                 else None
             ),
             "source_download_log_id": entry.source_download_log_id,
-            # Migration 085 (issue #811) — the search row that produced
+            # Migration 086 (issue #811) — the search row that produced
             # this grab. Part of ``dl.*``, so every reader sees it.
             "search_log_id": entry.search_log_id,
             "original_beets_distance": next(

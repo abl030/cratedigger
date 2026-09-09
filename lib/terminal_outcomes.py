@@ -89,7 +89,7 @@ class TerminalDownloadAudit:
     source_download_log_id: int | None = None
     # Issue #811: the ``search_log`` row whose ``found`` outcome produced
     # the grab this audit row describes (``download_log.search_log_id``,
-    # migration 085). Copied from ``DownloadInfo.search_log_id`` at every
+    # migration 086). Copied from ``DownloadInfo.search_log_id`` at every
     # construction site that has the grab's own download info in scope,
     # and read straight off the owned request's still-attached
     # ``active_download_state`` by the AUTOMATION preview

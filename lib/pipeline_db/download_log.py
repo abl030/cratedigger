@@ -86,7 +86,7 @@ WRITABLE_IMPORT_ACCEPTANCE_OUTCOMES: tuple[DownloadLogOutcome, ...] = (
 #: lane too, whose rows inherit ``source='slskd'`` from their origin row;
 #: those are counted, which slightly over-reports a request the operator
 #: has force-imported into. Narrowing further would need the row's own
-#: ``search_log_id``, which is NULL on every row older than migration 085.
+#: ``search_log_id``, which is NULL on every row older than migration 086.
 GRAB_OUTCOMES: tuple[DownloadLogOutcome, ...] = (
     "success", "rejected", "failed", "timeout",
     "measurement_failed", "have_analysis_error",
@@ -698,7 +698,7 @@ class _DownloadLogMixin(_PipelineDBBase):
                      # audit, ...); this comment is scoped to the terminal-
                      # outcome writers only, not every caller.
                      source: str = "slskd",
-                     # Migration 085 (issue #811). Only a grab-originated
+                     # Migration 086 (issue #811). Only a grab-originated
                      # row carries one: the caller reads it off the
                      # attempt's own ``DownloadInfo``/``GrabListEntry``,
                      # which got it from the persisted

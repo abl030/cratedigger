@@ -319,7 +319,7 @@ class _SearchPlanMixin(_PipelineDBBase):
         ``[1, 200]`` clamp so the DB layer stays a thin SQL adapter.
 
         Issue #811: every row also carries the grab that search produced,
-        via ``download_log.search_log_id`` (migration 085) — the NEWEST
+        via ``download_log.search_log_id`` (migration 086) — the NEWEST
         linked row, since one grab can write several audit rows over its
         life (a timeout, then a later terminal outcome). ``grab_*`` is
         all-NULL on a search that never enqueued, on one whose stamp

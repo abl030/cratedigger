@@ -349,7 +349,7 @@ class ActiveDownloadState(msgspec.Struct, omit_defaults=True):
     # the empty-files edge case that has no fingerprint to match on.
     # Read back by ``lib.download_reconstruction.reconstruct_grab_list_
     # entry`` so every ``download_log`` row this grab later writes can
-    # carry ``download_log.search_log_id`` (migration 085).
+    # carry ``download_log.search_log_id`` (migration 086).
     search_log_id: int | None = None
 
     def to_json(self) -> str:
@@ -667,7 +667,7 @@ class DownloadInfo:
     # Issue #811: the ``search_log`` row this grab came from, carried from
     # ``GrabListEntry.search_log_id`` by ``lib.dispatch.helpers.
     # _build_download_info`` and written to ``download_log.search_log_id``
-    # (migration 085). None for every non-grab lane -- force import,
+    # (migration 086). None for every non-grab lane -- force import,
     # local import, the manifest guard's username-only info -- because
     # those have no grab state in scope.
     search_log_id: int | None = None

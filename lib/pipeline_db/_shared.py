@@ -1110,7 +1110,7 @@ class AcquisitionLastFound:
 
     The peer facts describe that search's best-matched SCORED candidate;
     ``grab`` is the newest ``download_log`` row linked to it, or None when
-    the enqueue never produced one (or the link predates migration 085).
+    the enqueue never produced one (or the link predates migration 086).
     """
 
     search_log_id: int
