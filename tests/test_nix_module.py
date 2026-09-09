@@ -269,9 +269,13 @@ _NIX_EVAL_CACHE: dict[str, dict[str, object] | Exception] = {}
 #: mutant runner works) cannot be fetched as ``git+file``, so the preamble
 #: falls back to #1248's filtered ``builtins.path`` copy there, now
 #: excluding the two churn paths seen so far (``__pycache__`` and
-#: ``tests/_harness_fixtures``). That fallback is weaker, not safe: a
-#: suite run in such a snapshot still runs its phases concurrently, and any
-#: other untracked churn under the tree can still race the walk.
+#: ``tests/_harness_fixtures``); ``builtins.path``'s result carries a
+#: store-path string context that ``getFlake`` refuses, so the fallback
+#: discards it with ``unsafeDiscardStringContext``, which is safe because
+#: the copy is already realized on disk by then. That fallback is weaker,
+#: not safe: a suite run in such a snapshot still runs its phases
+#: concurrently, and any other untracked churn under the tree can still
+#: race the walk.
 
 
 def _cached_nix_eval_json(expression: str) -> dict[str, object]:
@@ -1029,45 +1033,56 @@ class TestWebAuthMatrixPreamblesStayIdentical(unittest.TestCase):
         )
         _assert_web_auth_matrix_preambles_equal(part1, part2_same)
 
-
-class TestNixEvalPreamblesNeverWalkTheLiveTree(unittest.TestCase):
-    """#1378: every nix-eval preamble loads the flake from the git snapshot
-    when it can, and no world names the live tree as ``src``.
-
-    The defect this guards against is a race with the concurrently running
-    JavaScript phase (see the comment above ``_NIX_EVAL_CACHE``), which no
-    test can assert as a value: reverting every preamble to the live-tree
-    shape leaves every eval green (measured by the #1387 mutant runner). So
-    the guard is a source pin, spelled from parts so this test's own text
-    never satisfies it.
-    """
-
-    PREAMBLE_MODULES = (
-        REPO_ROOT / "tests" / "test_nix_module.py",
-        REPO_ROOT / "tests" / "test_web_auth_mode_generated.py",
-    )
-
-    def test_every_preamble_prefers_the_git_snapshot(self) -> None:
-        live_flake = "getFlake (toString " + "./.)"
-        live_src = "src = " + "./.;"
-        filtered_src = "src = " + "repoSource;"
-        snapshot = '"git+file://" ' + "+ toString ./."
-        guard = "if builtins.pathExists " + "./.git"
-        for path in self.PREAMBLE_MODULES:
-            with self.subTest(path=path.name):
-                source = path.read_text(encoding="utf-8")
-                self.assertNotIn(live_flake, source)
-                self.assertNotIn(live_src, source)
-                self.assertNotIn(filtered_src, source)
-                self.assertGreaterEqual(source.count(snapshot), 1)
-                self.assertEqual(source.count(snapshot), source.count(guard))
-
     def test_missing_marker_fails_closed(self) -> None:
         """Known-bad self-test for the marker-not-found guard clauses."""
         with self.assertRaisesRegex(AssertionError, "part1 world-list marker not found"):
             _assert_web_auth_matrix_preambles_equal("no marker here", "wheelAccessGroup = evaluate {")
         with self.assertRaisesRegex(AssertionError, "part2 world-list marker not found"):
             _assert_web_auth_matrix_preambles_equal("missing = evaluate {", "no marker here")
+
+
+#: The one shape every flake-loading call under tests/ must take (#1378):
+#: the git snapshot when ``.git`` exists, else #1248's filtered copy.
+#: Matched immediately after the call's opening parenthesis; the brace
+#: after ``builtins.path`` may be doubled inside an f-string.
+_SNAPSHOT_PREAMBLE_RE = re.compile(
+    r"^\s*if builtins\.pathExists \./\.git"
+    r'\s*then "git\+file://" \+ toString \./\.'
+    r"\s*else builtins\.unsafeDiscardStringContext \(toString \(builtins\.path \{\{?"
+)
+
+
+class TestNixEvalPreamblesNeverWalkTheLiveTree(unittest.TestCase):
+    """#1378: every nix-eval preamble under tests/ loads the flake from the
+    git snapshot when it can, falls back to the filtered copy otherwise,
+    and no world names the live tree as ``src``.
+
+    The defect this guards against is a race with the concurrently running
+    JavaScript phase (see the comment above ``_NIX_EVAL_CACHE``), which no
+    test can assert as a value: reverting every preamble to the live-tree
+    shape leaves every eval green (measured by the #1387 mutant runner). So
+    the guard is a source pin over the call spelling itself: the modules
+    are found by scanning for it rather than listed, every occurrence must
+    be followed by the one accepted shape, and the literals are spelled
+    from parts so this test's own text never satisfies it.
+    """
+
+    def test_every_preamble_prefers_the_git_snapshot(self) -> None:
+        call = "builtins.getFlake" + " ("
+        live_src = "src = " + "./.;"
+        modules = sorted(
+            path for path in (REPO_ROOT / "tests").glob("*.py")
+            if call in path.read_text(encoding="utf-8")
+        )
+        self.assertGreaterEqual(len(modules), 2, modules)
+        for path in modules:
+            with self.subTest(path=path.name):
+                source = path.read_text(encoding="utf-8")
+                self.assertNotIn(live_src, source)
+                calls = [match.end() for match in re.finditer(re.escape(call), source)]
+                self.assertGreaterEqual(len(calls), 1)
+                for end in calls:
+                    self.assertRegex(source[end:end + 400], _SNAPSHOT_PREAMBLE_RE)
 
 
 def _shared_module_worlds_rest() -> dict[str, object]:

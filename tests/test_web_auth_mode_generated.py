@@ -153,7 +153,11 @@ def _evaluate_mode_worlds() -> dict[str, dict[str, object]]:
     expression = f'''
       let
         # Same snapshot idiom as tests/test_nix_module.py (see the comment
-        # above _NIX_EVAL_CACHE there): never hand Nix the live tree.
+        # above _NIX_EVAL_CACHE there): never hand Nix the live tree. The
+        # fallback's builtins.path result carries a store-path string
+        # context that getFlake refuses, hence unsafeDiscardStringContext;
+        # the copy is already realized on disk by then, so nothing is
+        # skipped.
         f = builtins.getFlake (
           if builtins.pathExists ./.git
           then "git+file://" + toString ./.

@@ -11,9 +11,10 @@ execution: code
 # Processing Lifecycle and Exact Automation Ownership - Plan
 
 > Superseded in part 2026-09-09 (#1378): the deploy-hold helper this plan
-> introduced (`scripts/cratedigger_deploy_hold.py`) and its tests were
-> deleted with the by-hand deploy ceremony. Migration 066's forward-only
-> boundary and the ownership model itself stand.
+> extended and depended on (`scripts/cratedigger_deploy_hold.py`, added
+> 2026-07-20) and its tests were deleted with the by-hand deploy ceremony.
+> Migration 066's forward-only boundary and the ownership model itself
+> stand.
 
 ## Amendment 1 (2026-07-30) - nothing is ever parked
 

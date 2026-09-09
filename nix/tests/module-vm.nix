@@ -1307,13 +1307,20 @@ pkgs.testers.nixosTest {
         "| grep -Eqx 'inactive|failed'"
     )
     # The unit leaving activating proves systemd's bookkeeping, not that
-    # journald has the admission line yet (the same settle this file waits
-    # for everywhere else it counts admissions); the count must land on
-    # exactly one, never two.
+    # journald has the admission line yet (the same settle this file uses
+    # at the other counted admission below), so wait for the line, then
+    # assert the count single-shot: exactly one, never two, and a
+    # regression fails at once with the count in the message rather than
+    # after the driver's 15-minute wait.
     machine.wait_until_succeeds(
         "journalctl -b -u cratedigger.service -o cat "
-        "| grep -c 'Beets configuration admitted for main' | grep -qx 1"
+        "| grep -q 'Beets configuration admitted for main'"
     )
+    admissions_after_release_cycle = machine.succeed(
+        "journalctl -b -u cratedigger.service -o cat "
+        "| grep -c 'Beets configuration admitted for main' || true"
+    ).strip()
+    assert admissions_after_release_cycle == "1", admissions_after_release_cycle
 
     # The timer-owned main service must survive both a healthy restart and a
     # failed restart of an external readiness producer. Hold one live
