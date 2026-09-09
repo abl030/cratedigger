@@ -3900,6 +3900,54 @@ class TestDropDeadSlskdBitrateMigration(unittest.TestCase):
 
 
 @requires_postgres
+class TestDropEvidenceFileContentDigestMigration(unittest.TestCase):
+    """Migration 085 removes the never-written ``content_sha256`` column.
+
+    Migration 068 added it for a snapshot-reuse guard nothing ever built.
+    Nothing in the current tree reads or writes it; the live population was
+    60 non-null values against 338,834 NULLs (measured 2026-09-09), residue
+    of the reverted "Reuse exact HAVE evidence during preview" work. The
+    full column list is asserted rather than the one absence, so a wider
+    ``DROP COLUMN`` typo fails here instead of in the evidence decoder.
+    """
+
+    def test_records_085_and_drops_only_content_sha256(self) -> None:
+        conn = psycopg2.connect(TEST_DSN)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT name FROM schema_migrations WHERE version = 85"
+                )
+                self.assertEqual(
+                    cur.fetchone(), ("drop_evidence_file_content_digest",)
+                )
+                cur.execute("""
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'album_quality_evidence_files'
+                    ORDER BY column_name
+                """)
+                self.assertEqual(
+                    [row[0] for row in cur.fetchall()],
+                    [
+                        "codec",
+                        "container",
+                        "decode_ok",
+                        "evidence_id",
+                        "extension",
+                        "id",
+                        "mtime_ns",
+                        "ordinal",
+                        "relative_path",
+                        "size_bytes",
+                    ],
+                )
+        finally:
+            conn.close()
+
+
+@requires_postgres
 class TestUniqueSlskdTransferIdsMigration(unittest.TestCase):
     """Migration 049 repairs duplicates without losing forensic rows."""
 

@@ -46,9 +46,9 @@ is a bounded LITERAL-shape match, not semantic tracking: it does not
 catch, and is not meant to catch, the shape a captured-and-verified kill
 actually takes -- ``__pg_intended = os.getppid()`` followed later by
 ``os.kill(__pg_intended, SIG)`` -- which is exactly what
-``guard_kill_statement`` below emits, and exactly what
-``tests/fakes/deploy_pin.py``'s three real, literal, on-disk kill sites
-now read. That shape is the FIX, not the hazard; widening the grammar to
+``guard_kill_statement`` below emits, and exactly what the since-deleted
+deploy-pin fixture's three real, literal, on-disk kill sites read once
+they were fixed. That shape is the FIX, not the hazard; widening the grammar to
 flag it would also flag every ordinary known-PID kill elsewhere in the
 tree that has nothing to do with this module at all.
 
@@ -67,9 +67,10 @@ module:
   generator for a child body that CANNOT import this module: a script
   executed via ``python -S`` skipping ``site``, or one whose own
   ``sys.path[0]`` is a throwaway fixture directory rather than the repo
-  root (``tests/fakes/deploy_pin.py``'s ``-S`` shim, and the inline
-  ``python -c ...`` commands ``tests/test_suite_coordinator.py`` feeds a
-  synthetic phase). Both functions only ever concatenate text -- they
+  root (the inline ``python -c ...`` commands
+  ``tests/test_suite_coordinator.py`` feeds a synthetic phase; the deleted
+  deploy-pin fixture's ``-S`` shim was the other). Both functions only ever
+  concatenate text -- they
   reimplement the SAME clauses as ``guard_refusal_reason`` in a
   stdlib-only, zero-import source snippet, never evaluate anything
   themselves, and never call ``os.kill`` directly at define time.
@@ -220,19 +221,18 @@ def guard_source_prelude(
     a generated child body that cannot import this module (see module
     docstring for which sites need this and why). Assumes ``os`` is
     already imported in the embedding scope; imports nothing itself, so it
-    is safe to embed inside a stdlib-only ``-S`` shim
-    (``tests/fakes/deploy_pin.py``) with zero added import cost. Embed
+    is safe to embed inside a stdlib-only ``-S`` shim with zero added
+    import cost. Embed
     this ONCE per file/process, near the top -- the emitted function
     closes over nothing and is cheap to define once and call from
     multiple guarded-kill sites in the same process.
 
     ``expected_signature=None`` omits the cmdline signature clause
     entirely (one fewer ``/proc`` read) for a caller with no meaningful
-    "expected parent shape" to check -- e.g. ``deploy_pin.py``'s fake
-    git/nix/hostname commands, whose real parent is a bash/pytest process,
-    never a ``ProcessPoolExecutor`` worker, and
-    ``tests/test_suite_coordinator.py``'s synthetic phase commands, whose
-    real parent is the coordinator test process itself.
+    "expected parent shape" to check -- e.g. a fake command whose real
+    parent is a bash/pytest process, never a ``ProcessPoolExecutor``
+    worker, or ``tests/test_suite_coordinator.py``'s synthetic phase
+    commands, whose real parent is the coordinator test process itself.
     """
     signature_repr = "None" if expected_signature is None else repr(expected_signature)
     lines = [

@@ -1,6 +1,6 @@
 ---
 name: orchestrate-issue
-description: "Orchestrate a substantial Cratedigger issue end to end: understand the scope, coordinate the work, converge efficiently, ship, verify live, and close. Use for issue-sized delivery, not small patches, diagnosis-only work, or ordinary review."
+description: "Orchestrate a substantial Cratedigger issue end to end: understand the scope, coordinate the work, converge efficiently, merge, verify live only where the change is user-facing, and close. Use for issue-sized delivery, not small patches, diagnosis-only work, or ordinary review."
 ---
 
 # Orchestrate Issue
@@ -10,10 +10,11 @@ view. This skill defines the broad lifecycle and safety boundaries; use your
 judgment for the route through them.
 
 Repository instructions remain authoritative. Do not use Compound Engineering.
-Load the deploy skill when it is time to ship instead of duplicating its
-runbook here. The independent-review gate below is an intentional, specific
-exception to client compatibility mappings that otherwise serialize subagent
-work in the main thread.
+Merged `main` ships on the nightly rolling update; load the deploy skill only
+when a user-facing change needs live proof before its issue closes. The
+independent-review gate below is an intentional, specific exception to client
+compatibility mappings that otherwise serialize subagent work in the main
+thread.
 
 ## Own the issue
 
@@ -29,7 +30,44 @@ they reduce a concrete risk or shorten the critical path. Implementation
 delegation is optional; the independent subagent review below is mandatory.
 
 The orchestrator retains responsibility for scope, architecture, integration,
-merge decisions, deployment, and live proof even when work is delegated.
+merge decisions, and closing evidence even when work is delegated.
+
+## Running agents
+
+These rules are the standing part of every brief. Paste them; do not re-type
+them, and do not omit them.
+
+- Never end a turn to wait. A stopped agent receives nothing, so a suite,
+  gate, or reviewer it launched must be polled inside the turn with ordinary
+  tool calls (`sleep 120`, then re-read the output or receipt) and acted on in
+  the same session. Read a background command's own exit line or the
+  receipt's `terminal` file, never a notification's exit code, which carries
+  the LAST command's status (a trailing `tail` reports 0).
+- A late finding is applied or recorded before merge. A reader's report that
+  lands after the implementer closed its round belongs to whoever holds it:
+  fix it, or write it up as a residual on the issue. It is never dropped.
+- On a correction round, the reader lists every claim the correction commit
+  itself added, in comments, docstrings, rule and skill sentences, or PR
+  prose, and re-derives each; no round catches its own false claims.
+- Every path an agent writes under `$CLAUDE_JOB_DIR/tmp` sits in a
+  subdirectory the brief gives that agent alone,
+  `$CLAUDE_JOB_DIR/tmp/<agent-name>/`. Subagents share the parent's job tmp
+  dir, so a generic filename collides: an implementer's `pr_body.md`
+  overwrote the orchestrator's draft of the same name.
+- The mutant runner never works in a live worktree. A subagent's shell stays
+  pinned to its parent's worktree even after `git worktree add`, so the
+  orchestrator materializes `git archive <sha> | tar -x -C
+  "$CLAUDE_JOB_DIR/tmp/<agent-name>"` plus a `-pristine` twin; the runner
+  mutates only there, with `PYTHONDONTWRITEBYTECODE=1`, and proves each
+  restore with `diff -rq` against the twin. Never `/tmp`, never a reviewer
+  clone into `/tmp`, never a detached HEAD in an implementer's tree.
+- A one-shot mutant driver asserts `count(old) == 1 and count(new) == 0`
+  before it writes, restores by inverse edit as the first statement of its
+  `finally`, and hashes against a baseline captured before any driver ran.
+- Never `gh issue comment --edit-last`. The shared account posts from several
+  agents at once; post a new comment with `--body-file`.
+- Every agent applies the unslop skill to commit messages, PR bodies, and
+  issue comments, and labels each claim MEASURED or INFERRED.
 
 ## Converge efficiently
 
@@ -81,17 +119,18 @@ Review should challenge the issue contract and real production path, not just
 confirm that tests are green. Stop when the issue is covered, required checks
 pass, and there is no concrete remaining counterexample.
 
-## Ship and prove it
+## Ship and close
 
-Keep issue references non-closing while deployment and live proof remain. Use
-the repository's merge method, the deploy skill, and current downstream
-instructions.
-
-Verify the deployed system rather than only the deployment command. Exercise
-the real CLI, API, or user-facing path and account for the service lifecycle
-that loads the new code. Close the issue deliberately only after its scope is
-covered and live evidence supports the result. Record unrelated follow-up work
-separately, and clean up temporary worktrees when they are no longer useful.
+Merge with the repository's merge method. Merged `main` ships on the nightly
+rolling update, so a merged PR is a shipped PR; do not deploy as ceremony.
+Deploy by hand (the deploy skill, one command) only when the issue is a
+user-facing feature or fix whose live behavior you need to see before
+closing, and then verify the change itself through the real CLI, API, or UI,
+accounting for the service lifecycle that loads the new code. Keep issue
+references non-closing until that evidence exists; for everything else, close
+on merge with the tests and review as the evidence. Record unrelated
+follow-up work separately, and clean up temporary worktrees when they are no
+longer useful.
 
 ## Communicate like an orchestrator
 
@@ -100,6 +139,6 @@ the operator follow routine agent pings, exact-SHA churn, or every intermediate
 test failure. When evidence changes the diagnosis, say so and adjust.
 
 Completion means the issue is covered, the converged change has been reviewed
-in proportion to its risk, required final checks pass, the work is merged and
-deployed, live behavior is verified, and the issue is closed with the evidence
-that matters.
+in proportion to its risk, required final checks pass, the work is merged,
+live behavior is verified where the change is user-facing, and the issue is
+closed with the evidence that matters.

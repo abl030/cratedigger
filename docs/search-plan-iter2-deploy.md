@@ -2,9 +2,9 @@
 
 > **Historical rollout record (completed 2026-05-26).** Preserve the commands
 > below as evidence of the original PR-by-PR deployment; do not execute them as
-> the current fleet procedure. New deployments use the repository `deploy`
-> skill: GitHub Cratedigger merge, signed Forgejo nixosconfig pin, then doc1's
-> locked-sibling `fleet-deploy doc2` path with exact-source verification.
+> the current fleet procedure. Merged `main` now ships on the nightly rolling
+> flake update, and `scripts/deploy.sh` (the `deploy` skill) is the one
+> command for deploying it sooner.
 
 Operator runbook for the search-plan iteration 2 PR series (issue
 [#369](https://github.com/abl030/cratedigger/issues/369)). One section

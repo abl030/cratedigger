@@ -392,6 +392,12 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
         "tests.test_pipeline_db_decisions",
         "tests.test_pipeline_db_decisions_generated",
     ),
+    # The lib/pipeline_db/ prefix rule resolves PIPELINE_DB_NEIGHBOURS and
+    # the basename probe resolves tests.test_evidence_generated, masking the
+    # loss of the SQL-versus-fake spectral parity property.
+    "lib/pipeline_db/evidence.py": (
+        "tests.test_evidence_transition_matrix_generated",
+    ),
     # Basename probes resolve tests.test_current_library_evidence and its
     # generated sibling, masking the loss of the other nine importers.
     "lib/current_library_evidence.py": (
@@ -484,28 +490,18 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
         "tests.test_daily_flake_update",
         "tests.test_daily_beets_tip_update",
     ),
-    "tests/fakes/deploy_cycle.py": (
-        "tests.test_deploy_cycle_verifier",
-        "tests.test_deploy_cycle_verifier_generated",
-    ),
-    "tests/fakes/deploy_hold.py": (
-        "tests.test_deploy_hold",
-        "tests.test_deploy_hold_generated",
-    ),
-    "tests/fakes/deploy_pin.py": (
-        "tests.test_deploy_pin_script",
-        "tests.test_deploy_pin_generated",
+    "tests/fakes/deploy.py": (
+        "tests.test_deploy",
+        "tests.test_deploy_generated",
     ),
     # Same prefix rule, one layer up: it resolves tests.test_fakes and the
-    # derived tests.test_fakes_subprocess_env, masking the loss of the three
+    # derived tests.test_fakes_subprocess_env, masking the loss of the two
     # fixtures whose subprocess environment this module decides.
     "tests/fakes/subprocess_env.py": (
         "tests.test_daily_flake_update",
         "tests.test_daily_beets_tip_update",
-        "tests.test_deploy_cycle_verifier",
-        "tests.test_deploy_cycle_verifier_generated",
-        "tests.test_deploy_pin_script",
-        "tests.test_deploy_pin_generated",
+        "tests.test_deploy",
+        "tests.test_deploy_generated",
     ),
     # The basename probe still resolves tests.web.test_runtime, masking
     # the loss of the two HTTP-boundary modules.

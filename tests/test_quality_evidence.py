@@ -1643,6 +1643,102 @@ class TestCaptureFieldsAreOneAtomicFactWithSpectralGrade(unittest.TestCase):
         self.assertEqual(measurement.new_row_validation_errors(), [])
 
 
+class TestEverySpectralGradeCompanionIsRejectedWithoutOne(unittest.TestCase):
+    """The capture-fact table above, for the two clauses beside it.
+
+    ``new_row_validation_errors`` guards three families of companion fact
+    against a null ``spectral_grade``: the four capture facts (covered
+    above, per field), the spectral bitrate, and the two markers
+    (``spectral_subject`` / ``spectral_provenance``, which share one
+    message via an ``or``). Only the capture family had a per-field table,
+    so mutants against the other two survived (#1378 review round).
+    Measured over the five modules nearest the clause -- this one plus
+    ``test_evidence_generated``, ``test_quality_decisions``,
+    ``test_candidate_admission_progress_generated``, ``test_pipeline_db``,
+    946 tests -- dropping the provenance operand and neutering the bitrate
+    clause each fail exactly one thing: the matching row below. The
+    provenance one is not an entropy miss that a deeper burst would catch:
+    ``TestGeneratedSpectralDisjunctSubsumption`` gates both its clauses on
+    R19, which needs the subject, so a provenance-only world is
+    unreachable there by construction.
+
+    The bitrate clause has a blast radius beyond itself.
+    ``tests.test_candidate_admission_progress_generated`` narrows its own
+    strategy on the strength of "a persisted row can never carry a bitrate
+    without a grade" — its ``SpectralFact`` literal has no bitrate-only
+    member, and the comment above it cites this clause as the reason —
+    while nothing exercised the guard it cites.
+    ``tests.test_quality_decisions`` narrowed its hand-written
+    ``TestCompareQualitySharedSpectralBucket.CASES`` table on the same
+    fact, under test-fidelity Rule C, and cites the clause twice: once in
+    that table's own header and once at
+    ``test_ungraded_existing_spectral_number_is_not_evidence``, to say why
+    the shape it deliberately constructs has no producer. Its worlds are a
+    literal table, not a strategy.
+
+    Each row asserts its clause's EXACT message, because the capture
+    family's own assertion matches on the shared "require a spectral
+    grade" substring and would pass on the wrong clause.
+    """
+
+    #: (description, gradeless measurement, exact expected message)
+    COMPANION_CASES: ClassVar[
+        list[tuple[str, Callable[[], AudioQualityMeasurement], str]]
+    ] = [
+        (
+            "spectral_bitrate_kbps",
+            lambda: AudioQualityMeasurement(
+                min_bitrate_kbps=192, format="MP3",
+                spectral_bitrate_kbps=192,
+            ),
+            "spectral bitrate requires a spectral grade",
+        ),
+        (
+            "spectral_subject alone",
+            lambda: AudioQualityMeasurement(
+                min_bitrate_kbps=192, format="MP3",
+                spectral_subject="source",
+            ),
+            "spectral markers require a spectral grade",
+        ),
+        (
+            "spectral_provenance alone",
+            lambda: AudioQualityMeasurement(
+                min_bitrate_kbps=192, format="MP3",
+                spectral_provenance="measured",
+            ),
+            "spectral markers require a spectral grade",
+        ),
+        (
+            "both markers",
+            lambda: AudioQualityMeasurement(
+                min_bitrate_kbps=192, format="MP3",
+                spectral_subject="source", spectral_provenance="carried",
+            ),
+            "spectral markers require a spectral grade",
+        ),
+    ]
+
+    def test_each_companion_without_a_grade_names_its_own_clause(self):
+        for description, make_measurement, message in self.COMPANION_CASES:
+            with self.subTest(companion=description):
+                self.assertIn(
+                    message, make_measurement().new_row_validation_errors(),
+                )
+
+    def test_the_same_companions_with_a_grade_are_valid(self):
+        """The must-still-work control, one shape carrying all three."""
+        measurement = AudioQualityMeasurement(
+            min_bitrate_kbps=192,
+            format="MP3",
+            spectral_grade="genuine",
+            spectral_bitrate_kbps=192,
+            spectral_subject="source",
+            spectral_provenance="measured",
+        )
+        self.assertEqual(measurement.new_row_validation_errors(), [])
+
+
 class TestBlankSourcePathPolicy(unittest.TestCase):
     """A blank ``source_path`` is action-incomplete (download_log 37206).
 

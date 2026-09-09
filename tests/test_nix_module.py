@@ -251,6 +251,32 @@ class TestDecisionDifferentialWrapperContract(unittest.TestCase):
 #: nix eval to detect, not one per consumer.
 _NIX_EVAL_CACHE: dict[str, dict[str, object] | Exception] = {}
 
+#: No expression below ever hands Nix the live repository tree. The
+#: JavaScript phase runs concurrently with this one, and
+#: ``tests/test_js_harness.mjs`` writes a transient in-repo fixture under
+#: ``tests/_harness_fixtures`` for the length of one child process; an
+#: eval whose store copy of ``./.`` began while that directory existed
+#: died with "path .../tests/_harness_fixtures does not exist"
+#: (2026-09-09, #1378). Two halves close that: the preambles load the
+#: flake as ``git+file://<root>``, whose snapshot carries every tracked
+#: file's working-tree content (uncommitted edits included, measured) but
+#: no untracked path, and every world takes the flake module's default
+#: ``src`` (the ``runtimeSrc`` fileset, computed inside that snapshot)
+#: instead of overriding it with ``./.``, which was a second full walk of
+#: the live tree per world. A brand-new file must be ``git add``ed before
+#: these worlds can see it, which fails loudly rather than silently. A tree
+#: with no ``.git`` at all (a ``git archive`` snapshot, which is where the
+#: mutant runner works) cannot be fetched as ``git+file``, so the preamble
+#: falls back to #1248's filtered ``builtins.path`` copy there, now
+#: excluding the two churn paths seen so far (``__pycache__`` and
+#: ``tests/_harness_fixtures``); ``builtins.path``'s result carries a
+#: store-path string context that ``getFlake`` refuses, so the fallback
+#: discards it with ``unsafeDiscardStringContext``, which is safe because
+#: the copy is already realized on disk by then. That fallback is weaker,
+#: not safe: a suite run in such a snapshot still runs its phases
+#: concurrently, and any other untracked churn under the tree can still
+#: race the walk.
+
 
 def _cached_nix_eval_json(expression: str) -> dict[str, object]:
     """Run one ``nix eval --json`` at most once per process per expression."""
@@ -407,7 +433,17 @@ def _shared_module_worlds_web_auth_matrix_part1() -> dict[str, object]:
     """
     expression = r'''
       let
-        f = builtins.getFlake (toString ./.);
+        f = builtins.getFlake (
+          if builtins.pathExists ./.git
+          then "git+file://" + toString ./.
+          else builtins.unsafeDiscardStringContext (toString (builtins.path {
+            path = toString ./.;
+            filter = path: type:
+              baseNameOf path != "__pycache__"
+              && baseNameOf path != "_harness_fixtures";
+            name = "cratedigger-nix-eval-source";
+          }))
+        );
         lib = f.inputs.nixpkgs.lib;
         modulePkgs = import f.inputs.nixpkgs {
           system = builtins.currentSystem;
@@ -426,7 +462,6 @@ def _shared_module_worlds_web_auth_matrix_part1() -> dict[str, object]:
                     ({ ... }: {
                       services.cratedigger = {
                         enable = true;
-                        src = ./.;
                         slskd.apiKeyFile = "/run/secrets/slskd-key";
                         slskd.downloadDir = "/srv/slskd";
                         pipelineDb.createLocally = true;
@@ -628,7 +663,17 @@ def _shared_module_worlds_web_auth_matrix_part2() -> dict[str, object]:
     """
     expression = r'''
       let
-        f = builtins.getFlake (toString ./.);
+        f = builtins.getFlake (
+          if builtins.pathExists ./.git
+          then "git+file://" + toString ./.
+          else builtins.unsafeDiscardStringContext (toString (builtins.path {
+            path = toString ./.;
+            filter = path: type:
+              baseNameOf path != "__pycache__"
+              && baseNameOf path != "_harness_fixtures";
+            name = "cratedigger-nix-eval-source";
+          }))
+        );
         lib = f.inputs.nixpkgs.lib;
         modulePkgs = import f.inputs.nixpkgs {
           system = builtins.currentSystem;
@@ -647,7 +692,6 @@ def _shared_module_worlds_web_auth_matrix_part2() -> dict[str, object]:
                     ({ ... }: {
                       services.cratedigger = {
                         enable = true;
-                        src = ./.;
                         slskd.apiKeyFile = "/run/secrets/slskd-key";
                         slskd.downloadDir = "/srv/slskd";
                         pipelineDb.createLocally = true;
@@ -997,6 +1041,50 @@ class TestWebAuthMatrixPreamblesStayIdentical(unittest.TestCase):
             _assert_web_auth_matrix_preambles_equal("missing = evaluate {", "no marker here")
 
 
+#: The one shape every flake-loading call under tests/ must take (#1378):
+#: the git snapshot when ``.git`` exists, else #1248's filtered copy.
+#: Matched immediately after the call's opening parenthesis; the brace
+#: after ``builtins.path`` may be doubled inside an f-string.
+_SNAPSHOT_PREAMBLE_RE = re.compile(
+    r"^\s*if builtins\.pathExists \./\.git"
+    r'\s*then "git\+file://" \+ toString \./\.'
+    r"\s*else builtins\.unsafeDiscardStringContext \(toString \(builtins\.path \{\{?"
+)
+
+
+class TestNixEvalPreamblesNeverWalkTheLiveTree(unittest.TestCase):
+    """#1378: every nix-eval preamble under tests/ loads the flake from the
+    git snapshot when it can, falls back to the filtered copy otherwise,
+    and no world names the live tree as ``src``.
+
+    The defect this guards against is a race with the concurrently running
+    JavaScript phase (see the comment above ``_NIX_EVAL_CACHE``), which no
+    test can assert as a value: reverting every preamble to the live-tree
+    shape leaves every eval green (measured by the #1387 mutant runner). So
+    the guard is a source pin over the call spelling itself: the modules
+    are found by scanning for it rather than listed, every occurrence must
+    be followed by the one accepted shape, and the literals are spelled
+    from parts so this test's own text never satisfies it.
+    """
+
+    def test_every_preamble_prefers_the_git_snapshot(self) -> None:
+        call = "builtins.getFlake" + " ("
+        live_src = "src = " + "./.;"
+        modules = sorted(
+            path for path in (REPO_ROOT / "tests").glob("*.py")
+            if call in path.read_text(encoding="utf-8")
+        )
+        self.assertGreaterEqual(len(modules), 2, modules)
+        for path in modules:
+            with self.subTest(path=path.name):
+                source = path.read_text(encoding="utf-8")
+                self.assertNotIn(live_src, source)
+                calls = [match.end() for match in re.finditer(re.escape(call), source)]
+                self.assertGreaterEqual(len(calls), 1)
+                for end in calls:
+                    self.assertRegex(source[end:end + 400], _SNAPSHOT_PREAMBLE_RE)
+
+
 def _shared_module_worlds_rest() -> dict[str, object]:
     """The other five nix-eval worlds this module's tests still merge.
 
@@ -1068,7 +1156,17 @@ def _shared_module_worlds_rest() -> dict[str, object]:
     """
     expression = r'''
       let
-        f = builtins.getFlake (toString ./.);
+        f = builtins.getFlake (
+          if builtins.pathExists ./.git
+          then "git+file://" + toString ./.
+          else builtins.unsafeDiscardStringContext (toString (builtins.path {
+            path = toString ./.;
+            filter = path: type:
+              baseNameOf path != "__pycache__"
+              && baseNameOf path != "_harness_fixtures";
+            name = "cratedigger-nix-eval-source";
+          }))
+        );
         lib = f.inputs.nixpkgs.lib;
         modulePkgs = import f.inputs.nixpkgs {
           system = builtins.currentSystem;
@@ -1085,7 +1183,6 @@ def _shared_module_worlds_rest() -> dict[str, object]:
                 ({ ... }: {
                   services.cratedigger = {
                     enable = true;
-                    src = ./.;
                     slskd.apiKeyFile = "/run/secrets/slskd-key";
                     slskd.downloadDir = "/srv/slskd";
                     pipelineDb.createLocally = true;
@@ -1128,7 +1225,6 @@ def _shared_module_worlds_rest() -> dict[str, object]:
                       networking.enableIPv6 = enableIPv6;
                       services.cratedigger = {
                         enable = true;
-                        src = ./.;
                         user = "cratedigger";
                         group = "cratedigger";
                         slskd.apiKeyFile = "/run/secrets/slskd-key";
@@ -1260,7 +1356,6 @@ def _shared_module_worlds_rest() -> dict[str, object]:
                   ({ ... }: {
                     services.cratedigger = {
                       enable = true;
-                      src = ./.;
                       packageSet = modulePkgs;
                       slskd.apiKeyFile = "/run/secrets/slskd-key";
                       slskd.downloadDir = "/srv/slskd";
@@ -1294,7 +1389,6 @@ def _shared_module_worlds_rest() -> dict[str, object]:
                   ({ ... }: {
                     services.cratedigger = {
                       enable = true;
-                      src = ./.;
                       packageSet = modulePkgs;
                       inherit user group;
                       slskd.apiKeyFile = "/run/secrets/slskd-key";
@@ -1323,7 +1417,6 @@ def _shared_module_worlds_rest() -> dict[str, object]:
                 ({ ... }: {
                   services.cratedigger = {
                     enable = true;
-                    src = ./.;
                     packageSet = modulePkgs;
                     slskd.apiKeyFile = "/run/secrets/slskd-key";
                     slskd.downloadDir = "/srv/slskd";
@@ -1412,7 +1505,6 @@ def _shared_module_worlds_rest() -> dict[str, object]:
                 ({ ... }: {
                   services.cratedigger = {
                     enable = true;
-                    src = ./.;
                     packageSet = modulePkgs;
                     slskd.apiKeyFile = "/run/secrets/slskd-key";
                     slskd.downloadDir = "/srv/slskd";
@@ -1475,7 +1567,6 @@ def _shared_module_worlds_rest() -> dict[str, object]:
                     ({ ... }: {
                       services.cratedigger = {
                         enable = true;
-                        src = ./.;
                         slskd.apiKeyFile = "/run/secrets/slskd-key";
                         slskd.downloadDir = "/srv/slskd";
                         pipelineDb.createLocally = true;
@@ -1565,7 +1656,6 @@ def _shared_module_worlds_rest() -> dict[str, object]:
                     ({ ... }: {
                       services.cratedigger = {
                         enable = true;
-                        src = ./.;
                         slskd.apiKeyFile = "/run/secrets/slskd-key";
                         slskd.downloadDir = "/srv/slskd";
                         pipelineDb.createLocally = true;
@@ -1875,7 +1965,17 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
     def test_injected_basic_path_cannot_render_toplevel(self) -> None:
         expression = r'''
           let
-            f = builtins.getFlake (toString ./.);
+            f = builtins.getFlake (
+              if builtins.pathExists ./.git
+              then "git+file://" + toString ./.
+              else builtins.unsafeDiscardStringContext (toString (builtins.path {
+                path = toString ./.;
+                filter = path: type:
+                  baseNameOf path != "__pycache__"
+                  && baseNameOf path != "_harness_fixtures";
+                name = "cratedigger-nix-eval-source";
+              }))
+            );
             modulePkgs = import f.inputs.nixpkgs {
               system = builtins.currentSystem;
             };
@@ -1888,7 +1988,6 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
                 ({ ... }: {
                   services.cratedigger = {
                     enable = true;
-                    src = ./.;
                     user = "cratedigger";
                     group = "cratedigger";
                     slskd.apiKeyFile = "/run/secrets/slskd-key";

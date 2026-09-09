@@ -132,7 +132,7 @@ class TestGuardRefusalReasonClauses(unittest.TestCase):
         self.assertIsNone(reason)
 
     def test_expected_signature_none_skips_cmdline_clause(self) -> None:
-        """A caller with no meaningful parent-shape (deploy_pin.py,
+        """A caller with no meaningful parent-shape (a fake command,
         test_suite_coordinator.py) never even attempts the cmdline read --
         prove it by NOT registering that path in the reader table at all
         (an unmapped path would refuse with "unreadable ... cmdline" if the
@@ -260,8 +260,8 @@ class TestCaptureIntendedParentPid(unittest.TestCase):
 # Source-emitting form: exec the ACTUAL generated text (not a re-implemented
 # copy) against a fully fake `os` + `open`, so these tests prove the
 # STRING guard_source_prelude()/guard_kill_statement() emit -- the exact
-# text embedded into tests/fakes/deploy_pin.py's -S shim and
-# tests/test_suite_coordinator.py's inline -c commands -- behaves like
+# text embedded into tests/test_suite_coordinator.py's inline -c commands
+# (and, until it was deleted, the deploy-pin fixture's -S shim) -- behaves like
 # guard_refusal_reason(). No real process, no real /proc, no real signal.
 # ---------------------------------------------------------------------------
 

@@ -9274,6 +9274,152 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
             ),
         )
 
+    def test_r19_incoming_without_a_grade_never_reaches_the_spectral_case(self):
+        """#1378 item 5: the removed disjunct 4 was unreachable, not inert.
+
+        The fourth OR-disjunct of
+        ``lib.pipeline_db.evidence._SPECTRAL_TUPLE_USE_INCOMING_SQL`` fired
+        when the stored row's ``spectral_subject`` was ``installed`` and the
+        incoming row satisfied R19 (``current_evidence_preserves_source_
+        spectral``). R19 requires an incoming ``spectral_subject`` of
+        ``source``, and at ``lineage_version >= 4`` a spectral marker without
+        a spectral grade is a storage validation error — so the only writes
+        that could ever satisfy disjunct 4 also satisfy disjunct 2
+        (``EXCLUDED.spectral_grade IS NOT NULL``). This pin holds the half
+        that makes the subsumption true: an R19-shaped incoming row with no
+        grade is refused at the production write boundary and never reaches
+        the ``ON CONFLICT DO UPDATE`` at all.
+        """
+        from lib.quality_evidence import (
+            current_evidence_preserves_source_spectral,
+        )
+
+        release_id = "r19-incoming-without-grade"
+        files = [AlbumQualityEvidenceFile(
+            relative_path="01.mp3",
+            size_bytes=4096,
+            mtime_ns=1_700_000_000_000_000_000,
+            extension="mp3",
+            container="mp3",
+            codec="mp3",
+        )]
+        gradeless = self._seed(
+            mb_release_id=release_id,
+            files=files,
+            codec="mp3",
+            container="mp3",
+            storage_format="MP3",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128,
+                avg_bitrate_kbps=130,
+                median_bitrate_kbps=129,
+                format="MP3",
+                spectral_grade=None,
+                spectral_bitrate_kbps=None,
+                spectral_subject="source",
+                spectral_provenance="carried",
+                spectral_measurement_version=None,
+                was_converted_from="flac",
+            ),
+            preserve_spectral_measurement_version=True,
+        )
+        # The world really is disjunct 4's: R19 holds and yet there is no
+        # incoming grade, so disjunct 2 is false.
+        self.assertTrue(current_evidence_preserves_source_spectral(gradeless))
+        self.assertIsNone(gradeless.measurement.spectral_grade)
+        self.assertEqual(
+            gradeless.lineage_version, CURRENT_EVIDENCE_LINEAGE_VERSION,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "spectral markers require a spectral grade",
+        ):
+            self.db.upsert_album_quality_evidence(gradeless)
+
+        self.assertIsNone(self.db.find_album_quality_evidence(
+            mb_release_id=release_id,
+            snapshot_fingerprint=gradeless.snapshot_fingerprint,
+        ))
+
+    def test_r19_incoming_with_a_grade_replaces_installed_subject_tuple(self):
+        """#1378 item 5 must-still-work: disjunct 2 decides disjunct 4's world.
+
+        The exact world the removed disjunct named — a stored
+        ``installed``-subject tuple overwritten by an incoming R19-shaped
+        derivative — still replaces, because the incoming row necessarily
+        carries a grade.
+        """
+        from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
+
+        release_id = "r19-incoming-replaces-installed"
+        files = [AlbumQualityEvidenceFile(
+            relative_path="01.mp3",
+            size_bytes=4096,
+            mtime_ns=1_700_000_000_000_000_000,
+            extension="mp3",
+            container="mp3",
+            codec="mp3",
+        )]
+        stored_installed = self._seed(
+            mb_release_id=release_id,
+            files=files,
+            codec="mp3",
+            container="mp3",
+            storage_format="MP3",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=200,
+                avg_bitrate_kbps=200,
+                median_bitrate_kbps=200,
+                format="MP3",
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=200,
+                spectral_subject="installed",
+                spectral_provenance="measured",
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+                was_converted_from=None,
+            ),
+            preserve_spectral_measurement_version=True,
+        )
+        self.db.upsert_album_quality_evidence(stored_installed)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=release_id,
+            snapshot_fingerprint=stored_installed.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(self.db.set_request_current_evidence(
+            self.req_id, stored.id,
+        ))
+
+        r19_incoming = msgspec.structs.replace(
+            stored_installed,
+            measurement=msgspec.structs.replace(
+                stored_installed.measurement,
+                min_bitrate_kbps=128,
+                avg_bitrate_kbps=130,
+                median_bitrate_kbps=129,
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=192,
+                spectral_subject="source",
+                spectral_provenance="carried",
+                was_converted_from="flac",
+            ),
+        )
+        self.db.upsert_album_quality_evidence(
+            r19_incoming, spectral_write_intent="replace",
+        )
+
+        canonical = self.db.load_album_quality_evidence_by_id(stored.id)
+        assert canonical is not None
+        self.assertEqual(
+            (
+                canonical.measurement.spectral_grade,
+                canonical.measurement.spectral_bitrate_kbps,
+                canonical.measurement.spectral_subject,
+                canonical.measurement.spectral_provenance,
+            ),
+            ("likely_transcode", 192, "source", "carried"),
+        )
+
     def test_upsert_then_find_by_content_address_round_trips(self):
         from lib.quality import (
             AlbumQualityEvidenceFile,
@@ -11040,6 +11186,141 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         self.assertTrue(preserved.audio_corrupt)
         self.assertEqual(preserved.audio_error, evidence.audio_error)
         self.assertFalse(preserved.files[0].decode_ok)
+
+    def test_skipped_re_audit_preserves_the_stored_validation_report(self):
+        """``skipped`` is the second weak outcome, and it was unpinned.
+
+        ``upsert_album_quality_evidence`` treats ``legacy_unrecorded`` and
+        ``skipped`` identically for ``preserve_existing_audio_validation``,
+        but every test drove the pair through ``legacy_unrecorded`` only —
+        mutating the ``"skipped"`` literal survived the whole selection
+        (mutmut breadth pass, #1378).
+
+        The outcome has a producer, though not one any deployment reaches
+        today. ``lib.util.validate_audio`` returns ``outcome="skipped"``
+        when ``cfg.audio_check_mode == "off"``, and that report rides
+        ``PreimportMeasurement.audio_validation`` into the candidate-side
+        ``evidence_from_measurement``. But ``audio_check`` is read only by
+        ``lib.config``: ``nix/module.nix`` renders a fixed ``[Beets
+        Validation]`` block without it and offers no override, so a
+        module-deployed installation cannot set ``off`` at all, and doc2
+        runs the ``normal`` default. The two current-evidence builders
+        (``evidence_from_album_info`` and the propagation write) pass no
+        ``audio_validation`` at all, so they carry ``legacy_unrecorded``
+        whatever the mode is. So this stays coverage for a member of the
+        set the deployment does not exercise — which is the right reason to
+        pin it, not a reason to call it dead. (``skipped_audio_validation_
+        report`` has no production caller: the outcome is spelled
+        elsewhere, which is why greping the constructor name says nothing
+        about reachability.)
+        """
+        from lib.quality import skipped_audio_validation_report
+
+        files = [
+            AlbumQualityEvidenceFile(
+                relative_path="disc-1/01.flac",
+                size_bytes=123,
+                mtime_ns=456,
+                extension="flac",
+                container="flac",
+                codec="flac",
+                decode_ok=False,
+            ),
+        ]
+        report = AudioValidationReport(
+            tool_version="8.1.1",
+            outcome="audio_corrupt",
+            files_checked=1,
+            files_failed=1,
+            diagnostics=[
+                AudioToolDiagnostic(
+                    relative_path="disc-1/01.flac",
+                    category="decode_error",
+                    return_code=69,
+                    stderr_excerpt="Invalid data",
+                    stderr_bytes=4096,
+                    stderr_sha256="c" * 64,
+                    stderr_truncated=True,
+                ),
+            ],
+        )
+        evidence = self._seed(
+            mb_release_id="mbid-skipped-weak-writer",
+            files=files,
+            audio_corrupt=True,
+            audio_error="disc-1/01.flac: Invalid data",
+            audio_validation=report,
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+
+        self.db.upsert_album_quality_evidence(msgspec.structs.replace(
+            evidence,
+            audio_validation=skipped_audio_validation_report(),
+            audio_corrupt=False,
+            audio_error=None,
+            files=[msgspec.structs.replace(files[0], decode_ok=True)],
+        ))
+
+        preserved = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert preserved is not None
+        self.assertEqual(preserved.audio_validation, report)
+        self.assertTrue(preserved.audio_corrupt)
+        self.assertEqual(preserved.audio_error, evidence.audio_error)
+        self.assertFalse(preserved.files[0].decode_ok)
+
+    def test_a_stored_skipped_report_has_nothing_worth_preserving(self):
+        """The stored side of the same set, across both observable columns.
+
+        The merge preserves the stored report only when the incoming one is
+        weak AND the stored one is not — ``album_quality_evidence.
+        audio_validation->>'outcome' NOT IN ('legacy_unrecorded',
+        'skipped')``. The sibling above drives the ``EXCLUDED`` half;
+        dropping ``'skipped'`` from the stored half survived all 46 tests of
+        this class (mutant runner finding, #1378 review round), because
+        nothing ever stored a ``skipped`` report and then wrote over it.
+
+        That guard is spelled once per column, and the three columns are
+        not equally reachable:
+
+        - ``audio_validation`` is the one this world distinguishes for
+          real. Both branches carry a different report.
+        - ``audio_error`` is asserted as fail-closed legislation, not as a
+          live scenario. The seeded value is hand-authored: every
+          production site that sets ``audio_error`` sets a corrupt-shaped
+          ``audio_validation`` alongside it, so a real ``skipped`` row
+          carries NULL and both branches would agree. A future writer that
+          pairs the two is what this catches.
+        - ``audio_corrupt`` is stronger than unpinned and stronger than
+          unproduced: the distinguishing row cannot be built at all.
+          ``storage_validation_errors`` forces the flag to agree with the
+          outcome, migration 064's own validator repeats that check in
+          SQL, and every weak outcome is non-corrupt — so both branches
+          yield ``False`` whenever the stored-side list is what decides.
+        """
+        from lib.quality import skipped_audio_validation_report
+
+        weak_incoming = legacy_unrecorded_audio_validation_report()
+        evidence = self._seed(
+            mb_release_id="mbid-stored-skipped-weak",
+            audio_validation=skipped_audio_validation_report(),
+            audio_error="disc-1/01.flac: stored diagnostic",
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+
+        self.db.upsert_album_quality_evidence(msgspec.structs.replace(
+            evidence, audio_validation=weak_incoming, audio_error=None,
+        ))
+
+        merged = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert merged is not None
+        self.assertEqual(merged.audio_validation, weak_incoming)
+        self.assertIsNone(merged.audio_error)
 
     def test_strong_writer_replaces_decode_ok_on_the_same_address(self):
         """Issue #1355 Batch E (E1, reader finding): the sibling test above

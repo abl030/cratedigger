@@ -218,12 +218,12 @@ class TestParentSignalGuardAudit(unittest.TestCase):
         self.assertEqual(offenders, ["planted_offender.py:5"])
 
     def test_scan_reaches_tests_fakes_subpackage(self) -> None:
-        """Pin the recursive walk -- tests/fakes/deploy_pin.py is exactly
-        the file whose -S shim originally carried three of the six real
-        occurrences; a walk that stopped at the top of tests/ would miss
-        it silently."""
+        """Pin the recursive walk -- the process-level fixtures under
+        tests/fakes/ are where a generated child body lives (the deleted
+        deploy-pin shim once carried three of the six real occurrences);
+        a walk that stopped at the top of tests/ would miss them silently."""
         files = {p.relative_to(REPO_ROOT).as_posix() for p in _iter_python_files(REPO_ROOT)}
-        self.assertIn("tests/fakes/deploy_pin.py", files)
+        self.assertIn("tests/fakes/deploy.py", files)
 
 
 if __name__ == "__main__":

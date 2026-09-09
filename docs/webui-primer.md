@@ -1027,21 +1027,18 @@ This inventory is acceptance scope, not current-live evidence:
 
 ## Deployment
 
-Code changes in `web/` deploy via the normal cratedigger flake update:
+Code changes in `web/` ship with merged `main`: doc1's nightly rolling flake
+update pins the tip and doc2 applies it the next morning. To see a change
+live now, run the one deploy command from doc1 after the merge:
 
 ```bash
-cd ~/cratedigger && git add web/ && git commit -m "..." && git push
-CRATEDIGGER_REV=$(git rev-parse HEAD)
-scripts/pin_nixosconfig.sh "$CRATEDIGGER_REV" "cratedigger: <description>"
-fleet-deploy doc2
+scripts/deploy.sh
 ```
 
-The pin helper is the checked doc1-only Bash boundary: it creates an
-SSH-signed nixosconfig commit, pushes Forgejo master without exposing the token
-in argv or a URL, and verifies the exact remote SHA. Follow the deploy skill's
-bounded `nixos-upgrade.service` polling and exact fleet-anchor verification;
-GitHub nixosconfig is a frozen fallback and is never a deployment source.
-The web service auto-restarts when the Nix store path changes.
+It pins nixosconfig to `origin/main`, pushes the signed commit to Forgejo,
+triggers doc2's verified rebuild and waits for it; GitHub nixosconfig is a
+frozen fallback and is never a deployment source. The web service restarts
+on the switch, so the new frontend is live as soon as the script returns.
 
 After deploy, check `systemctl status cratedigger-import-preview-worker
 cratedigger-importer` and the worker journals. The Recents Imports subview shows

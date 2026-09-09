@@ -450,6 +450,13 @@ class FinalGateReceiptTestCase(unittest.TestCase):
         process = self._launch(mode="drain")
         receipt = self._receipt_from(process)
         gate_pid = self._gate_pid(receipt)
+        # The receipt names the pid before the fake's shell has installed
+        # its TERM trap, so signalling straight after `_gate_pid` can kill
+        # the fake outright and turn this into the "has exited" case below
+        # it. Waiting for the exec is what makes the drain real. Without
+        # this the test fails under load; it took down a whole final gate
+        # on 2026-09-09.
+        self._await_exec(gate_pid, "sleep")
         os.kill(process.pid, signal.SIGTERM)
         process.communicate(timeout=10)
 

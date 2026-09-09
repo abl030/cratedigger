@@ -64,7 +64,7 @@ WEB_TEST_HARNESS_NEIGHBOURS = (
     "tests.web.test_static_assets",
 )
 STRUCTURAL_AUDIT_NEIGHBOURS = (
-    "tests.test_deploy_pin_script",
+    "tests.test_deploy",
     "tests.test_ffmpeg_audio_map_audit",
     "tests.test_js_ast_audits",
     "tests.test_js_payload_contract_audit",
@@ -101,6 +101,20 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         # tests.test_decisions_generated) miss them entirely.
         "tests.test_pipeline_db_decisions",
         "tests.test_pipeline_db_decisions_generated",
+    ),
+    "lib/pipeline_db/evidence.py": (
+        # Same shape as decisions.py above: the prefix rule keeps this file
+        # off the zero-neighbour path and the basename probe does resolve
+        # tests.test_evidence_generated, so nothing raises. The deterministic
+        # pins on _SPECTRAL_TUPLE_USE_INCOMING_SQL — the constant spliced
+        # into all eight spectral CASE expressions in this module — live in
+        # tests.test_pipeline_db and were already selected; the
+        # real-PG-versus-fake parity property, exhaustive over its own
+        # enumerated stored/ownership/incoming/intent domain, was not,
+        # because its module is named for the transition matrix rather than
+        # for this file (issue #1378 item 5, which edited the constant
+        # without selecting it).
+        "tests.test_evidence_transition_matrix_generated",
     ),
     "lib/convergence.py": (
         # Was an admitted zero-neighbour gap (issue #1199, measured
@@ -455,9 +469,7 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         # them, satisfied by commented-out text.
         "tests.test_source_pins",
         "tests.test_daily_flake_update",
-        "tests.test_deploy_cycle_verifier",
-        "tests.test_deploy_hold",
-        "tests.test_deploy_pin_script",
+        "tests.test_deploy",
         "tests.test_docs_audit",
         "tests.test_fuzz_burst",
         "tests.test_issue_573_boundaries",
@@ -533,34 +545,24 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_daily_flake_update",
         "tests.test_daily_beets_tip_update",
     ),
-    "tests/fakes/deploy_cycle.py": (
-        "tests.test_deploy_cycle_verifier",
-        "tests.test_deploy_cycle_verifier_generated",
+    "tests/fakes/deploy.py": (
+        "tests.test_deploy",
+        "tests.test_deploy_generated",
     ),
-    "tests/fakes/deploy_hold.py": (
-        "tests.test_deploy_hold",
-        "tests.test_deploy_hold_generated",
-    ),
-    "tests/fakes/deploy_pin.py": (
-        "tests.test_deploy_pin_script",
-        "tests.test_deploy_pin_generated",
-    ),
-    # The environment the three fake-command fixtures above hand their
+    # The environment the two fake-command fixtures above hand their
     # subprocesses (issue #1313, 1329-2). This entry and the tests/fakes/
     # prefix rule are UNIONED, not overridden, so the prefix half already
     # contributes tests.test_fakes and the derived
     # tests.test_fakes_subprocess_env and neither is repeated here; what it
-    # cannot reach is the three fixtures whose behaviour this module
-    # decides. DERIVED, not curated: every test module importing any of
-    # daily_flake_update, deploy_cycle, or deploy_pin, which is the union of
-    # those three entries. Maskable — pinned in MASKABLE_ENTRY_PINS.
+    # cannot reach is the two fixtures whose behaviour this module
+    # decides. DERIVED, not curated: every test module importing either of
+    # daily_flake_update or deploy, which is the union of those two
+    # entries. Maskable — pinned in MASKABLE_ENTRY_PINS.
     "tests/fakes/subprocess_env.py": (
         "tests.test_daily_flake_update",
         "tests.test_daily_beets_tip_update",
-        "tests.test_deploy_cycle_verifier",
-        "tests.test_deploy_cycle_verifier_generated",
-        "tests.test_deploy_pin_script",
-        "tests.test_deploy_pin_generated",
+        "tests.test_deploy",
+        "tests.test_deploy_generated",
     ),
     "tests/finite_domain.py": (
         "tests.test_finite_domain",
@@ -1127,14 +1129,6 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_beets_config_contract_integration",
         "tests.test_beets_config_startup_generated",
     ),
-    "scripts/cratedigger_deploy_hold.py": (
-        # tests.test_deploy_hold: "import scripts.cratedigger_deploy_hold
-        # as deploy_hold_module" + a real-module import block.
-        # tests.test_deploy_hold_generated:
-        # "from scripts.cratedigger_deploy_hold import (...)".
-        "tests.test_deploy_hold",
-        "tests.test_deploy_hold_generated",
-    ),
     "scripts/plex_dupes_audit.py": (
         # tests.test_plex_dupes_scripts: "from scripts import
         # plex_dupes_audit, plex_dupes_merge" plus real calls
@@ -1375,17 +1369,6 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         # --make-whitelist invocation).
         "tests.test_unused_import_audit",
     ),
-    "scripts/pin_nixosconfig.sh": (
-        # Both modules run the real script through the deploy-pin fake
-        # command harness, which `subprocess.run([str(script), ...])`s the
-        # path it is handed -- `SCRIPT = REPO_ROOT/"scripts"/
-        # "pin_nixosconfig.sh"`, then `fake.run(SCRIPT)` / `fake.popen(
-        # SCRIPT)` at dozens of sites. The deterministic module also reads
-        # this file's own source for its shell-contract audit (shebang,
-        # zero contract violations, `flock 9` before `worktree add`).
-        "tests.test_deploy_pin_script",
-        "tests.test_deploy_pin_generated",
-    ),
     "tests/js_harness.mjs": (
         # The shared JavaScript test harness (issue #1313 candidate 6).
         # No ROOT_COVERAGE_RULES row polices `.mjs` -- the `tests/` row
@@ -1431,17 +1414,6 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_js_suite_audit",
         "tests.test_parallel_test_runner",
         "tests.test_world_model_burst",
-    ),
-    "scripts/verify_cratedigger_cycle.sh": (
-        # Both modules run the real verifier through the deploy-cycle fake
-        # command harness, which `subprocess.run([str(script), *args])`s
-        # the path it is handed (`fake.run(SCRIPT, "capture-migrate")`,
-        # `fake.run(SCRIPT, "verify-migrate-ran", ...)`, ...). Neither
-        # reads this file's source -- their only `pinned_source` calls
-        # target the deploy SKILL, not the verifier -- so the coverage
-        # here is real execution, nothing else.
-        "tests.test_deploy_cycle_verifier",
-        "tests.test_deploy_cycle_verifier_generated",
     ),
 }
 

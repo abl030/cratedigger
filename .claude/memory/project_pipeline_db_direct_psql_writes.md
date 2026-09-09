@@ -28,8 +28,10 @@ postgresql://cratedigger@10.20.0.11:5432/cratedigger
 The nspawn DB host is **10.20.0.11**, NOT the `192.168.100.11` printed in
 CLAUDE.md (that address is stale — same class of staleness as the discogs
 mirror DB, see [[project-discogs-api-deploy-and-db-access]]). The real DSN is
-in `/var/lib/cratedigger/config.ini` (`dsn = …`) and the
-`PIPELINE_DB_DSN` env on `cratedigger.service`. Password is env-format in
+in the immutable store config the wrapper passes as `--config` (derive it
+from `systemctl show cratedigger.service -p ExecStart`; the old
+`/var/lib/cratedigger/config.ini` copy was stale and removed 2026-09-09,
+#1276) and the `PIPELINE_DB_DSN` env on `cratedigger.service`. Password is env-format in
 `/run/secrets/cratedigger-pgpass` (`PGPASSWORD=…`).
 
 Working `psql` incantation (pipe SQL via stdin heredoc — psql reads stdin with

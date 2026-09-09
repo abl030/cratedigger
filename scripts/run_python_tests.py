@@ -191,8 +191,6 @@ AUDITED_FRONTLOAD_MODULES = frozenset({
 #: ``AUDITED_FRONTLOAD_MODULES`` above.
 HOTSPOT_SHARD_POLICIES = {
     "tests.test_beets_destructive_configs_generated": "method_batch",
-    "tests.test_deploy_pin_generated": "method_batch",
-    "tests.test_deploy_pin_script": "method_batch",
     "tests.test_pipeline_db": "class_batch",
 }
 HOTSPOT_CLASS_BATCHES = 8

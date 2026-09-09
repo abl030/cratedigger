@@ -456,29 +456,30 @@ class TestTargetedTestSelection(unittest.TestCase):
         """Regression pin for issue #1081 review round 2, MUST FIX 2.
 
         The tests/fakes/ prefix rule alone maps every fake to
-        tests.test_fakes, but five fakes are neither imported by
+        tests.test_fakes, but several fakes are neither imported by
         tests/test_fakes.py nor re-exported by tests/fakes/__init__.py —
-        tests.test_fakes never loads them. tests/fakes/deploy_hold.py is the
-        live instance: another agent was editing it while this regression
-        shipped, and the prefix rule alone would have selected a test that
-        never loads it.
+        tests.test_fakes never loads them. tests/fakes/deploy.py is the
+        current instance (the original, tests/fakes/deploy_hold.py, was
+        being edited by another agent while this regression shipped, and
+        the prefix rule alone would have selected a test that never loaded
+        it).
         """
         selected = expand_test_selection(
             (),
-            changed_paths=("tests/fakes/deploy_hold.py",),
+            changed_paths=("tests/fakes/deploy.py",),
             repo_root=REPO_ROOT,
         )
 
         self.assertIn("tests.test_fakes", selected)
-        self.assertIn("tests.test_deploy_hold", selected)
-        self.assertIn("tests.test_deploy_hold_generated", selected)
+        self.assertIn("tests.test_deploy", selected)
+        self.assertIn("tests.test_deploy_generated", selected)
 
     def test_a_fake_selects_its_own_cluster_test_module(self) -> None:
         """The #1313 split moved TestFakeBeetsDB out of tests/test_fakes.py.
 
         tests/test_fakes.py no longer names FakeBeetsDB anywhere, so the
         tests/fakes/ prefix rule alone would select a module that never
-        loads the fake being edited: the same shape as the deploy_hold pin
+        loads the fake being edited: the same shape as the deploy-fake pin
         above. The derived tests.test_fakes_<stem> row is what still
         reaches the real consumer.
         """

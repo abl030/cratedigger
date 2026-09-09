@@ -1,4 +1,4 @@
-"""Structural checks for shell forms forbidden in the deploy-pin helper."""
+"""Structural checks for shell forms forbidden in scripts/deploy.sh."""
 
 from __future__ import annotations
 
