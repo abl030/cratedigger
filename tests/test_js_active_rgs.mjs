@@ -600,6 +600,13 @@ t.section('loadReleaseGroup() composed path — a Discogs master row with an act
     'a real match on the master id enables the inverted-mode Replace button for a Discogs row, proving the cache genuinely holds Discogs-shaped ids');
   t.excludes(html, 'Could not check',
     'an enabled button carries no "could not check" explanation');
+  // The offer above was decided from the master id; assert the button
+  // OPENS the picker on that same id. Enablement alone cannot show that.
+  // The offer and the picker argument used to be two independent
+  // computations of one formula (issue #1355 Batch D residual), so a row
+  // could be enabled on the master while the picker got null.
+  t.contains(html, 'releaseGroupId: &quot;424242&quot;',
+    'the enabled Discogs row hands the picker the same master id its offer was decided from');
 }
 
 t.done();

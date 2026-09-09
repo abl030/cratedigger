@@ -52,6 +52,18 @@
  * identical `tracks` shape (`disc_number/track_number/title/
  * length_seconds`), proven by
  * `tests/web/test_routes_browse.py::test_release_detail_numeric_id_forwards_to_discogs`.
+ * `runInverted`'s own two lookups follow the same convention and need no
+ * client-side branch either. `GET /api/pipeline/requests-by-rg/<id>`
+ * takes an MB release-group UUID or a numeric Discogs master id, since
+ * `mb_release_group_id` holds both shapes in one column (KTD-1) and
+ * `list_requests_in_release_group` is a plain equality match with no
+ * shape assumption, proven by
+ * `tests/web/test_routes_release_identity.py::test_requests_by_rg_accepts_a_numeric_discogs_master_id`.
+ * `GET /api/pipeline/requests-by-release/<id>` takes an MB release UUID
+ * or a numeric Discogs release id, resolved through the identity-aware
+ * `get_request_by_release_id`, proven by
+ * `tests/web/test_routes_release_identity.py::test_requests_by_release_finds_the_exact_holder`.
+ * Both route patterns match `[a-f0-9-]+`, which a numeric id satisfies.
  */
 
 import { handleProcessingLockedConflict } from './release_action_state.js';
