@@ -128,11 +128,13 @@ def _evaluate_mode_worlds() -> dict[str, dict[str, object]]:
     ``result*``, untracked files) remained an unmeasured race surface.
     #1378's deploy-trim PR then hit exactly that surface in
     ``tests/test_nix_module.py`` (``tests/test_js_harness.mjs``'s transient
-    in-repo fixture under ``tests/_harness_fixtures``), and this module now
+    in-repo fixture under ``tests/_harness_fixtures``, which #1394 has since
+    made a tracked file, so that particular path no longer churns at all),
+    and this module now
     shares its remedy: the preamble loads the flake as ``git+file://<root>``
     when ``.git`` exists (falling back, in a ``git archive`` snapshot, to
-    the filtered ``builtins.path`` copy this module used before, which now
-    also excludes ``tests/_harness_fixtures`` but stays exposed to any
+    the filtered ``builtins.path`` copy this module used before, which also
+    excludes ``tests/_harness_fixtures`` but stays exposed to any
     other untracked churn, since a suite run there still runs its phases
     concurrently), whose snapshot
     carries every tracked file's working-tree content -- uncommitted edits

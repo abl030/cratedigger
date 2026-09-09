@@ -14,7 +14,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, rmdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,61 +31,66 @@ import {
 const t = suite(import.meta.url);
 
 const TESTS_DIR = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(TESTS_DIR, '..');
 const HARNESS = path.join(TESTS_DIR, 'js_harness.mjs');
 
 /**
- * Where an in-repo fixture goes: a subdirectory, not `tests/` itself.
+ * The tracked in-repo fixture, and the exact identity the harness owes it.
  *
- * A fixture has to live inside the repository for the repo-relative identity
- * assertions to mean anything, and it is removed in a `finally` — but a
- * SIGKILL in that window leaks the file, and nothing reaps it. Under
- * `tests/` directly that leak is an untracked `.mjs` sitting among the real
- * suites (#1319's residual 6); in its own subdirectory it is one line of
- * `git status` naming a directory whose whole purpose is scratch.
+ * Spelled out rather than derived: `path.relative(REPO_ROOT, file)` is what
+ * the harness itself does, so a derived expectation is satisfied by any
+ * consistent answer — including `../../tmp/js-harness-x/…` for a fixture in
+ * a scratch directory. The one thing it cannot say is what the operator
+ * actually reads in the failure index, which is this literal.
  */
-const FIXTURE_DIR = path.join(TESTS_DIR, '_harness_fixtures');
+const IN_REPO_FIXTURE = 'tests/_harness_fixtures/in_repo_identity.mjs';
+
+/** Run one already-written fixture file as a suite and return its result. */
+function runFile(file) {
+  const child = spawnSync(process.execPath, [file], { encoding: 'utf8' });
+  return {
+    status: child.status,
+    stdout: child.stdout,
+    stderr: child.stderr,
+    lines: child.stdout.split('\n'),
+    markers: child.stdout.split('\n').filter(line => line.startsWith(`${FAILURE_MARKER}\t`)),
+    file: path.relative(REPO_ROOT, file),
+  };
+}
 
 /**
  * Run `body` as a suite in a child process and return its result.
  *
- * `inRepo` places the fixture inside the repository so the repo-relative
- * identity is exercised; otherwise it goes to a scratch directory.
+ * The fixture goes to a scratch directory OUTSIDE the repository. It used to
+ * have an `inRepo` mode writing into `tests/_harness_fixtures/` for the
+ * length of one child process, which raced every Nix evaluation that copies
+ * the working tree — the JavaScript phase runs concurrently with the Python
+ * one, and an eval whose walk began while that directory existed died with
+ * "path .../tests/_harness_fixtures does not exist" (#1378, #1394). It also
+ * changed no outcome: flipping all four of its call sites to a scratch
+ * directory left this file at 135 passed, 0 failed (measured 2026-09-09),
+ * because `file` below and the harness each run `path.relative` against a
+ * root they derive themselves, so the two track each other wherever the
+ * fixture sits. The identity claim is now made once, against a literal, by
+ * the tracked fixture above.
+ *
+ * One trade it does make: a scratch identity is longer than an in-repo one
+ * (136 characters against 76 under the suite's own `TMPDIR`, measured by
+ * the independent review) and so sits closer to the harness's 240-character
+ * identity cap. A deep enough checkout or long enough `TMPDIR` would make
+ * the `${run.file}::…` assertions below fail on truncation rather than on a
+ * real defect. 104 characters of headroom today.
  */
-function runFixture(body, { inRepo = false } = {}) {
-  let dir;
-  if (inRepo) {
-    dir = FIXTURE_DIR;
-    mkdirSync(dir, { recursive: true });
-  } else {
-    dir = mkdtempSync(path.join(tmpdir(), 'js-harness-'));
-  }
-  // `_`-prefixed as well: `run_js_checks.sh` globs `test_js_*.mjs`
-  // non-recursively, so an in-repo fixture is already out of its reach on
-  // two counts, and stays so if the glob is ever widened to one of them.
+function runFixture(body) {
+  const dir = mkdtempSync(path.join(tmpdir(), 'js-harness-'));
   const file = path.join(dir, `_js_harness_fixture_${process.pid}_${Math.random().toString(36).slice(2)}.mjs`);
   const source = `import { suite, stubGlobals, domStub, element } from ${JSON.stringify(HARNESS)};\n`
     + `const t = suite(import.meta.url);\n${body}\n`;
   writeFileSync(file, source);
   try {
-    const child = spawnSync(process.execPath, [file], { encoding: 'utf8' });
-    return {
-      status: child.status,
-      stdout: child.stdout,
-      stderr: child.stderr,
-      lines: child.stdout.split('\n'),
-      markers: child.stdout.split('\n').filter(line => line.startsWith(`${FAILURE_MARKER}\t`)),
-      file: path.relative(path.resolve(TESTS_DIR, '..'), file),
-    };
+    return runFile(file);
   } finally {
-    rmSync(file, { force: true });
-    if (inRepo) {
-      // Non-recursive on purpose: it succeeds once this run's last fixture
-      // is gone and fails harmlessly (ENOTEMPTY) while a leaked one remains,
-      // so the leak stays visible instead of being swept up by its own test.
-      try { rmdirSync(dir); } catch { /* another fixture is still there */ }
-    } else {
-      rmSync(dir, { force: true, recursive: true });
-    }
+    rmSync(dir, { force: true, recursive: true });
   }
 }
 
@@ -122,7 +127,6 @@ t.section('a failing suite emits one marker per failed assertion');
     + "t.contains('abc', 'z', 'second');\n"
     + "t.ok(true, 'third');\n"
     + 't.done();',
-    { inRepo: true },
   );
   t.equal(run.status, 1, 'any failed assertion makes the process exit 1');
   t.equal(run.markers.length, 2, 'exactly one marker per FAILED assertion, not one per file');
@@ -193,7 +197,7 @@ t.section('a long identity is capped too, not just the detail');
 
 t.section('a suite that never reaches done() fails closed');
 {
-  const run = runFixture("t.equal(1, 1, 'ran'); // no done()", { inRepo: true });
+  const run = runFixture("t.equal(1, 1, 'ran'); // no done()");
   t.equal(run.status, 1, 'a forgotten done() cannot pass silently');
   t.equal(run.markers.length, 1, 'the exit guard emits exactly one marker');
   t.contains(
@@ -481,7 +485,6 @@ t.section('an assertion with no message fails closed, even when it would pass');
     + 't.pass();\n'
     + "t.throws(() => { throw new Error('x'); });\n"
     + 't.done();',
-    { inRepo: true },
   );
   t.equal(run.status, 1, 'an unnamed assertion reds the suite even though its check passed');
   t.equal(run.markers.length, 4, 'each unnamed site is reported once');
@@ -515,7 +518,7 @@ t.section('a suite that stubs console cannot swallow its own markers');
 
 t.section('an unlabelled assertion has no section segment');
 {
-  const run = runFixture("t.equal(1, 2, 'bare');\nt.done();", { inRepo: true });
+  const run = runFixture("t.equal(1, 2, 'bare');\nt.done();");
   t.equal(
     run.markers[0].split('\t')[1],
     `${run.file}::bare`,
@@ -782,6 +785,48 @@ t.section('element() attributes live beside the element, never on it');
   el.removeAttribute('aria-busy');
   t.equal(el.getAttribute('aria-busy'), null, 'removeAttribute clears it');
   t.equal(el.hasAttribute('aria-busy'), false, 'and hasAttribute agrees');
+}
+
+t.section('a module inside the repository is named by its repo-relative path');
+{
+  // Last in the file on purpose (independent review F5): `markers[0]` on an
+  // empty list throws, and a throw here ends the process, so an early
+  // placement would cost the whole rest of the failure index whenever the
+  // tracked fixture is broken.
+  const run = runFile(path.join(REPO_ROOT, IN_REPO_FIXTURE));
+  t.equal(run.status, 1, 'a suite with a failing assertion exits 1');
+  // Exit 1 alone is also what a MISSING fixture gives (MODULE_NOT_FOUND),
+  // so the run has to be shown to have happened (independent review F6).
+  t.contains(
+    run.stderr,
+    'FAIL: reported from inside the repository',
+    'the tracked fixture really ran and really failed',
+  );
+  t.equal(run.markers.length, 1, 'exactly one marker from the tracked fixture');
+  t.equal(
+    run.markers[0].split('\t')[1],
+    `${IN_REPO_FIXTURE}::in repo::reported from inside the repository`,
+    'the identity is the path relative to the repository root',
+  );
+  t.contains(
+    run.stdout,
+    `${DONE_MARKER}\t${IN_REPO_FIXTURE}\t1\t1`,
+    'the done marker names the same repo-relative path',
+  );
+}
+
+t.section('a scratch fixture is written outside the repository');
+{
+  // #1394: writing one into `tests/_harness_fixtures/` for the length of a
+  // child process raced every Nix walk of the working tree. Without this
+  // assertion, sending `runFixture` back into the repository is invisible —
+  // the independent review's own mutant did exactly that and left the file
+  // green — so the fix would be one line from being undone (review F2).
+  const run = runFixture("t.equal(1, 1, 'ran');\nt.done();");
+  t.ok(
+    run.file.startsWith('..'),
+    `the fixture is outside the repository (identity was ${run.file})`,
+  );
 }
 
 t.done();
