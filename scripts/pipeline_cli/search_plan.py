@@ -522,8 +522,9 @@ def add_search_plan_subparser(
     sp_sub = p_sp.add_subparsers(dest="search_plan_command")
     p_sp_show = sp_sub.add_parser(
         "show",
-        help="Show active/failed plans, cursor, items, provenance, "
-             "legacy logs for one request")
+        help="Show the effective search scope, what has been acquired "
+             "since the last import, and the active/failed plans, cursor, "
+             "items, provenance and legacy logs for one request")
     p_sp_show.add_argument("id", type=int, help="Request ID")
     p_sp_show.add_argument("--json", action="store_true",
                             help="Print structured JSON instead of text")

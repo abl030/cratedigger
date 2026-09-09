@@ -2045,11 +2045,15 @@ class TestSearchLinkStampChecker(unittest.TestCase):
         ), [])
 
     def test_a_second_stamp_over_an_existing_link_is_quiet(self) -> None:
-        """Re-searching a still-downloading attempt re-points the link.
+        """An overwrite of the key itself is not an unexplained change.
 
-        The state already carries an older ``search_log_id``; the new
-        stamp overwrites exactly that key, which is a legitimate world
-        the "nothing else changed" clause must not accuse.
+        Production reaches this at most once per attempt today
+        (``get_wanted`` filters on ``status='wanted'``, so no second
+        search runs while a request is downloading), but the guard's
+        UPDATE does not care what the key already holds — so the clause
+        must judge the RESULT, not assume the key was absent. Written as
+        fail-closed legislation for a writer that re-points a link, not
+        as a claim that one exists.
         """
         self.assertEqual(search_link_stamp_violations(
             status_before="downloading",

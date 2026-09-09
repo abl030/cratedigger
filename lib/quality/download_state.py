@@ -330,11 +330,15 @@ class ActiveDownloadState(msgspec.Struct, omit_defaults=True):
     # identity instead of a clock comparison.
     attempt_fingerprint: str | None = None
     # Issue #811: the exact ``search_log`` row whose ``found`` outcome
-    # produced this grab. Stamped ONCE, by
+    # produced this grab. Stamped by
     # ``PipelineDB.record_consumed_search_attempt``, inside the same
     # transaction that INSERTs that search row -- guarded on
     # ``status='downloading'`` AND an exact ``attempt_fingerprint`` match,
     # so a stamp can only ever land on the attempt the search produced.
+    # The guard permits a re-point (the UPDATE does not care what the key
+    # already holds); production reaches it at most once per attempt
+    # because ``get_wanted``'s ``status = 'wanted'`` filter means no
+    # further search runs for a request while it is downloading.
     # The claim runs BEFORE the search row exists (``lib.enqueue``
     # claims, then ``find_download`` returns, then
     # ``cratedigger._log_search_result`` records), which is why this is a

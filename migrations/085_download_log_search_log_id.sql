@@ -11,8 +11,12 @@
 -- the enqueue-time ``user_offline`` row (written before any search row
 -- exists), merge/delete audits, YouTube queue rows, force/local-import
 -- rows (whose grab state is long gone), and every historical row.
--- ON DELETE SET NULL because search_log rows are forensic and may be
--- pruned; losing the link must never delete the audit row.
+-- ON DELETE SET NULL, not CASCADE: download_log is the operator's audit
+-- trail and search_log is forensics about how that row came to be. If a
+-- search row ever goes away, the audit row must survive without it.
+-- (Nothing deletes search_log rows today except the request-level cascade,
+-- which takes the download_log rows with it anyway; SET NULL is the
+-- fail-safe choice for whatever comes later, not a live code path.)
 ALTER TABLE download_log
     ADD COLUMN search_log_id INTEGER REFERENCES search_log(id) ON DELETE SET NULL;
 
