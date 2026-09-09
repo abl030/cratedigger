@@ -450,28 +450,28 @@ class TestReducePollCycle(unittest.TestCase):
     #: state that is still ``downloading``. ``reset_missing_state`` is
     #: absent because it is the one branch whose input state is ``None``;
     #: it gets its own assertion below. Each row is
-    #: ``(decision, state kwargs, per-file snapshots, cfg overrides)``.
-    IDENTITY_BRANCH_WORLDS: ClassVar[tuple[
-        tuple[PollCycleDecision, dict, list, dict], ...
-    ]] = (
+    #: ``(decision, state overrides, per-file snapshots)``, reduced
+    #: under this class's one config.
+    IDENTITY_BRANCH_WORLDS: ClassVar[tuple[tuple[
+        PollCycleDecision,
+        dict[str, object],
+        list[PollFileSnapshot],
+    ], ...]] = (
         (
             PollCycleDecision.wait_fresh_vanished,
             {"enqueued_at": "2026-07-11T02:59:30+00:00"},
             [PollFileSnapshot()],
-            {},
         ),
         (
             PollCycleDecision.timeout_vanished,
             {},
             [PollFileSnapshot()],
-            {},
         ),
         (
             PollCycleDecision.in_progress,
             {},
             [PollFileSnapshot(
                 transfer_id="tx-1", state="InProgress", bytes_transferred=40)],
-            {},
         ),
         (
             PollCycleDecision.complete,
@@ -481,7 +481,6 @@ class TestReducePollCycle(unittest.TestCase):
                 state="Completed, Succeeded",
                 bytes_transferred=100,
             )],
-            {},
         ),
         (
             PollCycleDecision.retry_files,
@@ -501,13 +500,11 @@ class TestReducePollCycle(unittest.TestCase):
                     transfer_id="tx-2", state="Completed, Rejected",
                     exception="banned"),
             ],
-            {},
         ),
         (
             PollCycleDecision.timeout_remote_queue,
             {"enqueued_at": "2026-07-11T02:50:00+00:00"},
             [PollFileSnapshot(transfer_id="tx-1", state="Queued, Remotely")],
-            {},
         ),
         (
             PollCycleDecision.timeout_stalled,
@@ -519,7 +516,6 @@ class TestReducePollCycle(unittest.TestCase):
                     file_dir="Album", size=100, last_state="InProgress")],
             },
             [PollFileSnapshot(transfer_id="tx-1", state="InProgress")],
-            {},
         ),
         (
             PollCycleDecision.timeout_all_errored,
@@ -528,7 +524,6 @@ class TestReducePollCycle(unittest.TestCase):
                 file_dir="Album", size=100,
                 last_state="Completed, Rejected", last_exception="banned")]},
             [PollFileSnapshot()],
-            {},
         ),
     )
 
@@ -552,15 +547,14 @@ class TestReducePollCycle(unittest.TestCase):
         rebuilding state through some other constructor is caught here
         rather than in production.
         """
-        for decision, overrides, snapshots, cfg in self.IDENTITY_BRANCH_WORLDS:
+        for decision, overrides, snapshots in self.IDENTITY_BRANCH_WORLDS:
             with self.subTest(decision=decision.value):
                 state = self._state(
                     attempt_fingerprint="fp-9f8e7d6c",
                     search_log_id=563143,
                     **overrides,
                 )
-                result = self._reduce(
-                    state, self._snapshot(*snapshots), **cfg)
+                result = self._reduce(state, self._snapshot(*snapshots))
 
                 self.assertEqual(result.verdict.decision, decision)
                 assert result.state is not None
