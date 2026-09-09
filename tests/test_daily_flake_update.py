@@ -38,16 +38,28 @@ TIP_SCRIPT = REPO_ROOT / "scripts" / "daily_beets_tip_update.sh"
 # only "never reached".
 STAGE_START_TIMEOUT_SECONDS = 120
 
-# The same reasoning for the other half of every one of those tests: waiting
-# for the runner to FINISH. Those bounds are hang guards too, and the tightest
-# of them (10s, in the flock test the issue names) sat 1.4x above the slowest
-# run measured here -- 7.1s for a complete fake candidate gate under a load
-# average of 161 to 170, against 0.55s median on a near-idle host. A hang
-# still fails, just later; a merely slow host no longer does. The deliberate
-# SHORT bound in `test_update_state_takes_an_exclusive_lock` is not one of
-# these: it asserts a call has NOT finished, so load pushes it away from a
-# false red, not toward one.
+# The same reasoning for the other half of those tests: waiting for the thing
+# they started to finish, whether that is a runner subprocess or a worker
+# thread. Those bounds are hang guards too, and the tightest of them (10s, in
+# the flock test the issue names) sat 1.4x above the slowest run measured
+# here -- 7.1s for a complete fake candidate gate under a load average of 161
+# to 170, against 0.55s median on a near-idle host. A hang still fails, just
+# later; a merely slow host no longer does. The deliberate SHORT bound in
+# `test_update_state_takes_an_exclusive_lock` is not one of these: it asserts
+# a call has NOT finished, so load pushes it away from a false red.
 RUNNER_EXIT_TIMEOUT_SECONDS = 120
+
+# Draining a dead runner's pipes is bounded too, and for a sharper reason:
+# scripts/daily_flake_update.sh forks the resource monitor's periodic loop
+# with the parent's stdout and stderr inherited, and that loop exits only when
+# daily_resource_monitor_finish writes its stop file from the parent's EXIT
+# trap. Kill the parent without running that trap -- SIGKILL, doc1's OOM
+# killer -- and the orphan holds the pipe open, so an unbounded
+# `communicate()` never returns, inside the very wait whose job is to be
+# bounded (measured: still blocked after 10s with the parent already reaped).
+# Exceeding this loses the runner's output, never the diagnosis, so it cannot
+# fail a test in either direction.
+PROBE_DRAIN_TIMEOUT_SECONDS = 5
 
 
 def process_exit_diagnosis(
@@ -58,7 +70,15 @@ def process_exit_diagnosis(
     def probe() -> str | None:
         if process.poll() is None:
             return None
-        stdout, stderr = process.communicate()
+        try:
+            stdout, stderr = process.communicate(
+                timeout=PROBE_DRAIN_TIMEOUT_SECONDS
+            )
+        except subprocess.TimeoutExpired:
+            return (
+                f"exit {process.returncode}; its output is still held by a "
+                "surviving child, so there is none to show"
+            )
         return f"exit {process.returncode}\nstdout:\n{stdout}\nstderr:\n{stderr}"
 
     return probe
@@ -67,7 +87,13 @@ def process_exit_diagnosis(
 def future_exit_diagnosis(
     runner: Future[subprocess.CompletedProcess[str]],
 ) -> Callable[[], str | None]:
-    """Exit probe for a runner submitted to an executor."""
+    """Exit probe for a runner submitted to an executor.
+
+    ``result()`` re-raises whatever the submitted callable raised, which
+    surfaces as a test error rather than a failure. `FakeDailyFlakeUpdateCommands.run`
+    passes ``check=False``, so today that cannot happen; if it ever does, the
+    real exception is the diagnosis.
+    """
 
     def probe() -> str | None:
         if not runner.done():
@@ -113,6 +139,21 @@ def await_stage_start(
         time.sleep(0.02)
 
 
+def _kill_group(group: int) -> None:
+    """Reap a whole process group, orphans included, ignoring one already gone."""
+    try:
+        os.killpg(group, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def _close_pipes(process: subprocess.Popen[str]) -> None:
+    """Close a Popen's pipes that a timed-out `communicate()` left open."""
+    for pipe in (process.stdout, process.stderr):
+        if pipe is not None:
+            pipe.close()
+
+
 def gate_run_diagnosis(proc: subprocess.CompletedProcess[str]) -> str:
     """The runner's stderr plus its resource receipt, for an assertion message.
 
@@ -131,12 +172,16 @@ def gate_run_diagnosis(proc: subprocess.CompletedProcess[str]) -> str:
     return "\n".join([proc.stderr.rstrip(), *receipts])
 
 
-class TestDailyFlakeUpdateScript(unittest.TestCase):
+class FakeRunnerCase(unittest.TestCase):
+    """One fixture directory per test, shared by every class in this module."""
+
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
         self.fake = FakeDailyFlakeUpdateCommands(Path(self.tempdir.name))
 
+
+class TestDailyFlakeUpdateScript(FakeRunnerCase):
     def fake_environment(self) -> dict[str, str]:
         env = os.environ.copy()
         env.update(
@@ -201,8 +246,11 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.assertIn(
             "CRATEDIGGER_DAILY_RESOURCE_RECEIPT schema=1 status=valid",
             proc.stdout,
+            gate_run_diagnosis(proc),
         )
-        self.assertNotIn("resource receipt invalid", proc.stderr)
+        self.assertNotIn(
+            "resource receipt invalid", proc.stderr, gate_run_diagnosis(proc)
+        )
         for phase in (
             "deterministic_suite",
             "shuffled_suite",
@@ -315,12 +363,15 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.assertIn(
             "CRATEDIGGER_DAILY_RESOURCE_RECEIPT schema=1 status=valid",
             proc.stdout,
+            gate_run_diagnosis(proc),
         )
         # A healthy, valid monitor on an ordinary gate failure gets no
         # invalid-receipt diagnostic -- issue #1214 gap 4 is about a
         # NON-CLEAN receipt surfacing, not every failing run growing new
         # output.
-        self.assertNotIn("resource receipt invalid", proc.stderr)
+        self.assertNotIn(
+            "resource receipt invalid", proc.stderr, gate_run_diagnosis(proc)
+        )
 
     def test_unchanged_lock_still_runs_gates_without_commit(self) -> None:
         self.fake.update_state(lock_changed=False)
@@ -657,16 +708,11 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.assertLess(daily_push, update_tip)
 
 
-class TestDailyFlakeUpdateFakeShimCaching(unittest.TestCase):
+class TestDailyFlakeUpdateFakeShimCaching(FakeRunnerCase):
     """Pins for the shared-module fake-command shape (issue #1156 item 5):
     git/nix/nix-shell remain symlinks to one tiny stub that imports a shared
     ``_shim.py``, so CPython caches its compiled bytecode across every fake
     command invocation instead of recompiling on each one."""
-
-    def setUp(self) -> None:
-        self.tempdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tempdir.cleanup)
-        self.fake = FakeDailyFlakeUpdateCommands(Path(self.tempdir.name))
 
     def test_command_stub_is_tiny_and_shares_one_cached_shim_module(self) -> None:
         shim_path = self.fake.fake_bin / "_shim.py"
@@ -742,7 +788,7 @@ class TestDailyFlakeUpdateFakeShimCaching(unittest.TestCase):
         self.assertIn("_shim", proc.stderr)
 
 
-class TestFakeStatePublication(unittest.TestCase):
+class TestFakeStatePublication(FakeRunnerCase):
     """The fixture's state file, which `await_stage_start` reads unlocked.
 
     Every subprocess test that waits for a stage marker spins on
@@ -756,11 +802,6 @@ class TestFakeStatePublication(unittest.TestCase):
     (`.claude/rules/code-quality.md` § "Never property-test the test
     machinery").
     """
-
-    def setUp(self) -> None:
-        self.tempdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tempdir.cleanup)
-        self.fake = FakeDailyFlakeUpdateCommands(Path(self.tempdir.name))
 
     def test_fixture_publishes_state_by_rename_never_by_truncation(self) -> None:
         """The mechanism itself: a fresh file replaces the old one.
@@ -928,18 +969,13 @@ class TestFakeStatePublication(unittest.TestCase):
         )
 
 
-class TestStageStartWait(unittest.TestCase):
+class TestStageStartWait(FakeRunnerCase):
     """Issue #1392: the wait every subprocess test above starts with.
 
     Test infrastructure, so deterministic only -- exact contracts, never a
     generated property (`.claude/rules/code-quality.md` § "Never
     property-test the test machinery").
     """
-
-    def setUp(self) -> None:
-        self.tempdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tempdir.cleanup)
-        self.fake = FakeDailyFlakeUpdateCommands(Path(self.tempdir.name))
 
     def test_a_marker_landing_past_the_old_window_is_still_awaited(self) -> None:
         """The load flake itself: a slow preamble is not a failure.
@@ -957,9 +993,16 @@ class TestStageStartWait(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=1) as executor:
             lander = executor.submit(land_marker)
             await_stage_start(self, self.fake, "suite", exited=lambda: None)
+            # Before the join, not after: joining the lander lands the marker
+            # by itself, so an assertion taken afterwards passes even for a
+            # wait that returned instantly. Found by the review's mutant
+            # runner, inverting this helper's own loop condition.
+            self.assertIn(
+                "suite",
+                self.fake.state["stage_started"],
+                "the wait returned before the marker landed",
+            )
             lander.result(timeout=RUNNER_EXIT_TIMEOUT_SECONDS)
-
-        self.assertIn("suite", self.fake.state["stage_started"])
 
     def test_a_runner_that_exits_early_fails_with_its_own_output(self) -> None:
         """A dead runner is diagnosed, not waited out.
@@ -972,20 +1015,54 @@ class TestStageStartWait(unittest.TestCase):
         self.fake.update_state(fault="update")
         with ThreadPoolExecutor(max_workers=1) as executor:
             runner = executor.submit(self.fake.run, SCRIPT)
-            started = time.monotonic()
             with self.assertRaises(AssertionError) as caught:
                 await_stage_start(
                     self, self.fake, "suite", exited=future_exit_diagnosis(runner)
                 )
-            elapsed = time.monotonic() - started
             runner.result(timeout=RUNNER_EXIT_TIMEOUT_SECONDS)
 
+        # Both strings together say the wait exited through the exit probe:
+        # the cap's own message is a different sentence, and only the probe
+        # branch carries the runner's stderr. Timing them would be the
+        # performance assertion this whole change removes.
         self.assertIn("exited before reaching suite", str(caught.exception))
         self.assertIn("flake update failed", str(caught.exception))
-        self.assertLess(
-            elapsed,
-            STAGE_START_TIMEOUT_SECONDS / 2,
-            "the wait burned its cap instead of reading the exit",
+
+    def test_a_dead_runners_surviving_child_cannot_block_the_exit_probe(
+        self,
+    ) -> None:
+        """An orphan holding the runner's pipe must not hang the wait.
+
+        `scripts/daily_flake_update.sh` forks the resource monitor's periodic
+        loop with its own stdout and stderr, and that loop exits only on the
+        stop file its parent's EXIT trap writes. A parent killed without
+        running that trap leaves the orphan holding the pipe, and an
+        unbounded `communicate()` then never returns -- measured against the
+        real script during this change's review, still blocked after 10s with
+        the parent already reaped. The world here is that shape at its
+        smallest: a shell that outlives itself through one child, with no
+        monitor involved, so nothing about the timing can drift.
+        """
+        process = subprocess.Popen(
+            ["bash", "-c", "sleep 300 & exit 7"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        group = process.pid
+        # LIFO: kill the group first, then close the pipes a timed-out
+        # `communicate()` leaves open.
+        self.addCleanup(_close_pipes, process)
+        self.addCleanup(_kill_group, group)
+        process.wait(timeout=RUNNER_EXIT_TIMEOUT_SECONDS)
+
+        diagnosis = process_exit_diagnosis(process)()
+
+        self.assertEqual(
+            diagnosis,
+            "exit 7; its output is still held by a surviving child, so there "
+            "is none to show",
         )
 
     def test_an_exit_seen_after_the_marker_landed_is_not_called_early(self) -> None:
@@ -1006,25 +1083,29 @@ class TestStageStartWait(unittest.TestCase):
 
         self.assertIn("suite", self.fake.state["stage_started"])
 
-    def test_a_live_runner_that_never_reaches_its_stage_still_gives_up(self) -> None:
+    def test_a_marker_that_never_lands_gives_up_at_the_cap(self) -> None:
         """The cap is smaller here than any real one, and that is the point:
-        a wait with no ceiling at all hangs a suite worker forever."""
+        a wait with no ceiling at all hangs a suite worker forever. The probe
+        reports a live runner throughout, so the cap is the only way out."""
+        started = time.monotonic()
         with self.assertRaises(AssertionError) as caught:
             await_stage_start(
                 self, self.fake, "suite", exited=lambda: None, timeout=0.2
             )
+        elapsed = time.monotonic() - started
 
         self.assertIn("never reached suite", str(caught.exception))
         self.assertIn("still alive", str(caught.exception))
+        # It must give up BECAUSE the cap elapsed. Inverting the comparison
+        # inside the wait produces the same message instantly, and the
+        # review's mutant runner proved the message assertions alone cannot
+        # tell the two apart. A slow host only pushes this further past 0.2s,
+        # so it fails in one direction only.
+        self.assertGreaterEqual(elapsed, 0.2)
 
 
-class TestGateRunDiagnosis(unittest.TestCase):
+class TestGateRunDiagnosis(FakeRunnerCase):
     """Issue #1392: what a failing green-run assertion actually prints."""
-
-    def setUp(self) -> None:
-        self.tempdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tempdir.cleanup)
-        self.fake = FakeDailyFlakeUpdateCommands(Path(self.tempdir.name))
 
     def test_an_invalid_receipt_names_the_monitor_step_that_failed(self) -> None:
         """The reason token comes from the real monitor, not a literal.
@@ -1051,6 +1132,19 @@ class TestGateRunDiagnosis(unittest.TestCase):
         diagnosis = gate_run_diagnosis(proc)
         self.assertIn("candidate failed; flake.lock was not committed", diagnosis)
         self.assertIn("status=valid", diagnosis)
+        # One receipt line, not the monitor's whole telemetry dump: a run
+        # emits seven CRATEDIGGER_DAILY_RESOURCE_PHASE lines of a couple of
+        # hundred characters each, and an assertion message carrying all of
+        # them buries the one fact it exists to show. Widening the prefix to
+        # CRATEDIGGER_DAILY_RESOURCE_ survived every substring assertion above
+        # when the review's mutant runner tried it.
+        self.assertNotIn("CRATEDIGGER_DAILY_RESOURCE_PHASE", diagnosis)
+        carried = [
+            line
+            for line in diagnosis.splitlines()
+            if line.startswith("CRATEDIGGER_DAILY_RESOURCE_")
+        ]
+        self.assertEqual(len(carried), 1, diagnosis)
 
 
 if __name__ == "__main__":
