@@ -14994,13 +14994,42 @@ class TestConsumedAttemptStampsDownloadState(unittest.TestCase):
         self.assertEqual(self._state(), before)
         self.assertNotIn("search_log_id", self._state())
 
-    def test_non_downloading_row_is_never_stamped(self):
-        # A request that never claimed: still ``wanted``, no state at all.
+    def test_a_row_that_never_claimed_is_never_stamped(self):
+        # Still ``wanted``, no state at all — nothing to stamp onto.
         result = self.db.record_consumed_search_attempt(self._attempt())
         self.assertFalse(result.download_state_stamped)
         req = self.db.get_request(self.req_id)
         assert req is not None
         self.assertIsNone(req["active_download_state"])
+
+    def test_a_processing_row_is_never_stamped(self):
+        """The status guard's real production world (invariant 10).
+
+        ``processing`` RETAINS the download state, fingerprint and all —
+        the state is cleared last, by the terminal bundle — so a stale
+        search completing after the handoff meets a row whose fingerprint
+        matches. Only ``status='downloading'`` keeps the stamp out, and
+        it must: every mutation of an owned row is fenced by its exact
+        automation job, which this write is not.
+        """
+        self._claim(self.FINGERPRINT)
+        state = self._state()
+        handoff = self.db.handoff_automation_import(
+            request_id=self.req_id,
+            expected_enqueued_at=str(state["enqueued_at"]),
+            canonical_path="/processing/albums/stamp",
+            message="stamp guard fixture",
+        )
+        self.assertTrue(handoff.committed)
+        req = self.db.get_request(self.req_id)
+        assert req is not None
+        self.assertEqual(req["status"], "processing")
+        before = self._state()
+        self.assertEqual(before["attempt_fingerprint"], self.FINGERPRINT)
+
+        result = self.db.record_consumed_search_attempt(self._attempt())
+        self.assertFalse(result.download_state_stamped)
+        self.assertEqual(self._state(), before)
 
     def test_attempt_without_a_fingerprint_never_stamps(self):
         self._claim(self.FINGERPRINT)

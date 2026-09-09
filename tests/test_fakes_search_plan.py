@@ -1036,7 +1036,7 @@ class TestFakeSearchToGrabLink(unittest.TestCase):
         self.assertFalse(result.download_state_stamped)
         self.assertEqual(self._state(db, rid), before)
 
-    def test_non_downloading_row_is_never_stamped(self):
+    def test_a_row_that_never_claimed_is_never_stamped(self):
         db, rid, plan_id, item_id = self._db_with_plan()
         result = db.record_consumed_search_attempt(
             self._attempt(rid, plan_id, item_id))
@@ -1044,6 +1044,34 @@ class TestFakeSearchToGrabLink(unittest.TestCase):
         row = db.get_request(rid)
         assert row is not None
         self.assertIsNone(row["active_download_state"])
+
+    def test_a_processing_row_is_never_stamped(self):
+        """``processing`` retains the state AND its fingerprint (#898).
+
+        Only the status half of the guard keeps the stamp off an owned
+        row; the fingerprint half matches. Real-PG twin:
+        ``TestConsumedAttemptStampsDownloadState::
+        test_a_processing_row_is_never_stamped``.
+        """
+        db, rid, plan_id, item_id = self._db_with_plan()
+        self._claim(db, rid, self.FINGERPRINT)
+        handoff = db.handoff_automation_import(
+            request_id=rid,
+            expected_enqueued_at=str(self._state(db, rid)["enqueued_at"]),
+            canonical_path="/processing/albums/stamp",
+            message="stamp guard fixture",
+        )
+        self.assertTrue(handoff.committed)
+        row = db.get_request(rid)
+        assert row is not None
+        self.assertEqual(row["status"], "processing")
+        before = dict(self._state(db, rid))
+        self.assertEqual(before["attempt_fingerprint"], self.FINGERPRINT)
+
+        result = db.record_consumed_search_attempt(
+            self._attempt(rid, plan_id, item_id))
+        self.assertFalse(result.download_state_stamped)
+        self.assertEqual(self._state(db, rid), before)
 
     def test_attempt_without_a_fingerprint_never_stamps(self):
         db, rid, plan_id, item_id = self._db_with_plan()
