@@ -15,6 +15,7 @@ from collections.abc import Callable, Sequence
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 import msgspec
 from hypothesis import HealthCheck, assume, given, settings
@@ -1685,9 +1686,15 @@ class TestShuffledOrder(unittest.TestCase):
                 )
 
     def _run_alpha_with_expected(
-        self, expected: tuple[str, ...]
+        self, expected: tuple[str, ...], *, shuffle_seed: str | None = None
     ) -> tuple[tuple[TargetRunResult, ...], tuple[TargetInfrastructureFailure, ...]]:
-        with tempfile.TemporaryDirectory() as tempdir:
+        overrides = {SHUFFLE_SEED_ENV: shuffle_seed} if shuffle_seed else {}
+        with (
+            tempfile.TemporaryDirectory() as tempdir,
+            patch.dict(os.environ, overrides),
+        ):
+            if shuffle_seed is None:
+                os.environ.pop(SHUFFLE_SEED_ENV, None)
             root = Path(tempdir)
             tests_dir = root / "fixture_tests"
             tests_dir.mkdir()
@@ -1721,6 +1728,16 @@ class TestShuffledOrder(unittest.TestCase):
         multiset question, so a reordered run passes while a dropped or
         invented ID still trips the guard."""
         results, failures = self._run_alpha_with_expected(tuple(reversed(_ALPHA_IDS)))
+
+        self.assertEqual(failures, ())
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0].successful)
+
+        # The child itself out of loader order, expected in loader order:
+        # seed 1 runs the fixture as c, a, b under the real salt contract,
+        # so a guard that sorts only one side trips here (mutant-runner
+        # finding on #1391: the unshuffled fixture could not tell).
+        results, failures = self._run_alpha_with_expected(_ALPHA_IDS, shuffle_seed="1")
 
         self.assertEqual(failures, ())
         self.assertEqual(len(results), 1)
