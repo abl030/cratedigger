@@ -10730,16 +10730,24 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         ``skipped`` identically for ``preserve_existing_audio_validation``,
         but every test drove the pair through ``legacy_unrecorded`` only —
         mutating the ``"skipped"`` literal survived the whole selection
-        (mutmut breadth pass, #1378). The arm is config-reachable, not
-        hypothetical: ``lib.util.validate_audio`` returns
-        ``outcome="skipped"`` whenever ``cfg.audio_check_mode == "off"``,
-        and ``measure_preimport_state`` puts that report straight onto the
-        evidence it persists. Under ``[Beets Validation] audio_check =
-        off`` every write carries it, so this branch decides every merge.
-        (The ``skipped_audio_validation_report`` constructor has no caller;
-        the outcome has a different producer, which is why greping the
-        constructor name says nothing.) doc2 runs the ``normal`` default
-        today.
+        (mutmut breadth pass, #1378).
+
+        The outcome has a producer, though not one any deployment reaches
+        today. ``lib.util.validate_audio`` returns ``outcome="skipped"``
+        when ``cfg.audio_check_mode == "off"``, and that report rides
+        ``PreimportMeasurement.audio_validation`` into
+        ``evidence_from_measurement``. But ``audio_check`` is read only by
+        ``lib.config``: ``nix/module.nix`` renders a fixed ``[Beets
+        Validation]`` block without it and offers no override, so a
+        module-deployed installation cannot set ``off`` at all, and doc2
+        runs the ``normal`` default. Two other current-evidence builders
+        (``evidence_from_album_info`` and the propagation write) never pass
+        ``audio_validation``, so they carry ``legacy_unrecorded`` whatever
+        the mode is. So this stays coverage for a member of the set the
+        deployment does not exercise — which is the right reason to pin it,
+        not a reason to call it dead. (Greping
+        ``skipped_audio_validation_report`` finds nothing: the constructor
+        has no caller, and the outcome is spelled elsewhere.)
         """
         from lib.quality import skipped_audio_validation_report
 
@@ -10799,7 +10807,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         self.assertFalse(preserved.files[0].decode_ok)
 
     def test_a_stored_skipped_report_has_nothing_worth_preserving(self):
-        """The other half of the same set, on the stored side.
+        """The stored side of the same set, across both observable columns.
 
         The merge preserves the stored report only when the incoming one is
         weak AND the stored one is not — ``album_quality_evidence.
@@ -10808,7 +10816,15 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         dropping ``'skipped'`` from the stored half survived all 46 tests of
         this class (mutant runner finding, #1378 review round), because
         nothing ever stored a ``skipped`` report and then wrote over it.
-        Under ``audio_check = off`` (see the sibling) that is every write.
+
+        That guard is spelled once per column, so this asserts both columns
+        a stored-``skipped`` world can distinguish: ``audio_validation``
+        itself and ``audio_error``. The third, ``audio_corrupt``, is
+        unobservable here by construction rather than untested —
+        ``storage_validation_errors`` forces it to agree with the outcome,
+        and every weak outcome is a non-corrupt one, so both the preserve
+        and the replace branch yield ``False`` whenever the guard's
+        stored-side list is what decides.
         """
         from lib.quality import skipped_audio_validation_report
 
@@ -10816,11 +10832,12 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         evidence = self._seed(
             mb_release_id="mbid-stored-skipped-weak",
             audio_validation=skipped_audio_validation_report(),
+            audio_error="disc-1/01.flac: stored diagnostic",
         )
         self.db.upsert_album_quality_evidence(evidence)
 
         self.db.upsert_album_quality_evidence(msgspec.structs.replace(
-            evidence, audio_validation=weak_incoming,
+            evidence, audio_validation=weak_incoming, audio_error=None,
         ))
 
         merged = self.db.find_album_quality_evidence(
@@ -10829,6 +10846,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         )
         assert merged is not None
         self.assertEqual(merged.audio_validation, weak_incoming)
+        self.assertIsNone(merged.audio_error)
 
     def test_strong_writer_replaces_decode_ok_on_the_same_address(self):
         """Issue #1355 Batch E (E1, reader finding): the sibling test above

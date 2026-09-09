@@ -2146,12 +2146,13 @@ class TestGeneratedSpectralDisjunctSubsumption(unittest.TestCase):
     @example(
         # The decisive world for the grade clause: R19-shaped at v5 with no
         # grade. Production refuses it (which is exactly why disjunct 4 was
-        # dead), so the clause stays quiet — but only 672 of this strategy's
-        # 345,600 cells (0.19%) can make it fire under a defective
-        # validator, so a suite-depth sample misses it on most runs.
-        # Measured: deleting the "spectral markers require a spectral grade"
-        # clause from ``AudioQualityMeasurement.new_row_validation_errors``
-        # leaves the property GREEN without this pin and RED with it.
+        # dead), so the clause stays quiet — but deleting the "spectral
+        # markers require a spectral grade" clause from
+        # ``AudioQualityMeasurement.new_row_validation_errors`` makes it
+        # fire on only 672 of this strategy's 345,600 cells (0.19%), and
+        # the suite tier draws 150 derandomized examples, which missed it.
+        # Measured: that mutant leaves the property GREEN without this pin
+        # and RED with it.
         world=SpectralSubsumptionWorld(
             lineage_version=5, grade=None, bitrate_kbps=None,
             subject="source", provenance="carried", was_converted_from="flac",
@@ -2167,7 +2168,13 @@ class TestGeneratedSpectralDisjunctSubsumption(unittest.TestCase):
         # the pin above stayed green while the mutated validator let this
         # exact shape become storable, and the property only caught it at
         # fuzz depth (mutant runner finding, #1378 review round). R19 never
-        # reads provenance, so dropping it keeps the world R19-shaped.
+        # reads provenance, so dropping it keeps the world R19-shaped. That
+        # mutant fires on 224 of the 345,600 cells, 0.065%. The mirror
+        # world — provenance set, subject null — is unreachable from here
+        # by construction, since R19 needs the subject; the operand-level
+        # cases live in
+        # ``tests.test_quality_evidence.
+        # TestEverySpectralGradeCompanionIsRejectedWithoutOne``.
         world=SpectralSubsumptionWorld(
             lineage_version=5, grade=None, bitrate_kbps=None,
             subject="source", provenance=None, was_converted_from="flac",

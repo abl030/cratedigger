@@ -1643,6 +1643,88 @@ class TestCaptureFieldsAreOneAtomicFactWithSpectralGrade(unittest.TestCase):
         self.assertEqual(measurement.new_row_validation_errors(), [])
 
 
+class TestEverySpectralGradeCompanionIsRejectedWithoutOne(unittest.TestCase):
+    """The capture-fact table above, for the two clauses beside it.
+
+    ``new_row_validation_errors`` guards three families of companion fact
+    against a null ``spectral_grade``: the four capture facts (covered
+    above, per field), the spectral bitrate, and the two markers
+    (``spectral_subject`` / ``spectral_provenance``, which share one
+    message via an ``or``). Only the capture family had a per-field table,
+    so mutant runs against the other two survived every test in the tree
+    (#1378 review round): dropping the provenance operand from the markers
+    clause survived 771 tests and a 20,000-example fuzz burst, and
+    neutering the bitrate clause survived 1,028.
+
+    That second one has a blast radius beyond itself. Both
+    ``tests.test_candidate_admission_progress_generated`` and
+    ``tests.test_quality_decisions`` narrow their own strategies on the
+    strength of "a persisted row can never carry a bitrate without a
+    grade", in comments, with nothing exercising the guard they cite.
+
+    Each row asserts its clause's EXACT message, because the capture
+    family's own assertion matches on the shared "require a spectral
+    grade" substring and would pass on the wrong clause.
+    """
+
+    #: (description, gradeless measurement, exact expected message)
+    COMPANION_CASES: ClassVar[
+        list[tuple[str, Callable[[], AudioQualityMeasurement], str]]
+    ] = [
+        (
+            "spectral_bitrate_kbps",
+            lambda: AudioQualityMeasurement(
+                min_bitrate_kbps=192, format="MP3",
+                spectral_bitrate_kbps=192,
+            ),
+            "spectral bitrate requires a spectral grade",
+        ),
+        (
+            "spectral_subject alone",
+            lambda: AudioQualityMeasurement(
+                min_bitrate_kbps=192, format="MP3",
+                spectral_subject="source",
+            ),
+            "spectral markers require a spectral grade",
+        ),
+        (
+            "spectral_provenance alone",
+            lambda: AudioQualityMeasurement(
+                min_bitrate_kbps=192, format="MP3",
+                spectral_provenance="measured",
+            ),
+            "spectral markers require a spectral grade",
+        ),
+        (
+            "both markers",
+            lambda: AudioQualityMeasurement(
+                min_bitrate_kbps=192, format="MP3",
+                spectral_subject="source", spectral_provenance="carried",
+            ),
+            "spectral markers require a spectral grade",
+        ),
+    ]
+
+    def test_each_companion_without_a_grade_names_its_own_clause(self):
+        for description, make_measurement, message in self.COMPANION_CASES:
+            with self.subTest(companion=description):
+                self.assertIn(
+                    message, make_measurement().new_row_validation_errors(),
+                )
+
+    def test_the_same_companions_with_a_grade_are_valid(self):
+        """The must-still-work control, one shape carrying all three."""
+        measurement = AudioQualityMeasurement(
+            min_bitrate_kbps=192,
+            format="MP3",
+            spectral_grade="genuine",
+            spectral_bitrate_kbps=192,
+            spectral_subject="source",
+            spectral_provenance="measured",
+        )
+        self.assertEqual(measurement.new_row_validation_errors(), [])
+
+
 class TestBlankSourcePathPolicy(unittest.TestCase):
     """A blank ``source_path`` is action-incomplete (download_log 37206).
 
