@@ -1281,11 +1281,11 @@ pkgs.testers.nixosTest {
     # controlled workers, then `systemctl start --no-block
     # cratedigger.service`, then a producer drain). That cycle reaches its
     # Beets admission line (measured: exactly one main admission since boot
-    # once it has finished), which is the single main admission the
-    # since-boot counts further down expect, exactly as the release's own
-    # cycle supplied it before the hold was removed. The later fresh-start
-    # scenario's `grep -q` for the same line is therefore satisfied by this
-    # one; the count assertion is what actually holds the total.
+    # once it has finished), exactly as the release's own cycle supplied it
+    # before the hold was removed. That is the first of the two main
+    # admissions the since-boot counts further down expect; the fresh-start
+    # scenario below supplies the second and proves it by counting its own
+    # delta rather than grepping for a line this one already wrote.
     machine.succeed("rm /run/cratedigger-test-config-hold")
     machine.succeed(
         "systemctl start cratedigger-web.service "
@@ -1386,11 +1386,28 @@ pkgs.testers.nixosTest {
     # producer remains failed, the soft dependency must let intrinsic Beets
     # admission run. The service will later fail because there is no real
     # slskd, which is outside this contract.
+    #
+    # Count this start's OWN admission rather than grepping for the line
+    # (#1394 item 1). The release-shaped cycle above already wrote one
+    # `admitted for main` line into the boot journal, so a `grep -q` here
+    # succeeded the instant it ran and the SIGKILL below landed first: the
+    # since-boot count further down asserted one main admission, not two,
+    # which is only true if this start never reached its own. Waiting for
+    # the count to reach the pre-start value plus one is what puts the kill
+    # after the admission the scenario claims the soft edge allows. The
+    # `test ! -f .cratedigger.lock` wait dropped alongside it was vacuous
+    # too, for its own reason: `cratedigger.py::main` removes that file when
+    # its cycle ends, and this unit's ExecStartPre removes it again on every
+    # start, so no earlier start here had left one behind.
+    admissions_before_fresh_main_start = int(machine.succeed(
+        "journalctl -b -u cratedigger.service -o cat "
+        "| grep -c 'Beets configuration admitted for main' || true"
+    ).strip())
     machine.succeed("systemctl start --no-block cratedigger.service")
-    machine.wait_until_succeeds("test ! -f /var/lib/cratedigger/.cratedigger.lock")
     machine.wait_until_succeeds(
         "journalctl -b -u cratedigger.service -o cat "
-        "| grep -q 'Beets configuration admitted for main'"
+        "| grep -c 'Beets configuration admitted for main' "
+        f"| grep -qx {admissions_before_fresh_main_start + 1}"
     )
     machine.succeed(
         "systemctl kill --kill-whom=all --signal=SIGKILL cratedigger.service || true"
@@ -1454,7 +1471,12 @@ pkgs.testers.nixosTest {
         startup_log = machine.succeed(
             f"journalctl -b -u {unit} -o cat"
         )
-        expected_admissions = 1 if role == "main" else 2
+        # Two admissions each, from different worlds: main admitted in the
+        # release-shaped cycle and again in the fresh start proved above;
+        # each worker admitted in that same release block and again in the
+        # recovery start just above, with its rejected start in between
+        # never reaching admission.
+        expected_admissions = 2
         assert startup_log.count(
             f"Beets configuration admitted for {role}"
         ) == expected_admissions, (unit, startup_log)
