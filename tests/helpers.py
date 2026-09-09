@@ -727,8 +727,14 @@ def make_grab_list_entry(
     download_spectral: SpectralMeasurement | None = None,
     current_min_bitrate: int | None = None,
     current_spectral: SpectralMeasurement | None = None,
+    search_log_id: int | None = None,
 ) -> GrabListEntry:
-    """Build a real GrabListEntry with sensible defaults."""
+    """Build a real GrabListEntry with sensible defaults.
+
+    ``search_log_id`` (issue #811) is the link a reconstructed entry
+    carries; ``None`` matches a freshly planned entry, which is what
+    every existing caller wants.
+    """
     return GrabListEntry(
         album_id=album_id,
         files=files if files is not None else [make_download_file()],
@@ -744,6 +750,7 @@ def make_grab_list_entry(
         download_spectral=download_spectral,
         current_min_bitrate=current_min_bitrate,
         current_spectral=current_spectral,
+        search_log_id=search_log_id,
     )
 
 

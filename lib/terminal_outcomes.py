@@ -90,13 +90,23 @@ class TerminalDownloadAudit:
     # Issue #811: the ``search_log`` row whose ``found`` outcome produced
     # the grab this audit row describes (``download_log.search_log_id``,
     # migration 085). Copied from ``DownloadInfo.search_log_id`` at every
-    # construction site that has the grab's own download info in scope.
-    # None where no such state exists: the preview measurement-failure
-    # bundle (no ``DownloadInfo`` at all -- see
-    # ``_record_preview_measurement_failed``) and the non-automation
-    # import-job failure diagnostic (``import_job_failure_outcome``,
-    # whose job payload names an ORIGIN ``download_log`` row rather than
-    # a live grab).
+    # construction site that has the grab's own download info in scope,
+    # and read straight off the owned request's still-attached
+    # ``active_download_state`` by the AUTOMATION preview
+    # measurement-failure bundle, which has no ``DownloadInfo`` but is a
+    # grab outcome all the same
+    # (``_record_preview_measurement_failed`` ->
+    # ``_automation_grab_search_link``).
+    #
+    # It stays None where the row genuinely is not about a live grab:
+    # a force/local/YouTube preview failure (their source is a folder
+    # already on disk, and the YouTube lane is forbidden from reading
+    # that column at all -- ``scripts/import_preview_worker.py`` KTD1),
+    # and the non-automation import-job failure diagnostic
+    # (``import_job_failure_outcome``, whose job payload names an ORIGIN
+    # ``download_log`` row rather than a live grab; the origin row may
+    # itself carry a link, but inheriting one would attribute this
+    # operator action to a search that did not cause it).
     search_log_id: int | None = None
 
 
@@ -278,6 +288,12 @@ class ImportTerminalOutcome:
     def __post_init__(self) -> None:
         if not self.successful_terminal_acceptance:
             return
+        # Function-local: ``DownloadLogOutcome`` itself is a
+        # TYPE_CHECKING-only import in this module because
+        # ``lib.pipeline_db`` imports back into it.
+        from lib.pipeline_db.download_log import (
+            WRITABLE_IMPORT_ACCEPTANCE_OUTCOMES,
+        )
         final_transition = (
             self.post_audit_transitions[-1]
             if self.post_audit_transitions
@@ -291,7 +307,13 @@ class ImportTerminalOutcome:
             # raised ValueError AFTER beets had already imported the
             # album — an unhandled crash outside every enclosing try, no
             # download_log row, no imported transition, no cleanup.
-            or self.audit.outcome not in ("success", "force_import", "local_import")
+            # The WRITABLE acceptance set, not the historical one: this is
+            # a refusal guard, so it admits only what a current writer can
+            # emit. Its historical superset,
+            # ``IMPORT_ACCEPTANCE_OUTCOMES``, is what asks "was this
+            # request ever imported" (issue #811); the two are pinned
+            # together by ``TestSharedOutcomeVocabularies``.
+            or self.audit.outcome not in WRITABLE_IMPORT_ACCEPTANCE_OUTCOMES
             or final_transition is None
             or final_transition.target_status != "imported"
         ):

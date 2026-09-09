@@ -42,6 +42,56 @@ DownloadLogOutcome = Literal[
 ]
 DOWNLOAD_LOG_OUTCOMES: frozenset[str] = frozenset(get_args(DownloadLogOutcome))
 
+#: Every ``download_log.outcome`` that means this request RECEIVED an
+#: accepted copy (issue #811). The question is historical — "has this
+#: request ever been imported, and when" — so it admits the retired
+#: ``manual_import`` lane, whose rows are still live acceptance evidence.
+#: Read by ``get_search_acquisition_summary``'s window: an acquisition
+#: summary that only recognised ``success`` reported "all history" for
+#: 1,112 live requests whose only acceptance is a force/local/manual
+#: import, and opened the window too early for 367 more.
+IMPORT_ACCEPTANCE_OUTCOMES: tuple[DownloadLogOutcome, ...] = (
+    "success", "force_import", "local_import", "manual_import",
+)
+
+#: The subset of ``IMPORT_ACCEPTANCE_OUTCOMES`` a CURRENT writer can
+#: produce — what ``lib/terminal_outcomes.py``'s successful-acceptance
+#: guard admits. Deliberately narrower: that guard's whole job is to
+#: REFUSE a bundle whose parts disagree (issue #1176 PR3 F1 shipped a
+#: crash after beets had already moved files because ``local_import`` was
+#: missing from it), and admitting an outcome nothing can write would be
+#: dead permission on a safety check. ``manual_import`` is exactly that —
+#: migration 080 retired its job type and no writer emits the outcome.
+#: ``tests/test_pipeline_db.py::TestSharedOutcomeVocabularies`` pins the
+#: difference between the two so they cannot drift apart silently.
+WRITABLE_IMPORT_ACCEPTANCE_OUTCOMES: tuple[DownloadLogOutcome, ...] = (
+    "success", "force_import", "local_import",
+)
+
+#: The ``download_log.outcome`` values a slskd GRAB can end in — a
+#: transfer was attempted and reached one of these verdicts (issue #811).
+#: Positively enumerated rather than derived by exclusion, because the
+#: ``source='slskd' AND soulseek_username IS NOT NULL`` shape it replaces
+#: also admitted rows no transfer produced: ``force_import`` (1,927 live
+#: rows, an operator re-import of a folder already on disk),
+#: ``curator_ban`` (8, a destructive operator action) and
+#: ``user_offline`` (written at enqueue time, before any transfer began).
+#: The YouTube outcomes are excluded because they are not slskd at all.
+#:
+#: Two honest edges. ``success`` is also an ``IMPORT_ACCEPTANCE_OUTCOMES``
+#: member, so it can never fall INSIDE its own window — it is listed
+#: because a grab genuinely can end that way, and the vocabulary test
+#: subtracts the overlap rather than pretending the counter rejects it.
+#: And ``rejected``/``have_analysis_error`` are reachable from the force
+#: lane too, whose rows inherit ``source='slskd'`` from their origin row;
+#: those are counted, which slightly over-reports a request the operator
+#: has force-imported into. Narrowing further would need the row's own
+#: ``search_log_id``, which is NULL on every row older than migration 085.
+GRAB_OUTCOMES: tuple[DownloadLogOutcome, ...] = (
+    "success", "rejected", "failed", "timeout",
+    "measurement_failed", "have_analysis_error",
+)
+
 from lib.pipeline_db._core import _PipelineDBBase
 from lib.validation_envelope import (
     FAILED_PATH_KEY,
