@@ -145,7 +145,7 @@ class _FakeSearchPlanMixin(_FakePipelineDBBase):
 
     def _stamp_download_state_search_log(
         self,
-        row: dict[str, Any],
+        row: dict[str, object],
         *,
         fingerprint: str | None,
         search_log_id: int,
@@ -563,8 +563,8 @@ class _FakeSearchPlanMixin(_FakePipelineDBBase):
             AcquisitionLastFound,
             AcquisitionPeer,
             AcquisitionTierCount,
-            SearchAcquisitionSummary as _Summary,
         )
+        from lib.pipeline_db import SearchAcquisitionSummary as _Summary
 
         imports = [
             entry for entry in self.download_logs

@@ -980,9 +980,10 @@ class TestFakeSearchToGrabLink(unittest.TestCase):
 
     def _claim(self, db: FakePipelineDB, rid: int, fingerprint: str) -> None:
         """Claim through the production state writer, not hand-typed JSON."""
+        import msgspec
+
         from lib.download import build_active_download_state
         from tests.helpers import make_download_file, make_grab_list_entry
-        import msgspec
 
         entry = make_grab_list_entry(
             album_id=rid,

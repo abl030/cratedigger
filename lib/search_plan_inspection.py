@@ -189,7 +189,7 @@ def _stats_to_dict(stats: SearchPlanStats) -> dict[str, Any]:
 
 def _acquisition_to_dict(
     summary: SearchAcquisitionSummary, scope_tiers: Sequence[str],
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Project the acquisition summary, scoring tiers against the scope.
 
     ``candidates_outside_scope`` is computed HERE rather than in SQL:
@@ -527,8 +527,10 @@ def _render_search_scope_lines(scope: dict[str, object]) -> list[str]:
         f"    decided by:        {scope.get('source')}",
         f"    tiers searched:    {', '.join(tiers) if tiers else '(none)'}",
         f"    catch-all:         {_fmt_bool(scope.get('catch_all'))}",
-        f"    configured tiers:  "
-        f"{', '.join(configured) if configured else '(none)'}",
+        (
+            f"    configured tiers:  "
+            f"{', '.join(configured) if configured else '(none)'}"
+        ),
     ]
 
 

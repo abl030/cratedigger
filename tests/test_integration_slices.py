@@ -13448,7 +13448,9 @@ class TestSearchToGrabLinkPropagationSlice(unittest.TestCase):
     WITNESS = "2026-09-01T00:00:00+00:00"
     SEARCH_LOG_ID = 4242
 
-    def _seeded(self, *, search_log_id: int | None) -> tuple[Any, Any, Any]:
+    def _seeded(
+        self, *, search_log_id: int | None,
+    ) -> tuple[FakePipelineDB, GrabListEntry, DownloadInfo]:
         """A ``downloading`` request, its reconstructed entry, and dl_info."""
         import msgspec
 

@@ -362,35 +362,6 @@ class _SearchPlanMixin(_PipelineDBBase):
         )
 
 
-    # ``jsonb_array_elements`` raises on a non-array input, and
-    # ``search_log.candidates`` is NULL on pre-attempt/error rows. A WHERE
-    # clause cannot guard it (the lateral expression is evaluated before
-    # WHERE filters the joined row), so every unnest below goes through
-    # this CASE and a non-array simply contributes zero elements.
-    _CANDIDATE_ELEMENTS = """
-        jsonb_array_elements(
-            CASE WHEN jsonb_typeof({alias}.candidates) = 'array'
-                 THEN {alias}.candidates ELSE '[]'::jsonb END)
-    """
-    #: Scored candidates only — the pre-filter's sampled rows record peers
-    #: the walk never browsed, so they are not evidence about a tier.
-    _SCORED_CANDIDATE = (
-        "COALESCE((c->>'pre_filter_skip')::boolean, FALSE) = FALSE"
-    )
-    #: Best-candidate ordering: most matched tracks, then closest average
-    #: ratio. The trailing three keys are what make it a TOTAL order —
-    #: ``CandidateScore`` is one record per ``(username, dir, filetype)``,
-    #: so no two candidates tie on all five. Without them PostgreSQL
-    #: would pick arbitrarily among equal-scoring peers and the operator
-    #: would see a different "best" peer on every page load.
-    _BEST_CANDIDATE_ORDER = """
-        COALESCE((c->>'matched_tracks')::int, -1) DESC,
-        COALESCE((c->>'avg_ratio')::float, -1) DESC,
-        c->>'username' ASC,
-        c->>'filetype' ASC,
-        c->>'dir' ASC
-    """
-
     def get_search_acquisition_summary(
         self, request_id: int,
     ) -> SearchAcquisitionSummary:
@@ -407,6 +378,30 @@ class _SearchPlanMixin(_PipelineDBBase):
         peers never materialises that JSONB in Python. The caller shapes
         the result and decides what falls outside the configured search
         scope — that needs the config this layer does not have.
+
+        Three recurring SQL shapes are written out in full in each query
+        below rather than shared through Python interpolation, because
+        composed SQL fails the replaced-write audit closed (it cannot
+        prove an interpolated statement does not reach ``album_requests``)
+        and a registered exception is a weaker guarantee than a literal:
+
+        * ``jsonb_array_elements(CASE WHEN jsonb_typeof(x.candidates) =
+          'array' THEN x.candidates END)`` — the unnest. ``candidates`` is
+          SQL NULL on pre-attempt/error rows and the function raises on a
+          non-array, and a WHERE clause cannot guard a lateral expression,
+          so the CASE (with no ELSE, so a non-array yields NULL) makes
+          either shape contribute zero elements instead of erroring.
+        * ``COALESCE((c->>'pre_filter_skip')::boolean, FALSE) = FALSE`` —
+          scored candidates only. The pre-filter's sampled rows record
+          peers the walk never browsed, so they are not evidence about a
+          tier or a peer.
+        * The five-key best-candidate ORDER BY. The last three keys are
+          what make it a TOTAL order — ``CandidateScore`` is one record
+          per ``(username, dir, filetype)``, so no two candidates tie on
+          all five — and ``last_found`` and ``peers`` must agree on which
+          candidate is "best", which
+          ``TestSearchToGrabLinkReads::test_last_found_and_peers_agree_on
+          _the_best_candidate`` pins behaviourally.
         """
         since_cur = self._execute(
             """
@@ -419,16 +414,17 @@ class _SearchPlanMixin(_PipelineDBBase):
         since_row = since_cur.fetchone()
         since = since_row["since"] if since_row is not None else None
         window = (since, since)
-        candidate_elements = self._CANDIDATE_ELEMENTS.format(alias="sl")
 
         tiers_cur = self._execute(
-            f"""
+            """
             SELECT c->>'filetype' AS tier, COUNT(*)::int AS n
             FROM search_log sl
-            CROSS JOIN LATERAL {candidate_elements} AS c
+            CROSS JOIN LATERAL jsonb_array_elements(
+                CASE WHEN jsonb_typeof(sl.candidates) = 'array'
+                     THEN sl.candidates END) AS c
             WHERE sl.request_id = %s
               AND (%s::timestamptz IS NULL OR sl.created_at > %s)
-              AND {self._SCORED_CANDIDATE}
+              AND COALESCE((c->>'pre_filter_skip')::boolean, FALSE) = FALSE
               AND c->>'filetype' IS NOT NULL
             GROUP BY 1
             ORDER BY n DESC, tier ASC
@@ -469,11 +465,8 @@ class _SearchPlanMixin(_PipelineDBBase):
             for r in grabs_cur.fetchall()
         ]
 
-        # The ``best`` subquery is LATERAL, so it may reference ``f``'s
-        # own candidates column directly — no second scan of the CTE.
-        found_candidate_elements = self._CANDIDATE_ELEMENTS.format(alias="f")
         found_cur = self._execute(
-            f"""
+            """
             WITH found AS (
                 SELECT sl.id, sl.created_at, sl.plan_strategy, sl.candidates
                 FROM search_log sl
@@ -500,9 +493,16 @@ class _SearchPlanMixin(_PipelineDBBase):
                        c->>'filetype' AS tier,
                        (c->>'matched_tracks')::int AS matched_tracks,
                        (c->>'total_tracks')::int AS total_tracks
-                FROM {found_candidate_elements} AS c
-                WHERE {self._SCORED_CANDIDATE}
-                ORDER BY {self._BEST_CANDIDATE_ORDER}
+                -- LATERAL, so it reads ``f``'s own column directly.
+                FROM jsonb_array_elements(
+                    CASE WHEN jsonb_typeof(f.candidates) = 'array'
+                         THEN f.candidates END) AS c
+                WHERE COALESCE((c->>'pre_filter_skip')::boolean, FALSE) = FALSE
+                ORDER BY COALESCE((c->>'matched_tracks')::int, -1) DESC,
+                         COALESCE((c->>'avg_ratio')::float, -1) DESC,
+                         c->>'username' ASC,
+                         c->>'filetype' ASC,
+                         c->>'dir' ASC
                 LIMIT 1
             ) best ON TRUE
             LEFT JOIN LATERAL (
@@ -553,21 +553,30 @@ class _SearchPlanMixin(_PipelineDBBase):
             )
 
         peers_cur = self._execute(
-            f"""
+            """
             SELECT c->>'username' AS username,
-                   (ARRAY_AGG(c->>'filetype'
-                        ORDER BY {self._BEST_CANDIDATE_ORDER}))[1] AS tier,
-                   (ARRAY_AGG((c->>'total_tracks')::int
-                        ORDER BY {self._BEST_CANDIDATE_ORDER}))[1]
-                            AS total_tracks,
+                   (ARRAY_AGG(c->>'filetype' ORDER BY
+                        COALESCE((c->>'matched_tracks')::int, -1) DESC,
+                        COALESCE((c->>'avg_ratio')::float, -1) DESC,
+                        c->>'username' ASC,
+                        c->>'filetype' ASC,
+                        c->>'dir' ASC))[1] AS tier,
+                   (ARRAY_AGG((c->>'total_tracks')::int ORDER BY
+                        COALESCE((c->>'matched_tracks')::int, -1) DESC,
+                        COALESCE((c->>'avg_ratio')::float, -1) DESC,
+                        c->>'username' ASC,
+                        c->>'filetype' ASC,
+                        c->>'dir' ASC))[1] AS total_tracks,
                    MAX((c->>'matched_tracks')::int) AS best_matched_tracks,
                    COUNT(*)::int AS attempts,
                    MAX(sl.created_at) AS last_at
             FROM search_log sl
-            CROSS JOIN LATERAL {candidate_elements} AS c
+            CROSS JOIN LATERAL jsonb_array_elements(
+                CASE WHEN jsonb_typeof(sl.candidates) = 'array'
+                     THEN sl.candidates END) AS c
             WHERE sl.request_id = %s
               AND (%s::timestamptz IS NULL OR sl.created_at > %s)
-              AND {self._SCORED_CANDIDATE}
+              AND COALESCE((c->>'pre_filter_skip')::boolean, FALSE) = FALSE
               AND c->>'username' IS NOT NULL
             GROUP BY 1
             ORDER BY attempts DESC, username ASC

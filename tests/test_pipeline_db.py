@@ -6592,6 +6592,44 @@ class TestSearchToGrabLinkReads(unittest.TestCase):
         self.assertEqual(
             summary.last_found.grab.error_message, "remote queue timeout")
 
+    def test_last_found_and_peers_agree_on_the_best_candidate(self):
+        """The two queries spell the same five-key ordering; prove it holds.
+
+        ``last_found`` and ``peers`` each pick a "best" candidate with
+        their own copy of that ORDER BY (they are separate literal SQL
+        statements, deliberately — see the method docstring), so drift
+        between the two copies is exactly what this pins. The world is
+        chosen so a naive ``avg_ratio``-first ordering picks a DIFFERENT
+        peer, and so the winning peer also has a weaker second candidate
+        that a per-row ordering would pick instead.
+        """
+        self._search("found", candidates=[
+            # Highest ratio, fewest matched tracks: the decoy.
+            self._candidate(
+                username="ratio_peer", dir="/ratio/album",
+                filetype="mp3 320", matched_tracks=5, avg_ratio=0.99),
+            # Most matched tracks: the real best.
+            self._candidate(
+                username="matched_peer", dir="/matched/album",
+                filetype="lossless", matched_tracks=9, avg_ratio=0.40),
+            # Same peer, weaker candidate — must not become its tier.
+            self._candidate(
+                username="matched_peer", dir="/matched/lossy",
+                filetype="mp3 320", matched_tracks=3, avg_ratio=0.90),
+        ])
+        summary = self.db.get_search_acquisition_summary(self.req_id)
+
+        assert summary.last_found is not None
+        self.assertEqual(summary.last_found.username, "matched_peer")
+        self.assertEqual(summary.last_found.tier, "lossless")
+        self.assertEqual(summary.last_found.matched_tracks, 9)
+
+        winner = next(
+            p for p in summary.peers if p.username == "matched_peer")
+        self.assertEqual(winner.tier, summary.last_found.tier)
+        self.assertEqual(winner.best_matched_tracks, 9)
+        self.assertEqual(winner.attempts, 2)
+
     def test_acquisition_summary_covers_all_history_without_an_import(self):
         self._search("found", candidates=[self._candidate()])
         summary = self.db.get_search_acquisition_summary(self.req_id)
@@ -14934,12 +14972,12 @@ class TestConsumedAttemptStampsDownloadState(unittest.TestCase):
         )
         return dataclasses.replace(base, **overrides)
 
-    def _state(self) -> dict[str, Any]:
+    def _state(self) -> dict[str, object]:
         req = self.db.get_request(self.req_id)
         assert req is not None
         state = req["active_download_state"]
         assert isinstance(state, dict)
-        return cast("dict[str, Any]", state)
+        return state
 
     def test_matching_fingerprint_on_downloading_row_stamps_the_link(self):
         self._claim(self.FINGERPRINT)

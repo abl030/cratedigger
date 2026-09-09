@@ -1900,48 +1900,52 @@ class TestSearchLinkStampChecker(unittest.TestCase):
     PR's Fault injection section.
     """
 
-    ELIGIBLE_AND_STAMPED: ClassVar[dict[str, object]] = {
-        "status_before": "downloading",
-        "fingerprint_before": "fp-alpha",
-        "supplied_fingerprint": "fp-alpha",
-        "state_before": {"attempt_fingerprint": "fp-alpha"},
-        "state_after": {"attempt_fingerprint": "fp-alpha",
-                        "search_log_id": 7},
-        "stamped": True,
-        "search_log_id": 7,
-    }
-
-    def _violations(self, **overrides: object) -> list[str]:
-        world = dict(self.ELIGIBLE_AND_STAMPED)
-        world.update(overrides)
-        return search_link_stamp_violations(**world)  # pyright: ignore[reportArgumentType]
+    # Every world below is spelled out in full rather than merged from a
+    # shared base: the world IS the subject of a checker self-test, and a
+    # kwargs-merge helper both hides which dimension the case turns on and
+    # needs an untyped splat to call a precisely-typed checker.
 
     # -- Q1: each clause trips on its own minimal world -----------------
 
     def test_ineligible_stamp_clause_trips(self) -> None:
-        violations = self._violations(
+        violations = search_link_stamp_violations(
             status_before="wanted",
             fingerprint_before=None,
+            supplied_fingerprint="fp-alpha",
             state_before=None,
             state_after={"search_log_id": 7},
+            stamped=True,
+            search_log_id=7,
         )
         self.assertEqual(len(violations), 1, violations)
         self.assertRegex(
             violations[0], r"^stamp landed on an ineligible attempt")
 
     def test_refused_eligible_stamp_clause_trips(self) -> None:
-        violations = self._violations(
-            stamped=False,
+        violations = search_link_stamp_violations(
+            status_before="downloading",
+            fingerprint_before="fp-alpha",
+            supplied_fingerprint="fp-alpha",
+            state_before={"attempt_fingerprint": "fp-alpha"},
             state_after={"attempt_fingerprint": "fp-alpha"},
+            stamped=False,
+            search_log_id=7,
         )
         self.assertEqual(len(violations), 1, violations)
         self.assertRegex(
             violations[0], r"^eligible attempt was refused the stamp")
 
     def test_unexplained_state_change_clause_trips(self) -> None:
-        violations = self._violations(
+        violations = search_link_stamp_violations(
+            status_before="downloading",
+            fingerprint_before="fp-alpha",
+            supplied_fingerprint="fp-alpha",
             state_before={"attempt_fingerprint": "fp-alpha",
                           "current_path": "/processing/album"},
+            state_after={"attempt_fingerprint": "fp-alpha",
+                         "search_log_id": 7},
+            stamped=True,
+            search_log_id=7,
         )
         self.assertEqual(len(violations), 1, violations)
         self.assertRegex(
@@ -1954,17 +1958,27 @@ class TestSearchLinkStampChecker(unittest.TestCase):
         self,
     ) -> None:
         """Ineligible AND unstamped is the guard working, not a violation."""
-        self.assertEqual(self._violations(
+        self.assertEqual(search_link_stamp_violations(
             status_before="wanted",
             fingerprint_before=None,
             supplied_fingerprint="fp-alpha",
             state_before=None,
             state_after=None,
             stamped=False,
+            search_log_id=7,
         ), [])
 
     def test_an_eligible_attempt_that_was_stamped_is_quiet(self) -> None:
-        self.assertEqual(self._violations(), [])
+        self.assertEqual(search_link_stamp_violations(
+            status_before="downloading",
+            fingerprint_before="fp-alpha",
+            supplied_fingerprint="fp-alpha",
+            state_before={"attempt_fingerprint": "fp-alpha"},
+            state_after={"attempt_fingerprint": "fp-alpha",
+                         "search_log_id": 7},
+            stamped=True,
+            search_log_id=7,
+        ), [])
 
     def test_a_second_stamp_over_an_existing_link_is_quiet(self) -> None:
         """Re-searching a still-downloading attempt re-points the link.
@@ -1973,18 +1987,27 @@ class TestSearchLinkStampChecker(unittest.TestCase):
         stamp overwrites exactly that key, which is a legitimate world
         the "nothing else changed" clause must not accuse.
         """
-        self.assertEqual(self._violations(
+        self.assertEqual(search_link_stamp_violations(
+            status_before="downloading",
+            fingerprint_before="fp-alpha",
+            supplied_fingerprint="fp-alpha",
             state_before={"attempt_fingerprint": "fp-alpha",
                           "search_log_id": 3},
             state_after={"attempt_fingerprint": "fp-alpha",
                          "search_log_id": 7},
+            stamped=True,
+            search_log_id=7,
         ), [])
 
     def test_an_attempt_with_no_fingerprint_is_quiet(self) -> None:
-        self.assertEqual(self._violations(
+        self.assertEqual(search_link_stamp_violations(
+            status_before="downloading",
+            fingerprint_before="fp-alpha",
             supplied_fingerprint=None,
-            stamped=False,
+            state_before={"attempt_fingerprint": "fp-alpha"},
             state_after={"attempt_fingerprint": "fp-alpha"},
+            stamped=False,
+            search_log_id=7,
         ), [])
 
 
