@@ -12,7 +12,10 @@ Upstream: https://jellyfin.org/
 ## Where Jellyfin Runs
 
 - External: https://jelly.ablz.au
-- Version at integration time: 10.11.11
+- Version at integration time: 10.11.11; 12.0 since 2026-09-11. Both lines
+  are supported and each has a real-server proof: the flake's
+  `jellyfinMetadataVm` check boots the lock's Jellyfin (10.11.x or 12.x) and
+  `jellyfinMetadataVm10` boots the pinned 10.11.11 (issue #1409).
 - Music library: `/mnt/fuse/Media/Music/Beets` — the same files Cratedigger
   sees at `/mnt/virtio/Music/Beets`. That exact prefix swap is
   `[Jellyfin] path_map`; `Incoming` and `failed_imports` are outside Jellyfin's
@@ -280,33 +283,50 @@ notification and the pin's exact album lookup. Via the Nix module this is
 
 ## API Access
 
-Auth is an admin API key passed as the `X-Emby-Token` header. Endpoints the
-integration uses (all verified on 10.11):
+Auth is an admin API key sent through the `MediaBrowser` scheme of the
+standard `Authorization` header — `Authorization: MediaBrowser Token="<key>"`;
+Cratedigger also names itself (`Client="Cratedigger", Device="cratedigger",
+DeviceId="cratedigger", Version="1"`, built by
+`lib/util.py::jellyfin_authorization_header`, values percent-encoded). Jellyfin
+12 ships `EnableLegacyAuthorization=false` (jellyfin/jellyfin#15559), so the
+legacy `X-Emby-Token`, `X-MediaBrowser-Token` and `X-Emby-Authorization`
+headers, the `Emby` scheme and the `api_key` query parameter all answer 401,
+and 10.13 removes them outright; the `MediaBrowser` scheme is accepted by both
+supported lines (10.11, 12), which is why it is the one form Cratedigger sends
+(issue #1409; reference: the gist linked from the release notes,
+https://gist.github.com/nielsvanvelzen/ea047d9028f676185832e51ffaf12a6f).
+Endpoints the integration uses (all verified on 10.11.11 and 12.0):
 
 ```bash
 TOKEN=$(ssh doc2 'sudo cat /run/cratedigger-secrets/JELLYFIN_TOKEN')
+AUTH="Authorization: MediaBrowser Token=\"$TOKEN\""
 
 # Find an album by title (path is the authoritative join — check it)
-curl -s -H "X-Emby-Token: $TOKEN" \
+curl -s -H "$AUTH" \
   "https://jelly.ablz.au/Items?recursive=true&includeItemTypes=MusicAlbum&searchTerm=<title>&fields=Path,DateCreated&limit=5"
 
 # Audio children of an album (the rows that drive Recently Added)
-curl -s -H "X-Emby-Token: $TOKEN" \
+curl -s -H "$AUTH" \
   "https://jelly.ablz.au/Items?parentId=<albumId>&includeItemTypes=Audio&fields=DateCreated"
 
 # Full item dto (userId required on the single-item GET)
-curl -s -H "X-Emby-Token: $TOKEN" "https://jelly.ablz.au/Items/<id>?userId=<uid>"
+curl -s -H "$AUTH" "https://jelly.ablz.au/Items/<id>?userId=<uid>"
 
 # Update an item — FULL dto only (see the full-dto rule above); returns 204
-curl -s -X POST -H "X-Emby-Token: $TOKEN" -H "Content-Type: application/json" \
+curl -s -X POST -H "$AUTH" -H "Content-Type: application/json" \
   --data @dto.json "https://jelly.ablz.au/Items/<id>"
 
 # Libraries + their paths
-curl -s -H "X-Emby-Token: $TOKEN" "https://jelly.ablz.au/Library/VirtualFolders"
+curl -s -H "$AUTH" "https://jelly.ablz.au/Library/VirtualFolders"
 ```
 
 Gotchas:
 
+- **Jellyfin 12 changed `GetItems`** to apply `recursive` only alongside
+  `includeItemTypes`. Every Cratedigger query already passes
+  `includeItemTypes`, so the album-title search, the artist search, the
+  `albumArtistIds` sweep and the `parentId` children query answer exactly as
+  on 10.11 (measured live against 12.0, 2026-09-11).
 - **There is no path-filter on `/Items`** — an unrecognized `path` param is
   ignored and the query degenerates to an unfiltered recursive sweep (slow
   enough to 504 through the proxy). The finder narrows by album-title /

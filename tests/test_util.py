@@ -15,6 +15,17 @@ from defusedxml.common import DefusedXmlException
 from tests.helpers import cold_ffmpeg_version_probe
 
 
+def _media_browser_auth(token: str) -> str:
+    """The exact ``Authorization`` value every Jellyfin leaf must send.
+
+    Spelled here, never derived from ``lib.util``, so a builder mutant fails
+    these pins. Jellyfin 12 refuses the legacy ``X-Emby-Token`` header; the
+    ``MediaBrowser`` scheme is accepted by every supported line (#1409).
+    """
+    return ('MediaBrowser Client="Cratedigger", Device="cratedigger", '
+            f'DeviceId="cratedigger", Version="1", Token="{token}"')
+
+
 class TestRepairMp3Headers(unittest.TestCase):
 
     def test_calls_mp3val_on_mp3_files(self):
@@ -924,7 +935,9 @@ class TestTriggerJellyfinScan(unittest.TestCase):
         )
         req = mock_urlopen.call_args[0][0]
         self.assertEqual(req.full_url, "http://jelly:8096/Library/Media/Updated")
-        self.assertEqual(req.get_header("X-emby-token"), "api-key-123")
+        self.assertEqual(
+            req.get_header("Authorization"), _media_browser_auth("api-key-123"))
+        self.assertIsNone(req.get_header("X-emby-token"))
         self.assertEqual(req.get_header("Content-type"), "application/json")
         self.assertEqual(req.get_method(), "POST")
         self.assertEqual(
@@ -946,15 +959,48 @@ class TestTriggerJellyfinScan(unittest.TestCase):
         trigger_jellyfin_scan(self._make_cfg(token=None), "Artist/Album")
 
     @patch("lib.util.urllib.request.urlopen")
-    def test_noop_when_album_path_cannot_be_mapped(self, mock_urlopen):
+    def test_refuses_absolute_path_outside_the_library(self, mock_urlopen):
+        # Absolute and not under the local prefix: the prefix swap leaves
+        # it alone, so it resolves outside the configured container library.
         from lib.util import trigger_jellyfin_scan
-        trigger_jellyfin_scan(self._make_cfg(), "/outside/library/Album")
+        with self.assertLogs("cratedigger", level="WARNING") as logs:
+            trigger_jellyfin_scan(self._make_cfg(), "/outside/library/Album")
         mock_urlopen.assert_not_called()
+        self.assertEqual(logs.output, [(
+            "WARNING:cratedigger:JELLYFIN: skipped media update outside "
+            "configured library: '/outside/library/Album'")])
+
+    @patch("lib.util.urllib.request.urlopen")
+    def test_warns_when_album_path_cannot_be_mapped(self, mock_urlopen):
+        # No beets directory and no path map: a relative path has nothing
+        # to anchor it, so there is no container path to report.
+        from lib.util import trigger_jellyfin_scan
+        cfg = self._make_cfg()
+        cfg.beets_directory = None
+        cfg.jellyfin_path_map = None
+        with self.assertLogs("cratedigger", level="WARNING") as logs:
+            trigger_jellyfin_scan(cfg, "Artist/Album")
+        mock_urlopen.assert_not_called()
+        self.assertEqual(logs.output, [(
+            "WARNING:cratedigger:JELLYFIN: skipped media update for "
+            "unmappable album path 'Artist/Album'")])
+
+    @patch("lib.util.urllib.request.urlopen")
+    def test_warns_when_album_path_is_empty(self, mock_urlopen):
+        from lib.util import trigger_jellyfin_scan
+        with self.assertLogs("cratedigger", level="WARNING") as logs:
+            trigger_jellyfin_scan(self._make_cfg(), "")
+        mock_urlopen.assert_not_called()
+        self.assertEqual(logs.output, [
+            "WARNING:cratedigger:JELLYFIN: skipped media update (no album path)"])
 
     @patch("lib.util.urllib.request.urlopen", side_effect=Exception("connection refused"))
     def test_does_not_raise_on_failure(self, mock_urlopen):
         from lib.util import trigger_jellyfin_scan
-        trigger_jellyfin_scan(self._make_cfg(), "Artist/Album")
+        with self.assertLogs("cratedigger", level="WARNING") as logs:
+            trigger_jellyfin_scan(self._make_cfg(), "Artist/Album")
+        self.assertEqual(logs.output, [
+            "WARNING:cratedigger:JELLYFIN: media update failed: connection refused"])
 
 
 class TestNotifiersReadSecretsFromFiles(unittest.TestCase):
@@ -1018,7 +1064,9 @@ class TestNotifiersReadSecretsFromFiles(unittest.TestCase):
         mock_urlopen.return_value = mock_resp
         trigger_jellyfin_scan(cfg, "Artist/Album")
         req = mock_urlopen.call_args[0][0]
-        self.assertEqual(req.get_header("X-emby-token"), "jellyfin-live-tok")
+        self.assertEqual(
+            req.get_header("Authorization"),
+            _media_browser_auth("jellyfin-live-tok"))
 
     def test_plex_scan_skipped_when_token_file_empty_and_no_direct_token(self):
         from lib.config import CratediggerConfig
@@ -1457,7 +1505,10 @@ class TestJellyfinDateCreatedClient(unittest.TestCase):
         out = _jellyfin_get_json(self._cfg(), "/Items", searchTerm="x y")
         self.assertEqual(out, {"Items": []})
         req = mock_urlopen.call_args[0][0]
-        self.assertEqual(req.get_header("X-emby-token"), "tok")
+        self.assertEqual(
+            req.get_header("Authorization"), _media_browser_auth("tok"))
+        self.assertIsNone(req.get_header("X-emby-token"))
+        self.assertEqual(req.get_header("Accept"), "application/json")
         self.assertIn("/Items?searchTerm=x+y", req.full_url)
 
     @patch("lib.util.urllib.request.urlopen")
@@ -1473,9 +1524,34 @@ class TestJellyfinDateCreatedClient(unittest.TestCase):
         self.assertEqual(status, 204)
         req = mock_urlopen.call_args[0][0]
         self.assertEqual(req.method, "POST")
-        self.assertEqual(req.get_header("X-emby-token"), "tok")
+        self.assertEqual(
+            req.get_header("Authorization"), _media_browser_auth("tok"))
+        self.assertIsNone(req.get_header("X-emby-token"))
         self.assertEqual(req.get_header("Content-type"), "application/json")
         self.assertEqual(req.data, b'{"Id": "alb-1"}')
+
+
+class TestJellyfinAuthorizationHeader(unittest.TestCase):
+    """Issue #1409: Jellyfin 12 ships ``EnableLegacyAuthorization=false``, so
+    ``X-Emby-Token`` answers 401; ``Authorization: MediaBrowser …`` is the one
+    form every supported line (10.11, 12) accepts. Expected values are
+    spelled here, never derived from the builder under test."""
+
+    def test_header_is_the_media_browser_scheme_with_quoted_parameters(self):
+        from lib.util import jellyfin_authorization_header
+        self.assertEqual(
+            jellyfin_authorization_header("abc123"),
+            'MediaBrowser Client="Cratedigger", Device="cratedigger", '
+            'DeviceId="cratedigger", Version="1", Token="abc123"')
+
+    def test_values_are_url_encoded_so_the_grammar_cannot_break(self):
+        # Jellyfin's parser splits on unescaped commas, trims the quotes and
+        # URL-decodes each value (AuthorizationContext.GetParts), turning a
+        # raw '+' into a space — so every reserved byte is percent-encoded.
+        from lib.util import jellyfin_authorization_header
+        header = jellyfin_authorization_header('a b,"c=d+e/f')
+        self.assertTrue(
+            header.endswith('Token="a%20b%2C%22c%3Dd%2Be%2Ff"'), header)
 
 
 class TestNotifierTlsFailClosed(unittest.TestCase):

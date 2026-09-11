@@ -96,7 +96,10 @@ class TestTargetedJellyfinRefreshGenerated(unittest.TestCase):
         self.assertNotEqual(
             request.full_url, "http://jellyfin:8096/Library/Refresh")
         self.assertEqual(request.get_method(), "POST")
-        self.assertEqual(request.get_header("X-emby-token"), token)
+        self.assertEqual(
+            request.get_header("Authorization"),
+            'MediaBrowser Client="Cratedigger", Device="cratedigger", '
+            f'DeviceId="cratedigger", Version="1", Token="{token}"')
         self.assertEqual(request.get_header("Content-type"), "application/json")
         self.assertEqual(timeout, 10)
 

@@ -137,7 +137,9 @@ class TestGeneratedNotifierTlsFailClosed(unittest.TestCase):
             self.assertIn(f"X-Plex-Token=plex-{token}", request.full_url)
         else:
             self.assertEqual(
-                request.get_header("X-emby-token"), f"jellyfin-{token}")
+                request.get_header("Authorization"),
+                'MediaBrowser Client="Cratedigger", Device="cratedigger", '
+                f'DeviceId="cratedigger", Version="1", Token="jellyfin-{token}"')
         if leaf == "plex_put":
             self.assertEqual(request.get_method(), "PUT")
         elif leaf == "jellyfin_post":
