@@ -830,6 +830,14 @@ FetchXml = Callable[..., Element]
 PutFn = Callable[..., int]
 
 
+def _split_path_map(path_map: str) -> tuple[str, str]:
+    """``local_prefix:container_prefix`` → its two halves — the ONE place the
+    remap is split, so the translation and every guard that re-reads the
+    container prefix cannot disagree about where the colon is."""
+    local_prefix, container_prefix = path_map.split(":", 1)
+    return local_prefix, container_prefix
+
+
 def _notifier_container_path(
     imported_path: str,
     *,
@@ -851,7 +859,7 @@ def _notifier_container_path(
     if not os.path.isabs(out) and beets_directory:
         out = os.path.join(beets_directory, out)
     if path_map:
-        local_prefix, container_prefix = path_map.split(":", 1)
+        local_prefix, container_prefix = _split_path_map(path_map)
         if out.startswith(local_prefix):
             out = container_prefix + out[len(local_prefix):]
         elif not os.path.isabs(out):
@@ -1007,6 +1015,42 @@ def plex_set_added_at(
 
 
 # === Jellyfin integration ===
+#
+# Every request authenticates through the ``MediaBrowser`` scheme of the
+# standard ``Authorization`` header (issue #1409). Jellyfin 12 ships
+# ``EnableLegacyAuthorization=false``, which makes the ``X-Emby-Token``,
+# ``X-MediaBrowser-Token`` and ``X-Emby-Authorization`` headers answer 401
+# (upstream intends to drop the toggle and the legacy methods in a later
+# release); every supported line — 10.11 and 12 — accepts the scheme, so
+# it is the one form sent. Values are percent-
+# encoded because the server's parser (``AuthorizationContext.GetParts``)
+# splits on unescaped commas, trims the quotes and URL-decodes each value,
+# reading a raw ``+`` as a space.
+
+
+def jellyfin_authorization_header(token: str) -> str:
+    """``Authorization`` value for one Jellyfin request: the ``MediaBrowser``
+    scheme carrying the client identity and the API key as ``Token``.
+
+    For an API key Jellyfin replaces ``Client`` with the key's own name and
+    keeps ``Device``/``DeviceId``/``Version`` when sent (its own server
+    identity fills them in when blank).
+    """
+    from urllib.parse import quote
+    parameters = (
+        ("Client", "Cratedigger"),
+        ("Device", "cratedigger"),
+        ("DeviceId", "cratedigger"),
+        ("Version", "1"),
+        ("Token", token),
+    )
+    return "MediaBrowser " + ", ".join(
+        f'{key}="{quote(value, safe="")}"' for key, value in parameters)
+
+
+def _jellyfin_request_headers(token: str, **extra: str) -> dict[str, str]:
+    """The header set every Jellyfin leaf sends: authorization plus ``extra``."""
+    return {"Authorization": jellyfin_authorization_header(token), **extra}
 
 
 def trigger_jellyfin_scan(
@@ -1041,7 +1085,7 @@ def trigger_jellyfin_scan(
             )
             return
         if cfg.jellyfin_path_map:
-            _local_prefix, container_prefix = cfg.jellyfin_path_map.split(":", 1)
+            _local_prefix, container_prefix = _split_path_map(cfg.jellyfin_path_map)
             if os.path.commonpath((container_path, container_prefix)) != os.path.normpath(
                 container_prefix
             ):
@@ -1060,10 +1104,8 @@ def trigger_jellyfin_scan(
             f"{cfg.jellyfin_url}/Library/Media/Updated",
             data=json.dumps(payload).encode("utf-8"),
             method="POST",
-            headers={
-                "X-Emby-Token": token,
-                "Content-Type": "application/json",
-            },
+            headers=_jellyfin_request_headers(
+                token, **{"Content-Type": "application/json"}),
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             resp.read()
@@ -1077,10 +1119,11 @@ def trigger_jellyfin_scan(
 # Read/edit half of the Jellyfin "Recently Added" pin feature (migration 046,
 # issue #574). The capture/reconcile orchestration lives in
 # lib/jellyfin_pin_service.py; these functions are the thin, testable Jellyfin
-# client it drives. Verified against Jellyfin 10.11 (2026-07-10): item update
-# is POST /Items/{id} with the FULL dto from GET /Items/{id}?userId=… — a
-# partial body wipes the omitted metadata fields, so the setter always
-# round-trips the fetched dto with only DateCreated changed.
+# client it drives. Verified against Jellyfin 10.11 (2026-07-10) and 12.0
+# (2026-09-11): item update is POST /Items/{id} with the FULL dto from
+# GET /Items/{id}?userId=… — a partial body wipes the omitted metadata
+# fields, so the setter always round-trips the fetched dto with only
+# DateCreated changed.
 
 
 @dataclass(frozen=True)
@@ -1133,10 +1176,8 @@ def _jellyfin_get_json(cfg: CratediggerConfig, path: str, **params: str) -> obje
     url = f"{cfg.jellyfin_url}{path}"
     if params:
         url += f"?{urlencode(params)}"
-    req = urllib.request.Request(url, headers={
-        "X-Emby-Token": cfg.resolved_jellyfin_token() or "",
-        "Accept": "application/json",
-    })
+    req = urllib.request.Request(url, headers=_jellyfin_request_headers(
+        cfg.resolved_jellyfin_token() or "", Accept="application/json"))
     with urllib.request.urlopen(req, timeout=15) as resp:
         return json.loads(resp.read())
 
@@ -1149,10 +1190,9 @@ def _jellyfin_post_json(
         f"{cfg.jellyfin_url}{path}",
         data=json.dumps(payload).encode("utf-8"),
         method="POST",
-        headers={
-            "X-Emby-Token": cfg.resolved_jellyfin_token() or "",
-            "Content-Type": "application/json",
-        })
+        headers=_jellyfin_request_headers(
+            cfg.resolved_jellyfin_token() or "",
+            **{"Content-Type": "application/json"}))
     with urllib.request.urlopen(req, timeout=15) as resp:
         return resp.status
 
@@ -1263,8 +1303,9 @@ def jellyfin_set_date_created(
     post-update restoration survives ordinary scans without a Plex-style
     field lock. Returns ``True`` on HTTP 200/204.
 
-    The single-item GET needs a userId in Jellyfin 10.11; any user works for
-    reading the dto, so the first user on the server is used."""
+    The single-item GET needs a userId (Jellyfin 10.11 and 12 alike answer
+    400 without one); any user works for reading the dto, so the first user
+    on the server is used."""
     if not cfg.jellyfin_url:
         return False
     def _default_get(path: str, **p: str) -> object:

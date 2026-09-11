@@ -13,6 +13,7 @@ import unittest
 import urllib.error
 from dataclasses import dataclass
 from unittest.mock import patch
+from urllib.parse import quote
 
 from hypothesis import given
 from hypothesis import strategies as st
@@ -136,8 +137,13 @@ class TestGeneratedNotifierTlsFailClosed(unittest.TestCase):
         if leaf.startswith("plex"):
             self.assertIn(f"X-Plex-Token=plex-{token}", request.full_url)
         else:
+            # Percent-encoded by urllib's own quote (never lib.util's builder);
+            # this alphabet happens to be encoding-neutral.
+            expected_token = quote(f"jellyfin-{token}", safe="")
             self.assertEqual(
-                request.get_header("X-emby-token"), f"jellyfin-{token}")
+                request.get_header("Authorization"),
+                'MediaBrowser Client="Cratedigger", Device="cratedigger", '
+                f'DeviceId="cratedigger", Version="1", Token="{expected_token}"')
         if leaf == "plex_put":
             self.assertEqual(request.get_method(), "PUT")
         elif leaf == "jellyfin_post":

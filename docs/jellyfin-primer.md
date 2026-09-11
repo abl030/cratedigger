@@ -12,7 +12,13 @@ Upstream: https://jellyfin.org/
 ## Where Jellyfin Runs
 
 - External: https://jelly.ablz.au
-- Version at integration time: 10.11.11
+- Version at integration time: 10.11.11; 12.0 since 2026-09-11. Both lines
+  are supported (issue #1409): the flake's `jellyfinMetadataVm10` check boots
+  the pinned 10.11.11, and `jellyfinMetadataVm` boots whatever the flake
+  lock's nixpkgs carries — the daily gate updates that lock before building
+  the candidate, so a new line is proven there before its lock is committed
+  (the committed lock stays at 10.11.11 until the first green run on 12).
+  The 12.0 contract was also measured against the live server on 2026-09-11.
 - Music library: `/mnt/fuse/Media/Music/Beets` — the same files Cratedigger
   sees at `/mnt/virtio/Music/Beets`. That exact prefix swap is
   `[Jellyfin] path_map`; `Incoming` and `failed_imports` are outside Jellyfin's
@@ -280,33 +286,54 @@ notification and the pin's exact album lookup. Via the Nix module this is
 
 ## API Access
 
-Auth is an admin API key passed as the `X-Emby-Token` header. Endpoints the
-integration uses (all verified on 10.11):
+Auth is an admin API key sent through the `MediaBrowser` scheme of the
+standard `Authorization` header — `Authorization: MediaBrowser Token="<key>"`;
+Cratedigger also names itself (`Client="Cratedigger", Device="cratedigger",
+DeviceId="cratedigger", Version="1"`, built by
+`lib/util.py::jellyfin_authorization_header`, values percent-encoded). Jellyfin
+12 ships `EnableLegacyAuthorization=false` (jellyfin/jellyfin#15559), so the
+legacy `X-Emby-Token`, `X-MediaBrowser-Token` and `X-Emby-Authorization`
+headers, the `Emby` scheme and the `api_key` query parameter all answer 401,
+and upstream intends to drop the toggle and the legacy methods in a later
+release (that PR says "likely 10.13", under the old numbering); the
+`MediaBrowser` scheme is accepted by both supported lines (10.11, 12), which
+is why it is the one form Cratedigger sends
+(issue #1409; reference: the gist linked from the release notes,
+https://gist.github.com/nielsvanvelzen/ea047d9028f676185832e51ffaf12a6f).
+Endpoints the integration uses (all verified on 10.11.11 and 12.0):
 
 ```bash
 TOKEN=$(ssh doc2 'sudo cat /run/cratedigger-secrets/JELLYFIN_TOKEN')
+AUTH="Authorization: MediaBrowser Token=\"$TOKEN\""
 
 # Find an album by title (path is the authoritative join — check it)
-curl -s -H "X-Emby-Token: $TOKEN" \
+curl -s -H "$AUTH" \
   "https://jelly.ablz.au/Items?recursive=true&includeItemTypes=MusicAlbum&searchTerm=<title>&fields=Path,DateCreated&limit=5"
 
 # Audio children of an album (the rows that drive Recently Added)
-curl -s -H "X-Emby-Token: $TOKEN" \
+curl -s -H "$AUTH" \
   "https://jelly.ablz.au/Items?parentId=<albumId>&includeItemTypes=Audio&fields=DateCreated"
 
 # Full item dto (userId required on the single-item GET)
-curl -s -H "X-Emby-Token: $TOKEN" "https://jelly.ablz.au/Items/<id>?userId=<uid>"
+curl -s -H "$AUTH" "https://jelly.ablz.au/Items/<id>?userId=<uid>"
 
 # Update an item — FULL dto only (see the full-dto rule above); returns 204
-curl -s -X POST -H "X-Emby-Token: $TOKEN" -H "Content-Type: application/json" \
+curl -s -X POST -H "$AUTH" -H "Content-Type: application/json" \
   --data @dto.json "https://jelly.ablz.au/Items/<id>"
 
 # Libraries + their paths
-curl -s -H "X-Emby-Token: $TOKEN" "https://jelly.ablz.au/Library/VirtualFolders"
+curl -s -H "$AUTH" "https://jelly.ablz.au/Library/VirtualFolders"
 ```
 
 Gotchas:
 
+- **Jellyfin 12 changed a `GetItems` default**: a query on a library folder
+  that names `includeItemTypes` but omits `recursive` is now recursive by
+  default (`ItemsController.cs`, `recursive ??= true`). Every Cratedigger
+  library query passes `recursive=true` explicitly, and the children query
+  targets a `MusicAlbum`, not a library, so the album-title search, the
+  artist search, the `albumArtistIds` sweep and the `parentId` children query
+  answer exactly as on 10.11 (measured live against 12.0, 2026-09-11).
 - **There is no path-filter on `/Items`** — an unrecognized `path` param is
   ignored and the query degenerates to an unfiltered recursive sweep (slow
   enough to 504 through the proxy). The finder narrows by album-title /

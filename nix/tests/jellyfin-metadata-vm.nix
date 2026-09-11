@@ -1,8 +1,10 @@
-# Jellyfin 10.11 metadata-refresh acceptance test for the real Cratedigger
-# post-import notifier. This deliberately lives outside module-vm.nix: the
-# stranger-boot gate proves module wiring, while this gate boots the pinned
+# Jellyfin metadata-refresh acceptance test for the real Cratedigger
+# post-import notifier, run once per supported Jellyfin line (flake.nix:
+# `jellyfinMetadataVm` boots the lock's Jellyfin, `jellyfinMetadataVm10` the
+# pinned last 10.x release). This deliberately lives outside module-vm.nix:
+# the stranger-boot gate proves module wiring, while this gate boots a real
 # media server and proves the external API contract against tagged audio.
-{ pkgs, cratediggerSrc }:
+{ pkgs, cratediggerSrc, jellyfinPackage ? pkgs.jellyfin }:
 
 let
   beetsPackage = import ../beets.nix { inherit pkgs; };
@@ -17,13 +19,23 @@ let
       LibraryOptions.EnableRealtimeMonitor = false;
     }
   );
+  # The Jellyfin lines this contract is proven against: 10.11 is the last
+  # 10.x line (the pinned twin in flake.nix), 12 is what the fleet runs.
+  # A 13.x arriving in nixpkgs fails here on purpose — re-verify the API
+  # contract (docs/jellyfin-primer.md), then widen this predicate.
+  supportedLine = v:
+    pkgs.lib.hasPrefix "10.11." v || pkgs.lib.versions.major v == "12";
 in
-assert pkgs.jellyfin.version == "10.11.11";
+assert pkgs.lib.assertMsg (supportedLine jellyfinPackage.version)
+  "Jellyfin ${jellyfinPackage.version} is not a verified line (10.11.x, 12.x)";
 pkgs.testers.nixosTest {
-  name = "cratedigger-jellyfin-metadata-vm";
+  name = "cratedigger-jellyfin-metadata-vm-${jellyfinPackage.version}";
 
   nodes.machine = { pkgs, ... }: {
-    services.jellyfin.enable = true;
+    services.jellyfin = {
+      enable = true;
+      package = jellyfinPackage;
+    };
     services.postgresql = {
       enable = true;
       ensureDatabases = [ "root" ];
@@ -55,9 +67,12 @@ pkgs.testers.nixosTest {
     )
 
     def curl(path, *, token=None, method="GET", body=None):
-        headers = ["-H", "X-Emby-Authorization:" + client_auth]
+        # Jellyfin 12 ships EnableLegacyAuthorization=false: the legacy
+        # X-Emby-Authorization / X-Emby-Token headers answer 401, while the
+        # MediaBrowser scheme in Authorization is accepted by every line.
+        headers = ["-H", "Authorization:" + client_auth]
         if token is not None:
-            headers = ["-H", "X-Emby-Token:" + token]
+            headers = ["-H", 'Authorization:MediaBrowser Token="' + token + '"']
         command = ["curl", "--fail", "--silent", "--show-error"]
         command += headers
         if method != "GET":
