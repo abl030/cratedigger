@@ -13,9 +13,12 @@ Upstream: https://jellyfin.org/
 
 - External: https://jelly.ablz.au
 - Version at integration time: 10.11.11; 12.0 since 2026-09-11. Both lines
-  are supported and each has a real-server proof: the flake's
-  `jellyfinMetadataVm` check boots the lock's Jellyfin (10.11.x or 12.x) and
-  `jellyfinMetadataVm10` boots the pinned 10.11.11 (issue #1409).
+  are supported (issue #1409): the flake's `jellyfinMetadataVm10` check boots
+  the pinned 10.11.11, and `jellyfinMetadataVm` boots whatever the flake
+  lock's nixpkgs carries — the daily gate updates that lock before building
+  the candidate, so a new line is proven there before its lock is committed
+  (the committed lock stays at 10.11.11 until the first green run on 12).
+  The 12.0 contract was also measured against the live server on 2026-09-11.
 - Music library: `/mnt/fuse/Media/Music/Beets` — the same files Cratedigger
   sees at `/mnt/virtio/Music/Beets`. That exact prefix swap is
   `[Jellyfin] path_map`; `Incoming` and `failed_imports` are outside Jellyfin's
@@ -291,8 +294,10 @@ DeviceId="cratedigger", Version="1"`, built by
 12 ships `EnableLegacyAuthorization=false` (jellyfin/jellyfin#15559), so the
 legacy `X-Emby-Token`, `X-MediaBrowser-Token` and `X-Emby-Authorization`
 headers, the `Emby` scheme and the `api_key` query parameter all answer 401,
-and 10.13 removes them outright; the `MediaBrowser` scheme is accepted by both
-supported lines (10.11, 12), which is why it is the one form Cratedigger sends
+and upstream intends to drop the toggle and the legacy methods in a later
+release (that PR says "likely 10.13", under the old numbering); the
+`MediaBrowser` scheme is accepted by both supported lines (10.11, 12), which
+is why it is the one form Cratedigger sends
 (issue #1409; reference: the gist linked from the release notes,
 https://gist.github.com/nielsvanvelzen/ea047d9028f676185832e51ffaf12a6f).
 Endpoints the integration uses (all verified on 10.11.11 and 12.0):
@@ -322,11 +327,13 @@ curl -s -H "$AUTH" "https://jelly.ablz.au/Library/VirtualFolders"
 
 Gotchas:
 
-- **Jellyfin 12 changed `GetItems`** to apply `recursive` only alongside
-  `includeItemTypes`. Every Cratedigger query already passes
-  `includeItemTypes`, so the album-title search, the artist search, the
-  `albumArtistIds` sweep and the `parentId` children query answer exactly as
-  on 10.11 (measured live against 12.0, 2026-09-11).
+- **Jellyfin 12 changed a `GetItems` default**: a query on a library folder
+  that names `includeItemTypes` but omits `recursive` is now recursive by
+  default (`ItemsController.cs`, `recursive ??= true`). Every Cratedigger
+  library query passes `recursive=true` explicitly, and the children query
+  targets a `MusicAlbum`, not a library, so the album-title search, the
+  artist search, the `albumArtistIds` sweep and the `parentId` children query
+  answer exactly as on 10.11 (measured live against 12.0, 2026-09-11).
 - **There is no path-filter on `/Items`** — an unrecognized `path` param is
   ignored and the query degenerates to an unfiltered recursive sweep (slow
   enough to 504 through the proxy). The finder narrows by album-title /

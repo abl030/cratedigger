@@ -906,6 +906,21 @@ class TestTriggerPlexScan(unittest.TestCase):
         )
 
 
+class TestSplitPathMap(unittest.TestCase):
+    """The one place a ``local:container`` remap is split (#1409 review):
+    the translation and the scan notifier's containment guard share it."""
+
+    def test_splits_at_the_first_colon_only(self):
+        from lib.util import _split_path_map
+        self.assertEqual(
+            _split_path_map("/mnt/virtio/Music/Beets:/mnt/fuse/Media/Music/Beets"),
+            ("/mnt/virtio/Music/Beets", "/mnt/fuse/Media/Music/Beets"))
+        # A colon inside the container half stays there: only the FIRST
+        # colon separates the halves.
+        self.assertEqual(
+            _split_path_map("/local:/srv/a:b"), ("/local", "/srv/a:b"))
+
+
 class TestTriggerJellyfinScan(unittest.TestCase):
     """Tests for trigger_jellyfin_scan()."""
 

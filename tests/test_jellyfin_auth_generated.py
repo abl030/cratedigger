@@ -105,13 +105,14 @@ def jellyfin_authorization_violations(
 
 # Real API keys are 32 hex characters; the alphabet deliberately reaches past
 # them into every byte the grammar reserves (quote, comma, equals, plus,
-# percent, space) and a non-ASCII character, so the encoding is what keeps
-# the parse honest, not the token's tameness.
+# percent, space), a non-ASCII character, and the header-injection bytes
+# (tab, CR, LF — a raw one would make urllib refuse the request), so the
+# encoding is what keeps the parse honest, not the token's tameness.
 _TOKEN = st.text(
-    alphabet='abcdef0123456789-_ ",=+%~/:é',
+    alphabet='abcdef0123456789-_ ",=+%~/:é\t\r\n',
     min_size=1,
     max_size=48,
-).filter(lambda token: token == token.strip())
+)
 _LEAVES = st.sampled_from(("scan", "get", "post"))
 
 
@@ -168,6 +169,15 @@ class TestInvariantCheckerTripsOnViolations(unittest.TestCase):
     def test_quiet_on_a_correct_request(self) -> None:
         self.assertEqual(
             jellyfin_authorization_violations({"Authorization": _GOOD}, "abc"), [])
+
+    def test_quiet_on_encoded_reserved_bytes_and_unknown_parameters(self) -> None:
+        # Looks like a comma, a quote and a plus inside the Token, plus a
+        # parameter the server ignores — the encoding is what makes this a
+        # correct request, and no clause may accuse it.
+        header = 'MediaBrowser Extra="x", Token="a%2Cb%22c%2Bd"'
+        self.assertEqual(
+            jellyfin_authorization_violations(
+                {"Authorization": header}, 'a,b"c+d'), [])
 
     def test_legacy_header_clause(self) -> None:
         self.assertEqual(

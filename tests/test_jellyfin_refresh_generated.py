@@ -10,6 +10,7 @@ import urllib.request
 from email.message import Message
 from typing import Self
 from unittest.mock import patch
+from urllib.parse import quote
 
 from hypothesis import given
 from hypothesis import strategies as st
@@ -96,10 +97,12 @@ class TestTargetedJellyfinRefreshGenerated(unittest.TestCase):
         self.assertNotEqual(
             request.full_url, "http://jellyfin:8096/Library/Refresh")
         self.assertEqual(request.get_method(), "POST")
+        # The token travels percent-encoded (urllib's own quote, never
+        # lib.util's builder); this alphabet happens to be encoding-neutral.
         self.assertEqual(
             request.get_header("Authorization"),
             'MediaBrowser Client="Cratedigger", Device="cratedigger", '
-            f'DeviceId="cratedigger", Version="1", Token="{token}"')
+            f'DeviceId="cratedigger", Version="1", Token="{quote(token, safe="")}"')
         self.assertEqual(request.get_header("Content-type"), "application/json")
         self.assertEqual(timeout, 10)
 

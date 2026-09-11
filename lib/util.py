@@ -830,6 +830,14 @@ FetchXml = Callable[..., Element]
 PutFn = Callable[..., int]
 
 
+def _split_path_map(path_map: str) -> tuple[str, str]:
+    """``local_prefix:container_prefix`` → its two halves — the ONE place the
+    remap is split, so the translation and every guard that re-reads the
+    container prefix cannot disagree about where the colon is."""
+    local_prefix, container_prefix = path_map.split(":", 1)
+    return local_prefix, container_prefix
+
+
 def _notifier_container_path(
     imported_path: str,
     *,
@@ -851,7 +859,7 @@ def _notifier_container_path(
     if not os.path.isabs(out) and beets_directory:
         out = os.path.join(beets_directory, out)
     if path_map:
-        local_prefix, container_prefix = path_map.split(":", 1)
+        local_prefix, container_prefix = _split_path_map(path_map)
         if out.startswith(local_prefix):
             out = container_prefix + out[len(local_prefix):]
         elif not os.path.isabs(out):
@@ -1012,8 +1020,9 @@ def plex_set_added_at(
 # standard ``Authorization`` header (issue #1409). Jellyfin 12 ships
 # ``EnableLegacyAuthorization=false``, which makes the ``X-Emby-Token``,
 # ``X-MediaBrowser-Token`` and ``X-Emby-Authorization`` headers answer 401
-# (10.13 removes them outright); every supported line — 10.11 and 12 —
-# accepts the scheme, so it is the one form sent. Values are percent-
+# (upstream intends to drop the toggle and the legacy methods in a later
+# release); every supported line — 10.11 and 12 — accepts the scheme, so
+# it is the one form sent. Values are percent-
 # encoded because the server's parser (``AuthorizationContext.GetParts``)
 # splits on unescaped commas, trims the quotes and URL-decodes each value,
 # reading a raw ``+`` as a space.
@@ -1024,8 +1033,8 @@ def jellyfin_authorization_header(token: str) -> str:
     scheme carrying the client identity and the API key as ``Token``.
 
     For an API key Jellyfin replaces ``Client`` with the key's own name and
-    keeps ``Device``/``DeviceId``/``Version`` when sent, so the dashboard
-    attributes the pipeline's activity to one stable device.
+    keeps ``Device``/``DeviceId``/``Version`` when sent (its own server
+    identity fills them in when blank).
     """
     from urllib.parse import quote
     parameters = (
@@ -1076,7 +1085,7 @@ def trigger_jellyfin_scan(
             )
             return
         if cfg.jellyfin_path_map:
-            _local_prefix, container_prefix = cfg.jellyfin_path_map.split(":", 1)
+            _local_prefix, container_prefix = _split_path_map(cfg.jellyfin_path_map)
             if os.path.commonpath((container_path, container_prefix)) != os.path.normpath(
                 container_prefix
             ):

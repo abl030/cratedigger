@@ -1062,7 +1062,8 @@ scoped targeting, curated-field preservation, and the real PostgreSQL-backed
 DateCreated capture/reconcile lifecycle. `jellyfinMetadataVm10` runs the same
 test against the pinned last 10.x release (10.11.11, a builtin nixpkgs fetch
 inside `flake.nix`, not a flake input), so both supported Jellyfin lines keep
-a real-server proof; the test refuses any other line so a future major fails
+a real-server proof once the lock carries 12.x (the daily gate moves the lock
+before it builds the candidate); the test refuses any other line so a future major fails
 loudly for re-verification. Run both for Jellyfin notifier, pin, or
 Jellyfin-version changes.
 

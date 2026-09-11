@@ -321,10 +321,13 @@ EOF
           cratediggerSrc = runtimeSrc;
         };
 
-        # Boots the lock's Jellyfin — the line the fleet actually runs — and
-        # proves the real targeted post-import notifier populates tagged
-        # album/track metadata without broadening scope or wiping an
-        # existing curated item, then the DateCreated pin lifecycle.
+        # Boots the lock's Jellyfin and proves the real targeted post-import
+        # notifier populates tagged album/track metadata without broadening
+        # scope or wiping an existing curated item, then the DateCreated pin
+        # lifecycle. The lock follows nixpkgs-unstable through the daily gate,
+        # which updates it BEFORE building this candidate — so a new Jellyfin
+        # line is proven here before the lock that carries it is committed,
+        # and the committed lock stays at 10.11.11 until that first green run.
         jellyfinMetadataVm = import ./nix/tests/jellyfin-metadata-vm.nix {
           inherit pkgs;
           cratediggerSrc = runtimeSrc;
@@ -333,11 +336,12 @@ EOF
         # The same contract against the last 10.x Jellyfin (issue #1409), so
         # 10.11 support keeps a real-server proof after the lock moves to 12.
         # The pin is a builtin fetch of the nixpkgs revision that shipped
-        # 10.11.11 — deliberately NOT a flake input: an input would surface in
-        # every consumer's flake.lock as a second nixpkgs node (nixosconfig's
-        # follows audit denies exactly that), while this revision only ever
-        # feeds this one check. The daily lock update leaves it alone; move it
-        # by hand only to a newer 10.11.x.
+        # 10.11.11 — deliberately NOT a flake input: an input would land in
+        # every consumer's flake.lock as a second nixpkgs node that no root
+        # pin update ever advances (the stale-duplicate shape nixosconfig's
+        # nixpkgs-follows policy exists to keep out), while this revision only
+        # ever feeds this one check. The daily lock update leaves it alone;
+        # move it by hand only to a newer 10.11.x.
         jellyfinMetadataVm10 = import ./nix/tests/jellyfin-metadata-vm.nix {
           inherit pkgs;
           cratediggerSrc = runtimeSrc;
