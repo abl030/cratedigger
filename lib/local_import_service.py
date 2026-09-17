@@ -57,11 +57,14 @@ retryable vocabulary, exactly like the sibling force-import surface (issue
 """
 RESULT_PROCESSING_LOCKED = "processing_locked"
 RESULT_ALREADY_QUEUED_DIFFERENT_PATH = "already_queued_different_path"
-"""issue #1176 PR3 review round, F8: ``local_import_dedupe_key`` keys on the
+"""An active job for the request already names a different path or metadata
+source mode.
+
+Issue #1176 PR3 review round, F8: ``local_import_dedupe_key`` keys on the
 request alone (there is no ``download_log`` row to key on — see its own
 docstring), so ``enqueue_import_job``'s ``ON CONFLICT ... DO NOTHING``
 silently returns the FIRST still-active job for this request regardless of
-whether THIS call's ``source_path`` matches it. Left unchecked, an operator
+whether THIS call's complete persisted input matches it. Left unchecked, an operator
 who typo'd a path, re-ran with the corrected one, and read a 202 "queued"
 line would have the ORIGINAL (wrong) folder imported with no cancel path —
 the response named the corrected path while the queued job still pointed
@@ -117,6 +120,7 @@ def enqueue_local_import(
     *,
     request_id: int,
     source_path: str,
+    upstream_musicbrainz: bool = False,
 ) -> LocalImportEnqueueResult:
     """Authorize and enqueue one operator-named local import.
 
@@ -184,23 +188,27 @@ def enqueue_local_import(
         payload=local_import_payload(
             source_path=authorized_path,
             request_id=request_id,
+            upstream_musicbrainz=upstream_musicbrainz,
         ),
         message=(
             f"Local import queued for {request['artist_name']} - "
             f"{request['album_title']}"
         ),
     )
-    # F8: a deduped return whose queued payload names a DIFFERENT path than
-    # this call just authorized is a genuine conflict — a still-active job
+    # F8: a deduped return whose queued payload names a DIFFERENT path or
+    # metadata source mode is a genuine conflict — a still-active job
     # for this request already exists, and THIS call's source_path was
     # never enqueued. The dedupe key is request-scoped only (no
     # download_log row to key on), so ON CONFLICT DO NOTHING cannot tell
-    # "same path resubmitted" from "different path, request already busy"
+    # "same input resubmitted" from "different input, request already busy"
     # by itself; this comparison is what tells them apart.
     if (
         job.deduped
         and isinstance(job.payload, LocalImportPayload)
-        and job.payload.source_path != authorized_path
+        and (
+            job.payload.source_path != authorized_path
+            or job.payload.upstream_musicbrainz != upstream_musicbrainz
+        )
     ):
         return LocalImportEnqueueResult(
             RESULT_ALREADY_QUEUED_DIFFERENT_PATH,
@@ -208,8 +216,10 @@ def enqueue_local_import(
             source_path=authorized_path,
             detail=(
                 f"request {request_id} already has an active local import "
-                f"queued for {job.payload.source_path!r}; cancel or let it "
-                f"finish before importing a different folder"
+                f"queued for {job.payload.source_path!r} with "
+                "upstream_musicbrainz="
+                f"{job.payload.upstream_musicbrainz}; cancel or let it "
+                f"finish before changing its folder or metadata source"
             ),
             job=job,
         )

@@ -956,6 +956,11 @@ def _execute_action_copy_dispatch(
     """
     source = lane.source_fn(job.payload)
     action_prefix = lane.action_copy_prefix()
+    upstream_musicbrainz = (
+        job.payload.upstream_musicbrainz
+        if isinstance(job.payload, LocalImportPayload)
+        else False
+    )
 
     from lib.dispatch import dispatch_import_from_db
     force_dispatch = force_dispatch_fn or dispatch_import_from_db
@@ -1009,6 +1014,7 @@ def _execute_action_copy_dispatch(
             cfg=runtime_config,
             distance_threshold=resolved_distance_threshold,
             scenario=lane.scenario,
+            upstream_musicbrainz=upstream_musicbrainz,
         )
     assert owner_session_identity is not None
     return force_dispatch(
@@ -1025,6 +1031,7 @@ def _execute_action_copy_dispatch(
         cfg=runtime_config,
         distance_threshold=resolved_distance_threshold,
         scenario=lane.scenario,
+        upstream_musicbrainz=upstream_musicbrainz,
     )
 
 

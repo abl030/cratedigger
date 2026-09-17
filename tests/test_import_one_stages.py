@@ -672,6 +672,15 @@ class TestImportOneRequest(unittest.TestCase):
 
         self.assertEqual(destinations, fields)
 
+    def test_upstream_musicbrainz_flag_is_typed(self) -> None:
+        from harness.import_one import ImportOneRequest
+
+        request = ImportOneRequest.from_argv([
+            "/staged/album", "mbid-1", "--upstream-musicbrainz",
+        ])
+
+        self.assertTrue(request.upstream_musicbrainz)
+
     def test_the_request_cannot_be_mutated_mid_run(self):
         from harness.import_one import ImportOneRequest
 
@@ -2193,6 +2202,7 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
                 album,
                 "mbid-123",
                 max_distance=import_one.DEFAULT_MAX_DISTANCE,
+                upstream_musicbrainz=False,
                 beets_config_dir=None,
                 beets_python=None,
                 beets_library_db_path=None,

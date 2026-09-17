@@ -2123,6 +2123,7 @@ def dispatch_import_core(
                 beets_python=preamble.beets_cfg.beets_python,
                 beets_library_db_path=preamble.beets_library_db_path,
                 beets_library_root=preamble.beets_library_root,
+                upstream_musicbrainz=request.upstream_musicbrainz,
                 cancellation_token=runner_cancellation_token,
                 on_spawn=runner_on_spawn,
                 owner_session_probe=runner_owner_session_probe,

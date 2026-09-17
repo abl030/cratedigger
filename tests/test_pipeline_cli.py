@@ -986,7 +986,13 @@ class TestCmdImportLocal(_FakeDbWebServerCase):
     codes (derived from ``LOCAL_IMPORT_HTTP_STATUS``, per
     ``lib.local_import_service.enqueue_local_import``'s outcome table)."""
 
-    def _run(self, request_id: int, source_path: str) -> tuple[int, str]:
+    def _run(
+        self,
+        request_id: int,
+        source_path: str,
+        *,
+        upstream_musicbrainz: bool = False,
+    ) -> tuple[int, str]:
         stdout = io.StringIO()
         with redirect_stdout(stdout):
             rc = pipeline_cli.cmd_import_local(
@@ -994,6 +1000,7 @@ class TestCmdImportLocal(_FakeDbWebServerCase):
                 argparse.Namespace(
                     request_id=request_id,
                     source_path=source_path,
+                    upstream_musicbrainz=upstream_musicbrainz,
                     api_endpoint=TcpApiEndpoint(self.base),
                 ),
             )
@@ -1032,7 +1039,11 @@ class TestCmdImportLocal(_FakeDbWebServerCase):
         )
 
     def test_import_local_enqueues_with_authorized_path(self) -> None:
-        from lib.import_queue import IMPORT_JOB_LOCAL, local_import_dedupe_key
+        from lib.import_queue import (
+            IMPORT_JOB_LOCAL,
+            LocalImportPayload,
+            local_import_dedupe_key,
+        )
 
         self.db.seed_request(make_request_row(
             id=123, status="wanted", mb_release_id="mbid-123",
@@ -1055,9 +1066,15 @@ class TestCmdImportLocal(_FakeDbWebServerCase):
                 "web.routes.pipeline_mutations.read_runtime_config",
                 return_value=cfg,
             ):
-                rc, out = self._run(123, album)
+                rc, out = self._run(
+                    123, album, upstream_musicbrainz=True,
+                )
 
         self.assertEqual(rc, 0)
+        job = self.db.list_import_jobs()[0]
+        self.assertIsInstance(job.payload, LocalImportPayload)
+        assert isinstance(job.payload, LocalImportPayload)
+        self.assertTrue(job.payload.upstream_musicbrainz)
         self.assertIn("[OK] Queued", out)
         self.assertEqual(len(self.db._import_jobs), 1)
         job_row = self.db._import_jobs[0]

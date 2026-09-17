@@ -95,6 +95,7 @@ class TestLocalImportService(unittest.TestCase):
 
         result = enqueue_local_import(
             db, cfg, request_id=867, source_path=album,
+            upstream_musicbrainz=True,
         )
 
         self.assertEqual(result.outcome, RESULT_QUEUED)
@@ -110,6 +111,7 @@ class TestLocalImportService(unittest.TestCase):
         assert isinstance(job.payload, LocalImportPayload)
         self.assertEqual(job.payload.source_path, album)
         self.assertEqual(job.payload.request_id, 867)
+        self.assertTrue(job.payload.upstream_musicbrainz)
 
     def test_resubmitting_the_same_path_keeps_deduping_to_queued(self) -> None:
         """The ordinary retry case: unchanged by the F8 conflict check."""
@@ -157,6 +159,27 @@ class TestLocalImportService(unittest.TestCase):
         self.assertEqual(len(db.list_import_jobs()), 1)
         assert first.job is not None and second.job is not None
         self.assertEqual(first.job.id, second.job.id)
+
+    def test_same_path_with_different_upstream_mode_is_a_conflict(self) -> None:
+        db, cfg, root = self._world()
+        album = os.path.join(root, "MyRip", "Album")
+        os.makedirs(album)
+
+        first = enqueue_local_import(
+            db, cfg, request_id=867, source_path=album,
+            upstream_musicbrainz=False,
+        )
+        second = enqueue_local_import(
+            db, cfg, request_id=867, source_path=album,
+            upstream_musicbrainz=True,
+        )
+
+        self.assertEqual(
+            second.outcome, RESULT_ALREADY_QUEUED_DIFFERENT_PATH,
+        )
+        assert first.job is not None and second.job is not None
+        self.assertEqual(first.job.id, second.job.id)
+        self.assertIn("upstream_musicbrainz=False", second.detail or "")
 
     def test_missing_request_returns_exact_outcome_without_job(self) -> None:
         db, cfg, root = self._world()

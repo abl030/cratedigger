@@ -264,6 +264,7 @@ class TestExecuteImportJobLocalBranchSeam(unittest.TestCase):
             dedupe_key=local_import_dedupe_key(request_id),
             payload=local_import_payload(
                 source_path="/operator/real/Album", request_id=request_id,
+                upstream_musicbrainz=True,
             ),
         )
         action_path = force_action_copy_path(
@@ -317,6 +318,7 @@ class TestExecuteImportJobLocalBranchSeam(unittest.TestCase):
         self.assertEqual(captured["distance_threshold"], 0.15)
         # Decision 4: the local-import attempt scenario.
         self.assertEqual(captured["scenario"], "local_import")
+        self.assertIs(captured["upstream_musicbrainz"], True)
         self.assertIsNone(captured["source_username"])
         self.assertIsNone(captured["source_dirs"])
         self.assertIsNone(captured["download_log_id"])

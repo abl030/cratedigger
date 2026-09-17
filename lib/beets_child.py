@@ -171,6 +171,7 @@ def harness_session_argv(
     # never a silent real import (review round, reader finding 5).
     pretend: bool,
     preserve_discogs_flat_subtracks: bool = False,
+    upstream_musicbrainz: bool = False,
 ) -> list[str]:
     """The one argv shape for a streaming harness session
     (``run_beets_harness.sh``): the validation session (``--pretend``) and
@@ -182,6 +183,8 @@ def harness_session_argv(
     if pretend:
         argv.append("--pretend")
     argv.append("--noincremental")
+    if upstream_musicbrainz:
+        argv.append("--upstream")
     if preserve_discogs_flat_subtracks:
         argv.append("--preserve-discogs-flat-subtracks")
     argv.extend(["--search-id", mb_release_id, album_path])

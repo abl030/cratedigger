@@ -894,6 +894,7 @@ def post_pipeline_force_import(h: RouteHandler, body: dict[str, object]) -> None
 class PipelineImportLocalRequest(BaseModel):
     request_id: int = Field(gt=0)
     source_path: str = Field(min_length=1)
+    upstream_musicbrainz: bool = Field(default=False, strict=True)
 
 
 def post_pipeline_import_local(h: RouteHandler, body: dict[str, object]) -> None:
@@ -908,6 +909,7 @@ def post_pipeline_import_local(h: RouteHandler, body: dict[str, object]) -> None
         read_runtime_config(),
         request_id=request_id,
         source_path=req_body.source_path,
+        upstream_musicbrainz=req_body.upstream_musicbrainz,
     )
     if result.outcome == LOCAL_RESULT_REQUEST_MISSING:
         h._error(

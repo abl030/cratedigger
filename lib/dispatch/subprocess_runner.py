@@ -68,6 +68,7 @@ def build_import_one_command(
     beets_python: str | None = None,
     beets_library_db_path: str | None = None,
     beets_library_root: str | None = None,
+    upstream_musicbrainz: bool = False,
 ) -> list[str]:
     """Build the single shared import_one.py command line."""
     from lib.beets_db import validate_beets_storage_pair
@@ -124,6 +125,8 @@ def build_import_one_command(
         cmd.extend(["--beets-config-dir", beets_config_dir])
     if beets_python is not None:
         cmd.extend(["--beets-python", beets_python])
+    if upstream_musicbrainz:
+        cmd.append("--upstream-musicbrainz")
     return cmd
 
 
@@ -146,6 +149,7 @@ def run_import_one(
     beets_python: str | None = None,
     beets_library_db_path: str | None = None,
     beets_library_root: str | None = None,
+    upstream_musicbrainz: bool = False,
     timeout: int = 1800,
     cancellation_token: CancellationToken | None = None,
     on_spawn: Callable[[int], None] | None = None,
@@ -176,6 +180,7 @@ def run_import_one(
         beets_python=beets_python,
         beets_library_db_path=beets_library_db_path,
         beets_library_root=beets_library_root,
+        upstream_musicbrainz=upstream_musicbrainz,
     )
     env = beets_subprocess_env(
         beets_config_dir=beets_config_dir,

@@ -404,6 +404,7 @@ class DispatchRequest:
     override_min_bitrate: int | None = None
     target_format: str | None = None
     verified_lossless_target: str = ""
+    upstream_musicbrainz: bool = False
 
     # --- peer attribution -------------------------------------------
     #: The downloaded files this candidate came from. Dispatch reads exactly
@@ -507,6 +508,7 @@ class ImportOneRunner(Protocol):
         beets_python: str | None,
         beets_library_db_path: str | None,
         beets_library_root: str | None,
+        upstream_musicbrainz: bool = False,
         cancellation_token: CancellationToken | None = None,
         on_spawn: Callable[[int], None] | None = None,
         owner_session_probe: Callable[[], bool] | None = None,

@@ -1308,6 +1308,7 @@ class TestImporterWorker(unittest.TestCase):
             # byte-identical even though the call shape now names them.
             distance_threshold=None,
             scenario="force_import",
+            upstream_musicbrainz=False,
         )
         assert updated is not None
         self.assertEqual(updated.status, "completed")
@@ -1532,6 +1533,7 @@ class TestImporterWorker(unittest.TestCase):
             # rationale for these two explicit defaults.
             distance_threshold=None,
             scenario="force_import",
+            upstream_musicbrainz=False,
         )
 
     def test_force_import_without_private_action_requeues_before_dispatch(self):
@@ -5016,6 +5018,7 @@ class TestImportPreviewWorker(unittest.TestCase):
             import_job_id=claimed.id,
             runtime_config=cfg,
             repair_fn=ANY,
+            upstream_musicbrainz=False,
         )
         assert updated is not None
         self.assertEqual(updated.status, "queued")
@@ -5055,7 +5058,11 @@ class TestImportPreviewWorker(unittest.TestCase):
                 IMPORT_JOB_LOCAL,
                 request_id=61,
                 dedupe_key=local_import_dedupe_key(61),
-                payload=local_import_payload(source_path=source, request_id=61),
+                payload=local_import_payload(
+                    source_path=source,
+                    request_id=61,
+                    upstream_musicbrainz=True,
+                ),
             )
             claimed = claim_next_import_preview_job(db, worker_id="preview")
             assert claimed is not None
@@ -5063,10 +5070,14 @@ class TestImportPreviewWorker(unittest.TestCase):
             with patch(
                 "scripts.import_preview_worker.measure_and_persist_candidate_evidence",
                 side_effect=RuntimeError("simulated measurement crash"),
-            ):
+            ) as measurement:
                 updated = import_preview_worker.process_claimed_preview_job(
                     db, claimed, runtime_config=cfg,
                 )
+
+        self.assertIs(
+            measurement.call_args.kwargs["upstream_musicbrainz"], True,
+        )
 
         assert updated is not None
         assert updated.preview_result is not None
@@ -8247,10 +8258,12 @@ class TestLocalImportJobType(unittest.TestCase):
         payload = local_import_payload(
             source_path="/mnt/virtio/Music/Incoming/local/Artist - Album",
             request_id=42,
+            upstream_musicbrainz=True,
         )
         self.assertEqual(payload, {
             "source_path": "/mnt/virtio/Music/Incoming/local/Artist - Album",
             "request_id": 42,
+            "upstream_musicbrainz": True,
         })
         self.assertEqual(validate_payload(IMPORT_JOB_LOCAL, payload), payload)
 

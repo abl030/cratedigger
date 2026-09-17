@@ -842,6 +842,7 @@ def _invoke_preview_harness(
     existing_v0_probe: V0ProbeEvidence | None,
     quality_evidence_action_file: str | None,
     cancellation_token: CancellationToken | None,
+    upstream_musicbrainz: bool = False,
     run_import_fn: Callable[..., ImportOneRun] | None = None,
 ) -> ImportOneRun:
     """Run the dry-run harness with the lane-shared argument set.
@@ -867,6 +868,7 @@ def _invoke_preview_harness(
             existing_v0_probe=existing_v0_probe,
             quality_evidence_action_file=quality_evidence_action_file,
             cancellation_token=cancellation_token,
+            upstream_musicbrainz=upstream_musicbrainz,
         )
     else:
         run = run_import_fn(
@@ -883,6 +885,7 @@ def _invoke_preview_harness(
             quality_rank_config_json=cfg.quality_ranks.to_json(),
             existing_v0_probe=existing_v0_probe,
             quality_evidence_action_file=quality_evidence_action_file,
+            upstream_musicbrainz=upstream_musicbrainz,
         )
     checkpoint(cancellation_token)
     return run
@@ -911,6 +914,7 @@ def measure_and_persist_candidate_evidence(
     cancellation_token: CancellationToken | None = None,
     aac_lattice_measure_fn: AacLatticeMeasureFn | None = measure_aac_lattice,
     measure_fn: Callable[..., PreimportMeasurement] | None = None,
+    upstream_musicbrainz: bool = False,
 ) -> ImportPreviewResult:
     """Measure a source folder and persist candidate evidence; never decide.
 
@@ -1220,6 +1224,7 @@ def measure_and_persist_candidate_evidence(
                 existing_v0_probe=existing_v0_probe,
                 quality_evidence_action_file=preview_spectral_file,
                 cancellation_token=cancellation_token,
+                upstream_musicbrainz=upstream_musicbrainz,
                 run_import_fn=run_import_fn,
             )
         except ExecutionCancelled:

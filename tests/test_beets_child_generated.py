@@ -239,8 +239,12 @@ class TestTokenIntegrityCheckerTripsOnViolations(unittest.TestCase):
 #: The harness session argv grammar: [wrapper] (--pretend?) --noincremental
 #: (--preserve-discogs-flat-subtracks?) --search-id <id> <path>. Length is
 #: fully determined by the two flags.
-def _session_argv_length(pretend: bool, preserve: bool) -> int:
-    return 5 + int(pretend) + int(preserve)
+def _session_argv_length(
+    pretend: bool,
+    preserve: bool,
+    upstream_musicbrainz: bool,
+) -> int:
+    return 5 + int(pretend) + int(preserve) + int(upstream_musicbrainz)
 
 
 def session_argv_violations(
@@ -251,6 +255,7 @@ def session_argv_violations(
     album_path: str,
     pretend: bool,
     preserve_discogs_flat_subtracks: bool,
+    upstream_musicbrainz: bool = False,
 ) -> list[str]:
     """Accumulating checker for invariant S — the session argv grammar.
 
@@ -268,14 +273,18 @@ def session_argv_violations(
         violations.append("--pretend does not track the pretend flag")
     if token(1 + int(pretend)) != "--noincremental":
         violations.append("--noincremental is not at its place")
-    if preserve_discogs_flat_subtracks and token(
+    if upstream_musicbrainz and token(
         2 + int(pretend),
+    ) != "--upstream":
+        violations.append("the upstream token is not at its place")
+    if preserve_discogs_flat_subtracks and token(
+        2 + int(pretend) + int(upstream_musicbrainz),
     ) != "--preserve-discogs-flat-subtracks":
         violations.append("the flat-subtracks token is not at its place")
     if argv[-3:] != ["--search-id", mb_release_id, album_path]:
         violations.append("the search-id/album-path tail is not verbatim")
     if len(argv) != _session_argv_length(
-        pretend, preserve_discogs_flat_subtracks,
+        pretend, preserve_discogs_flat_subtracks, upstream_musicbrainz,
     ):
         violations.append("argv carries a missing or stray token")
     return violations
@@ -296,6 +305,7 @@ class TestSessionArgvGrammar(unittest.TestCase):
         album_path=st.text(min_size=0, max_size=40),
         pretend=st.booleans(),
         preserve=st.booleans(),
+        upstream_musicbrainz=st.booleans(),
     )
     @example(
         harness_path="/nix/store/x/harness/run_beets_harness.sh",
@@ -303,6 +313,7 @@ class TestSessionArgvGrammar(unittest.TestCase):
         album_path="/mnt/virtio/music/slskd/album",
         pretend=True,
         preserve=False,
+        upstream_musicbrainz=True,
     )
     @example(
         harness_path="/nix/store/x/harness/run_beets_harness.sh",
@@ -310,6 +321,7 @@ class TestSessionArgvGrammar(unittest.TestCase):
         album_path="/processing/albums/x",
         pretend=False,
         preserve=True,
+        upstream_musicbrainz=False,
     )
     def test_builder_emits_the_session_grammar(
         self,
@@ -318,6 +330,7 @@ class TestSessionArgvGrammar(unittest.TestCase):
         album_path: str,
         pretend: bool,
         preserve: bool,
+        upstream_musicbrainz: bool,
     ) -> None:
         argv = harness_session_argv(
             harness_path,
@@ -325,6 +338,7 @@ class TestSessionArgvGrammar(unittest.TestCase):
             album_path=album_path,
             pretend=pretend,
             preserve_discogs_flat_subtracks=preserve,
+            upstream_musicbrainz=upstream_musicbrainz,
         )
         self.assertEqual(
             session_argv_violations(
@@ -334,6 +348,7 @@ class TestSessionArgvGrammar(unittest.TestCase):
                 album_path=album_path,
                 pretend=pretend,
                 preserve_discogs_flat_subtracks=preserve,
+                upstream_musicbrainz=upstream_musicbrainz,
             ),
             [],
         )
@@ -366,6 +381,23 @@ class TestSessionArgvCheckerTripsOnViolations(unittest.TestCase):
                 "--search-id", "m", "/a",
             ]),
             ["argv does not begin with the harness wrapper"],
+        )
+
+    def test_a_replaced_upstream_token_trips_only_the_upstream_clause(self):
+        self.assertEqual(
+            session_argv_violations(
+                [
+                    "/h", "--pretend", "--noincremental",
+                    "--verbose", "--search-id", "m", "/a",
+                ],
+                harness_path="/h",
+                mb_release_id="m",
+                album_path="/a",
+                pretend=True,
+                preserve_discogs_flat_subtracks=False,
+                upstream_musicbrainz=True,
+            ),
+            ["the upstream token is not at its place"],
         )
 
     def test_a_replaced_pretend_token_trips_only_the_pretend_clause(
