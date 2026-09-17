@@ -1517,7 +1517,11 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
             with _local_import_runtime_config(local_import_dir=local_root):
                 status, data = self._post(
                     "/api/pipeline/import-local",
-                    {"request_id": 201, "source_path": album},
+                    {
+                        "request_id": 201,
+                        "source_path": album,
+                        "upstream_musicbrainz": True,
+                    },
                 )
 
         self.assertEqual(status, 202)
@@ -1525,6 +1529,26 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
             self, data, self.LOCAL_IMPORT_REQUIRED_FIELDS,
             "pipeline import-local response")
         self.assertEqual(len(self.db.list_import_jobs()), 1)
+        from lib.import_queue import LocalImportPayload
+
+        payload = self.db.list_import_jobs()[0].payload
+        self.assertIsInstance(payload, LocalImportPayload)
+        assert isinstance(payload, LocalImportPayload)
+        self.assertTrue(
+            payload.upstream_musicbrainz,
+        )
+
+    def test_pipeline_import_local_rejects_non_boolean_upstream_mode(self):
+        status, _data = self._post(
+            "/api/pipeline/import-local",
+            {
+                "request_id": 201,
+                "source_path": "/operator/Album",
+                "upstream_musicbrainz": "true",
+            },
+        )
+
+        self.assertEqual(status, 400)
 
     def test_pipeline_import_local_statuses_are_service_mapped(self):
         with tempfile.TemporaryDirectory() as root:

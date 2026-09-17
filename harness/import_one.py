@@ -34,7 +34,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
-from typing import Final, NoReturn, Protocol, TypeGuard
+from typing import Final, NoReturn, Protocol, TypedDict, TypeGuard
 
 import msgspec
 
@@ -189,6 +189,7 @@ class ImportOneRequest:
     existing_v0_probe_median_bitrate: int | None = None
     preserve_source: bool = False
     dry_run: bool = False
+    upstream_musicbrainz: bool = False
 
     @classmethod
     def from_argv(cls, argv: Sequence[str] | None = None) -> "ImportOneRequest":
@@ -226,6 +227,7 @@ class ImportOneRequest:
             ),
             preserve_source=args.preserve_source,
             dry_run=args.dry_run,
+            upstream_musicbrainz=args.upstream_musicbrainz,
         )
 
 
@@ -1398,6 +1400,7 @@ def _run_import_once(
     beets_library_db_path: str | None = None,
     beets_library_root: str | None = None,
     preserve_discogs_flat_subtracks: bool = False,
+    upstream_musicbrainz: bool = False,
 ) -> RunImportOutcome:
     """Drive the beets harness to import one album.
 
@@ -1415,6 +1418,7 @@ def _run_import_once(
         album_path=path,
         pretend=False,
         preserve_discogs_flat_subtracks=preserve_discogs_flat_subtracks,
+        upstream_musicbrainz=upstream_musicbrainz,
     )
     print(f"  [HARNESS] {' '.join(cmd)}", file=sys.stderr)
 
@@ -1685,6 +1689,7 @@ def run_import(
     beets_python: str | None = None,
     beets_library_db_path: str | None = None,
     beets_library_root: str | None = None,
+    upstream_musicbrainz: bool = False,
 ) -> RunImportOutcome:
     """Import one exact release with at most one safe Discogs retry.
 
@@ -1709,6 +1714,7 @@ def run_import(
         beets_python=beets_python,
         beets_library_db_path=beets_library_db_path,
         beets_library_root=beets_library_root,
+        upstream_musicbrainz=upstream_musicbrainz,
     )
     if not outcome.retry_discogs_flat_subtracks:
         return outcome
@@ -1726,6 +1732,7 @@ def run_import(
         beets_library_db_path=beets_library_db_path,
         beets_library_root=beets_library_root,
         preserve_discogs_flat_subtracks=True,
+        upstream_musicbrainz=upstream_musicbrainz,
     )
 
 
@@ -2198,6 +2205,7 @@ def _run_quality_evidence_authorized_import(
         request.path,
         mbid,
         max_distance=max_distance,
+        upstream_musicbrainz=request.upstream_musicbrainz,
         **import_beets_subprocess_kwargs(request),
     )
     _log_timing("beets_import", stage_start)
@@ -2361,6 +2369,11 @@ def build_parser() -> argparse.ArgumentParser:
                              "import so a downgrade verdict does not destroy "
                              "the user's only copy in failed_imports/ (#111).")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--upstream-musicbrainz",
+        action="store_true",
+        help="Use live musicbrainz.org instead of the configured mirror",
+    )
     return parser
 
 
@@ -2386,9 +2399,18 @@ def open_import_beets(
     return BeetsDB(db_path, library_root=library_root)
 
 
+class ImportBeetsSubprocessKwargs(TypedDict):
+    """Explicit keyword shape for the nested Beets subprocess boundary."""
+
+    beets_config_dir: str | None
+    beets_python: str | None
+    beets_library_db_path: str | None
+    beets_library_root: str | None
+
+
 def import_beets_subprocess_kwargs(
     request: ImportOneRequest,
-) -> dict[str, str | None]:
+) -> ImportBeetsSubprocessKwargs:
     """Forward the child's complete snapshotted Beets authority downstream."""
 
     return {
@@ -3141,6 +3163,7 @@ def _run_import_one_stages(
         work_path,
         mbid,
         max_distance=max_distance,
+        upstream_musicbrainz=request.upstream_musicbrainz,
         **import_beets_subprocess_kwargs(request),
     )
     _log_timing("beets_import", stage_start)

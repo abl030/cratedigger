@@ -226,6 +226,7 @@ class _RecordingRunImport:
         beets_python: str | None,
         beets_library_db_path: str | None,
         beets_library_root: str | None,
+        upstream_musicbrainz: bool = False,
         cancellation_token: CancellationToken | None = None,
         on_spawn: Callable[[int], None] | None = None,
         owner_session_probe: Callable[[], bool] | None = None,
@@ -236,7 +237,7 @@ class _RecordingRunImport:
             quality_rank_config_json, existing_v0_probe,
             beets_config_dir, beets_python,
             beets_library_db_path, beets_library_root, cancellation_token,
-            on_spawn, owner_session_probe,
+            on_spawn, owner_session_probe, upstream_musicbrainz,
         )
         self.evidence_release_ids.append(
             _action_file_release_id(quality_evidence_action_file),

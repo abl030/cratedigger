@@ -961,6 +961,11 @@ def execute_preview_job(
             import_job_id=job.id,
             runtime_config=cfg,
             repair_fn=_noop_header_repair,
+            upstream_musicbrainz=(
+                job.payload.upstream_musicbrainz
+                if isinstance(job.payload, LocalImportPayload)
+                else False
+            ),
         )
         return msgspec.structs.replace(result, action_path=action_path)
     preview_input = _preview_input(

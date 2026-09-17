@@ -67,6 +67,7 @@ def dispatch_import_from_db(
     retag_fn: MergeRetagFn | None = None,
     distance_threshold: float | None = None,
     scenario: DownloadLogOutcome = "force_import",
+    upstream_musicbrainz: bool = False,
 ) -> DispatchOutcome:
     """Run a force-import through the full dispatch pipeline.
 
@@ -212,6 +213,7 @@ def dispatch_import_from_db(
             retag_fn=retag_fn,
             distance_threshold=distance_threshold,
             scenario=scenario,
+            upstream_musicbrainz=upstream_musicbrainz,
         )
 
 
@@ -267,6 +269,7 @@ def _dispatch_import_from_db_locked(
     retag_fn: MergeRetagFn | None = None,
     distance_threshold: float | None = None,
     scenario: DownloadLogOutcome = "force_import",
+    upstream_musicbrainz: bool = False,
 ) -> DispatchOutcome:
     """Body of dispatch_import_from_db, called once the advisory lock is held.
 
@@ -362,6 +365,7 @@ def _dispatch_import_from_db_locked(
         release_id=mbid,
         import_job_id=import_job_id,
         distance_threshold=effective_distance_threshold,
+        upstream_musicbrainz=upstream_musicbrainz,
         cancellation_token=cancellation_token,
         canonical_release_fn=canonical_release_fn,
         retag_fn=retag_fn,
@@ -557,6 +561,7 @@ def _dispatch_import_from_db_locked(
             override_min_bitrate=None,
             target_format=req.get("target_format"),
             verified_lossless_target=resolved_cfg.verified_lossless_target,
+            upstream_musicbrainz=upstream_musicbrainz,
             beets_harness_path=resolved_cfg.beets_harness_path,
             dl_info=dl_info,
             # Since #1080 a measurement DOES exist for both lanes — the

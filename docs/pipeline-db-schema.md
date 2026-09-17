@@ -465,8 +465,10 @@ Key fields:
   optional `source_username` and `source_dirs`; automation jobs carry no
   fields; YouTube jobs require positive `request_id`/`download_log_id` values
   and nonempty `staged_path`/`browse_id` values; `local_import` jobs require a
-  positive `request_id` and a nonempty `source_path` — no `download_log_id`,
-  since a local import has no originating `download_log` row.
+  positive `request_id`, a nonempty `source_path`, and the Boolean
+  `upstream_musicbrainz` mode — no `download_log_id`, since a local import has
+  no originating `download_log` row. The mode is persisted so a retry cannot
+  silently switch between the configured mirror and live MusicBrainz.
 - `result JSONB`, `message`, `error` — terminal worker result visible to web
   and CLI callers. Result and preview-result display/audit data remain broadly
   decoded; `preview_status` continues to accept historical/raw

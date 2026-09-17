@@ -158,6 +158,7 @@ def cmd_import_local(_db: object, args: argparse.Namespace) -> int:
             body={
                 "request_id": int(args.request_id),
                 "source_path": str(args.source_path),
+                "upstream_musicbrainz": bool(args.upstream_musicbrainz),
             },
         ),
         render=_render_import_local,
@@ -417,6 +418,14 @@ def add_imports_subparsers(
     p_local.add_argument(
         "source_path",
         help="Absolute path under the configured local-import root",
+    )
+    p_local.add_argument(
+        "--upstream-musicbrainz",
+        action="store_true",
+        help=(
+            "Use live musicbrainz.org for a newly seeded release instead "
+            "of the configured mirror"
+        ),
     )
 
     # import-jobs

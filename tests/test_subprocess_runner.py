@@ -124,6 +124,16 @@ class TestImportOneCommandWireContract(unittest.TestCase):
             ],
         )
 
+    def test_upstream_musicbrainz_is_an_explicit_import_one_flag(self) -> None:
+        command = build_import_one_command(
+            path="/incoming/album",
+            mb_release_id="release-1",
+            beets_harness_path="/opt/harness/run-harness",
+            upstream_musicbrainz=True,
+        )
+
+        self.assertEqual(command[-1], "--upstream-musicbrainz")
+
 
 class TestImportOneSimpleProcessContract(unittest.TestCase):
     def test_defaults_and_process_options_reach_subprocess_run_exactly(self) -> None:

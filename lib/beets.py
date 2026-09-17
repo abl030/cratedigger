@@ -231,6 +231,7 @@ def _beets_validate_once(
     distance_threshold: float = 0.15,
     *,
     preserve_discogs_flat_subtracks: bool = False,
+    upstream_musicbrainz: bool = False,
     spawn: HarnessSpawnFn = spawn_harness_session,
 ) -> ValidationResult:
     """Dry-run beets import with specific MBID. Returns ValidationResult.
@@ -260,6 +261,7 @@ def _beets_validate_once(
         album_path=album_path,
         pretend=True,
         preserve_discogs_flat_subtracks=preserve_discogs_flat_subtracks,
+        upstream_musicbrainz=upstream_musicbrainz,
     )
     result = ValidationResult(target_mbid=mb_release_id)
 
@@ -438,6 +440,7 @@ def beets_validate(
     mb_release_id: str,
     distance_threshold: float = 0.15,
     *,
+    upstream_musicbrainz: bool = False,
     spawn: HarnessSpawnFn = spawn_harness_session,
 ) -> ValidationResult:
     """Validate one exact release, preserving split Discogs audio if needed.
@@ -458,6 +461,7 @@ def beets_validate(
         album_path,
         mb_release_id,
         distance_threshold,
+        upstream_musicbrainz=upstream_musicbrainz,
         spawn=spawn,
     )
     if result.scenario != "unmapped_audio":
@@ -483,5 +487,6 @@ def beets_validate(
         mb_release_id,
         distance_threshold,
         preserve_discogs_flat_subtracks=True,
+        upstream_musicbrainz=upstream_musicbrainz,
         spawn=spawn,
     )

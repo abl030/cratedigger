@@ -837,6 +837,7 @@ def validate_release_with_merge_redirect(
     release_id: str,
     import_job_id: int | None,
     distance_threshold: float,
+    upstream_musicbrainz: bool = False,
     cancellation_token: CancellationToken | None = None,
     canonical_release_fn: CanonicalReleaseFn | None = None,
     retag_fn: MergeRetagFn | None = None,
@@ -876,6 +877,7 @@ def validate_release_with_merge_redirect(
         album_path,
         release_id,
         distance_threshold,
+        upstream_musicbrainz=upstream_musicbrainz,
     )
     if result.scenario != "mbid_not_found":
         return ReleaseValidation(

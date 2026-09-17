@@ -267,6 +267,23 @@ class TestHarnessSessionArgv(unittest.TestCase):
                     expected,
                 )
 
+    def test_upstream_musicbrainz_is_before_the_search_tail(self) -> None:
+        wrapper = "/nix/store/x/harness/run_beets_harness.sh"
+
+        self.assertEqual(
+            harness_session_argv(
+                wrapper,
+                mb_release_id="mb-1",
+                album_path="/a",
+                pretend=True,
+                upstream_musicbrainz=True,
+            ),
+            [
+                wrapper, "--pretend", "--noincremental", "--upstream",
+                "--search-id", "mb-1", "/a",
+            ],
+        )
+
 
 class TestSpawnHarnessSession(unittest.TestCase):
     def test_spawns_a_real_text_mode_child_with_the_beets_env(self) -> None:

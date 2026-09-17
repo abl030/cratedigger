@@ -328,7 +328,7 @@ inside socket authorization, never credentials.
   `lib.fs_authority.errno_proves_absence`).
 - `pipeline-cli disk-coverage` — Compare active pipeline rows with Beets library coverage; each off-disk row reports whether its exact identity is `missing` or `ambiguous`.
 - `pipeline-cli force-import` — Queue a rejected download for the importer lane.
-- `pipeline-cli import-local` — Import a folder already on disk (`<request_id> <source_path>`) against a request's exact release (issue #1176); strict pressing-identity validation, no relaxed-threshold escape hatch — a candidate that fails lands as an ordinary Wrong Matches row.
+- `pipeline-cli import-local` — Import a folder already on disk (`<request_id> <source_path>`) against a request's exact release (issue #1176); strict pressing-identity validation, no relaxed-threshold escape hatch — a candidate that fails lands as an ordinary Wrong Matches row. Add `--upstream-musicbrainz` when the release was just seeded and has not reached the configured mirror; the opt-in is persisted on the job and applies to preview, final validation, and import retries.
 - `pipeline-cli import-job-recovery show` — Show read-only exact evidence for one import job.
 - `pipeline-cli import-jobs` — List import queue jobs.
 - `pipeline-cli import-preview` — Inspect an import preview and its evidence inputs.

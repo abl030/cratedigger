@@ -463,6 +463,13 @@ operator's folder (see issue #111: converting in place could destroy the
 source on a `downgrade` verdict, before copy-first made the folder
 strictly read-only input).
 
+New MusicBrainz edits can be imported before a replica catches up with
+`pipeline-cli import-local <request_id> <path> --upstream-musicbrainz`.
+This is a per-job choice, not a service-wide mirror change: it is persisted
+with the queued job and forwarded through preview, exact-release validation,
+and the final Beets import. Omitting it keeps every stage on the configured
+mirror.
+
 Both options are deliberately redundant — `enable` (bool) and `dir` (path)
 rather than one nullable path — because it reads more obviously to a human
 that this is a conscious, two-part act. `dir` has **no working default**

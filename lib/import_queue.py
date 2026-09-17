@@ -171,13 +171,16 @@ class YoutubeImportPayload(msgspec.Struct, kw_only=True, forbid_unknown_fields=T
 class LocalImportPayload(msgspec.Struct, kw_only=True, forbid_unknown_fields=True):
     """The strict JSONB contract for a ``local_import`` queue row.
 
-    No ``download_log_id``: unlike ``force_import``/``youtube_import``, a
+    ``upstream_musicbrainz`` is part of the durable input so preview and
+    every retry use the same metadata authority. No ``download_log_id``:
+    unlike ``force_import``/``youtube_import``, a
     local import has no originating ``download_log`` row — the operator
     names a request ID and a folder already on disk.
     """
 
     source_path: _NonEmptyStr
     request_id: _PositiveInt
+    upstream_musicbrainz: bool = False
 
 
 ImportJobPayload = (
@@ -601,6 +604,7 @@ def local_import_payload(
     *,
     source_path: str,
     request_id: int,
+    upstream_musicbrainz: bool = False,
 ) -> dict[str, object]:
     """Build the payload for a ``local_import`` job.
 
@@ -616,4 +620,5 @@ def local_import_payload(
     return _payload_to_builtins(LocalImportPayload(
         source_path=source_path,
         request_id=request_id,
+        upstream_musicbrainz=upstream_musicbrainz,
     ))
