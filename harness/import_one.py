@@ -927,8 +927,10 @@ def _is_m4a_alac(fpath: str) -> bool:
         return False
 
 
-def _folder_codec_labels(folder: str) -> set[str]:
-    """Read every audio stream before reducing an album to a rank format."""
+def _detect_source_format(
+    folder: str, cfg: QualityRankConfig | None = None,
+) -> str:
+    """Reduce source codecs with the same configured rule as installed albums."""
     formats: set[str] = set()
     for root, _dirs, filenames in os.walk(folder):
         for fname in filenames:
@@ -939,47 +941,8 @@ def _folder_codec_labels(folder: str) -> set[str]:
             if codec is None:
                 codec = native_codec_format_label(None, ext) or ext.lstrip(".")
             formats.add(codec.upper())
-    return formats
-
-
-def _detect_native_codec_family(
-    folder: str, cfg: QualityRankConfig | None = None,
-) -> str:
-    """Rank-model format label for a native (non-converted) lossy download.
-
-    Probes the actual audio files with ffprobe and maps the album codec to the
-    rank model's family label (for example ``"opus"``, ``"vorbis"``, or
-    ``"MP3"``) via ``native_codec_format_label``. A decodable codec without a
-    rank family is labelled ``"UNKNOWN"``; an empty folder returns the
-    explicit ``"NO_AUDIO"`` sentinel. The upstream evidence gate rejects an
-    empty fileset before this helper runs in production.
-
-    This is the fix for the Opus-recorded-as-MP3 bug (request 4679): the
-    native lossy path hardcoded ``native_codec_family="MP3"`` for every codec,
-    so a genuine Opus 124 was scored on the MP3-VBR band table (acceptable
-    floor 130) and rejected as a downgrade against an MP3 128. Probing the
-    real codec lets Opus/AAC classify against their own bands. An unmapped
-    result remains visible in the audit trail without inventing an MP3 label.
-    """
-    formats = _folder_codec_labels(folder)
-    if not formats:
-        return "NO_AUDIO"
-    album_format = _reduce_album_format(formats, cfg or QualityRankConfig.defaults())
-    label = native_codec_format_label(album_format)
-    if label is not None:
-        return label
-    _log(f"[WARN] native codec probe returned no rank-model label for "
-         f"audio in {folder}; ranking as UNKNOWN (a probe failure or an "
-         f"unmapped decodable codec)")
-    return "UNKNOWN"
-
-
-def _detect_source_format(
-    folder: str, cfg: QualityRankConfig | None = None,
-) -> str:
-    """Reduce source codecs with the same configured rule as installed albums."""
     return _reduce_album_format(
-        _folder_codec_labels(folder), cfg or QualityRankConfig.defaults(),
+        formats, cfg or QualityRankConfig.defaults(),
     ) or "UNKNOWN"
 
 
@@ -2898,18 +2861,13 @@ def _run_import_one_stages(
     new_conv_target = conversion_target(
         request.target_format, supported_lossless_source,
         request.verified_lossless_target)
-    # Probe the real native codec once and reuse at both comparison_format_hint
-    # call sites. ``comparison_format_hint`` only consumes this on the native
-    # (converted==0) branch; on converted paths it's ignored, so one probe is
-    # enough for the whole function.
-    native_codec_family = _detect_native_codec_family(work_path, rank_cfg)
     new_format_label = comparison_format_hint(
         target_format=request.target_format,
         verified_lossless_target=new_conv_target,
         converted_count=converted,
         is_transcode=quality_is_transcode,
         verified_lossless_proof=will_be_verified_lossless,
-        native_codec_family=native_codec_family,
+        native_codec_family=source_format,
     )
 
     # --- Build source/current measurements + separate target policy ---

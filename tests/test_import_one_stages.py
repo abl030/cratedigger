@@ -727,8 +727,66 @@ class TestResolveRankConfig(unittest.TestCase):
                 )
 
 
+def run_native_import_measurement(
+    codecs: Sequence[str], precedence: tuple[str, ...],
+) -> ImportResult:
+    """Run native import stages with media/Beets subprocesses at the I/O seam."""
+    from harness import import_one
+    from lib.quality import QualityRankConfig, SpectralAnalysisDetail, SpectralDetail
+
+    cfg = dataclasses.replace(
+        QualityRankConfig.defaults(), mixed_format_precedence=precedence,
+    )
+    audit = SpectralDetail(
+        candidate=SpectralAnalysisDetail(attempted=True, grade="genuine"),
+        existing=SpectralAnalysisDetail(attempted=False),
+    )
+    with tempfile.TemporaryDirectory() as temporary:
+        album = os.path.join(temporary, "album")
+        os.makedirs(album)
+        paths: dict[str, str] = {}
+        extensions = {"aac": "aac", "mp3": "mp3", "opus": "opus", "vorbis": "ogg"}
+        for index, codec in enumerate(codecs):
+            path = os.path.join(album, f"{index:02d}.{extensions[codec]}")
+            with open(path, "wb") as stream:
+                stream.write(b"test audio")
+            paths[path] = codec
+
+        def ffprobe(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            if argv[0] != "ffprobe":
+                raise AssertionError(f"unexpected media subprocess: {argv[0]}")
+            return subprocess.CompletedProcess(
+                argv, 0, json.dumps({"streams": [{"codec_name": paths[argv[-1]]}]}),
+            )
+
+        with (
+            patch("harness.import_one.BeetsDB", return_value=FakeBeetsDB()),
+            patch("lib.measurement.subprocess.run", side_effect=ffprobe),
+            patch("lib.measurement.collect_attempt_spectral_audit", return_value=audit),
+            patch("harness.import_one._get_folder_bitrates", return_value=[128] * len(codecs)),
+            patch("harness.import_one._probe_native_lossy_as_v0", return_value=None),
+            patch("harness.import_one.run_import", return_value=import_one.RunImportOutcome(
+                2, [], failure_reason="test child stopped before library writes",
+            )),
+            patch("harness.import_one._log"),
+        ):
+            return import_one.run_import_one(import_one.ImportOneRequest(
+                path=album, mb_release_id="mixed-stage-release",
+                quality_rank_config=cfg.to_json(),
+            ))
+
+
 class TestRunImportOneReturnsInsteadOfExiting(unittest.TestCase):
     """``run_import_one`` hands its caller a result; only ``main`` exits."""
+
+    def test_custom_mixed_precedence_reaches_the_source_measurement(self):
+        result = run_native_import_measurement(["mp3", "aac"], ("aac", "mp3"))
+        self.assertEqual(result.decision, "import_failed")
+        self.assertEqual(result.error, "test child stopped before library writes")
+        assert result.source_measurement is not None
+        self.assertEqual(result.source_measurement.format, "AAC")
+        self.assertEqual(result.source_measurement.avg_bitrate_kbps, 128)
+        self.assertIsNone(result.target_quality_contract)
 
     def test_terminal_stage_returns_the_result(self):
         from harness import import_one
@@ -953,8 +1011,6 @@ class TestRunImportOneReturnsInsteadOfExiting(unittest.TestCase):
                        return_value=[900]), \
                  patch("harness.import_one._detect_source_format",
                        return_value="MP3"), \
-                 patch("harness.import_one._detect_native_codec_family",
-                       return_value="mp3"), \
                  patch("harness.import_one._probe_native_lossy_as_v0",
                        return_value=None), \
                  patch("harness.import_one.fix_library_modes"), \
@@ -2829,8 +2885,6 @@ class TestDryRunMintsVerifiedLosslessProof(unittest.TestCase):
                    return_value=240), \
              patch("harness.import_one._detect_source_format",
                    return_value="FLAC"), \
-             patch("harness.import_one._detect_native_codec_family",
-                   return_value="flac"), \
              self.assertRaises(SystemExit) as cm:
             import_one.main()
 
@@ -2965,10 +3019,6 @@ class TestDryRunMintsVerifiedLosslessProof(unittest.TestCase):
                      patch(
                          "harness.import_one._detect_source_format",
                          return_value="FLAC",
-                     ), \
-                     patch(
-                         "harness.import_one._detect_native_codec_family",
-                         return_value="flac",
                      ), \
                      self.assertRaises(SystemExit) as cm:
                     import_one.main()

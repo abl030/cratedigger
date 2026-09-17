@@ -310,7 +310,6 @@ _LEAF_SEAM_PATTERNS = [
     # ffprobe codec probes over the source folder (same subprocess seam
     # as the _probe_* helpers above).
     re.compile(r"^harness\.import_one\._detect_source_format$"),
-    re.compile(r"^harness\.import_one\._detect_native_codec_family$"),
     re.compile(r"^harness\.import_one\.BeetsDB$"),  # class replacement, see lib.beets_db.BeetsDB
 
     # Album-level spectral analysis — same sox/ffmpeg seam as

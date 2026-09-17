@@ -18,7 +18,6 @@ from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from harness.import_one import (
-    _detect_native_codec_family,
     _detect_source_format,
     _materialize_quality_evidence_action,
 )
@@ -83,7 +82,6 @@ class TestMixedAlbumFormat(unittest.TestCase):
 
             with patch("lib.media_readiness.subprocess.run", side_effect=ffprobe):
                 source_format = _detect_source_format(str(album), cfg)
-                native_format = _detect_native_codec_family(str(album), cfg)
                 candidate_result = evidence_from_import_result(
                     mb_release_id="crowz",
                     source_path=str(album),
@@ -110,7 +108,6 @@ class TestMixedAlbumFormat(unittest.TestCase):
                 decision = full_pipeline_decision_from_evidence(candidate, current, cfg=cfg)
                 self.assertFalse(decision["imported"], decision)
                 self.assertEqual(source_format.lower(), album_info.format.lower())
-                self.assertEqual(native_format.lower(), album_info.format.lower())
                 output = ImportResult()
                 _materialize_quality_evidence_action(
                     work_path=str(album),
@@ -122,7 +119,7 @@ class TestMixedAlbumFormat(unittest.TestCase):
     def test_crowz_four_aac_then_sixteen_mp3_does_not_upgrade_itself(self) -> None:
         self._assert_same_album_is_not_an_upgrade(["aac"] * 4 + ["mp3"] * 16)
 
-    def test_custom_precedence_reaches_source_and_native_projections(self) -> None:
+    def test_custom_precedence_reaches_source_and_current_projections(self) -> None:
         self._assert_same_album_is_not_an_upgrade(
             ["mp3", "aac"], ("aac", "mp3"),
         )
@@ -138,6 +135,26 @@ class TestMixedAlbumFormat(unittest.TestCase):
         self, codecs: list[str], precedence: tuple[str, ...] | None,
     ) -> None:
         self._assert_same_album_is_not_an_upgrade(codecs, precedence)
+
+
+class TestMixedImportStagePrecedence(unittest.TestCase):
+    @given(
+        codecs=st.lists(st.sampled_from(tuple(_EXTENSIONS)), min_size=1, max_size=8),
+        precedence=st.permutations(tuple(_EXTENSIONS)).map(tuple),
+    )
+    @example(codecs=["mp3", "aac"], precedence=("aac", "mp3", "opus", "vorbis"))
+    def test_serialized_precedence_reaches_the_import_source_measurement(
+        self, codecs: list[str], precedence: tuple[str, ...],
+    ) -> None:
+        from tests.test_import_one_stages import run_native_import_measurement
+
+        expected = next(codec for codec in precedence if codec in codecs).upper()
+        result = run_native_import_measurement(codecs, precedence)
+        self.assertEqual(result.error, "test child stopped before library writes")
+        assert result.source_measurement is not None
+        self.assertEqual(result.source_measurement.format, expected)
+        self.assertEqual(result.source_measurement.avg_bitrate_kbps, 128)
+        self.assertIsNone(result.target_quality_contract)
 
 
 if __name__ == "__main__":
