@@ -1247,53 +1247,40 @@ albums are not clamped at all and their raw metrics decide. This resolves
 an inconsistency rather than adding one: the two mechanisms disagreed about
 the grade before.
 
-**One-class comparison is role-neutral** (issue #911's *Fall 2007* guard,
-and #1157). When exactly one encode has an accusation-capable decision-grade
-class and the other is a `genuine`/`marginal` bare measurement in the same codec
-family, the class follows the encode in either role — **subject to the SELF
-caveat below.** The effective class and
-raw metric pass through the ordinary rank and same-family tolerance rules,
-so 192 versus 190 is equivalent in both directions while 256 versus 172
-still imports. The narrow gates withhold for an unmeasured raw side, explicit
-labels, inadmissible codecs, cross-family comparisons (by raw `format`
-label), any raw grade other than `genuine`/`marginal`, or an unbound class.
-**The classed side's own label is judged twice, not once (issue #1204
-defect 1's amended invariant — the SELF gate):** once by the raw-`format`-
-label cross-family check above, and independently by requiring the
-class-carrying (classed) side's own codec-aware INTERPRETATION
-(`resolve_measured_codec_family`) to agree with the label `quality_rank`
-will actually consume for it — `class_format` (the candidate's TARGET
-CONTRACT format when one is supplied, not necessarily its raw
-`AudioQualityMeasurement.format`). The two checks deliberately use
-different vocabularies: the cross-family check above uses the ranks
-module's `_codec_family_of` (bare container tokens like "ogg"/"m4a" read
-as "unknown" there), while SELF uses `_family_from_label` — the SAME
-resolver `resolve_measured_codec_family` itself uses — so a genuinely
-correct container/family pairing (`format="ogg"`, persisted
-`codec_family="vorbis"`) is not spuriously refused for want of a common
-vocabulary; an unresolvable label is no opinion, never a refusal. A
-persisted `codec_family` can override the label (rule 2 — the rare
-ANOMALY this gate exists to catch), so a measurement can read
-`format='FLAC'` while its interpretation resolves to `'mp3'` — licensing
-on the label alone let a decision-grade MP3-ladder class bind against a
-genuinely lossless side purely because both raw labels happened to match.
-**The RAW side's interpreted FAMILY never licenses this bound and never
-classifies a returned value; the only thing consumed from the raw side's
-interpretation is the required ABSENCE of a class.** An earlier version of
-this gate also required the raw side's interpreted family to agree with
-the classed side's; review proved that fail-open on the R19
-converted-lineage cohort (15,368 live rows) — conversion lineage
-(rule 3: `spectral_subject='source'` + `was_converted_from` set,
-legitimately resolving to the pre-conversion SOURCE's family while
-`format` still names the on-disk derivative) is the DOMINANT legitimate
-reason a raw side's label and interpretation diverge, not an anomaly, so
-gating the raw side on it removed a protection instead of withholding a
-hazard: a fake CBR-320/class-160 candidate displaced a genuine converted
-MP3-245 copy until that extra check was dropped. `spectral_candidate_bound` and
-`spectral_existing_bound` record which side supplied the class, allowing the
-renderers to show only that side as a spectral-clamped value. This preserves
-the *Fall 2007* fixed point: fake CBR 320/class 160 versus genuine 160 is
-equivalent in both directions, so neither copy re-displaces the other.
+**One-class comparison is role-neutral** (#911, #1157, #1411). When
+exactly one encode has an accusation-capable decision-grade class, that
+class follows the encode in either role. Within one codec family, the raw
+side must carry an affirmative `genuine`/`marginal` grade. Across families,
+the raw side must resolve to its own label and have either an affirmative
+grade or `content_floor`/`audit_only` semantics. A clean MP3 or Vorbis, and
+native AAC and Opus, keep their measured codec rank;
+their spectral rolloff never supplies a bitrate class. Mixed, unresolved,
+or conflicting raw codec evidence withholds the cross-family bound.
+
+The class must bound its own selected metric. Explicit quality labels
+withhold the comparison. The classed side's interpretation must agree with
+the label that `quality_rank` consumes, including a target contract
+(#1204). This guard uses `_family_from_label`, the spectral resolver's own
+vocabulary; bare container labels such as Ogg have no conflicting opinion.
+Within one family, the raw side may retain affirmative pre-conversion
+source evidence: an installed MP3 derived from FLAC does not lose the
+protection merely because its source evidence resolves to lossless.
+
+`spectral_candidate_bound` and `spectral_existing_bound` identify which
+encode supplied the class. The effective class and raw metric pass through
+ordinary rank comparison; bitrate tolerance applies only within one codec
+family. Fake CBR 320/class 160 versus genuine MP3 160 stays equivalent in
+both directions. MP3 320/class 128 versus AAC 127 keeps the MP3 at
+`acceptable` and AAC at `good` in either role, preventing the alternating
+imports reported in #1411. Same-rank cross-family comparisons report those
+same effective values even when neither direction imports.
+
+Source and installed album formats use the same configured
+`mixed_format_precedence` over every audio codec (#1413). Track order cannot
+make an AAC/MP3 mixture rank as AAC before import and MP3 afterwards. This
+single format is a rank projection: the UI lists all installed codecs, and
+spectral interpretation still withholds a single-family inference for mixed
+albums.
 
 ### Stage 1 / Stage 2 parity (issue #813 Finding 1)
 
@@ -1413,8 +1400,8 @@ returning `"equivalent"` unconditionally is a fact about **that branch**,
 not about cross-codec worlds. That branch only fires at the *same* rank; a
 cross-codec pair at different ranks takes `rank`, and
 `metric_tiebreak` is reachable cross-codec too — both can emit `"better"`.
-The one-class spectral branches are deliberately same-family only; their
-tolerance never compares different codec families. The negative is a code
+One-class spectral bounds can also govern resolved cross-family pairs
+(#1411); their bitrate tolerance still applies only within one codec family. The negative is a code
 fact rather than a sample: only `cross_family_same_rank` hardcodes
 `"equivalent"`.
 Measured over a 46,286-world sweep of MP3-candidate worlds with the

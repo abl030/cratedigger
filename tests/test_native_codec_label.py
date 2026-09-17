@@ -111,6 +111,14 @@ class TestDetectNativeCodecFamilyRealAudio(unittest.TestCase):
             label = self._detect(d)
         self.assertEqual(label, "aac")
 
+    def test_alac_in_m4a_stays_lossless_at_source(self):
+        from harness.import_one import _detect_source_format
+
+        with tempfile.TemporaryDirectory() as d:
+            _make_audio(os.path.join(d, "01.m4a"), ["-c:a", "alac"])
+            self.assertEqual(_detect_source_format(d), "ALAC")
+            self.assertEqual(self._detect(d), "UNKNOWN")
+
     def test_empty_folder_returns_no_audio_sentinel(self):
         # Unreachable after the upstream empty_fileset rejection, but keep the
         # helper total without inventing a codec family.
@@ -138,16 +146,23 @@ class TestDetectNativeCodecFamilyRealAudio(unittest.TestCase):
             _make_audio(os.path.join(d, "01.flac"), ["-c:a", "flac"])
             self.assertEqual(self._detect(d), "UNKNOWN")
 
-    def test_first_mappable_file_wins_in_mixed_lossy_folder(self):
-        # Mixed lossy+lossy (opus + mp3) is not caught by the mixed-source
-        # gate (that one is lossless+lossy only). Pin the deterministic
-        # first-sorted-mappable-file-wins behaviour so a change is visible.
+    def test_mixed_lossy_folder_uses_album_precedence(self):
         with tempfile.TemporaryDirectory() as d:
-            _make_audio(os.path.join(d, "01.mp3"),
+            _make_audio(os.path.join(d, "02.mp3"),
                         ["-c:a", "libmp3lame", "-q:a", "0"])
-            _make_audio(os.path.join(d, "02.opus"),
+            _make_audio(os.path.join(d, "01.opus"),
                         ["-c:a", "libopus", "-b:a", "128k"])
-            # "01.mp3" sorts first → MP3.
+            self.assertEqual(self._detect(d), "MP3")
+
+    def test_crowz_aac_then_mp3_reports_mp3_for_source_and_native(self):
+        from harness.import_one import _detect_source_format
+
+        with tempfile.TemporaryDirectory() as d:
+            _make_audio(os.path.join(d, "01.m4a"),
+                        ["-c:a", "aac", "-b:a", "128k"])
+            _make_audio(os.path.join(d, "02.mp3"),
+                        ["-c:a", "libmp3lame", "-b:a", "128k"])
+            self.assertEqual(_detect_source_format(d), "MP3")
             self.assertEqual(self._detect(d), "MP3")
 
 

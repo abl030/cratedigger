@@ -699,9 +699,12 @@ export function renderDownloadHistoryItem(h) {
 
   const targetContract = h.target_contract_format || h.final_format;
   if (targetContract) {
-    const finalFormat = String(targetContract);
+    let finalFormat = String(targetContract);
     const explicitContract = h.comparison_basis?.new_metric === 'contract'
       || /(?:\bv\d+\b|\b\d+\b)/i.test(finalFormat);
+    if (!h.target_contract_format && !explicitContract && h.materialized_format) {
+      finalFormat = String(h.materialized_format);
+    }
     rows.push([
       h.target_contract_format ? 'Target contract' : 'Stored as',
       `${esc(finalFormat.toUpperCase())}${explicitContract ? ' contract' : ''}`,

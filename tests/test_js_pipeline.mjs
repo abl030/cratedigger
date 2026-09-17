@@ -299,6 +299,7 @@ t.section('current Quality applies the pair belonging to the chosen grade');
   const html = renderCurrentQualityRow(
     {
       current_spectral_grade: null,
+      current_spectral_bitrate: 96,
       current_spectral_accusation_admissible: true,
       current_spectral_accusation_withheld: null,
       last_download_spectral_bitrate: 128,
@@ -313,15 +314,18 @@ t.section('current Quality applies the pair belonging to the chosen grade');
     'the last-download pair is applied to the last-download grade');
   t.excludes(html, 'quality-tone-poor',
     'the HAVE pair never overrides the grade the chain selected');
+  t.contains(html, '~128kbps', 'the fallback grade keeps its own bitrate');
+  t.excludes(html, '~96kbps', 'the absent current grade cannot supply a bitrate');
 
   // ...and the converse: a HAVE grade must not read the candidate pair.
   const haveHtml = renderCurrentQualityRow(
     {
-      current_spectral_bitrate: 128,
+      current_spectral_bitrate: null,
       current_spectral_grade: 'likely_transcode',
       current_spectral_accusation_admissible: true,
       current_spectral_accusation_withheld: null,
       last_download_spectral_grade: 'likely_transcode',
+      last_download_spectral_bitrate: 96,
       last_download_spectral_accusation_admissible: false,
       last_download_spectral_accusation_withheld: 'audit_only_codec',
       verified_lossless: false,
@@ -332,6 +336,7 @@ t.section('current Quality applies the pair belonging to the chosen grade');
     'the HAVE grade keeps its own admissible finding');
   t.excludes(haveHtml, 'audit-only',
     'the candidate pair never neutralizes a HAVE accusation');
+  t.excludes(haveHtml, '~96kbps', 'a current grade with no bitrate does not borrow one');
 }
 
 t.section('current Quality never claims encoder facts for an unresolved codec');
@@ -848,6 +853,20 @@ async function openDetailPanel(envelope) {
   });
   await toggleDetail(4242);
   return panel.innerHTML;
+}
+
+t.section('Crowz detail Quality lists all installed codecs regardless of track order');
+{
+  const envelope = detailEnvelope({ verified_lossless: false });
+  envelope.beets_tracks = [
+    ...Array.from({ length: 4 }, () => ({ format: 'AAC', bitrate: 128000 })),
+    ...Array.from({ length: 16 }, () => ({ format: 'MP3', bitrate: 128000 })),
+  ];
+  const html = await openDetailPanel(envelope);
+  t.excludes(html, 'Failed to load details', 'mixed detail renders successfully');
+  t.contains(html, 'AAC + MP3 (mixed) 128k avg', 'Quality describes the actual mixture');
+  const reverse = renderCurrentQualityRow(envelope.request, [...envelope.beets_tracks].reverse());
+  t.contains(reverse, 'AAC + MP3 (mixed) 128k avg', 'track order cannot choose the album codec');
 }
 
 t.section('toggleDetail() composes the panel in order, each row from its own payload field');

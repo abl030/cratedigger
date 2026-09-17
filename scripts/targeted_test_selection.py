@@ -549,6 +549,11 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     # test_quality_decisions and test_dispatch_core are heavy real
     # consumers of make_audio_corrupt_validation_report and
     # make_album_quality_evidence respectively.
+    "tests/cross_codec_quality_helpers.py": (
+        "tests.test_quality_classification",
+        "tests.test_cross_codec_quality",
+        "tests.test_cross_codec_quality_generated",
+    ),
     "tests/evidence_helpers.py": (
         "tests.test_quality_classification",
         "tests.test_quality_generated",
