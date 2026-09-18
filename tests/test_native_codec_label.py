@@ -159,6 +159,28 @@ class TestDetectSourceFormatRealAudio(unittest.TestCase):
                         ["-c:a", "libmp3lame", "-b:a", "128k"])
             self.assertEqual(self._detect(d), "MP3")
 
+    def test_wma_codec_alias_beats_aac_at_album_precedence(self):
+        for codec in ("wmav1", "wmav2"):
+            with self.subTest(codec=codec), tempfile.TemporaryDirectory() as d:
+                _make_audio(os.path.join(d, "01.wma"),
+                            ["-c:a", codec, "-b:a", "128k"])
+                _make_audio(os.path.join(d, "02.m4a"),
+                            ["-c:a", "aac", "-b:a", "128k"])
+                self.assertEqual(self._detect(d), "WMA")
+
+    def test_measured_aac_wins_over_misleading_mp3_extension(self):
+        with tempfile.TemporaryDirectory() as d:
+            _make_audio(os.path.join(d, "01.mp3"),
+                        ["-c:a", "aac", "-b:a", "128k", "-f", "adts"])
+            self.assertEqual(self._detect(d), "AAC")
+
+    def test_failed_probe_keeps_ambiguous_container_unresolved(self):
+        for ext in ("m4a", "ogg"):
+            with self.subTest(ext=ext), tempfile.TemporaryDirectory() as d:
+                with open(os.path.join(d, f"01.{ext}"), "wb") as stream:
+                    stream.write(b"unreadable media")
+                self.assertEqual(self._detect(d), "UNKNOWN")
+
 
 if __name__ == "__main__":
     unittest.main()

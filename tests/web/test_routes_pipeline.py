@@ -16,6 +16,7 @@ import os
 import sys
 import threading
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import ClassVar
 from unittest.mock import ANY, patch
@@ -2605,6 +2606,17 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
             "release_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             "reason": "multiple_matches",
             "album_ids": [7, 8],
+        })
+
+    def test_pipeline_detail_without_beets_returns_service_unavailable(self):
+        self.db.request(100)["mb_release_id"] = (
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        )
+        with install_runtime(replace(runtime(), shared_beets=None)):
+            status, data = self._get("/api/pipeline/100")
+        self.assertEqual(status, 503)
+        self.assertEqual(data, {
+            "error": "Current Beets authority is unavailable; retry later.",
         })
 
     def test_pipeline_detail_conflicting_request_identity_is_unavailable(self):

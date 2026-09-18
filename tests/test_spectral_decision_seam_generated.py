@@ -560,16 +560,19 @@ def assert_clamp_requires_comparability(
     existing_spectral = interpret_measurement(existing)
     new_has_class = decision_class_kbps(new_spectral) is not None
     existing_has_class = decision_class_kbps(existing_spectral) is not None
-    same_rank_one_sided = (
-        basis.branch == "cross_family_same_rank"
+    terminal_one_sided = (
+        (basis.branch == "cross_family_same_rank" or (
+            basis.branch == "metric_missing"
+            and basis.new_rank == basis.existing_rank == "unknown"
+        ))
         and new_has_class != existing_has_class
     )
     if (
         basis.branch in ("spectral_candidate_bound", "spectral_existing_bound")
-        or same_rank_one_sided
+        or terminal_one_sided
     ):
         class_is_new = (
-            new_has_class if same_rank_one_sided
+            new_has_class if terminal_one_sided
             else basis.branch == "spectral_candidate_bound"
         )
         failures = _one_sided_bound_licence_failures(
@@ -679,6 +682,23 @@ class TestClampComparabilityCheckerSelfTest(unittest.TestCase):
                     new_rank="good", existing_rank="good",
                     spectral_clamped=True),
                 new, existing, context="planted two-class clamp")
+
+    def test_unknown_ranks_keep_the_full_one_sided_licence(self):
+        classed = msgspec.structs.replace(
+            _ONE_SIDED_CROSS_FAMILY_PAIR[0], format="Ogg", codec_family="mp3")
+        raw = AudioQualityMeasurement(
+            min_bitrate_kbps=32, avg_bitrate_kbps=32, format="Ogg",
+            spectral_grade="genuine")
+        for new, existing in ((classed, raw), (raw, classed)):
+            basis = compare_quality(new, existing, CFG)
+            self.assertEqual(basis.branch, "metric_missing")
+            self.assertEqual(basis.verdict, "equivalent")
+            self.assertTrue(basis.spectral_clamped)
+            assert_clamp_requires_comparability(basis, new, existing, context="unknown ranks")
+        with self.assertRaisesRegex(AssertionError, "not affirmatively known clean"):
+            assert_clamp_requires_comparability(
+                basis, msgspec.structs.replace(raw, spectral_grade=None), classed,
+                context="planted unknown-rank licence failure")
 
     def test_unlicensed_candidate_bound_trips(self):
         mp3 = AudioQualityMeasurement(
@@ -812,6 +832,7 @@ class TestClampComparabilityCheckerSelfTest(unittest.TestCase):
 #: cannot reach that gate at all (PR2b review S3).
 _FORMAT_LABELS: tuple[str, ...] = (
     "MP3", "AAC", "Opus", "Vorbis", "WMA", "FLAC",
+    "Ogg", "M4A", "UNKNOWN",
     "mp3 v0", "mp3 v2", "mp3 320", "opus 128", "aac 192",
 )
 
@@ -876,7 +897,7 @@ def measurement_pairs(draw) -> tuple[AudioQualityMeasurement, AudioQualityMeasur
                 draw(_SPECTRAL_SUBJECT) if grade is not None else None),
             spectral_provenance="measured" if grade is not None else None,
             cliff_hz=draw(_CLIFF_HZ) if grade is not None else None,
-            codec_family=family if grade is not None else None,
+            codec_family=family,
             was_converted_from=(
                 draw(_WAS_CONVERTED_FROM) if grade is not None else None),
         )
@@ -943,6 +964,34 @@ _ONE_SIDED_CROSS_FAMILY_SAME_RANK_PAIR = (
     msgspec.structs.replace(
         _ONE_SIDED_CROSS_FAMILY_PAIR[1],
         min_bitrate_kbps=32, avg_bitrate_kbps=32),
+)
+
+_ONE_SIDED_UNRESOLVED_RAW_PAIR = (
+    _ONE_SIDED_CROSS_FAMILY_PAIR[0],
+    msgspec.structs.replace(
+        _ONE_SIDED_CROSS_FAMILY_PAIR[1], format="Ogg", codec_family="aac"),
+)
+_ONE_SIDED_MISMATCHED_RAW_PAIR = (
+    _ONE_SIDED_CROSS_FAMILY_PAIR[0],
+    msgspec.structs.replace(
+        _ONE_SIDED_CROSS_FAMILY_PAIR[1], codec_family="opus"),
+)
+_ONE_SIDED_CLASS_ABOVE_RAW_PAIR = (
+    msgspec.structs.replace(
+        _ONE_SIDED_CROSS_FAMILY_PAIR[0], min_bitrate_kbps=32, avg_bitrate_kbps=32),
+    _ONE_SIDED_CROSS_FAMILY_SAME_RANK_PAIR[1],
+)
+_ONE_SIDED_UNGRADED_LADDER_PAIR = (
+    _ONE_SIDED_CROSS_FAMILY_PAIR[0],
+    msgspec.structs.replace(
+        _ONE_SIDED_CROSS_FAMILY_SAME_RANK_PAIR[1], format="Vorbis", codec_family="vorbis"),
+)
+_UNCALIBRATED_FLOOR_PAIR = (
+    AudioQualityMeasurement(
+        min_bitrate_kbps=192, avg_bitrate_kbps=192, format="AAC",
+        spectral_grade="suspect", cliff_hz=15000,
+        spectral_subject="source", spectral_provenance="measured"),
+    AudioQualityMeasurement(min_bitrate_kbps=32, avg_bitrate_kbps=32, format="Opus"),
 )
 
 #: Issue #1204 defect 1, World A — verbatim from the 2026-08-18/19 overnight
@@ -1071,6 +1120,16 @@ class TestClampRequiresComparability(unittest.TestCase):
     @example(pair=tuple(reversed(_ONE_SIDED_CROSS_FAMILY_PAIR)))
     @example(pair=_ONE_SIDED_CROSS_FAMILY_SAME_RANK_PAIR)
     @example(pair=tuple(reversed(_ONE_SIDED_CROSS_FAMILY_SAME_RANK_PAIR)))
+    @example(pair=_ONE_SIDED_UNRESOLVED_RAW_PAIR)
+    @example(pair=tuple(reversed(_ONE_SIDED_UNRESOLVED_RAW_PAIR)))
+    @example(pair=_ONE_SIDED_MISMATCHED_RAW_PAIR)
+    @example(pair=tuple(reversed(_ONE_SIDED_MISMATCHED_RAW_PAIR)))
+    @example(pair=_ONE_SIDED_CLASS_ABOVE_RAW_PAIR)
+    @example(pair=tuple(reversed(_ONE_SIDED_CLASS_ABOVE_RAW_PAIR)))
+    @example(pair=_ONE_SIDED_UNGRADED_LADDER_PAIR)
+    @example(pair=tuple(reversed(_ONE_SIDED_UNGRADED_LADDER_PAIR)))
+    @example(pair=_UNCALIBRATED_FLOOR_PAIR)
+    @example(pair=tuple(reversed(_UNCALIBRATED_FLOOR_PAIR)))
     @example(pair=_ONE_SIDED_LABEL_MASKED_LOSSLESS_CLIFF_PAIR)
     @example(pair=_ONE_SIDED_LABEL_MASKED_LOSSLESS_STORED_PAIR)
     @example(pair=_ONE_SIDED_LABEL_MASKED_LOSSY_PAIR)

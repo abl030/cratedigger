@@ -745,7 +745,9 @@ def run_native_import_measurement(
         album = os.path.join(temporary, "album")
         os.makedirs(album)
         paths: dict[str, str] = {}
-        extensions = {"aac": "aac", "mp3": "mp3", "opus": "opus", "vorbis": "ogg"}
+        extensions = {
+            "aac": "aac", "mp3": "mp3", "opus": "opus", "vorbis": "ogg", "wmav2": "wma",
+        }
         for index, codec in enumerate(codecs):
             path = os.path.join(album, f"{index:02d}.{extensions[codec]}")
             with open(path, "wb") as stream:

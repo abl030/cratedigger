@@ -938,9 +938,8 @@ def _detect_source_format(
             if ext not in AUDIO_EXTENSIONS:
                 continue
             codec = ffprobe_audio_codec_name(os.path.join(root, fname))
-            if codec is None:
-                codec = native_codec_format_label(None, ext) or ext.lstrip(".")
-            formats.add(codec.upper())
+            label = native_codec_format_label(codec) or codec or "UNKNOWN"
+            formats.add(label.upper())
     return _reduce_album_format(
         formats, cfg or QualityRankConfig.defaults(),
     ) or "UNKNOWN"

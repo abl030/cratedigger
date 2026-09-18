@@ -72,6 +72,12 @@ class TestCrossCodecQuality(unittest.TestCase):
                 self.assertTrue(forward["comparison_basis"]["spectral_clamped"])
                 self.assertTrue(backward["comparison_basis"]["spectral_clamped"])
                 assert_no_cross_codec_reversal(forward, backward)
+                direct_forward = compare_quality(
+                    mp3.measurement, raw.measurement, QualityRankConfig.defaults())
+                direct_backward = compare_quality(
+                    raw.measurement, mp3.measurement, QualityRankConfig.defaults())
+                self.assertEqual(direct_forward.new_value_kbps, 96)
+                self.assertEqual(direct_backward.existing_value_kbps, 96)
 
     def test_explicit_labels_and_class_label_conflicts_withhold_the_bound(self):
         mp3 = native_encode("mp3", 320, is_cbr=True, cliff_hz=15500)

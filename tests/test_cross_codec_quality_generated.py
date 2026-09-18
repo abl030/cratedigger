@@ -7,6 +7,7 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
+from lib.quality import QualityRankConfig, compare_quality
 from tests.cross_codec_quality_helpers import (
     assert_no_cross_codec_reversal,
     decide_native_pair,
@@ -53,3 +54,14 @@ class TestCrossCodecQualityGenerated(unittest.TestCase):
             assert_no_cross_codec_reversal(forward, backward)
         self.assertEqual(forward["comparison_basis"]["existing_value_kbps"], raw_bitrate)
         self.assertEqual(backward["comparison_basis"]["new_value_kbps"], raw_bitrate)
+        direct_forward = compare_quality(
+            classed.measurement, raw.measurement, QualityRankConfig.defaults())
+        direct_backward = compare_quality(
+            raw.measurement, classed.measurement, QualityRankConfig.defaults())
+        if direct_forward.branch != "transcode_rank_regression":
+            self.assertEqual(
+                (direct_forward.new_value_kbps, direct_forward.existing_value_kbps,
+                 direct_forward.new_rank, direct_forward.existing_rank),
+                (direct_backward.existing_value_kbps, direct_backward.new_value_kbps,
+                 direct_backward.existing_rank, direct_backward.new_rank),
+            )

@@ -32,7 +32,14 @@ from lib.quality import (
 from lib.quality_evidence import evidence_from_album_info, evidence_from_import_result
 from tests.test_beets_db import _create_test_db
 
-_EXTENSIONS = {"aac": "m4a", "mp3": "mp3", "opus": "opus", "vorbis": "ogg"}
+_EXTENSIONS = {
+    "aac": "m4a", "mp3": "mp3", "opus": "opus", "vorbis": "ogg", "wmav2": "wma",
+}
+_BEETS_FORMATS = {
+    "aac": "AAC", "mp3": "MP3", "opus": "Opus",
+    "vorbis": "Ogg", "wmav2": "Windows Media",
+}
+_RANK_FAMILIES = ("aac", "mp3", "opus", "vorbis", "wma")
 
 
 class TestMixedAlbumFormat(unittest.TestCase):
@@ -59,7 +66,7 @@ class TestMixedAlbumFormat(unittest.TestCase):
                     connection.execute(
                         "INSERT INTO items (album_id, bitrate, path, format) "
                         "VALUES (1, 128000, ?, ?)",
-                        (os.fsencode(path), codec.upper()),
+                        (os.fsencode(path), _BEETS_FORMATS[codec]),
                     )
                 connection.commit()
 
@@ -114,7 +121,8 @@ class TestMixedAlbumFormat(unittest.TestCase):
                     payload=QualityEvidenceActionPayload(candidate=candidate),
                     r=output,
                 )
-                self.assertEqual(output.final_format, album_info.format)
+                assert output.final_format is not None
+                self.assertEqual(output.final_format.lower(), album_info.format.lower())
 
     def test_crowz_four_aac_then_sixteen_mp3_does_not_upgrade_itself(self) -> None:
         self._assert_same_album_is_not_an_upgrade(["aac"] * 4 + ["mp3"] * 16)
@@ -124,13 +132,17 @@ class TestMixedAlbumFormat(unittest.TestCase):
             ["mp3", "aac"], ("aac", "mp3"),
         )
 
+    def test_wma_aac_keeps_the_same_rank_after_install(self) -> None:
+        self._assert_same_album_is_not_an_upgrade(["wmav2", "aac"])
+
     @given(
         codecs=st.lists(st.sampled_from(tuple(_EXTENSIONS)), min_size=1, max_size=8),
-        precedence=st.one_of(st.none(), st.permutations(tuple(_EXTENSIONS)).map(tuple)),
+        precedence=st.one_of(st.none(), st.permutations(_RANK_FAMILIES).map(tuple)),
     )
     @example(codecs=["aac", "mp3"], precedence=None)
     @example(codecs=["opus", "mp3"], precedence=None)
     @example(codecs=["mp3", "aac"], precedence=("aac", "mp3"))
+    @example(codecs=["wmav2", "aac"], precedence=None)
     def test_track_order_and_mixture_keep_source_current_and_output_consistent(
         self, codecs: list[str], precedence: tuple[str, ...] | None,
     ) -> None:
@@ -140,15 +152,17 @@ class TestMixedAlbumFormat(unittest.TestCase):
 class TestMixedImportStagePrecedence(unittest.TestCase):
     @given(
         codecs=st.lists(st.sampled_from(tuple(_EXTENSIONS)), min_size=1, max_size=8),
-        precedence=st.permutations(tuple(_EXTENSIONS)).map(tuple),
+        precedence=st.permutations(_RANK_FAMILIES).map(tuple),
     )
     @example(codecs=["mp3", "aac"], precedence=("aac", "mp3", "opus", "vorbis"))
+    @example(codecs=["wmav2", "aac"], precedence=("wma", "aac", "mp3", "opus", "vorbis"))
     def test_serialized_precedence_reaches_the_import_source_measurement(
         self, codecs: list[str], precedence: tuple[str, ...],
     ) -> None:
         from tests.test_import_one_stages import run_native_import_measurement
 
-        expected = next(codec for codec in precedence if codec in codecs).upper()
+        families = {"wma" if codec == "wmav2" else codec for codec in codecs}
+        expected = next(codec for codec in precedence if codec in families).upper()
         result = run_native_import_measurement(codecs, precedence)
         self.assertEqual(result.error, "test child stopped before library writes")
         assert result.source_measurement is not None
