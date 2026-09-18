@@ -993,6 +993,11 @@ _UNCALIBRATED_FLOOR_PAIR = (
         spectral_subject="source", spectral_provenance="measured"),
     AudioQualityMeasurement(min_bitrate_kbps=32, avg_bitrate_kbps=32, format="Opus"),
 )
+_ONE_SIDED_UNGRADED_AMBIGUOUS_PAIR = (
+    msgspec.structs.replace(
+        _ONE_SIDED_CROSS_FAMILY_PAIR[0], format="Ogg", codec_family="mp3"),
+    AudioQualityMeasurement(min_bitrate_kbps=32, avg_bitrate_kbps=32, format="Ogg"),
+)
 
 #: Issue #1204 defect 1, World A — verbatim from the 2026-08-18/19 overnight
 #: journal (both nights, first run after PR #1187). The EXISTING side's raw
@@ -1130,6 +1135,8 @@ class TestClampRequiresComparability(unittest.TestCase):
     @example(pair=tuple(reversed(_ONE_SIDED_UNGRADED_LADDER_PAIR)))
     @example(pair=_UNCALIBRATED_FLOOR_PAIR)
     @example(pair=tuple(reversed(_UNCALIBRATED_FLOOR_PAIR)))
+    @example(pair=_ONE_SIDED_UNGRADED_AMBIGUOUS_PAIR)
+    @example(pair=tuple(reversed(_ONE_SIDED_UNGRADED_AMBIGUOUS_PAIR)))
     @example(pair=_ONE_SIDED_LABEL_MASKED_LOSSLESS_CLIFF_PAIR)
     @example(pair=_ONE_SIDED_LABEL_MASKED_LOSSLESS_STORED_PAIR)
     @example(pair=_ONE_SIDED_LABEL_MASKED_LOSSY_PAIR)
