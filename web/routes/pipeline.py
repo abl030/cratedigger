@@ -359,6 +359,15 @@ def get_pipeline_detail(h: RouteHandler, params: dict[str, list[str]], req_id_st
         )
     ):
         current_evidence = None
+    if current_evidence is not None:
+        # The grade and its admissibility flags must describe the same copy.
+        # A request's denormalized grade may still belong to a replaced album.
+        request_payload["current_spectral_grade"] = (
+            current_evidence.measurement.spectral_grade
+        )
+        request_payload["current_spectral_bitrate"] = (
+            current_evidence.measurement.spectral_bitrate_kbps
+        )
     have_flags = evidence_accusation_flags(current_evidence)
     candidate_flags = last_download_accusation_flags(
         history_items, req["last_download_spectral_grade"]

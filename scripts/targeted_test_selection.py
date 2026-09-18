@@ -214,6 +214,15 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_slskd_searches",
         "tests.test_slskd_sweep_exception_contracts",
     ),
+    # The quality prefix misses codec-seam and comparison-basis modules.
+    # The full suite exposed that gap while fixing the #1411 role reversal.
+    "lib/quality/compare.py": (
+        "tests.test_quality_comparison_basis",
+        "tests.test_comparison_basis_contract",
+        "tests.test_spectral_decision_seam_generated",
+        "tests.test_cross_codec_quality",
+        "tests.test_cross_codec_quality_generated",
+    ),
     "lib/quality/download_state.py": (
         # The lib/quality/ prefix rule resolves the three decision-album
         # modules, so this file is never zero-neighbour -- and none of
@@ -554,6 +563,11 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_quality_generated",
         "tests.test_quality_decisions",
         "tests.test_dispatch_core",
+    ),
+    "tests/cross_codec_quality_helpers.py": (
+        "tests.test_quality_classification",
+        "tests.test_cross_codec_quality",
+        "tests.test_cross_codec_quality_generated",
     ),
     "tests/fakes/beets_contract.py": (
         "tests.test_beets_config_startup",
@@ -1010,6 +1024,8 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_import_one_request_generated",
         "tests.test_import_one_argparse_audit",
         "tests.test_force_import",
+        "tests.test_native_codec_label",
+        "tests.test_mixed_album_format_generated",
     ),
     # lib/quality/wire_types.py holds the harness wire Structs (#1278
     # item 8). The lib/quality/ prefix rule selects only the quality

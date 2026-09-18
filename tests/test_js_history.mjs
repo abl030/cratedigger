@@ -825,6 +825,24 @@ t.section('renderDownloadHistoryItem() calls only explicit quality labels contra
   t.contains(explicitOpus, 'OPUS 128 contract', 'numeric target is a contract');
 }
 
+t.section('Crowz Stored as uses measured output while preserving its recorded source');
+{
+  const html = renderDownloadHistoryFixture({
+    outcome: 'success', created_at: '2026-09-18T02:10:00+08:00',
+    source_format: 'AAC', source_avg_bitrate: 127,
+    final_format: 'AAC', materialized_format: 'MP3', materialized_avg_bitrate: 128,
+  });
+  t.match(html, /Stored as<\/span><span class="p-hist-value">MP3<\/span>/,
+    'native stored codec follows the post-import measurement');
+  t.contains(html, 'AAC avg 127kbps', 'original source measurement remains historical');
+
+  const contract = renderDownloadHistoryFixture({
+    outcome: 'success', created_at: '2026-09-18T02:10:00+08:00',
+    final_format: 'opus 128', materialized_format: 'Opus',
+  });
+  t.contains(contract, 'OPUS 128 contract', 'explicit encoded target remains intact');
+}
+
 t.section('renderEvidenceStrip() stops compact V0 probes after the minimum');
 {
   // Probe-kind provenance belongs to expanded details. Every compact kind

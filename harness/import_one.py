@@ -53,9 +53,15 @@ from lib import transitions
 from lib.beets import FORCE_IMPORT_DISTANCE_THRESHOLD
 from lib.beets_candidate_coverage import candidate_audio_coverage
 from lib.beets_child import harness_session_argv
-from lib.beets_db import AlbumInfo, BeetsDB, validate_beets_storage_pair
+from lib.beets_db import (
+    AlbumInfo,
+    BeetsDB,
+    _reduce_album_format,
+    validate_beets_storage_pair,
+)
 from lib.config import CratediggerConfig, read_runtime_config
 from lib.import_manifest import audio_relative_paths
+from lib.measurement import ffprobe_audio_codec_name
 from lib.media_readiness import (
     MediaReadinessError,
     media_facts_for_path,
@@ -921,60 +927,22 @@ def _is_m4a_alac(fpath: str) -> bool:
         return False
 
 
-def _detect_native_codec_family(folder: str) -> str:
-    """Rank-model format label for a native (non-converted) lossy download.
-
-    Probes the actual audio files with ffprobe and maps the real codec to the
-    rank model's family label (for example ``"opus"``, ``"vorbis"``, or
-    ``"MP3"``) via ``native_codec_format_label``. A decodable codec without a
-    rank family is labelled ``"UNKNOWN"``; an empty folder returns the
-    explicit ``"NO_AUDIO"`` sentinel. The upstream evidence gate rejects an
-    empty fileset before this helper runs in production.
-
-    This is the fix for the Opus-recorded-as-MP3 bug (request 4679): the
-    native lossy path hardcoded ``native_codec_family="MP3"`` for every codec,
-    so a genuine Opus 124 was scored on the MP3-VBR band table (acceptable
-    floor 130) and rejected as a downgrade against an MP3 128. Probing the
-    real codec lets Opus/AAC classify against their own bands. An unmapped
-    result remains visible in the audit trail without inventing an MP3 label.
-    """
-    probed_any_audio = False
+def _detect_source_format(
+    folder: str, cfg: QualityRankConfig | None = None,
+) -> str:
+    """Reduce source codecs with the same configured rule as installed albums."""
+    formats: set[str] = set()
     for root, _dirs, filenames in os.walk(folder):
-        for fname in sorted(filenames):
+        for fname in filenames:
             ext = os.path.splitext(fname)[1].lower()
             if ext not in AUDIO_EXTENSIONS:
                 continue
-            probed_any_audio = True
-            fpath = os.path.join(root, fname)
-            try:
-                codec = media_facts_for_path(fpath).codec
-            except MediaReadinessError:
-                codec = None
-            label = native_codec_format_label(codec, ext)
-            if label is not None:
-                return label
-    if probed_any_audio:
-        _log(f"[WARN] native codec probe returned no rank-model label for "
-             f"audio in {folder}; ranking as UNKNOWN (a probe failure or an "
-             f"unmapped decodable codec)")
-        return "UNKNOWN"
-    return "NO_AUDIO"
-
-
-def _detect_source_format(folder: str) -> str:
-    """Return the bare codec actually present in the downloaded source."""
-
-    for root, _dirs, filenames in os.walk(folder):
-        for fname in sorted(filenames):
-            ext = os.path.splitext(fname)[1].lower()
-            if ext not in AUDIO_EXTENSIONS:
-                continue
-            try:
-                return media_facts_for_path(os.path.join(root, fname)).codec.upper()
-            except MediaReadinessError:
-                pass
-            return ext.lstrip(".").upper()
-    return "UNKNOWN"
+            codec = ffprobe_audio_codec_name(os.path.join(root, fname))
+            label = native_codec_format_label(codec) or codec or "UNKNOWN"
+            formats.add(label.upper())
+    return _reduce_album_format(
+        formats, cfg or QualityRankConfig.defaults(),
+    ) or "UNKNOWN"
 
 
 def _is_lossless_file(fname: str, folder: str = "") -> bool:
@@ -2554,7 +2522,7 @@ def _run_import_one_stages(
     source_is_cbr = (
         len(set(source_bitrates)) == 1 if source_bitrates else False
     )
-    source_format = _detect_source_format(work_path)
+    source_format = _detect_source_format(work_path, rank_cfg)
 
     # --- Spectral analysis (pre-conversion) ---
     spectral_grade: str | None = None
@@ -2892,18 +2860,13 @@ def _run_import_one_stages(
     new_conv_target = conversion_target(
         request.target_format, supported_lossless_source,
         request.verified_lossless_target)
-    # Probe the real native codec once and reuse at both comparison_format_hint
-    # call sites. ``comparison_format_hint`` only consumes this on the native
-    # (converted==0) branch; on converted paths it's ignored, so one probe is
-    # enough for the whole function.
-    native_codec_family = _detect_native_codec_family(work_path)
     new_format_label = comparison_format_hint(
         target_format=request.target_format,
         verified_lossless_target=new_conv_target,
         converted_count=converted,
         is_transcode=quality_is_transcode,
         verified_lossless_proof=will_be_verified_lossless,
-        native_codec_family=native_codec_family,
+        native_codec_family=source_format,
     )
 
     # --- Build source/current measurements + separate target policy ---

@@ -358,6 +358,13 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
         "tests.test_slskd_searches",
         "tests.test_slskd_sweep_exception_contracts",
     ),
+    "lib/quality/compare.py": (
+        "tests.test_quality_comparison_basis",
+        "tests.test_comparison_basis_contract",
+        "tests.test_spectral_decision_seam_generated",
+        "tests.test_cross_codec_quality",
+        "tests.test_cross_codec_quality_generated",
+    ),
     # The lib/quality/ prefix rule resolves the three decision-album
     # modules regardless, masking the loss of the poll-cycle reducer's own
     # pin and the generated module that patrols it (#1405).
@@ -396,6 +403,8 @@ MASKABLE_ENTRY_PINS: dict[str, tuple[str, ...]] = {
         "tests.test_import_one_request_generated",
         "tests.test_import_one_argparse_audit",
         "tests.test_force_import",
+        "tests.test_native_codec_label",
+        "tests.test_mixed_album_format_generated",
     ),
     # Basename probes resolve tests.test_beets_child(_generated).
     "lib/beets_child.py": (

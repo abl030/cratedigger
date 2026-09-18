@@ -39,6 +39,26 @@ class TestLiveBugReproductions(unittest.TestCase):
     observed in production. Each test documents a real incident.
     """
 
+    def test_flaming_lips_aac_and_mp3_cannot_both_upgrade(self):
+        """#1411, request 8357: logs 41507 and 41542 approved both directions."""
+        from tests.cross_codec_quality_helpers import (
+            assert_no_cross_codec_reversal,
+            decide_native_pair,
+            native_encode,
+        )
+        mp3 = native_encode("mp3", 320, is_cbr=True, cliff_hz=15500)
+        aac = native_encode("aac", 127, minimum=126,
+                            cliff_hz=15000, spectral_bitrate=96)
+        incoming_mp3 = decide_native_pair(mp3, aac)
+        incoming_aac = decide_native_pair(aac, mp3)
+        self.assertFalse(incoming_mp3["imported"])
+        self.assertTrue(incoming_aac["imported"])
+        self.assertTrue(incoming_mp3["keep_searching"])
+        self.assertTrue(incoming_aac["keep_searching"])
+        self.assertEqual(incoming_mp3["comparison_basis"]["new_value_kbps"], 128)
+        self.assertEqual(incoming_aac["comparison_basis"]["new_value_kbps"], 127)
+        assert_no_cross_codec_reversal(incoming_mp3, incoming_aac)
+
     def test_tyler_lamberts_grave_cbr320_transcode_accepted(self):
         """BUG: CBR 320 transcode from 160k source was accepted.
 
@@ -461,7 +481,9 @@ class TestLiveBugReproductions(unittest.TestCase):
         encoder rate the four-arm calibration measured from 96 to 320 kbps,
         so its LAME-bucketed 192 is not a class in any codec's terms. The
         pre-#829 seam nonetheless weighed it against an MP3 candidate's
-        real 128 and rejected a genuine upgrade over a 112 kbps AAC.
+        real 128 and rejected at Stage 1 using an inadmissible AAC class.
+        Stage 1 still defers; Stage 2 now applies the MP3 bound (#1411),
+        so AAC112 (good) beats MP3/class128 (acceptable).
         """
         from lib.quality import SpectralCodecContext, spectral_import_decision
         self.assertEqual(
@@ -484,10 +506,12 @@ class TestLiveBugReproductions(unittest.TestCase):
             existing_spectral_context=SpectralCodecContext(cliff_hz=15500),
         )
         self.assertEqual(r["stage1_spectral"], "import_no_exist")
-        self.assertEqual(r["stage2_import"], "import")
-        self.assertTrue(r["imported"])
+        self.assertEqual(r["stage2_import"], "downgrade")
+        self.assertFalse(r["imported"])
         self.assertEqual(r["comparison_basis"]["existing_format"], "aac")
         self.assertTrue(r["keep_searching"])
+        self.assertEqual(r["comparison_basis"]["new_value_kbps"], 128)
+        self.assertEqual(r["comparison_basis"]["existing_value_kbps"], 112)
 
     def test_taboo_vi_fake_flac_192_requires_an_explicit_v0_probe(self):
         """A fake FLAC cannot turn its target projection into source evidence.
@@ -1992,9 +2016,11 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         r = full_pipeline_decision_from_evidence(candidate, current)
 
         self.assertEqual(r["stage1_spectral"], "import_no_exist")
-        self.assertEqual(r["stage2_import"], "import")
-        self.assertTrue(r["imported"])
+        self.assertEqual(r["stage2_import"], "downgrade")
+        self.assertFalse(r["imported"])
         self.assertTrue(r["keep_searching"])
+        self.assertEqual(r["comparison_basis"]["new_value_kbps"], 128)
+        self.assertEqual(r["comparison_basis"]["existing_value_kbps"], 112)
 
     def test_fall_2007_fake_320_via_evidence(self):
         """Parity twin of the Fall 2007 anti-loop pin (issue #911)."""

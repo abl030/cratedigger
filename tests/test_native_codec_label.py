@@ -12,7 +12,7 @@ TRANSPARENT (opus transparent threshold 112) and wins outright.
 
 These tests pin: (1) the pure codec→family mapping, and (2) the real-audio
 harness derivation — "here's an Opus file, what's it labelled?". Both must
-say opus, not MP3.
+identify Opus rather than MP3.
 """
 
 import os
@@ -75,16 +75,16 @@ class TestNativeCodecFormatLabel(unittest.TestCase):
         self.assertIsNone(self._label("", ""))
 
 
-class TestDetectNativeCodecFamilyRealAudio(unittest.TestCase):
+class TestDetectSourceFormatRealAudio(unittest.TestCase):
     """Real-audio: 'here's an Opus file — what's it labelled?'
 
     Drives the harness derivation against genuine ffmpeg-encoded files. The
-    Opus case is the live bug: it MUST come back ``opus``, not ``MP3``.
+    Opus case is the live bug: it MUST come back ``OPUS``, not ``MP3``.
     """
 
     def _detect(self, folder):
-        from harness.import_one import _detect_native_codec_family
-        return _detect_native_codec_family(folder)
+        from harness.import_one import _detect_source_format
+        return _detect_source_format(folder)
 
     def test_opus_folder_labelled_opus_not_mp3(self):
         with tempfile.TemporaryDirectory() as d:
@@ -92,7 +92,7 @@ class TestDetectNativeCodecFamilyRealAudio(unittest.TestCase):
                         ["-c:a", "libopus", "-b:a", "128k"])
             label = self._detect(d)
         self.assertEqual(
-            label, "opus",
+            label, "OPUS",
             f"Native Opus download mislabelled as {label!r} — this is the "
             "Darcie Haven bug (Opus scored on MP3 bands).",
         )
@@ -109,19 +109,24 @@ class TestDetectNativeCodecFamilyRealAudio(unittest.TestCase):
             _make_audio(os.path.join(d, "01.m4a"),
                         ["-c:a", "aac", "-b:a", "192k"])
             label = self._detect(d)
-        self.assertEqual(label, "aac")
+        self.assertEqual(label, "AAC")
 
-    def test_empty_folder_returns_no_audio_sentinel(self):
+    def test_alac_in_m4a_stays_lossless_at_source(self):
+        with tempfile.TemporaryDirectory() as d:
+            _make_audio(os.path.join(d, "01.m4a"), ["-c:a", "alac"])
+            self.assertEqual(self._detect(d), "ALAC")
+
+    def test_empty_folder_reports_unknown_format(self):
         # Unreachable after the upstream empty_fileset rejection, but keep the
         # helper total without inventing a codec family.
         with tempfile.TemporaryDirectory() as d:
-            self.assertEqual(self._detect(d), "NO_AUDIO")
+            self.assertEqual(self._detect(d), "UNKNOWN")
 
     def test_vorbis_folder_labelled_vorbis(self):
         with tempfile.TemporaryDirectory() as d:
             _make_audio(os.path.join(d, "01.ogg"),
                         ["-c:a", "libvorbis", "-q:a", "5"])
-            self.assertEqual(self._detect(d), "vorbis")
+            self.assertEqual(self._detect(d), "VORBIS")
 
     def test_ogg_container_uses_actual_codec(self):
         cases = [
@@ -131,24 +136,50 @@ class TestDetectNativeCodecFamilyRealAudio(unittest.TestCase):
         for expected, codec_args in cases:
             with self.subTest(expected=expected), tempfile.TemporaryDirectory() as d:
                 _make_audio(os.path.join(d, "01.ogg"), codec_args)
-                self.assertEqual(self._detect(d), expected)
+                self.assertEqual(self._detect(d), expected.upper())
 
-    def test_unmapped_decodable_audio_labelled_unknown(self):
+    def test_flac_folder_preserves_lossless_source_format(self):
         with tempfile.TemporaryDirectory() as d:
             _make_audio(os.path.join(d, "01.flac"), ["-c:a", "flac"])
-            self.assertEqual(self._detect(d), "UNKNOWN")
+            self.assertEqual(self._detect(d), "FLAC")
 
-    def test_first_mappable_file_wins_in_mixed_lossy_folder(self):
-        # Mixed lossy+lossy (opus + mp3) is not caught by the mixed-source
-        # gate (that one is lossless+lossy only). Pin the deterministic
-        # first-sorted-mappable-file-wins behaviour so a change is visible.
+    def test_mixed_lossy_folder_uses_album_precedence(self):
+        with tempfile.TemporaryDirectory() as d:
+            _make_audio(os.path.join(d, "02.mp3"),
+                        ["-c:a", "libmp3lame", "-q:a", "0"])
+            _make_audio(os.path.join(d, "01.opus"),
+                        ["-c:a", "libopus", "-b:a", "128k"])
+            self.assertEqual(self._detect(d), "MP3")
+
+    def test_crowz_aac_then_mp3_reports_mp3(self):
+        with tempfile.TemporaryDirectory() as d:
+            _make_audio(os.path.join(d, "01.m4a"),
+                        ["-c:a", "aac", "-b:a", "128k"])
+            _make_audio(os.path.join(d, "02.mp3"),
+                        ["-c:a", "libmp3lame", "-b:a", "128k"])
+            self.assertEqual(self._detect(d), "MP3")
+
+    def test_wma_codec_alias_beats_aac_at_album_precedence(self):
+        for codec in ("wmav1", "wmav2"):
+            with self.subTest(codec=codec), tempfile.TemporaryDirectory() as d:
+                _make_audio(os.path.join(d, "01.wma"),
+                            ["-c:a", codec, "-b:a", "128k"])
+                _make_audio(os.path.join(d, "02.m4a"),
+                            ["-c:a", "aac", "-b:a", "128k"])
+                self.assertEqual(self._detect(d), "WMA")
+
+    def test_measured_aac_wins_over_misleading_mp3_extension(self):
         with tempfile.TemporaryDirectory() as d:
             _make_audio(os.path.join(d, "01.mp3"),
-                        ["-c:a", "libmp3lame", "-q:a", "0"])
-            _make_audio(os.path.join(d, "02.opus"),
-                        ["-c:a", "libopus", "-b:a", "128k"])
-            # "01.mp3" sorts first → MP3.
-            self.assertEqual(self._detect(d), "MP3")
+                        ["-c:a", "aac", "-b:a", "128k", "-f", "adts"])
+            self.assertEqual(self._detect(d), "AAC")
+
+    def test_failed_probe_keeps_ambiguous_container_unresolved(self):
+        for ext in ("m4a", "ogg"):
+            with self.subTest(ext=ext), tempfile.TemporaryDirectory() as d:
+                with open(os.path.join(d, f"01.{ext}"), "wb") as stream:
+                    stream.write(b"unreadable media")
+                self.assertEqual(self._detect(d), "UNKNOWN")
 
 
 if __name__ == "__main__":

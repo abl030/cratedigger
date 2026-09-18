@@ -16,6 +16,7 @@ import os
 import sys
 import threading
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import ClassVar
 from unittest.mock import ANY, patch
@@ -2250,6 +2251,26 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertIsNone(
             data["request"]["last_download_spectral_accusation_admissible"])
 
+    def test_current_evidence_spectral_tuple_overrides_stale_request_fields(self):
+        from lib.quality import AudioQualityMeasurement
+
+        for grade, bitrate in ((None, None), ("suspect", 128)):
+            with self.subTest(grade=grade, bitrate=bitrate):
+                self._seed_installed_evidence(AudioQualityMeasurement(
+                    format="MP3", min_bitrate_kbps=128, avg_bitrate_kbps=128,
+                    spectral_grade=grade, spectral_bitrate_kbps=bitrate,
+                ))
+                self.db.update_status(
+                    100, "imported", current_spectral_grade="likely_transcode",
+                    current_spectral_bitrate=96,
+                )
+
+                status, data = self._get("/api/pipeline/100")
+
+                self.assertEqual(status, 200)
+                self.assertEqual(data["request"]["current_spectral_grade"], grade)
+                self.assertEqual(data["request"]["current_spectral_bitrate"], bitrate)
+
     def test_pipeline_detail_last_download_flags_track_the_denorm_grade(self):
         """The candidate half of the chain: the flags must belong to the
         attempt whose grade ``last_download_spectral_grade`` copied."""
@@ -2517,9 +2538,31 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         beets.set_album_ids_for_release(
             "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", [9001],
         )
-        beets.set_item_paths(
+        # Missing disc/track sort as zero; item ID orders equal positions.
+        ordered_items = (
+            (85, "Unnumbered", None, None),
+            (80, "Disc missing", None, 2),
+            (70, "Track missing first", 1, None),
+            (90, "Track missing second", 1, None),
+            (20, "Disc one first", 1, 1),
+            (60, "Disc one second", 1, 2),
+            (10, "Disc two first", 2, 1),
+        )
+        expected_tracks = [
+            {
+                "title": title, "track": track, "disc": disc,
+                "length": 181.5, "format": "FLAC", "bitrate": 900000,
+                "samplerate": 44100, "bitdepth": 16,
+            }
+            for _, title, disc, track in ordered_items
+        ]
+        beets.set_tracks_for_release(
             "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-            [(91, "/current/library/Moved/01 Track.flac")],
+            [
+                dict(expected_tracks[index], id=ordered_items[index][0],
+                     path=f"/current/library/Moved/{index}.flac")
+                for index in (6, 5, 3, 1, 2, 4, 0)
+            ],
         )
         with install_runtime(make_web_runtime(runtime(), beets=beets)):
             status, data = self._get("/api/pipeline/100")
@@ -2533,6 +2576,11 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
             "album_id": 9001,
             "path": "/current/library/Moved",
         })
+        self.assertEqual(data["tracks"], [{
+            "disc_number": 1, "track_number": 1, "title": "Track",
+            "length_seconds": 180, "track_artist": None,
+        }])
+        self.assertEqual(data["beets_tracks"], expected_tracks)
 
     def test_pipeline_detail_exposes_missing_and_ambiguous_authority(self):
         """Missing and ambiguous are operator-visible, never empty paths."""
@@ -2558,6 +2606,17 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
             "release_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
             "reason": "multiple_matches",
             "album_ids": [7, 8],
+        })
+
+    def test_pipeline_detail_without_beets_returns_service_unavailable(self):
+        self.db.request(100)["mb_release_id"] = (
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        )
+        with install_runtime(replace(runtime(), shared_beets=None)):
+            status, data = self._get("/api/pipeline/100")
+        self.assertEqual(status, 503)
+        self.assertEqual(data, {
+            "error": "Current Beets authority is unavailable; retry later.",
         })
 
     def test_pipeline_detail_conflicting_request_identity_is_unavailable(self):

@@ -649,19 +649,20 @@ export function renderCurrentQualityRow(req, beetsTracks) {
         / positiveBitrates.length / 1000,
     )
     : 0;
-  const fmt = beetsTracks[0]?.format || '';
-  const nominal = avgBrKbps ? qualityLabel(fmt, avgBrKbps) : fmt;
-  // Current spectral data describes the files currently in beets.
-  // Fall back to the most recent download's measurement for older rows.
-  const spectralBr =
-    req.current_spectral_bitrate || req.last_download_spectral_bitrate || null;
-  const spectralGrade =
-    req.current_spectral_grade || req.last_download_spectral_grade || null;
-  // The chain mixes two measurements, so the audit-only pair has to be the
-  // one belonging to the grade it actually selected (issue #829 Phase 5
-  // PR4). Reading the HAVE flag beside a last-download grade would be a
-  // codec verdict on a different album.
+  const formats = [...new Set(
+    beetsTracks.map(track => String(track.format || '').trim().toUpperCase()).filter(Boolean),
+  )].sort();
+  const fmt = formats[0] || '';
+  const nominal = formats.length > 1
+    ? esc(formats.join(' + ')) + ' (mixed)' + (avgBrKbps ? ' ' + avgBrKbps + 'k avg' : '')
+    : (avgBrKbps ? qualityLabel(fmt, avgBrKbps) : esc(fmt));
+  // Keep the bitrate and admissibility flags with the selected grade.
+  // Fall back to the most recent download when current evidence has no grade.
   const fromCurrent = Boolean(req.current_spectral_grade);
+  const spectralGrade = fromCurrent
+    ? req.current_spectral_grade : req.last_download_spectral_grade;
+  const spectralBr = fromCurrent
+    ? req.current_spectral_bitrate : req.last_download_spectral_bitrate;
   const admissible = fromCurrent
     ? req.current_spectral_accusation_admissible
     : req.last_download_spectral_accusation_admissible;
