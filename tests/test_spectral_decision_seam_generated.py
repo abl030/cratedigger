@@ -485,16 +485,14 @@ def _one_sided_bound_licence_failures(
         failures.append("classed encode cannot support a transcode accusation")
     if _is_explicit_label(classed.format) or _is_explicit_label(raw.format):
         failures.append("a side carries an explicit contract label")
-    if _codec_family_of(classed.format) != _codec_family_of(raw.format):
-        failures.append("sides are not in one codec family")
     classed_label_family = _family_from_label(classed.format)
     if (
         classed_label_family is not None
         and classed_spectral.codec_family != classed_label_family
     ):
         # Restates the ``lib/quality/compare.py::_one_sided_spectral_bitrates``
-        # SELF gate (issue #1204 defect 1, amended invariant). The raw-label
-        # check just above is not enough on its own: a persisted
+        # SELF gate (issue #1204 defect 1, amended invariant). Comparing
+        # the two raw labels is not enough on its own: a persisted
         # ``codec_family`` can override the label on the CLASSED side
         # (``resolve_measured_codec_family`` rule 2), so the classed side's
         # raw label can agree with the raw side's label while the classed
@@ -505,29 +503,32 @@ def _one_sided_bound_licence_failures(
         #
         # Compared via ``_family_from_label`` — the SAME resolver
         # ``resolve_measured_codec_family`` uses for labels, not the
-        # ranks-module ``_codec_family_of`` the cross-family clause above
+        # ranks-module ``_codec_family_of`` the cross-family clause below
         # uses (coarser: bare container tokens like "ogg"/"m4a" resolve to
         # "unknown" there). An unresolvable label is no-opinion, never a
         # failure — only two RESOLVED families that disagree trip this
         # clause, mirroring production exactly.
         #
-        # Deliberately checks ONLY the classed side, never the raw side's
-        # interpreted FAMILY — that family never licenses the bound and
-        # never classifies a returned value; the only thing consumed from
-        # the raw side's interpretation is the required ABSENCE of a class
-        # (the clause below). An earlier version of this checker also
-        # compared the classed side's interpreted family against the RAW
-        # side's interpreted family — review proved that cross-side check
-        # fail-open on the R19 converted-lineage cohort
-        # (``resolve_measured_codec_family`` rule 3: a converted raw row
-        # legitimately resolves to its SOURCE's family while its label
-        # describes the on-disk derivative) — gating on it patrolled a
-        # requirement production does not enforce.
+        # Same-family clean raw encodes may retain their pre-conversion
+        # source family under R19. SELF checks only the classed encode;
+        # the cross-family licence below separately checks the raw family.
         failures.append(
             "classed side's interpreted family disagrees with its own raw "
             "label")
-    if raw.spectral_grade not in SPECTRAL_AFFIRMATIVE_GRADES:
-        failures.append("raw encode is not affirmatively known clean")
+    if _codec_family_of(classed.format) == _codec_family_of(raw.format):
+        if raw.spectral_grade not in SPECTRAL_AFFIRMATIVE_GRADES:
+            failures.append("raw encode is not affirmatively known clean")
+    else:
+        raw_label_family = _family_from_label(raw.format)
+        if raw_label_family is None:
+            failures.append("cross-family raw label does not resolve")
+        elif raw_spectral.codec_family != raw_label_family:
+            failures.append("cross-family raw interpretation disagrees with its label")
+        if (
+            raw.spectral_grade not in SPECTRAL_AFFIRMATIVE_GRADES
+            and raw_spectral.semantics not in ("content_floor", "audit_only")
+        ):
+            failures.append("cross-family raw encode is neither clean nor audit-only")
     if decision_class_kbps(raw_spectral) is not None:
         failures.append("raw encode carries a class of its own")
     class_value = decision_class_kbps(classed_spectral)
@@ -557,8 +558,20 @@ def assert_clamp_requires_comparability(
         return
     new_spectral = interpret_measurement(new)
     existing_spectral = interpret_measurement(existing)
-    if basis.branch in ("spectral_candidate_bound", "spectral_existing_bound"):
-        class_is_new = basis.branch == "spectral_candidate_bound"
+    new_has_class = decision_class_kbps(new_spectral) is not None
+    existing_has_class = decision_class_kbps(existing_spectral) is not None
+    same_rank_one_sided = (
+        basis.branch == "cross_family_same_rank"
+        and new_has_class != existing_has_class
+    )
+    if (
+        basis.branch in ("spectral_candidate_bound", "spectral_existing_bound")
+        or same_rank_one_sided
+    ):
+        class_is_new = (
+            new_has_class if same_rank_one_sided
+            else basis.branch == "spectral_candidate_bound"
+        )
         failures = _one_sided_bound_licence_failures(
             new if class_is_new else existing,
             existing if class_is_new else new,
@@ -579,28 +592,93 @@ def assert_clamp_requires_comparability(
 
 class TestClampComparabilityCheckerSelfTest(unittest.TestCase):
     def test_clamp_on_a_non_comparable_pair_trips(self):
-        # An AAC can never be decision-grade, so any clamp naming it is
-        # unlicensed.
+        # Neither AAC supplies a decision-grade class to license a clamp.
         aac = AudioQualityMeasurement(
             min_bitrate_kbps=256, avg_bitrate_kbps=256, format="AAC",
             is_cbr=True, spectral_grade="likely_transcode",
             spectral_bitrate_kbps=128, spectral_subject="source",
             spectral_provenance="measured", codec_family="aac",
         )
-        mp3 = AudioQualityMeasurement(
-            min_bitrate_kbps=192, avg_bitrate_kbps=192, format="MP3",
+        other_aac = AudioQualityMeasurement(
+            min_bitrate_kbps=192, avg_bitrate_kbps=192, format="AAC",
             is_cbr=True, spectral_grade="likely_transcode",
             spectral_bitrate_kbps=192, spectral_subject="installed",
-            spectral_provenance="measured", codec_family="mp3",
+            spectral_provenance="measured", codec_family="aac",
         )
         planted = QualityComparisonBasis(
             verdict="better", branch="rank", new_rank="good",
             existing_rank="acceptable", spectral_clamped=True,
         )
-        with self.assertRaises(AssertionError) as caught:
+        for new, existing, branch in (
+            (aac, other_aac, "rank"),
+            (aac, other_aac, "cross_family_same_rank"),
+            (*_ONE_SIDED_CROSS_FAMILY_PAIR, "rank"),
+        ):
+            with self.subTest(branch=branch), self.assertRaisesRegex(
+                AssertionError, "non-comparable",
+            ):
+                assert_clamp_requires_comparability(
+                    msgspec.structs.replace(planted, branch=branch),
+                    new, existing, context="planted")
+
+    def test_cross_family_raw_licence_failures_trip_in_both_roles(self):
+        classed = AudioQualityMeasurement(
+            min_bitrate_kbps=96, avg_bitrate_kbps=96, format="MP3",
+            spectral_grade="suspect", cliff_hz=11000,
+            spectral_subject="source", spectral_provenance="measured",
+        )
+        cases: tuple[tuple[str, CodecFamily, str | None, str], ...] = (
+            ("Ogg", "aac", None, "cross-family raw label does not resolve"),
+            ("AAC", "opus", None,
+             "cross-family raw interpretation disagrees with its label"),
+            ("Vorbis", "vorbis", None,
+             "cross-family raw encode is neither clean nor audit-only"),
+            ("Vorbis", "vorbis", "suspect",
+             "cross-family raw encode is neither clean nor audit-only"),
+        )
+        for fmt, codec_family, grade, failure in cases:
+            raw = AudioQualityMeasurement(
+                min_bitrate_kbps=32, avg_bitrate_kbps=32, format=fmt,
+                codec_family=codec_family, spectral_grade=grade,
+            )
+            # Each planted violation fails exactly its named clause.
+            self.assertEqual(
+                _one_sided_bound_licence_failures(
+                    classed, raw, interpret_measurement(classed),
+                    interpret_measurement(raw)),
+                [failure],
+            )
+            for class_is_new in (True, False):
+                for branch in (
+                    "spectral_candidate_bound" if class_is_new
+                    else "spectral_existing_bound",
+                    "cross_family_same_rank",
+                ):
+                    with self.subTest(
+                        fmt=fmt, codec_family=codec_family, grade=grade,
+                        class_is_new=class_is_new, branch=branch,
+                    ), self.assertRaisesRegex(AssertionError, failure):
+                        assert_clamp_requires_comparability(
+                            QualityComparisonBasis(
+                                verdict="equivalent", branch=branch,
+                                new_rank="poor", existing_rank="poor",
+                                spectral_clamped=True),
+                            classed if class_is_new else raw,
+                            raw if class_is_new else classed,
+                            context="planted cross-family bound",
+                        )
+
+    def test_same_rank_with_two_noncomparable_classes_trips(self):
+        new, existing = _CROSS_CODEC_LEGACY_PAIR
+        self.assertIsNotNone(decision_class_kbps(interpret_measurement(new)))
+        self.assertIsNotNone(decision_class_kbps(interpret_measurement(existing)))
+        with self.assertRaisesRegex(AssertionError, "non-comparable"):
             assert_clamp_requires_comparability(
-                planted, aac, mp3, context="planted")
-        self.assertIn("non-comparable", str(caught.exception))
+                QualityComparisonBasis(
+                    verdict="equivalent", branch="cross_family_same_rank",
+                    new_rank="good", existing_rank="good",
+                    spectral_clamped=True),
+                new, existing, context="planted two-class clamp")
 
     def test_unlicensed_candidate_bound_trips(self):
         mp3 = AudioQualityMeasurement(
@@ -847,6 +925,26 @@ _CROSS_CODEC_LEGACY_PAIR = (
     ),
 )
 
+#: The two shrunk #1411 worlds: an MP3 owns its 96 kbps bound while AAC
+#: contributes only its raw rank. Equal ranks retain the bound but name
+#: the terminal cross-family branch instead of a role-specific branch.
+_ONE_SIDED_CROSS_FAMILY_PAIR = (
+    AudioQualityMeasurement(
+        min_bitrate_kbps=96, avg_bitrate_kbps=96, format="MP3",
+        spectral_grade="suspect", cliff_hz=11000,
+        spectral_subject="source", spectral_provenance="measured",
+    ),
+    AudioQualityMeasurement(
+        min_bitrate_kbps=80, avg_bitrate_kbps=80, format="AAC",
+    ),
+)
+_ONE_SIDED_CROSS_FAMILY_SAME_RANK_PAIR = (
+    _ONE_SIDED_CROSS_FAMILY_PAIR[0],
+    msgspec.structs.replace(
+        _ONE_SIDED_CROSS_FAMILY_PAIR[1],
+        min_bitrate_kbps=32, avg_bitrate_kbps=32),
+)
+
 #: Issue #1204 defect 1, World A — verbatim from the 2026-08-18/19 overnight
 #: journal (both nights, first run after PR #1187). The EXISTING side's raw
 #: label reads "FLAC", but its persisted ``codec_family="mp3"`` resolves
@@ -969,6 +1067,10 @@ class TestClampRequiresComparability(unittest.TestCase):
 
     @example(pair=_MIXED_BASIS_PAIR)
     @example(pair=_CROSS_CODEC_LEGACY_PAIR)
+    @example(pair=_ONE_SIDED_CROSS_FAMILY_PAIR)
+    @example(pair=tuple(reversed(_ONE_SIDED_CROSS_FAMILY_PAIR)))
+    @example(pair=_ONE_SIDED_CROSS_FAMILY_SAME_RANK_PAIR)
+    @example(pair=tuple(reversed(_ONE_SIDED_CROSS_FAMILY_SAME_RANK_PAIR)))
     @example(pair=_ONE_SIDED_LABEL_MASKED_LOSSLESS_CLIFF_PAIR)
     @example(pair=_ONE_SIDED_LABEL_MASKED_LOSSLESS_STORED_PAIR)
     @example(pair=_ONE_SIDED_LABEL_MASKED_LOSSY_PAIR)
@@ -979,6 +1081,43 @@ class TestClampRequiresComparability(unittest.TestCase):
         basis = compare_quality(new, existing, CFG)
         assert_clamp_requires_comparability(
             basis, new, existing, context=f"new={new!r} existing={existing!r}")
+
+    def test_cross_family_one_sided_licences_pass_in_both_roles(self):
+        classed, aac = _ONE_SIDED_CROSS_FAMILY_PAIR
+        cases = (
+            (aac, "content_floor", False),
+            (_ONE_SIDED_CROSS_FAMILY_SAME_RANK_PAIR[1], "content_floor", True),
+            (AudioQualityMeasurement(
+                min_bitrate_kbps=32, avg_bitrate_kbps=32, format="Opus",
+            ), "audit_only", True),
+            (AudioQualityMeasurement(
+                min_bitrate_kbps=32, avg_bitrate_kbps=32, format="Vorbis",
+                spectral_grade="genuine",
+            ), "ladder", True),
+        )
+        self.assertEqual(decision_class_kbps(interpret_measurement(classed)), 96)
+        for raw, semantics, same_rank in cases:
+            raw_spectral = interpret_measurement(raw)
+            self.assertEqual(raw_spectral.semantics, semantics)
+            self.assertIsNone(decision_class_kbps(raw_spectral))
+            self.assertEqual(
+                _one_sided_bound_licence_failures(
+                    classed, raw, interpret_measurement(classed), raw_spectral),
+                [],
+            )
+            for class_is_new in (True, False):
+                new, existing = (classed, raw) if class_is_new else (raw, classed)
+                with self.subTest(format=raw.format, class_is_new=class_is_new):
+                    basis = compare_quality(new, existing, CFG)
+                    self.assertTrue(basis.spectral_clamped)
+                    expected_branch = (
+                        "cross_family_same_rank" if same_rank else
+                        "spectral_candidate_bound" if class_is_new else
+                        "spectral_existing_bound"
+                    )
+                    self.assertEqual(basis.branch, expected_branch)
+                    assert_clamp_requires_comparability(
+                        basis, new, existing, context="licensed cross-family pin")
 
     def test_the_pinned_worlds_really_are_non_comparable(self):
         """Rule C for a property pin: prove the world reaches the branch.
