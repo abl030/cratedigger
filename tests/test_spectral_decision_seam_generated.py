@@ -354,14 +354,18 @@ class TestWithheldSpectralMovesNothing(unittest.TestCase):
 def assert_no_uncalibrated_accusation(
     decision: dict[str, object],
     *,
+    candidate: AudioQualityMeasurement,
     context: str,
 ) -> None:
-    """No spectral rejection and no transcode bound for an uncalibrated codec.
+    """No spectral rejection or candidate bound for an uncalibrated codec.
 
     "Fail closed" in this project means WITHHOLD the spectral opinion. It
     never means reject the album — so an AAC, an Opus or an unmapped codec
     must never lose on spectral grounds, however its LAME-bucketed number
-    reads.
+    reads. ``spectral_clamped`` is pair-level audit data: it may truthfully
+    describe a calibrated class on the installed side, including when the
+    terminal branch is ``cross_family_same_rank``. Invariant 3 separately
+    proves that every such clamp belongs to a licensed side.
     """
     if decision.get("stage1_spectral") == "reject":
         raise AssertionError(
@@ -370,37 +374,58 @@ def assert_no_uncalibrated_accusation(
         raise AssertionError(
             "the gate mirror claims production would measure an "
             f"uncalibrated codec ({context})")
+    if decision_class_kbps(interpret_measurement(candidate)) is not None:
+        raise AssertionError(
+            f"uncalibrated codec produced a transcode class ({context})")
     basis = decision.get("comparison_basis")
     if isinstance(basis, dict) and basis.get("branch") == "spectral_candidate_bound":
         raise AssertionError(
             f"uncalibrated codec produced a transcode bound ({context})")
-    if isinstance(basis, dict) and basis.get("spectral_clamped"):
-        raise AssertionError(
-            f"uncalibrated codec was spectrally clamped ({context})")
 
 
 class TestUncalibratedAccusationCheckerSelfTest(unittest.TestCase):
+    _CANDIDATE = AudioQualityMeasurement(
+        min_bitrate_kbps=32, avg_bitrate_kbps=32, format="AAC",
+        codec_family="aac",
+    )
+
     def test_stage1_reject_trips(self):
         with self.assertRaises(AssertionError):
             assert_no_uncalibrated_accusation(
-                {"stage1_spectral": "reject"}, context="planted")
+                {"stage1_spectral": "reject"}, candidate=self._CANDIDATE,
+                context="planted")
 
     def test_would_run_gate_trips(self):
         with self.assertRaises(AssertionError):
             assert_no_uncalibrated_accusation(
-                {"stage0_spectral_gate": "would_run"}, context="planted")
+                {"stage0_spectral_gate": "would_run"},
+                candidate=self._CANDIDATE, context="planted")
+
+    def test_candidate_transcode_class_trips(self):
+        with self.assertRaises(AssertionError):
+            assert_no_uncalibrated_accusation(
+                {},
+                candidate=AudioQualityMeasurement(
+                    min_bitrate_kbps=320, avg_bitrate_kbps=320, format="MP3",
+                    spectral_grade="suspect", cliff_hz=16500,
+                    spectral_subject="source", spectral_provenance="measured",
+                ),
+                context="planted",
+            )
 
     def test_candidate_bound_branch_trips(self):
         with self.assertRaises(AssertionError):
             assert_no_uncalibrated_accusation(
                 {"comparison_basis": {"branch": "spectral_candidate_bound"}},
+                candidate=self._CANDIDATE,
                 context="planted")
 
-    def test_spectral_clamp_trips(self):
-        with self.assertRaises(AssertionError):
+    def test_existing_side_clamp_passes(self):
+        for branch in ("spectral_existing_bound", "cross_family_same_rank"):
             assert_no_uncalibrated_accusation(
-                {"comparison_basis": {"branch": "rank",
+                {"comparison_basis": {"branch": branch,
                                       "spectral_clamped": True}},
+                candidate=self._CANDIDATE,
                 context="planted")
 
     def test_clean_decision_passes(self):
@@ -408,12 +433,50 @@ class TestUncalibratedAccusationCheckerSelfTest(unittest.TestCase):
             {"stage1_spectral": None,
              "stage0_spectral_gate": "skipped_uncalibrated_codec",
              "comparison_basis": {"branch": "rank", "spectral_clamped": False}},
+            candidate=self._CANDIDATE,
             context="planted")
 
 
 class TestUncalibratedCodecNeverAccuses(unittest.TestCase):
     """Invariant 2 — withholding is never a rejection."""
 
+    # The three distinct shrinks retained by the first overnight run after
+    # PR #1414. In each, the candidate is uncalibrated and the installed
+    # MP3/Vorbis side owns the one-sided class. Five additional shards
+    # independently shrank to the first AAC/MP3 world.
+    @example(
+        world=WithholdingWorld(
+            native_format="AAC", native_codec="aac", min_bitrate=32,
+            is_cbr=False, spectral_grade=None, current_min=96,
+            current_format="MP3", current_is_cbr=False,
+            current_grade="suspect", current_stored=96,
+            current_cliff=None,
+        ),
+        stored=None,
+        cliff=None,
+    )
+    @example(
+        world=WithholdingWorld(
+            native_format="Opus", native_codec="opus", min_bitrate=375,
+            is_cbr=True, spectral_grade="error", current_min=1199,
+            current_format="Vorbis", current_is_cbr=False,
+            current_grade="likely_transcode", current_stored=128,
+            current_cliff=None,
+        ),
+        stored=198,
+        cliff=None,
+    )
+    @example(
+        world=WithholdingWorld(
+            native_format="AAC", native_codec="aac", min_bitrate=525,
+            is_cbr=False, spectral_grade="likely_transcode", current_min=525,
+            current_format="Vorbis", current_is_cbr=False,
+            current_grade="likely_transcode", current_stored=112,
+            current_cliff=None,
+        ),
+        stored=112,
+        cliff=None,
+    )
     @given(world=withholding_candidate_worlds(), stored=_STORED,
            cliff=_CLIFF_HZ)
     def test_uncalibrated_candidate_never_loses_on_spectral(
@@ -444,6 +507,7 @@ class TestUncalibratedCodecNeverAccuses(unittest.TestCase):
         )
         assert_no_uncalibrated_accusation(
             full_pipeline_decision_from_evidence(candidate, current),
+            candidate=candidate.measurement,
             context=f"{world!r} stored={stored!r} cliff={cliff!r}",
         )
 
