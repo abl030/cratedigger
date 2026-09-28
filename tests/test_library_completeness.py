@@ -201,6 +201,50 @@ class TestLiveIncidentPins(unittest.TestCase):
                     self.assertEqual([component.kind for component in manifest.components], kinds)
                     self.assertEqual([component.title for component in manifest.components], positions)
 
+    def test_rows_beets_never_sees_do_not_split_a_subtrack_group(self) -> None:
+        # Independent re-review of #1416: the harness drops video rows and
+        # flattened headings BEFORE Beets coalesces, so 3.1 and 3.2 either
+        # side of one merge into a single installed track. The census must
+        # group them the same way, or that complete install reads as
+        # missing "B". A video-positioned nested parent is dropped whole.
+        release = "1"
+        video_parent = {"position": "Video", "duration": "", "title": "Clips", "sub_tracks": [
+            {"position": "V1", "title": "Clip One"}, {"position": "V2", "title": "Clip Two"},
+        ]}
+        cases = [
+            ("video between", [
+                {"position": "3.1", "title": "A", "duration": "2:00"},
+                {"position": "Video", "title": "Clip", "duration": "4:47"},
+                {"position": "3.2", "title": "B", "duration": "2:00"},
+            ]),
+            ("heading between", [
+                {"position": "1", "title": "One", "duration": "3:00"},
+                {"position": "3.1", "title": "A", "duration": "2:00"},
+                {"position": "", "title": "Side Two", "duration": ""},
+                {"position": "3.2", "title": "B", "duration": "2:00"},
+            ]),
+            ("video index parent", [
+                {"position": "1", "title": "One", "duration": "3:00"},
+                video_parent,
+            ]),
+        ]
+        for label, tracks in cases:
+            with self.subTest(label):
+                installed = [
+                    str(t["position"]) for t in tracks
+                    if t["position"] not in ("", "Video", "3.2")
+                ]
+                paths = {f"/album/{p}.flac": (f"{release}-{p}", "") for p in installed}
+                album = LibraryAlbum(1, "a", "b", ReleaseIdentity("discogs", release), "/album",
+                                     tuple(CatalogItem(path, tag[0], "") for path, tag in paths.items()))
+                manifest = discogs_manifest(release, {"id": release, "tracks": tracks})
+                result = classify_album(
+                    album, manifest, enumerate_files=lambda _directory: tuple(paths),
+                    tag_reader=lambda path: paths[path],
+                    detect_composite_gap=lambda _path: True,
+                )
+                self.assertEqual({finding.kind for finding in result.findings}, set())
+
     def test_discogs_untimed_audio_and_index_parents_vote_against_all_video(self) -> None:
         # Only the flattened heading shape (empty position AND empty
         # duration, no sub_tracks) abstains. An untimed real track and a
@@ -888,22 +932,22 @@ class TestSourceRawContracts(unittest.TestCase):
             ["1-16.1", "1-A9", "1-16.2"],
         )
 
-    def test_empty_header_between_subtrack_siblings_breaks_pending_group(self) -> None:
-        """Issue #1237 review C7: the OTHER ``flush_pending()`` call (the
-        empty-position/empty-duration header skip) must also break
-        adjacency, not just the ``sub_tracks`` one.
+    def test_empty_header_between_subtrack_siblings_keeps_the_group(self) -> None:
+        """A flattened header between sub-positions does not break their
+        group. Issue #1237 review C7 pinned the opposite when raw Beets
+        saw the header; since 2b5c9a12 the harness drops it before Beets
+        coalesces (``tests/test_discogs_subtracks.py::
+        test_heading_inside_flat_subtrack_run_keeps_program_marking``), so
+        16.1 and 16.2 install as ONE track and the census must agree
+        (issue #1416 re-review).
         """
         manifest = discogs_manifest("1", {"id": "1", "tracks": [
             {"position": "16.1", "title": "Part A"},
             {"position": "", "duration": "", "title": "Side Two"},
             {"position": "16.2", "title": "Part B"},
         ]})
-        self.assertEqual(
-            [component.key for component in manifest.components],
-            ["1-16.1", "1-16.2"],
-        )
-        self.assertEqual(manifest.components[0].sub_component_titles, ())
-        self.assertEqual(manifest.components[1].sub_component_titles, ())
+        self.assertEqual([component.key for component in manifest.components], ["1-16.1"])
+        self.assertEqual(manifest.components[0].sub_component_keys, ("1-16.1", "1-16.2"))
 
     def test_discogs_flattened_empty_position_empty_duration_header_is_skipped(self) -> None:
         manifest = discogs_manifest("1", {"id": "1", "tracks": [

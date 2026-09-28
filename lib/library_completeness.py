@@ -377,6 +377,18 @@ def discogs_manifest(release_id: str, raw: Mapping[str, object]) -> SourceManife
         nonlocal pending, pending_key
         for raw_entry in entries:
             entry = _raw_mapping(raw_entry, "Discogs track is not an object")
+            if drop_video and is_video_row(entry):
+                # Beets never sees this row (the harness drops it, nested
+                # children and all, before coalescing), so it is recorded
+                # as non-audio and does not break a pending group: the
+                # sub-positions either side still merge into one track.
+                title = entry.get("title")
+                components.append(SourceComponent(
+                    key=f"{release_id}-{entry.get('position')}",
+                    title=title if isinstance(title, str) else "",
+                    kind="non_audio",
+                ))
+                continue
             subtracks = entry.get("sub_tracks")
             if subtracks is not None:
                 if groupable:
@@ -397,22 +409,14 @@ def discogs_manifest(release_id: str, raw: Mapping[str, object]) -> SourceManife
             # The deployed mirror flattens Discogs' index/side headings into
             # ordinary rows. A literal empty position AND empty duration is
             # that non-playable header shape; an absent/nonempty duration is
-            # ambiguous and must not be silently discarded.
+            # ambiguous and must not be silently discarded. The harness drops
+            # it before Beets coalesces, so it does not break a pending group.
             if position == "" and duration == "":
-                if groupable:
-                    flush_pending()
                 continue
             if not isinstance(position, str) or not position:
                 raise SourceManifestError("Discogs track lacks literal position")
             title = entry.get("title")
             title_str = title if isinstance(title, str) else ""
-            if drop_video and is_video_row(entry):
-                if groupable:
-                    flush_pending()
-                components.append(SourceComponent(
-                    key=f"{release_id}-{position}", title=title_str, kind="non_audio",
-                ))
-                continue
             if not groupable:
                 components.append(SourceComponent(
                     key=f"{release_id}-{position}", title=title_str, kind="audio",

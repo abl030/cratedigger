@@ -437,32 +437,59 @@ _VIDEO_MARKERS = ("Video", "Video 1", "Video2", "VIDEO 3", "video", "Videotape")
 def _enhanced_cd_rows(draw: st.DrawFn) -> list[tuple[str, str]]:
     """Numbered audio rows interleaved with enhanced-CD video markers (and
     the ``Videotape`` near-miss, a real track), including audio-free
-    whole-video releases. ``(position, title)`` pairs, unique positions."""
+    whole-video releases, plus an optional flat sub-position family whose
+    two parts may straddle a video marker or a flattened heading (``""``
+    position) -- rows the harness drops before Beets coalesces (#1416
+    re-review). ``(position, title)`` pairs, unique non-empty positions."""
     audio = [(str(n), f"Song {n}") for n in range(1, draw(st.integers(0, 4)) + 1)]
     videos = [(marker, f"Clip {marker}") for marker in draw(st.lists(
         st.sampled_from(_VIDEO_MARKERS), max_size=3, unique=True))]
-    rows = draw(st.permutations(audio + videos))
-    if not rows:
-        rows = [("1", "Song 1")]
-    return list(rows)
+    rows: list[tuple[str, str]] = list(draw(st.permutations(audio + videos)))
+    if draw(st.booleans()):
+        interloper = draw(st.sampled_from(("none", "video", "heading")))
+        family = [("7.1", "Part A")]
+        if interloper == "video" and not any(p == "Video" for p, _ in rows):
+            family.append(("Video", "Clip Between"))
+        elif interloper == "heading":
+            family.append(("", "Side Two"))
+        family.append(("7.2", "Part B"))
+        at = draw(st.integers(0, len(rows)))
+        rows[at:at] = family
+    if not any(position for position, _ in rows):
+        rows.append(("1", "Song 1"))
+    return rows
+
+
+def _raw_row(position: str, title: str) -> dict[str, str]:
+    # A flattened heading carries an empty duration too; tracks are timed.
+    return {"position": position, "title": title, "duration": "3:00" if position else ""}
+
+
+def _mirror_row(position: str, title: str) -> AudioTrack:
+    # The same row as the mirror serves it to Beets (headings retyped "track").
+    return {"type_": "track", "position": position, "title": title,
+            "duration": "3:00" if position else ""}
 
 
 @given(_enhanced_cd_rows())
 @example([(str(n), f"Song {n}") for n in range(1, 10)] + [("Video", "Song 3")])
 @example([("Video 1", "Clip One"), ("Video 2", "Clip Two")])
 @example([("1", "Song 1"), ("Video2", "Clip"), ("VIDEO 3", "Clip 3"), ("Videotape", "Real")])
+@example([("7.1", "Part A"), ("Video", "Clip Between"), ("7.2", "Part B")])
+@example([("1", "Song 1"), ("7.1", "Part A"), ("", "Side Two"), ("7.2", "Part B")])
 def _property_harness_candidate_import_is_census_complete(rows: list[tuple[str, str]]) -> None:
     """Issue #1416, at the importer/census composition: an album installed
     as exactly the tracks the REAL Beets candidate builds (the harness
-    compat patches applied, each catalogued at its literal position) is
-    never reported missing source audio by the census over the same raw
-    Discogs release. The candidate, not a second copy of the video rule,
-    is the oracle."""
+    compat patches applied, each catalogued at its literal position, and
+    each merged file physically holding its whole program -- the rip is
+    complete by construction) is never reported missing source audio by
+    the census over the same raw Discogs release. The candidate, not a
+    second copy of the video rule, is the oracle."""
     release = "1"
     configure_discogs_subtracks(preserve_flat=False)
     plugin = _plugin()
     candidate = plugin.get_tracks(
-        [{"type_": "track", "position": p, "title": t, "duration": "3:00"} for p, t in rows],
+        [_mirror_row(p, t) for p, t in rows],
         _artist_state(plugin),
     )
     installed = [str(track.track_alt) for track in candidate]
@@ -471,12 +498,12 @@ def _property_harness_candidate_import_is_census_complete(rows: list[tuple[str, 
                          tuple(CatalogItem(path, tag[0], "") for path, tag in paths.items()))
     manifest = discogs_manifest(release, {
         "id": release,
-        "tracks": [{"position": p, "title": t, "duration": "3:00"} for p, t in rows],
+        "tracks": [_raw_row(p, t) for p, t in rows],
     })
     result = classify_album(
         album, manifest, enumerate_files=lambda _: tuple(paths),
         tag_reader=lambda path: paths[path],
-        detect_composite_gap=_identity_only_gap_detector,
+        detect_composite_gap=lambda _path: True,
     )
     assert not completeness_invariant_violations(
         {f.kind for f in result.findings}, expect_drift=False, expect_missing=False,
