@@ -24,6 +24,7 @@ from lib.composite_audio_gap import (
     CompositeAudioReadError,
     detect_composite_silence_gap,
 )
+from lib.discogs_positions import VIDEO_POSITION_RE, split_sub_position
 from lib.mb_canonical import CanonicalReleaseRedirected, TaggedCanonicalReleaseFn
 from lib.quality import AUDIO_EXTENSIONS_DOTTED
 from lib.release_identity import ReleaseIdentity
@@ -320,6 +321,14 @@ def discogs_manifest(release_id: str, raw: Mapping[str, object]) -> SourceManife
     non-subindexed children flatten literally, unchanged. Either way, a
     nested header breaks any pending TOP-LEVEL group, like a real Beets
     non-"track" entry breaks ``groupby``'s adjacency.
+
+    Enhanced-CD video-marker positions (``Video``, ``Video 1``; issue
+    #1416) are ``non_audio`` components, like MusicBrainz video
+    recordings: the Beets candidate drops them
+    (``harness/discogs_patches.py::filter_discogs_heading_rows``), so an
+    installed album never has them. As there and in
+    ``lib/discogs_positions.py``, a release whose every non-heading
+    top-level row is video-marked keeps them as audio.
     """
     raw_release_id = raw.get("id")
     if (isinstance(raw_release_id, bool)
@@ -327,6 +336,21 @@ def discogs_manifest(release_id: str, raw: Mapping[str, object]) -> SourceManife
             or str(raw_release_id) != release_id):
         raise SourceManifestError("Discogs raw release identity is unavailable or mismatched")
     tracks = _raw_list(raw.get("tracks"), "Discogs raw release has no tracks list")
+
+    def is_video_row(entry: Mapping[str, object]) -> bool:
+        position = entry.get("position")
+        if entry.get("sub_tracks") is not None or not isinstance(position, str):
+            return False
+        return bool(VIDEO_POSITION_RE.match(split_sub_position(position)[0]))
+
+    voting = [
+        entry for entry in (
+            _raw_mapping(raw_entry, "Discogs track is not an object") for raw_entry in tracks
+        )
+        if not (entry.get("position") == "" and entry.get("duration") == ""
+                and entry.get("sub_tracks") is None)
+    ]
+    drop_video = not all(is_video_row(entry) for entry in voting)
     components: list[SourceComponent] = []
     pending: list[tuple[str, str]] = []
     pending_key: str | None = None
@@ -381,6 +405,13 @@ def discogs_manifest(release_id: str, raw: Mapping[str, object]) -> SourceManife
                 raise SourceManifestError("Discogs track lacks literal position")
             title = entry.get("title")
             title_str = title if isinstance(title, str) else ""
+            if drop_video and is_video_row(entry):
+                if groupable:
+                    flush_pending()
+                components.append(SourceComponent(
+                    key=f"{release_id}-{position}", title=title_str, kind="non_audio",
+                ))
+                continue
             if not groupable:
                 components.append(SourceComponent(
                     key=f"{release_id}-{position}", title=title_str, kind="audio",

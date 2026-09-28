@@ -1271,7 +1271,10 @@ before matching (`harness/discogs_patches.py::filter_discogs_heading_rows`,
 held in step by the agreement property in
 `tests/test_discogs_subtracks_generated.py`); until issue #1416 it kept
 video rows, so request 5936's complete 9-file rip met a 10-track
-candidate and was rejected as `extra_tracks`.
+candidate and was rejected as `extra_tracks`. The completeness census
+(`lib/library_completeness.py::discogs_manifest`) classifies the same
+video rows `non_audio`, so an album installed without them is not
+reported incomplete.
 Bare vinyl side letters (`A`/`B`) parse as track 1 of their
 side, consistent with the existing `A1`/`B1` side-as-disc convention;
 `1A`-style and trailing-dot (`1.`) positions parse instead of falling

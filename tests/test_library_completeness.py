@@ -43,6 +43,12 @@ def _discogs_raw(
     }
 
 
+def _raw_tracks(raw: dict[str, object]) -> list[object]:
+    tracks = raw["tracks"]
+    assert isinstance(tracks, list)
+    return list(tracks)
+
+
 def _mb_raw(
     rows: list[tuple[str, str, str, bool]], release_id: str = "release",
 ) -> dict[str, object]:
@@ -164,6 +170,47 @@ class TestLiveIncidentPins(unittest.TestCase):
             ("video-rt", "video-rec", "Video", True),
         ]), tags=paths)
         self.assertEqual(kinds, set())
+
+    def test_omitted_discogs_enhanced_cd_video_is_ignored_not_missing_audio(self) -> None:
+        # Issue #1416: request 5936 / Discogs 4345679 imports as nine audio
+        # files; the tenth tracklist row (position "Video") is the enhanced
+        # CD's music video, which the Beets candidate drops and no rip has.
+        release = "4345679"
+        audio = [str(n) for n in range(1, 10)]
+        paths = {f"/album/{position}.flac": (f"{release}-{position}", "") for position in audio}
+        album = LibraryAlbum(5936, "Stickmen", "Man Made Stars", ReleaseIdentity("discogs", release), "/album",
+                             tuple(CatalogItem(path, tag[0], "") for path, tag in paths.items()))
+        self.assertEqual(self._classify(album, _discogs_raw([*audio, "Video"]), tags=paths), set())
+
+    def test_discogs_video_marker_components_are_non_audio_unless_all_video(self) -> None:
+        # Markers are judged on the sub-position base, and a flattened
+        # heading row does not vote: heading + videos is still all-video.
+        heading = {"position": "", "duration": "", "title": "Bonus DVD"}
+        cases = [
+            (["1", "Video", "Video 2", "video3", "Video 4.1", "Videotape"],
+             ["audio", "non_audio", "non_audio", "non_audio", "non_audio", "audio"]),
+            (["Video 1", "Video 2"], ["audio", "audio"]),
+        ]
+        for positions, kinds in cases:
+            for with_heading in (False, True):
+                with self.subTest(positions=positions, with_heading=with_heading):
+                    raw = _discogs_raw(positions)
+                    if with_heading:
+                        raw["tracks"] = [heading, *_raw_tracks(raw)]
+                    manifest = discogs_manifest("1", raw)
+                    self.assertEqual([component.kind for component in manifest.components], kinds)
+
+    def test_all_video_discogs_release_still_requires_its_videos(self) -> None:
+        # A whole-release video pressing's videos ARE its content (the
+        # Placebo ignore_video_tracks precedent): one missing is missing.
+        release = "77"
+        paths = {"/album/v1.flac": (f"{release}-Video 1", "")}
+        album = LibraryAlbum(1, "a", "b", ReleaseIdentity("discogs", release), "/album",
+                             (CatalogItem("/album/v1.flac", f"{release}-Video 1", ""),))
+        self.assertEqual(
+            self._classify(album, _discogs_raw(["Video 1", "Video 2"]), tags=paths),
+            {"missing_source_audio"},
+        )
 
     def test_whole_program_mb_identity_churn_uses_safe_global_coordinate_control(self) -> None:
         release = "d87dbe79-82f7-4055-b9d4-379cef3f9bdd"

@@ -125,6 +125,20 @@ _ENHANCED_CD_PIN = World(rows=(
     ("Video", "Paradise", "4:47"),
 ))
 
+# The marker grammar at suite tier (independent review, #1416): numbered
+# and spaced markers, case, and a near-miss that is a real track. The
+# derandomized suite draws too few video worlds to reach these alone.
+_VIDEO_GRAMMAR_PIN = World(rows=(
+    ("1", "Song", "3:00"),
+    ("Video 1", "Clip", "4:00"),
+    ("VIDEO 3", "Clip Two", "4:00"),
+))
+
+_VIDEO_NEAR_MISS_PIN = World(rows=(
+    ("1", "Song", "3:00"),
+    ("Videotape", "A Real Song", "4:00"),
+))
+
 _ALL_VIDEO_PIN = World(rows=(
     ("", "Bonus DVD", ""),
     ("Video 1", "Clip One", "3:30"),
@@ -164,6 +178,8 @@ class TestCandidateManifestAgreement(unittest.TestCase):
     @example(_POSITIONLESS_PIN)
     @example(_ENHANCED_CD_PIN)
     @example(_ALL_VIDEO_PIN)
+    @example(_VIDEO_GRAMMAR_PIN)
+    @example(_VIDEO_NEAR_MISS_PIN)
     def test_candidate_counts_agree_with_the_manifest(
         self, world: World,
     ) -> None:

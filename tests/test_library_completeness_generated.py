@@ -13,6 +13,7 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
+from harness.discogs_patches import configure_discogs_subtracks
 from lib.library_completeness import (
     AudioTagReadError,
     CatalogItem,
@@ -22,6 +23,7 @@ from lib.library_completeness import (
     musicbrainz_manifest,
 )
 from lib.release_identity import ReleaseIdentity
+from tests.test_discogs_subtracks_generated import _artist_state, _plugin
 
 
 def completeness_invariant_violations(
@@ -426,6 +428,68 @@ def _property_discogs_manifest_agrees_with_beets_oracle(entries: list[dict[str, 
     assert [component.title for component in manifest.components] == [
         title for _, title in oracle
     ]
+
+
+_VIDEO_MARKERS = ("Video", "Video 1", "Video2", "VIDEO 3", "video", "Videotape")
+
+
+@st.composite
+def _enhanced_cd_rows(draw: st.DrawFn) -> list[tuple[str, str]]:
+    """Numbered audio rows interleaved with enhanced-CD video markers (and
+    the ``Videotape`` near-miss, a real track), including audio-free
+    whole-video releases. ``(position, title)`` pairs, unique positions."""
+    audio = [(str(n), f"Song {n}") for n in range(1, draw(st.integers(0, 4)) + 1)]
+    videos = [(marker, f"Clip {marker}") for marker in draw(st.lists(
+        st.sampled_from(_VIDEO_MARKERS), max_size=3, unique=True))]
+    rows = draw(st.permutations(audio + videos))
+    if not rows:
+        rows = [("1", "Song 1")]
+    return list(rows)
+
+
+@given(_enhanced_cd_rows())
+@example([(str(n), f"Song {n}") for n in range(1, 10)] + [("Video", "Song 3")])
+@example([("Video 1", "Clip One"), ("Video 2", "Clip Two")])
+@example([("1", "Song 1"), ("Video2", "Clip"), ("VIDEO 3", "Clip 3"), ("Videotape", "Real")])
+def _property_harness_candidate_import_is_census_complete(rows: list[tuple[str, str]]) -> None:
+    """Issue #1416, at the importer/census composition: an album installed
+    as exactly the tracks the REAL Beets candidate builds (the harness
+    compat patches applied, each catalogued at its literal position) is
+    never reported missing source audio by the census over the same raw
+    Discogs release. The candidate, not a second copy of the video rule,
+    is the oracle."""
+    release = "1"
+    configure_discogs_subtracks(preserve_flat=False)
+    plugin = _plugin()
+    candidate = plugin.get_tracks(
+        [{"type_": "track", "position": p, "title": t, "duration": "3:00"} for p, t in rows],
+        _artist_state(plugin),
+    )
+    installed = [str(track.track_alt) for track in candidate]
+    paths = {f"/album/{position}.flac": (f"{release}-{position}", "") for position in installed}
+    album = LibraryAlbum(1, "a", "b", ReleaseIdentity("discogs", release), "/album",
+                         tuple(CatalogItem(path, tag[0], "") for path, tag in paths.items()))
+    manifest = discogs_manifest(release, {
+        "id": release,
+        "tracks": [{"position": p, "title": t, "duration": "3:00"} for p, t in rows],
+    })
+    result = classify_album(
+        album, manifest, enumerate_files=lambda _: tuple(paths),
+        tag_reader=lambda path: paths[path],
+        detect_composite_gap=_identity_only_gap_detector,
+    )
+    assert not completeness_invariant_violations(
+        {f.kind for f in result.findings}, expect_drift=False, expect_missing=False,
+        expect_video_ignored=True, expect_unknown=False,
+    ), (rows, installed, [f.kind for f in result.findings])
+
+
+class TestHarnessCandidateCensusGenerated(unittest.TestCase):
+    def tearDown(self) -> None:
+        configure_discogs_subtracks(preserve_flat=False)
+
+    def test_harness_candidate_import_is_census_complete(self) -> None:
+        _property_harness_candidate_import_is_census_complete()
 
 
 class TestDiscogsGroupingOracleGenerated(unittest.TestCase):

@@ -295,7 +295,10 @@ def filter_discogs_heading_rows(
     ``lib/discogs_positions.py``: dropped UNLESS every row surviving the
     heading rule is video-marked, because a whole-release video
     pressing's videos are what its rips contain (the Placebo
-    ``ignore_video_tracks`` precedent).
+    ``ignore_video_tracks`` precedent). The completeness census
+    (``lib/library_completeness.py::discogs_manifest``) marks the same
+    rows ``non_audio``, so an album installed from this candidate is not
+    reported missing them.
     """
     any_positioned = any(
         str(track.get("position") or "") for track in tracklist
