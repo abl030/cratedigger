@@ -11,7 +11,10 @@ beets' mapping, or every download bounces at one side or the other.
 
 Worlds are drawn structurally (mirror-retyped headings, positioned
 tracks with and without durations, positionless-but-timed ambiguous
-rows, ADJACENT flat subtrack runs, positionless-only releases). Known
+rows, ADJACENT flat subtrack runs, positionless-only releases,
+enhanced-CD video-marker rows and their near-misses, and whole-video
+releases — the video axis is issue #1416, which escaped because this
+property never drew one). Known
 limits (deliberate): subtrack runs are always adjacent — Beets'
 ``groupby`` coalescing is consecutive-only while the manifest groups by
 base string, so a non-adjacent run is a real upstream-data pathology
@@ -47,20 +50,35 @@ _titles = st.text(
 
 _durations = st.sampled_from(("", "2:30", "4:07", "0:39"))
 
+# Enhanced-CD video markers (issue #1416) plus near-misses that are real
+# positions and must be kept on both sides.
+_video_positions = st.sampled_from(
+    ("Video", "Video 1", "Video2", "VIDEO 3", "video", "Videotape"),
+)
+
 
 @st.composite
 def worlds(draw: st.DrawFn) -> World:
-    positionless_only = draw(st.booleans())
+    mode = draw(st.sampled_from(("positionless", "mixed", "all_video")))
     rows: list[tuple[str, str, str]] = []
-    if positionless_only:
+    if mode == "positionless":
         for _ in range(draw(st.integers(min_value=1, max_value=4))):
             rows.append(("", draw(_titles), draw(_durations)))
+        return World(rows=tuple(rows))
+    if mode == "all_video":
+        # A whole-release video pressing, optionally interleaved with
+        # headings (which do not vote on the all-video question).
+        for index in range(draw(st.integers(min_value=1, max_value=4))):
+            if draw(st.booleans()):
+                rows.append(("", draw(_titles), ""))
+            rows.append((f"Video {index + 1}", draw(_titles), draw(_durations)))
         return World(rows=tuple(rows))
     count = draw(st.integers(min_value=1, max_value=5))
     for index in range(count):
         number = index + 1
         kind = draw(st.sampled_from(
-            ("track", "untimed_track", "heading", "ambiguous", "subrun"),
+            ("track", "untimed_track", "heading", "ambiguous", "subrun",
+             "video"),
         ))
         if kind == "track":
             rows.append((f"A{number}", draw(_titles), draw(_durations)))
@@ -70,6 +88,9 @@ def worlds(draw: st.DrawFn) -> World:
             rows.append(("", draw(_titles), ""))
         elif kind == "ambiguous":
             rows.append(("", draw(_titles), "2:30"))
+        elif kind == "video":
+            rows.append((draw(_video_positions), draw(_titles),
+                         draw(_durations)))
         else:
             for sub in range(1, draw(st.integers(min_value=2, max_value=3)) + 1):
                 rows.append((f"A{number}.{sub}", draw(_titles), "4:00"))
@@ -94,6 +115,20 @@ _POSITIONLESS_PIN = World(rows=(
     ("", "one", "3:00"),
     ("", "two", ""),
     ("", "three", "2:30"),
+))
+
+# Issue #1416 (request 5936 / Discogs 4345679), shrunk: audio plus the
+# enhanced-CD video row sharing an audio track's title.
+_ENHANCED_CD_PIN = World(rows=(
+    ("1", "Field", "3:04"),
+    ("2", "Paradise", "4:44"),
+    ("Video", "Paradise", "4:47"),
+))
+
+_ALL_VIDEO_PIN = World(rows=(
+    ("", "Bonus DVD", ""),
+    ("Video 1", "Clip One", "3:30"),
+    ("Video 2", "Clip Two", "4:10"),
 ))
 
 
@@ -127,6 +162,8 @@ class TestCandidateManifestAgreement(unittest.TestCase):
     @given(worlds())
     @example(_TINY_DOTS_PIN)
     @example(_POSITIONLESS_PIN)
+    @example(_ENHANCED_CD_PIN)
+    @example(_ALL_VIDEO_PIN)
     def test_candidate_counts_agree_with_the_manifest(
         self, world: World,
     ) -> None:

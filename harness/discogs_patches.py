@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import re
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
@@ -225,6 +226,21 @@ def _discogs_subtrack_methods(
     )
 
 
+# The manifest's grammar, spelled again because the harness child cannot
+# import lib/: ``lib/discogs_positions.py``'s SUB_POSITION_RE and
+# VIDEO_POSITION_RE. The agreement property in
+# ``tests/test_discogs_subtracks_generated.py`` holds the two in step.
+_SUB_POSITION_RE = re.compile(r"^(.+)\.(\d+)$")
+_VIDEO_POSITION_RE = re.compile(r"^video\s*\d*$", re.IGNORECASE)
+
+
+def _is_discogs_video_row(track: dict[str, object]) -> bool:
+    position = str(track.get("position", "") or "")
+    match = _SUB_POSITION_RE.match(position)
+    base = match.group(1) if match else position
+    return bool(_VIDEO_POSITION_RE.match(base))
+
+
 def _is_discogs_heading_row(
     track: dict[str, object], *, any_positioned: bool,
 ) -> bool:
@@ -241,7 +257,9 @@ def _is_discogs_heading_row(
 def filter_discogs_heading_rows(
     tracklist: list[dict[str, object]],
 ) -> list[dict[str, object]]:
-    """Drop Discogs section-label rows before candidate construction.
+    """Drop Discogs non-audio rows before candidate construction.
+
+    Two kinds: section-label headings, and enhanced-CD video markers.
 
     Two measured producer shapes (issue #1261's validation-side half,
     request 6937 / Discogs 8439330): the real api.discogs.com marks
@@ -268,6 +286,16 @@ def filter_discogs_heading_rows(
     manifest normalizer is the agreement partner here.) A tracklist that
     is ENTIRELY heading-shaped is returned unchanged: never manufacture
     an empty candidate from non-empty input.
+
+    Video-marker positions (``Video``, ``Video 1``, judged on the
+    sub-position base) are an enhanced CD's bonus video, a data file no
+    rip has audio for — issue #1416 (request 5936 / Discogs 4345679): the
+    manifest dropped the row in #1261 while the candidate kept it, so a
+    complete 9-file rip met a 10-track candidate. Same rule as
+    ``lib/discogs_positions.py``: dropped UNLESS every row surviving the
+    heading rule is video-marked, because a whole-release video
+    pressing's videos are what its rips contain (the Placebo
+    ``ignore_video_tracks`` precedent).
     """
     any_positioned = any(
         str(track.get("position") or "") for track in tracklist
@@ -278,7 +306,9 @@ def filter_discogs_heading_rows(
     ]
     if not kept:
         return tracklist
-    return kept
+    if all(_is_discogs_video_row(track) for track in kept):
+        return kept
+    return [track for track in kept if not _is_discogs_video_row(track)]
 
 
 def configure_discogs_subtracks(*, preserve_flat: bool) -> None:
