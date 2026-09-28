@@ -14,7 +14,9 @@ from harness.discogs_patches import (
     configure_discogs_subtracks,
     discogs_indexed_component_count,
     discogs_indexed_duration_complete,
+    filter_discogs_heading_rows,
 )
+from lib.discogs_positions import normalize_release_tracks
 
 
 def _audio(position: str, title: str, duration: str) -> AudioTrack:
@@ -197,6 +199,12 @@ class TestDiscogsHeadingRowExclusion(unittest.TestCase):
     Beets' own heading handling never fires. The pipeline's manifests
     drop headings (`lib/discogs_positions.py`, same measured shape
     rule); the validation-side candidate must agree.
+
+    Enhanced-CD video-marker rows (``Video``, ``Video 1``) are the same
+    class of non-audio row (issue #1416, request 5936 / Discogs 4345679):
+    the manifest dropped them in #1261, the candidate did not, so a
+    complete 9-file rip faced a 10-track candidate — ``extra_tracks`` at
+    distance 0.1609, and force import refused by the coverage guard.
     """
 
     def tearDown(self) -> None:
@@ -421,6 +429,102 @@ class TestDiscogsHeadingRowExclusion(unittest.TestCase):
                     tracklist, self._artist_state(plugin))
 
                 self.assertEqual(len(track_infos), 2)
+
+    # Request 5936 / Discogs 4345679 as the mirror serves it (probed
+    # 2026-09-28): nine audio tracks plus the enhanced-CD video row.
+    _STICKMEN_TRACKLIST: tuple[tuple[str, str, str], ...] = (
+        ("1", "Field", "3:04"),
+        ("2", "Maps Of Places", "3:25"),
+        ("3", "Paradise", "4:44"),
+        ("4", "Man Made Stars", "2:54"),
+        ("5", "Shoot To Kill", "3:54"),
+        ("6", "Mary Anne Beck", "2:23"),
+        ("7", "City Is Dead", "3:09"),
+        ("8", "Measure Your Limbs", "5:27"),
+        ("9", "Wait For You", "3:41"),
+        ("Video", "Paradise", "4:47"),
+    )
+
+    def test_enhanced_cd_video_row_is_excluded(self) -> None:
+        # Issue #1416's live shape, in both subtrack modes (the
+        # preserve_flat=True rerun fires on exactly the unmapped-audio
+        # situation a phantom track causes). The candidate must count
+        # what the acquisition manifest counts for the same payload, and
+        # the surviving Paradise is the 4:44 audio track, not the video.
+        manifest = normalize_release_tracks([
+            {"position": position, "title": title, "duration": duration}
+            for position, title, duration in self._STICKMEN_TRACKLIST
+        ])
+        self.assertEqual(len(manifest), 9)
+        for preserve_flat in (False, True):
+            with self.subTest(preserve_flat=preserve_flat):
+                configure_discogs_subtracks(preserve_flat=preserve_flat)
+                plugin = self._configured_plugin()
+                tracklist: list[Track] = [
+                    _audio(position, title, duration)
+                    for position, title, duration in self._STICKMEN_TRACKLIST
+                ]
+
+                track_infos = plugin.get_tracks(
+                    tracklist, self._artist_state(plugin))
+
+                self.assertEqual(len(track_infos), len(manifest))
+                self.assertEqual(
+                    [t.length for t in track_infos if t.title == "Paradise"],
+                    [284])
+
+    def test_video_marker_grammar(self) -> None:
+        # The marker grammar is the manifest's VIDEO_POSITION_RE: case-
+        # insensitive "video" with an optional (spaced or not) number,
+        # judged on the sub-position base. Near-misses are real tracks,
+        # and both sides must count the same rows for every case.
+        cases = [
+            ("Video", False),
+            ("Video 1", False),
+            ("Video2", False),
+            ("VIDEO 3", False),
+            ("video", False),
+            ("Video 1.2", False),
+            ("Videotape", True),
+            ("V1", True),
+            ("Video A", True),
+        ]
+        for position, kept in cases:
+            with self.subTest(position=position):
+                rows: list[dict[str, object]] = [
+                    {"type_": "track", "position": "1", "title": "Real",
+                     "duration": "3:00"},
+                    {"type_": "track", "position": position,
+                     "title": "Candidate", "duration": "4:00"},
+                ]
+                titles = [
+                    r["title"] for r in filter_discogs_heading_rows(rows)]
+                manifest = normalize_release_tracks([
+                    {"position": r["position"], "title": r["title"],
+                     "duration": r["duration"]}
+                    for r in rows
+                ])
+                self.assertEqual("Candidate" in titles, kept)
+                self.assertEqual(len(titles), len(manifest))
+
+    def test_all_video_release_keeps_every_row(self) -> None:
+        # A whole-release video pressing's content IS what rips contain
+        # (the Placebo ignore_video_tracks precedent): with no surviving
+        # non-video row the markers are real content, kept on both
+        # sides. A heading does not vote, so heading + videos is still
+        # all-video (the heading itself is dropped).
+        configure_discogs_subtracks(preserve_flat=False)
+        plugin = self._configured_plugin()
+        tracklist: list[Track] = [
+            self._mirror_heading("Bonus DVD"),
+            _audio("Video 1", "Clip One", "3:30"),
+            _audio("Video 2", "Clip Two", "4:10"),
+        ]
+
+        track_infos = plugin.get_tracks(tracklist, self._artist_state(plugin))
+
+        self.assertEqual(
+            [t.title for t in track_infos], ["Clip One", "Clip Two"])
 
 
 if __name__ == "__main__":

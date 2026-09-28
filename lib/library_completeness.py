@@ -24,6 +24,8 @@ from lib.composite_audio_gap import (
     CompositeAudioReadError,
     detect_composite_silence_gap,
 )
+from lib.discogs_positions import VIDEO_POSITION_RE, split_sub_position
+from lib.json_narrow import is_str_object_dict
 from lib.mb_canonical import CanonicalReleaseRedirected, TaggedCanonicalReleaseFn
 from lib.quality import AUDIO_EXTENSIONS_DOTTED
 from lib.release_identity import ReleaseIdentity
@@ -320,6 +322,14 @@ def discogs_manifest(release_id: str, raw: Mapping[str, object]) -> SourceManife
     non-subindexed children flatten literally, unchanged. Either way, a
     nested header breaks any pending TOP-LEVEL group, like a real Beets
     non-"track" entry breaks ``groupby``'s adjacency.
+
+    Enhanced-CD video-marker positions (``Video``, ``Video 1``; issue
+    #1416) are ``non_audio`` components, like MusicBrainz video
+    recordings: the Beets candidate drops them
+    (``harness/discogs_patches.py::filter_discogs_heading_rows``), so an
+    installed album never has them. As there and in
+    ``lib/discogs_positions.py``, a release whose every non-heading
+    top-level row is video-marked keeps them as audio.
     """
     raw_release_id = raw.get("id")
     if (isinstance(raw_release_id, bool)
@@ -327,6 +337,21 @@ def discogs_manifest(release_id: str, raw: Mapping[str, object]) -> SourceManife
             or str(raw_release_id) != release_id):
         raise SourceManifestError("Discogs raw release identity is unavailable or mismatched")
     tracks = _raw_list(raw.get("tracks"), "Discogs raw release has no tracks list")
+
+    def is_video_row(entry: Mapping[str, object]) -> bool:
+        position = entry.get("position")
+        if not isinstance(position, str):
+            return False
+        return bool(VIDEO_POSITION_RE.match(split_sub_position(position)[0]))
+
+    # Non-object rows are left to ``visit``, which rejects them.
+    voting = [
+        entry for entry in tracks
+        if is_str_object_dict(entry)
+        and not (entry.get("position") == "" and entry.get("duration") == ""
+                 and entry.get("sub_tracks") is None)
+    ]
+    drop_video = not all(is_video_row(entry) for entry in voting)
     components: list[SourceComponent] = []
     pending: list[tuple[str, str]] = []
     pending_key: str | None = None
@@ -352,6 +377,18 @@ def discogs_manifest(release_id: str, raw: Mapping[str, object]) -> SourceManife
         nonlocal pending, pending_key
         for raw_entry in entries:
             entry = _raw_mapping(raw_entry, "Discogs track is not an object")
+            if drop_video and is_video_row(entry):
+                # Beets never sees this row (the harness drops it, nested
+                # children and all, before coalescing), so it is recorded
+                # as non-audio and does not break a pending group: the
+                # sub-positions either side still merge into one track.
+                title = entry.get("title")
+                components.append(SourceComponent(
+                    key=f"{release_id}-{entry.get('position')}",
+                    title=title if isinstance(title, str) else "",
+                    kind="non_audio",
+                ))
+                continue
             subtracks = entry.get("sub_tracks")
             if subtracks is not None:
                 if groupable:
@@ -372,10 +409,9 @@ def discogs_manifest(release_id: str, raw: Mapping[str, object]) -> SourceManife
             # The deployed mirror flattens Discogs' index/side headings into
             # ordinary rows. A literal empty position AND empty duration is
             # that non-playable header shape; an absent/nonempty duration is
-            # ambiguous and must not be silently discarded.
+            # ambiguous and must not be silently discarded. The harness drops
+            # it before Beets coalesces, so it does not break a pending group.
             if position == "" and duration == "":
-                if groupable:
-                    flush_pending()
                 continue
             if not isinstance(position, str) or not position:
                 raise SourceManifestError("Discogs track lacks literal position")
