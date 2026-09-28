@@ -25,6 +25,7 @@ from lib.composite_audio_gap import (
     detect_composite_silence_gap,
 )
 from lib.discogs_positions import VIDEO_POSITION_RE, split_sub_position
+from lib.json_narrow import is_str_object_dict
 from lib.mb_canonical import CanonicalReleaseRedirected, TaggedCanonicalReleaseFn
 from lib.quality import AUDIO_EXTENSIONS_DOTTED
 from lib.release_identity import ReleaseIdentity
@@ -346,7 +347,7 @@ def discogs_manifest(release_id: str, raw: Mapping[str, object]) -> SourceManife
     # Non-object rows are left to ``visit``, which rejects them.
     voting = [
         entry for entry in tracks
-        if isinstance(entry, Mapping)
+        if is_str_object_dict(entry)
         and not (entry.get("position") == "" and entry.get("duration") == ""
                  and entry.get("sub_tracks") is None)
     ]
