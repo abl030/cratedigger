@@ -235,7 +235,7 @@ _VIDEO_POSITION_RE = re.compile(r"^video\s*\d*$", re.IGNORECASE)
 
 
 def _is_discogs_video_row(track: dict[str, object]) -> bool:
-    position = str(track.get("position", "") or "")
+    position = str(track.get("position") or "")
     match = _SUB_POSITION_RE.match(position)
     base = match.group(1) if match else position
     return bool(_VIDEO_POSITION_RE.match(base))

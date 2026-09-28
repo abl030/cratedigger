@@ -1266,6 +1266,12 @@ rows, request 5936's shape) drop as non-audio unless every non-heading
 row is video-marked: a whole-release video pressing's content is
 rip-real (the Placebo `ignore_video_tracks` precedent,
 `docs/plans/2026-05-12-001-feat-video-track-wrong-matches-plan.md`).
+The Beets validation candidate applies the same heading and video rules
+before matching (`harness/discogs_patches.py::filter_discogs_heading_rows`,
+held in step by the agreement property in
+`tests/test_discogs_subtracks_generated.py`); until issue #1416 it kept
+video rows, so request 5936's complete 9-file rip met a 10-track
+candidate and was rejected as `extra_tracks`.
 Bare vinyl side letters (`A`/`B`) parse as track 1 of their
 side, consistent with the existing `A1`/`B1` side-as-disc convention;
 `1A`-style and trailing-dot (`1.`) positions parse instead of falling
