@@ -339,16 +339,16 @@ def discogs_manifest(release_id: str, raw: Mapping[str, object]) -> SourceManife
 
     def is_video_row(entry: Mapping[str, object]) -> bool:
         position = entry.get("position")
-        if entry.get("sub_tracks") is not None or not isinstance(position, str):
+        if not isinstance(position, str):
             return False
         return bool(VIDEO_POSITION_RE.match(split_sub_position(position)[0]))
 
+    # Non-object rows are left to ``visit``, which rejects them.
     voting = [
-        entry for entry in (
-            _raw_mapping(raw_entry, "Discogs track is not an object") for raw_entry in tracks
-        )
-        if not (entry.get("position") == "" and entry.get("duration") == ""
-                and entry.get("sub_tracks") is None)
+        entry for entry in tracks
+        if isinstance(entry, Mapping)
+        and not (entry.get("position") == "" and entry.get("duration") == ""
+                 and entry.get("sub_tracks") is None)
     ]
     drop_video = not all(is_video_row(entry) for entry in voting)
     components: list[SourceComponent] = []

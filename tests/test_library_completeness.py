@@ -199,6 +199,27 @@ class TestLiveIncidentPins(unittest.TestCase):
                         raw["tracks"] = [heading, *_raw_tracks(raw)]
                     manifest = discogs_manifest("1", raw)
                     self.assertEqual([component.kind for component in manifest.components], kinds)
+                    self.assertEqual([component.title for component in manifest.components], positions)
+
+    def test_discogs_untimed_audio_and_index_parents_vote_against_all_video(self) -> None:
+        # Only the flattened heading shape (empty position AND empty
+        # duration, no sub_tracks) abstains. An untimed real track and a
+        # nested index parent are audio, so the video row beside them is
+        # an enhanced-CD extra, not a whole-video release.
+        index_parent = {"position": "", "duration": "", "title": "Suite", "sub_tracks": [
+            {"position": "1.1", "title": "Part One"}, {"position": "1.2", "title": "Part Two"},
+        ]}
+        cases = [
+            ([{"position": "1", "duration": "", "title": "Untimed"},
+              {"position": "Video", "duration": "4:47", "title": "Clip"}], "untimed audio"),
+            ([index_parent,
+              {"position": "Video", "duration": "4:47", "title": "Clip"}], "index parent"),
+        ]
+        for tracks, label in cases:
+            with self.subTest(label):
+                manifest = discogs_manifest("1", {"id": "1", "tracks": tracks})
+                self.assertEqual(
+                    [c.kind for c in manifest.components if c.key == "1-Video"], ["non_audio"])
 
     def test_all_video_discogs_release_still_requires_its_videos(self) -> None:
         # A whole-release video pressing's videos ARE its content (the
