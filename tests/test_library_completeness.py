@@ -238,9 +238,10 @@ class TestLiveIncidentPins(unittest.TestCase):
                 album = LibraryAlbum(1, "a", "b", ReleaseIdentity("discogs", release), "/album",
                                      tuple(CatalogItem(path, tag[0], "") for path, tag in paths.items()))
                 manifest = discogs_manifest(release, {"id": release, "tracks": tracks})
+                files = tuple(paths)
                 result = classify_album(
-                    album, manifest, enumerate_files=lambda _directory: tuple(paths),
-                    tag_reader=lambda path: paths[path],
+                    album, manifest, enumerate_files=lambda _directory, files=files: files,
+                    tag_reader=paths.__getitem__,
                     detect_composite_gap=lambda _path: True,
                 )
                 self.assertEqual({finding.kind for finding in result.findings}, set())
