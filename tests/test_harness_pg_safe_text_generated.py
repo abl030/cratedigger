@@ -23,7 +23,7 @@ from tests.test_harness_pg_safe_text import (
 )
 from tests.test_pipeline_db import make_db, requires_postgres
 
-_TEXT = st.text(alphabet=st.sampled_from("a\x00 é�\\\"u0"), max_size=8)
+_TEXT = st.text(alphabet=st.sampled_from("aX\x00 é�\\\"u0"), max_size=8)
 _SCALARS = st.none() | st.booleans() | st.integers() | _TEXT
 _VALUES = st.recursive(
     _SCALARS,

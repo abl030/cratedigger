@@ -137,7 +137,7 @@ class TestNulTaggedChooseMatchIsStorable(unittest.TestCase):
     def test_nul_free_message_is_unchanged(self) -> None:
         message: dict[str, object] = {
             "type": "x", "nested": [{"k": "v", "n": 1, "f": 0.5, "b": True}],
-            "none": None, "tuple": ("a", "b"),
+            "none": None, "tuple": ("a", "b"), "tail": "SAX",
         }
         self.assertEqual(
             send_captured(message), json.dumps(message) + "\n",
