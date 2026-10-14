@@ -22,7 +22,7 @@ import os
 import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, TextIO
+from typing import TYPE_CHECKING, TextIO, TypeGuard
 
 from beets import config, library, plugins
 from beets.autotag import AlbumInfo, AlbumMatch, TrackInfo, TrackMatch
@@ -439,11 +439,43 @@ def _reserve_protocol_stdout() -> TextIO:
     return os.fdopen(protocol_fd, "w", encoding="utf-8", closefd=True)
 
 
+def _pg_safe_text(value: object) -> object:
+    """Remove U+0000 from every string (keys included) in a wire message.
+
+    PostgreSQL text and JSONB cannot hold U+0000, and the consumer persists
+    these messages verbatim into ``download_log`` JSONB. File tags carry
+    NULs in the wild: ID3 text frames are often NUL-terminated (a trailing
+    NUL on ``mb_trackid`` made every audit INSERT for one album raise
+    ``UntranslatableCharacter`` and loop the request forever). Trailing
+    NULs are padding and are dropped; an interior NUL becomes U+FFFD so the
+    audit still shows something unrepresentable was there.
+    """
+    if isinstance(value, str):
+        return value.rstrip("\x00").replace("\x00", "�")
+    if _is_object_dict(value):
+        return {
+            _pg_safe_text(key): _pg_safe_text(item) for key, item in value.items()
+        }
+    if _is_object_sequence(value):
+        return [_pg_safe_text(item) for item in value]
+    return value
+
+
+def _is_object_dict(value: object) -> TypeGuard[dict[object, object]]:
+    return isinstance(value, dict)
+
+
+def _is_object_sequence(
+    value: object,
+) -> TypeGuard[list[object] | tuple[object, ...]]:
+    return isinstance(value, (list, tuple))
+
+
 def _send(msg: dict[str, object]) -> None:
     """Write one JSON protocol message to the private original stdout fd."""
     if _protocol_stdout is None:
         raise RuntimeError("harness protocol stdout has not been reserved")
-    _protocol_stdout.write(json.dumps(msg) + "\n")
+    _protocol_stdout.write(json.dumps(_pg_safe_text(msg)) + "\n")
     _protocol_stdout.flush()
 
 
