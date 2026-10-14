@@ -4,7 +4,9 @@
 # Returns a `python3` whose package set has Beets, mutagen and mediafile built
 # from the tip flake inputs. Everything else resolves normally, so a package
 # that does not depend on the three keeps its pinned store path and is not
-# rebuilt.
+# rebuilt. The one exception is a released dependency tip Beets requires at
+# a version nixpkgs does not ship yet (currently discogs-client); each such
+# override names the condition for deleting it.
 #
 # Why one SET rather than three separate packages: mutagen is a dependency of
 # both mediafile and music-tag, and mediafile is a dependency of Beets. Three
@@ -40,6 +42,19 @@ let
     packageOverrides = _final: prev: {
       mutagen = fromTip prev.mutagen mutagenSrc;
       mediafile = fromTip prev.mediafile mediafileSrc;
+      # Not a tip input: Beets tip requires python3-discogs-client >= 2.10
+      # (its discogs plugin imports MalformedResponseError, new in 2.10)
+      # while nixpkgs still ships 2.9 (#1418). A pinned release, so its own
+      # tests keep running. Delete this override once nixpkgs reaches 2.10.
+      discogs-client = prev.discogs-client.overridePythonAttrs (_: rec {
+        version = "2.10";
+        src = pkgs.fetchFromGitHub {
+          owner = "joalla";
+          repo = "discogs_client";
+          tag = "v${version}";
+          hash = "sha256-1Dx0KSYP15+izEfNSGfEw8lpjqSQPuhQkGntRA4srmo=";
+        };
+      });
       # Beets goes through the shared checks-only builder, which owns the
       # PEP 517 backend and metadata handling a non-release tree needs.
       # `prev` is deliberate: it resolves Beets' own base expression from
