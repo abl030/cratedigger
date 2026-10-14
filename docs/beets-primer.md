@@ -48,8 +48,11 @@ revisions in `flake.lock` therefore record where a human last set them, not
 what was last proven green — the signal is the run itself. When tip Beets
 requires a released dependency newer than Nixpkgs ships, `nix/tip-python.nix`
 pins that one package at the needed release inside the same checks-only set
-(currently `discogs-client` 2.10, #1418), with a comment naming when to delete
-the override. Meanwhile the
+through its `releaseAhead` helper (currently `discogs-client` 2.10, #1418).
+The pin expires on its own: once Nixpkgs reaches the pinned version,
+evaluating the tip shell fails with an instruction to delete the override, so
+the canary goes red already diagnosed. The stable Nixpkgs gate never
+evaluates the tip set, so an expired pin cannot block a lock update. Meanwhile the
 reviewed 730-day manifest runs disposable harness/delete contracts for
 each final release. These checks do not establish live-catalog upgrade or downgrade
 safety. LRCLIB and unrelated external plugin behaviour are deployment-owned
