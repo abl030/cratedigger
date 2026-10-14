@@ -5,8 +5,8 @@
 # from the tip flake inputs. Everything else resolves normally, so a package
 # that does not depend on the three keeps its pinned store path and is not
 # rebuilt. The one exception is a released dependency tip Beets requires at
-# a version nixpkgs does not ship yet (currently discogs-client); each such
-# override names the condition for deleting it.
+# a version nixpkgs does not ship yet; those go through `releaseAhead`, which
+# fails evaluation once nixpkgs catches up.
 #
 # Why one SET rather than three separate packages: mutagen is a dependency of
 # both mediafile and music-tag, and mediafile is a dependency of Beets. Three
@@ -37,24 +37,36 @@ let
     dontCheckPythonMetadata = true;
   });
 
+  # A released dependency that tip Beets needs before nixpkgs ships it. The
+  # pin expires on its own: once nixpkgs reaches `version`, evaluating the
+  # tip set fails with the deletion instruction, so the canary goes red
+  # pre-diagnosed instead of the override outliving its reason unnoticed.
+  # Only the tip canary evaluates this set; the stable nixpkgs gate builds
+  # `beetsStableCandidate`, which never reaches it, so the expiry cannot
+  # block a nixpkgs lock update. A pinned release keeps its own tests.
+  releaseAhead = prev: { version, src }:
+    if pkgs.lib.versionAtLeast prev.version version then
+      throw ("nix/tip-python.nix: nixpkgs now ships ${prev.pname} "
+        + "${prev.version}, which satisfies the ${version} pin. Delete the "
+        + "${prev.pname} releaseAhead override.")
+    else prev.overridePythonAttrs (_: { inherit version src; });
+
   python = pkgs.python3.override {
     self = python;
     packageOverrides = _final: prev: {
       mutagen = fromTip prev.mutagen mutagenSrc;
       mediafile = fromTip prev.mediafile mediafileSrc;
-      # Not a tip input: Beets tip requires python3-discogs-client >= 2.10
-      # (its discogs plugin imports MalformedResponseError, new in 2.10)
-      # while nixpkgs still ships 2.9 (#1418). A pinned release, so its own
-      # tests keep running. Delete this override once nixpkgs reaches 2.10.
-      discogs-client = prev.discogs-client.overridePythonAttrs (_: rec {
+      # Beets tip requires python3-discogs-client >= 2.10: its discogs
+      # plugin imports MalformedResponseError, new in 2.10 (#1418).
+      discogs-client = releaseAhead prev.discogs-client {
         version = "2.10";
         src = pkgs.fetchFromGitHub {
           owner = "joalla";
           repo = "discogs_client";
-          tag = "v${version}";
+          tag = "v2.10";
           hash = "sha256-1Dx0KSYP15+izEfNSGfEw8lpjqSQPuhQkGntRA4srmo=";
         };
-      });
+      };
       # Beets goes through the shared checks-only builder, which owns the
       # PEP 517 backend and metadata handling a non-release tree needs.
       # `prev` is deliberate: it resolves Beets' own base expression from
