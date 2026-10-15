@@ -7,9 +7,10 @@ on-disk files and the Jellyfin rescan recreates the album's Audio items with
 ``lib/jellyfin_pin_service.py`` that clamps new Audio dates to the captured
 pre-upgrade maximum. See migration 046 for the table's original rationale.
 """
-import json
 from datetime import datetime
 from typing import Any
+
+import psycopg2.extras
 
 from lib.pipeline_db._core import _PipelineDBBase
 from lib.pipeline_db.pin_status import (
@@ -46,7 +47,7 @@ class _JellyfinPinsMixin(_PipelineDBBase):
             RETURNING id
             """,
             (imported_path, original_date_created, album_item_id,
-             json.dumps(list(children_item_ids)), request_id),
+             psycopg2.extras.Json(list(children_item_ids)), request_id),
         )
         row = cur.fetchone()
         assert row is not None, "INSERT RETURNING should always return a row"

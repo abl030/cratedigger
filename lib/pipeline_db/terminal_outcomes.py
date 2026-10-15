@@ -22,7 +22,6 @@ from lib.pipeline_db._shared import (
     BACKOFF_MAX_MINUTES,
     REQUEST_PRESENTATION_FROM,
     REQUEST_PRESENTATION_SELECT,
-    _msgspec_json_dumps,
     request_presentation_row,
     validate_request_metadata_fields,
 )
@@ -34,6 +33,7 @@ from lib.pipeline_db.decisions import (
     SEARCH_BACKOFF_MAX_EXPONENT,
     search_backoff_minutes,
 )
+from lib.pipeline_db.pg_safe import pg_jsonb_text
 from lib.pipeline_db.rows import AlbumRequestRow
 from lib.terminal_outcomes import (
     AutomationTerminalAuthority,
@@ -202,7 +202,6 @@ class _TransactionalTransitionsDB:
                 now,
                 psycopg2.extras.Json(
                     fields,
-                    dumps=_msgspec_json_dumps,
                 ),
                 request_id,
                 expected_status,
@@ -578,7 +577,6 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
             (
                 psycopg2.extras.Json(
                     patch,
-                    dumps=_msgspec_json_dumps,
                 ),
                 job_id,
                 typed_receipt.request_id,
@@ -590,7 +588,6 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 AUTOMATION_COMPLETION_RESULT_KEY,
                 psycopg2.extras.Json(
                     receipt_json,
-                    dumps=_msgspec_json_dumps,
                 ),
             ),
         )
@@ -770,7 +767,9 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 audit.actual_filetype, audit.actual_min_bitrate,
                 audit.spectral_grade, audit.spectral_bitrate,
                 audit.existing_min_bitrate, audit.existing_spectral_bitrate,
-                audit.import_result, audit.validation_result, audit.final_format,
+                pg_jsonb_text(audit.import_result),
+                pg_jsonb_text(audit.validation_result),
+                audit.final_format,
                 audit.v0_probe_kind, audit.v0_probe_min_bitrate,
                 audit.v0_probe_avg_bitrate, audit.v0_probe_median_bitrate,
                 audit.existing_v0_probe_kind, audit.existing_v0_probe_min_bitrate,
@@ -885,8 +884,8 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 audit.spectral_bitrate,
                 audit.existing_min_bitrate,
                 audit.existing_spectral_bitrate,
-                audit.import_result,
-                audit.validation_result,
+                pg_jsonb_text(audit.import_result),
+                pg_jsonb_text(audit.validation_result),
                 audit.final_format,
                 audit.v0_probe_kind,
                 audit.v0_probe_min_bitrate,
@@ -1117,7 +1116,10 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
         payload[PROCESSING_CLEANUP_AUDIT_KEY] = cleanup
         return replace(
             audit,
-            validation_result=_msgspec_json_dumps(payload),
+            # stdlib json, not msgspec: ``payload`` came from ``json.loads``
+            # and may hold a lone surrogate msgspec refuses to encode; the
+            # bind's ``pg_jsonb_text`` decodes it again and cleans it.
+            validation_result=json.dumps(payload),
         )
 
     def _automation_job_result(
@@ -1266,7 +1268,6 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 (
                     psycopg2.extras.Json(
                         fields,
-                        dumps=_msgspec_json_dumps,
                     ),
                     request_id,
                     job_id,
@@ -1441,7 +1442,6 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 job.status,
                 psycopg2.extras.Json(
                     result,
-                    dumps=_msgspec_json_dumps,
                 ),
                 job.message,
                 None if completed else job.error,
@@ -1968,13 +1968,11 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                     command.preview_status,
                     psycopg2.extras.Json(
                         command.preview_result,
-                        dumps=_msgspec_json_dumps,
                     ),
                     command.message,
                     command.error,
                     psycopg2.extras.Json(
                         result,
-                        dumps=_msgspec_json_dumps,
                     ),
                     command.message,
                     command.error,

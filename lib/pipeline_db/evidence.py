@@ -1,10 +1,10 @@
 """album_quality_evidence content-addressed keying + FK setters."""
 
-import json
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 
 import msgspec
+import psycopg2.extras
 
 from lib.convergence_service import normalize_contributor_usernames
 from lib.evidence_media_identity import (
@@ -36,11 +36,11 @@ from lib.quality_evidence import (
     snapshot_fingerprint,
 )
 
-_PRESERVED_SOURCE_LOSSY_PAIRS_JSON = json.dumps([
+_PRESERVED_SOURCE_LOSSY_PAIRS = [
     {"container": container, "codec": codec}
     for container, codecs in sorted(LOSSY_CODECS_BY_CONTAINER.items())
     for codec in sorted(codecs)
-])
+]
 
 # The single source of truth for "does this write replace the stored
 # spectral tuple with the incoming one?", spliced into all eight spectral
@@ -285,16 +285,12 @@ class _EvidenceMixin(_PipelineDBBase):
         proof = evidence.verified_lossless_proof
         lattice = evidence.aac_lattice
         m = evidence.measurement
-        audio_validation_json = msgspec.json.encode(
-            evidence.audio_validation,
-        ).decode()
+        audio_validation_json = psycopg2.extras.Json(evidence.audio_validation)
         aac_lattice_tracks_json = (
-            msgspec.json.encode(lattice.tracks).decode()
-            if lattice is not None
-            else None
+            psycopg2.extras.Json(lattice.tracks) if lattice is not None else None
         )
         cd_rip_verification_json = (
-            msgspec.json.encode(evidence.cd_rip_verification).decode()
+            psycopg2.extras.Json(evidence.cd_rip_verification)
             if evidence.cd_rip_verification is not None else None
         )
         preserve_existing_audio_validation = evidence.audio_validation.outcome in {
@@ -789,7 +785,7 @@ class _EvidenceMixin(_PipelineDBBase):
             (
                 spectral_write_intent == "replace",
                 sorted(EVIDENCE_LOSSLESS_CODECS),
-                _PRESERVED_SOURCE_LOSSY_PAIRS_JSON,
+                psycopg2.extras.Json(_PRESERVED_SOURCE_LOSSY_PAIRS),
                 EVIDENCE_SUBJECT_SOURCE,
                 evidence.mb_release_id,
                 evidence.snapshot_fingerprint,
@@ -844,7 +840,7 @@ class _EvidenceMixin(_PipelineDBBase):
                 lattice.scored_tracks if lattice is not None else None,
                 lattice.max_z if lattice is not None else None,
                 preserve_existing_audio_validation,
-                json.dumps(file_rows),
+                psycopg2.extras.Json(file_rows),
             ),
         )
 

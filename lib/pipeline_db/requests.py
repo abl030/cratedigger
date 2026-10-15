@@ -31,12 +31,12 @@ from lib.pipeline_db._shared import (
     MergeRekeyCollision,
     SupersedeRaceError,
     _escape_like_pattern,
-    _msgspec_json_dumps,
     processing_owner_payload,
     request_presentation_row,
     validate_request_metadata_fields,
 )
 from lib.pipeline_db.decisions import SEARCH_BACKOFF_MAX_EXPONENT
+from lib.pipeline_db.pg_safe import pg_jsonb_text
 from lib.pipeline_db.rows import (
     AlbumRequestPresentationRow,
     AlbumRequestRow,
@@ -788,7 +788,6 @@ class _RequestsMixin(_PipelineDBBase):
                     now,
                     psycopg2.extras.Json(
                         fields,
-                        dumps=_msgspec_json_dumps,
                     ),
                     request_id,
                     expected_status,
@@ -806,7 +805,6 @@ class _RequestsMixin(_PipelineDBBase):
                     now,
                     psycopg2.extras.Json(
                         fields,
-                        dumps=_msgspec_json_dumps,
                     ),
                     request_id,
                 ),
@@ -1539,7 +1537,7 @@ class _RequestsMixin(_PipelineDBBase):
                 last_attempt_at = %s,
                 updated_at = %s
             WHERE id = %s AND status = %s AND status != 'replaced'
-        """, (state_json, now, now, request_id, expected_status))
+        """, (pg_jsonb_text(state_json), now, now, request_id, expected_status))
         self.conn.commit()
         return cur.rowcount > 0
 
@@ -1580,7 +1578,7 @@ class _RequestsMixin(_PipelineDBBase):
               AND next_plan_ordinal = %s
               AND plan_cycle_count = %s
         """, (
-            state_json, now, now, request_id,
+            pg_jsonb_text(state_json), now, now, request_id,
             plan_id, plan_ordinal, cycle_count_snapshot,
         ))
         self.conn.commit()
@@ -1611,7 +1609,7 @@ class _RequestsMixin(_PipelineDBBase):
               AND outgoing.state -> 'enqueued_at'
                   = to_jsonb(%s::text)
         """, (
-            state_json,
+            pg_jsonb_text(state_json),
             now,
             request_id,
             expected_enqueued_at,

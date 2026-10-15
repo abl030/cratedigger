@@ -18,7 +18,6 @@ import msgspec
 import psycopg2.extras
 
 from lib.pipeline_db._core import _PipelineDBBase
-from lib.pipeline_db._shared import _msgspec_json_dumps
 
 CleanupReceiptOutcome = Literal["completed", "no_op"]
 CleanupJournalConflictKind = Literal[
@@ -160,7 +159,7 @@ def _receipt_builtins(
 
 
 def _json_param(value: object) -> psycopg2.extras.Json:
-    return psycopg2.extras.Json(value, dumps=_msgspec_json_dumps)
+    return psycopg2.extras.Json(value)
 
 
 def _require_nonblank(value: str, field: str) -> None:
