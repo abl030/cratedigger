@@ -2,9 +2,10 @@
 
 INVARIANT (pins in ``tests/test_pg_safe.py``): over arbitrary strings and
 JSON-shaped payloads, a real ``log_download`` write never fails; what reads
-back holds no U+0000, lone surrogate, or non-finite float; a clean value
-reads back unchanged; and every interior unstorable character is marked by
-exactly one U+FFFD.
+back holds no U+0000 or non-finite float; a clean value reads back
+unchanged; and every interior NUL is marked by exactly one U+FFFD. A value
+holding a lone surrogate is never rewritten: the write fails loudly and
+stores nothing (stored paths are identity; operator decision https://github.com/abl030/cratedigger/issues/1422#issuecomment-6181707467).
 """
 
 from __future__ import annotations
@@ -21,10 +22,11 @@ from lib.pipeline_db.pg_safe import pg_safe_text
 from tests.test_pg_safe import LIVE_TRACK_ID
 from tests.test_pipeline_db import make_db, requires_postgres
 
-_BAD = frozenset({"\x00"}) | frozenset(chr(c) for c in range(0xD800, 0xE000))
+_BAD = frozenset({"\x00"})
+_SURROGATES = ("\ud83c", "\udce9")
 _TEXT = st.text(
     alphabet=st.sampled_from(
-        ["a", "X", " ", "\x00", "é", "�", "\ud83c", "\udce9", "🎵", "\\", '"', "u"],
+        ["a", "X", " ", "\x00", "é", "�", "🎵", "\\", '"', "u"],
     ),
     max_size=10,
 )
@@ -114,7 +116,7 @@ class TestTextContract(unittest.TestCase):
 
     @given(text=_TEXT)
     @example(text=LIVE_TRACK_ID + "\x00")
-    @example(text="a\x00\udce9")
+    @example(text="a\x00b\x00")
     def test_cleaning_meets_the_text_contract(self, text: str) -> None:
         self.assertEqual(text_violations(text, pg_safe_text(text)), [])
 
@@ -150,7 +152,7 @@ class TestRealWriterStoresEveryValue(unittest.TestCase):
         return dict(row)
 
     @given(text=_TEXT, names=st.lists(_TEXT.filter(bool), max_size=3))
-    @example(text="Transfer rejected: Banned\x00", names=["peer\udce9"])
+    @example(text="Transfer rejected: Banned\x00", names=["peer\x00x"])
     def test_text_and_text_array_parameters(
         self, text: str, names: list[str],
     ) -> None:
@@ -187,7 +189,7 @@ class TestRealWriterStoresEveryValue(unittest.TestCase):
 
     @given(payload=_JSON)
     @example(payload=[{"items": [{"mb_trackid": LIVE_TRACK_ID + "\x00"}]}])
-    @example(payload={"ratio": math.nan, "pair": ("caf\udce9", math.inf)})
+    @example(payload={"ratio": math.nan, "pair": ("caf\x00", math.inf)})
     @example(payload=4.934925614736811e16)
     def test_json_parameters(self, payload: object) -> None:
         log_id = self.db.log_download(
@@ -198,6 +200,40 @@ class TestRealWriterStoresEveryValue(unittest.TestCase):
             self.assertIsNone(stored)
             return
         self.assertEqual(json_violations(payload, stored), [])
+
+
+    @given(
+        prefix=_TEXT, suffix=_TEXT, surrogate=st.sampled_from(_SURROGATES),
+        column=st.sampled_from(["error_message", "transfer_detail", "import_result"]),
+    )
+    @example(prefix="Caf", suffix="", surrogate="\udce9", column="error_message")
+    def test_a_lone_surrogate_fails_loudly_and_stores_nothing(
+        self, prefix: str, suffix: str, surrogate: str, column: str,
+    ) -> None:
+        text = prefix + surrogate + suffix
+        before = self._log_count()
+        with self.assertRaises(UnicodeEncodeError):
+            if column == "error_message":
+                self.db.log_download(
+                    self.request_id, outcome="failed", error_message=text,
+                )
+            elif column == "transfer_detail":
+                self.db.log_download(
+                    self.request_id, outcome="failed",
+                    transfer_detail=[{"file": text}],
+                )
+            else:
+                self.db.log_download(
+                    self.request_id, outcome="failed",
+                    import_result=json.dumps({"error": text}),
+                )
+        self.db.conn.rollback()
+        self.assertEqual(self._log_count(), before)
+
+    def _log_count(self) -> int:
+        row = self.db._execute("SELECT count(*) AS n FROM download_log").fetchone()
+        assert row is not None
+        return int(row["n"])
 
 
 class TestCheckersTripOnViolations(unittest.TestCase):

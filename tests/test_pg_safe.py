@@ -1,9 +1,10 @@
 """Every bound value is PostgreSQL-storable (``lib/pipeline_db/pg_safe.py``).
 
 INVARIANT: a ``PipelineDB`` write never fails because a string holds U+0000
-or a lone surrogate, or because a JSON payload holds NaN/±Infinity. Clean
-values round-trip byte-identically; trailing NULs vanish; every interior
-unstorable character is stored as U+FFFD; a non-finite float is JSON null.
+or because a JSON payload holds NaN/±Infinity. Clean values round-trip
+byte-identically; trailing NULs vanish; an interior NUL is stored as U+FFFD;
+a non-finite float is JSON null. A lone surrogate is never rewritten: the
+write fails loudly and stores nothing (stored paths are identity).
 
 The generated twin is ``tests/test_pg_safe_generated.py``.
 """
@@ -58,10 +59,8 @@ class TestPgSafeText(unittest.TestCase):
         ("interior NUL", "Artist\x00Guest", "Artist�Guest"),
         ("leading NUL", "\x00x", "�x"),
         ("only NULs", "\x00\x00", ""),
-        ("lone low surrogate", "caf\udce9", "caf�"),
-        ("lone high surrogate", "\ud83cx", "�x"),
-        ("surrogate then NUL", "a\udce9\x00", "a�"),
-        ("NUL then surrogate", "a\x00\udce9", "a��"),
+        ("lone surrogate is never rewritten", "caf\udce9", "caf\udce9"),
+        ("NUL cleaned, surrogate kept", "a\x00\udce9\x00", "a�\udce9"),
         ("only NULs are stripped from the tail", "SAX", "SAX"),
         ("a dirty string keeps a non-NUL tail", "a\x00X", "a�X"),
     ]
@@ -89,11 +88,11 @@ class TestPgJsonDumps(unittest.TestCase):
 
     def test_keys_and_nested_values_are_cleaned(self) -> None:
         encoded = pg_json_dumps(
-            {"k\x00": [{"id": LIVE_TRACK_ID + "\x00"}, ("caf\udce9", None)]},
+            {"k\x00": [{"id": LIVE_TRACK_ID + "\x00"}, ("caf\x00", None)]},
         )
         self.assertEqual(
             msgspec.json.decode(encoded),
-            {"k": [{"id": LIVE_TRACK_ID}, ["caf�", None]]},
+            {"k": [{"id": LIVE_TRACK_ID}, ["caf", None]]},
         )
 
     def test_struct_input_is_encoded_through_to_builtins(self) -> None:
@@ -159,16 +158,16 @@ class TestEveryParameterPathIsStorable(unittest.TestCase):
     def test_text_textarray_and_json_paths(self) -> None:
         log_id = self.db.log_download(
             self.request_id,
-            soulseek_username="peer\udce9",
-            contributor_usernames=["peer\udce9", "other\x00"],
+            soulseek_username="peer\x00x",
+            contributor_usernames=["peer\x00x", "other\x00"],
             outcome="failed",
             error_message="Transfer rejected: Banned\x00",
-            transfer_detail=[{"file": "01 caf\udce9.mp3", "ratio": math.nan}],
+            transfer_detail=[{"file": "01 caf\x00.mp3", "ratio": math.nan}],
         )
         self.assertEqual(self._row(log_id), {
             "error_message": "Transfer rejected: Banned",
-            "soulseek_username": "peer�",
-            "candidate_contributor_usernames": ["other", "peer�"],
+            "soulseek_username": "peer�x",
+            "candidate_contributor_usernames": ["other", "peer�x"],
             "transfer_detail": [{"file": "01 caf�.mp3", "ratio": None}],
         })
 
@@ -184,6 +183,38 @@ class TestEveryParameterPathIsStorable(unittest.TestCase):
         )
         self.assertEqual([r["id"] for r in cur.fetchall()], [self.request_id])
 
+    def _download_log_count(self) -> int:
+        row = self.db._execute("SELECT count(*) AS n FROM download_log").fetchone()
+        assert row is not None
+        return int(row["n"])
+
+    def test_a_surrogate_text_parameter_fails_loudly(self) -> None:
+        with self.assertRaises(UnicodeEncodeError):
+            self.db.log_download(
+                self.request_id, outcome="failed",
+                download_path="/music/slskd/Caf\udce9",
+            )
+        self.db.conn.rollback()
+        self.assertEqual(self._download_log_count(), 0)
+
+    def test_a_surrogate_json_parameter_fails_loudly(self) -> None:
+        with self.assertRaises(UnicodeEncodeError):
+            self.db.log_download(
+                self.request_id, outcome="failed",
+                transfer_detail=[{"file": "Caf\udce9/01.mp3"}],
+            )
+        self.db.conn.rollback()
+        self.assertEqual(self._download_log_count(), 0)
+
+    def test_a_surrogate_in_caller_json_text_fails_loudly(self) -> None:
+        with self.assertRaises(UnicodeEncodeError):
+            self.db.log_download(
+                self.request_id, outcome="failed",
+                validation_result=json.dumps({"failed_path": "Caf\udce9"}),
+            )
+        self.db.conn.rollback()
+        self.assertEqual(self._download_log_count(), 0)
+
     def test_execute_values_path(self) -> None:
         cur = self.db.conn.cursor()
         psycopg2.extras.execute_values(
@@ -191,13 +222,13 @@ class TestEveryParameterPathIsStorable(unittest.TestCase):
             "INSERT INTO download_log (request_id, outcome, error_message,"
             " transfer_detail) VALUES %s RETURNING id",
             [(self.request_id, "failed", "x\x00",
-              psycopg2.extras.Json({"v": "y\udce9"}))],
+              psycopg2.extras.Json({"v": "y\x00"}))],
         )
         row = cur.fetchone()
         assert row is not None
         stored = self._row(int(row[0]))
         self.assertEqual(stored["error_message"], "x")
-        self.assertEqual(stored["transfer_detail"], {"v": "y�"})
+        self.assertEqual(stored["transfer_detail"], {"v": "y"})
 
 
 @requires_postgres
@@ -476,7 +507,7 @@ class TestLiveSmellyBeaverWorld(unittest.TestCase):
         command = replace(command, audit=replace(
             command.audit,
             validation_result=msgspec.json.encode(decoded).decode(),
-            import_result=json.dumps({"ratio": math.nan, "error": "x\udce9"}),
+            import_result=json.dumps({"ratio": math.nan, "error": "x\x00"}),
         ))
 
         db.persist_import_terminal_outcome(command)
@@ -491,7 +522,7 @@ class TestLiveSmellyBeaverWorld(unittest.TestCase):
         self.assertEqual(first["mb_trackid"], LIVE_TRACK_ID)
         self.assertEqual(first["title"], "Opener")
         self.assertEqual(first["artist"], "The Artist�Guest")
-        self.assertEqual(row["import_result"], {"ratio": None, "error": "x�"})
+        self.assertEqual(row["import_result"], {"ratio": None, "error": "x"})
 
 
 if __name__ == "__main__":
