@@ -24,6 +24,18 @@ paths:
   frozen and have no outgoing ordinary lifecycle transition; only
   `supersede_request_mbid` may create that status.
 - JSONB columns: use for structured audit data (`import_result`, `validation_result`)
+- **Bind JSONB as an object, never as encoded JSON text.** Use
+  `psycopg2.extras.Json(obj)`; a JSON string a caller hands in goes through
+  `lib/pipeline_db/pg_safe.py::pg_jsonb_text`. `install_pg_safe_adapters`
+  (run at `_core` import) routes every `str` and `Json` parameter through
+  one cleaner, because PostgreSQL rejects U+0000 (text and JSONB), lone
+  surrogates (text and JSONB) and NaN/±Infinity (JSON): trailing NULs are
+  dropped, an interior NUL or surrogate becomes U+FFFD, a non-finite float
+  becomes `null`. It cannot see escapes inside pre-encoded JSON text, which
+  is why the bind rule exists; `tests/test_pg_jsonb_bind_audit.py` allows a
+  JSON encoder call in `lib/pipeline_db/` only in its named functions.
+  Live incident: a NUL-terminated ID3 `mb_trackid` looped request 6343's
+  import (2026-10-12). Encoders outside PostgreSQL: issue #1422.
 
 ## Processing-owner writes
 

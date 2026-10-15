@@ -301,16 +301,6 @@ def pg_execute_values(
     _execute_values_fn(cur, sql, argslist)
 
 
-def _msgspec_json_dumps(value: object) -> str:
-    """``dumps=`` callable for ``psycopg2.extras.Json`` using msgspec's encoder.
-
-    A named function (not a lambda) so its parameter carries an explicit
-    type — ``psycopg2.extras.Json.__init__``'s ``dumps: Callable[..., str]``
-    stub gives pyright no per-parameter type to infer a lambda's arg from.
-    """
-    return msgspec.json.encode(value).decode()
-
-
 def _stable_hash(label: str, *parts: str) -> str:
     """Return a namespaced SHA-256 digest for privacy-preserving counters."""
     digest = hashlib.sha256()

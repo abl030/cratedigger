@@ -113,12 +113,13 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "scope on the live connection"
         ),
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", "5fa18d2c1737583f"): (
+    ("lib/pipeline_db/terminal_outcomes.py", "43116cf9ccedf60e"): (
         (
             "terminal metadata keys use the existing validated request-field "
-            "vocabulary (issue #784: `dumps=lambda value: msgspec.json.encode("
-            "value).decode()` replaced with the shared `_msgspec_json_dumps` "
-            "helper from `_shared.py` — same encoder, same output, no SQL change)"
+            "vocabulary (issue #784 replaced an inline `dumps=` lambda with a "
+            "shared helper; the PG-safe adapter change then dropped `dumps=` "
+            "entirely, since `lib/pipeline_db/pg_safe.py` encodes every Json "
+            "parameter — no SQL change either time)"
         ),
     ),
     ("lib/pipeline_db/terminal_outcomes.py", "acecdeb5d9931e7f"): (
@@ -229,7 +230,7 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "above each shifted this line only)"
         ),
     ),
-    ("lib/pipeline_db/download_log.py", "d87a36ba1d1768e7"): (
+    ("lib/pipeline_db/download_log.py", "c4b158f967f32b37"): (
         (
             "JSON path key is selected from a closed server-owned vocabulary "
             "(issue #835, issue #829 PR4, the source-semantic proof gate, issue "
@@ -392,14 +393,14 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "with one static lifecycle predicate"
         ),
     ),
-    ("lib/pipeline_db/requests.py", "bc05e500065af93a"): (
+    ("lib/pipeline_db/requests.py", "bea0861a4fe91479"): (
         (
             "metadata keys are validated identifiers, lifecycle fields are reserved, "
             "values use one typed JSONB record parameter, and the exact active "
             "source plus absent processing owner are guarded"
         ),
     ),
-    ("lib/pipeline_db/requests.py", "943205ae40bba7e6"): (
+    ("lib/pipeline_db/requests.py", "861ba9456aeac7a5"): (
         (
             "metadata keys are validated identifiers, lifecycle fields are reserved, "
             "values use one typed JSONB record parameter, and any processing owner "
@@ -469,7 +470,7 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "the counter vocabulary are untouched"
         ),
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", "c4d426397b1774f9"): (
+    ("lib/pipeline_db/terminal_outcomes.py", "c31b7b477f4ab13d"): (
         (
             "processing-terminal metadata keys use the validated request-field "
             "vocabulary while exact request and owner predicates retain authority; "
@@ -486,7 +487,10 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "this scope's own retry-backoff arithmetic now calls the shared "
             "``decisions.search_backoff_minutes`` instead of restating "
             "``min(BASE * 2 ** prior, MAX)`` inline, and a lifecycle-bound "
-            "fingerprint hashes the whole enclosing method AST)"
+            "fingerprint hashes the whole enclosing method AST. The PG-safe "
+            "adapter change re-keyed it (c4d426397b1774f9 -> c31b7b477f4ab13d), "
+            "again with no SQL change: the enclosing method's audit binds now "
+            "go through ``pg_jsonb_text``)"
         ),
     ),
 }
@@ -536,7 +540,7 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "atomic terminal typed transition CASes the source status selected by the DAG"
         ),
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", "93a08ead2aed7cf8"): (
+    ("lib/pipeline_db/terminal_outcomes.py", "f88d3ac2bb993382"): (
         (
             "automation terminalization performs the final exact processing-owner "
             "CAS and clears the owner in the same static request write "
@@ -554,7 +558,9 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "for the same reason as its dynamic sibling above: this scope's "
             "retry-backoff arithmetic now calls the shared "
             "``decisions.search_backoff_minutes``, and a lifecycle-bound "
-            "fingerprint binds the whole enclosing method AST)"
+            "fingerprint binds the whole enclosing method AST. The PG-safe "
+            "adapter change re-keyed it (93a08ead2aed7cf8 -> f88d3ac2bb993382) "
+            "with no SQL change, as its dynamic sibling)"
         ),
     ),
     ("lib/pipeline_db/requests.py", "a2f3083f8cbe8885"): (
@@ -594,13 +600,13 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "without widening processing authority"
         ),
     ),
-    ("lib/pipeline_db/requests.py", "a0853139ff6dd9ad"): (
+    ("lib/pipeline_db/requests.py", "8fd4e57884e829a6"): (
         (
             "typed download claim accepts only the explicit wanted source status "
             "and installs one immutable active download state"
         ),
     ),
-    ("lib/pipeline_db/requests.py", "34dd9d8beb763829"): (
+    ("lib/pipeline_db/requests.py", "81fcccda67d9ca44"): (
         (
             "plan-aware download claim uses an exact wanted source predicate "
             "plus exact persisted-plan witnesses"

@@ -26,6 +26,11 @@ from lib.pipeline_db._shared import (
     DEFAULT_DSN,
     logger,
 )
+from lib.pipeline_db.pg_safe import install_pg_safe_adapters
+
+# Before any connection exists: every str/Json parameter any PipelineDB binds
+# is made PostgreSQL-storable at psycopg2's adaptation layer.
+install_pg_safe_adapters()
 
 if TYPE_CHECKING:
     from lib.pipeline_db.cleanup_journal import (

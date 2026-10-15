@@ -14,6 +14,7 @@ from lib.pipeline_db._shared import (
     CURRENT_EVIDENCE_PREFIX,
     accusation_evidence_columns,
 )
+from lib.pipeline_db.pg_safe import pg_jsonb_text
 from lib.pipeline_db.rows import (
     DownloadLogWithEvidenceRow,
     DownloadLogWithOriginRow,
@@ -755,7 +756,8 @@ class _DownloadLogMixin(_PipelineDBBase):
             actual_filetype, actual_min_bitrate,
             spectral_grade, spectral_bitrate,
             existing_min_bitrate, existing_spectral_bitrate,
-            import_result, validation_result, final_format,
+            pg_jsonb_text(import_result), pg_jsonb_text(validation_result),
+            final_format,
             v0_probe_kind, v0_probe_min_bitrate,
             v0_probe_avg_bitrate, v0_probe_median_bitrate,
             existing_v0_probe_kind, existing_v0_probe_min_bitrate,
@@ -1060,7 +1062,7 @@ class _DownloadLogMixin(_PipelineDBBase):
                 true
             )
             WHERE id = %s
-        """, (msgspec.json.encode(triage_result).decode(), log_id))
+        """, (psycopg2.extras.Json(msgspec.to_builtins(triage_result)), log_id))
         self.conn.commit()
         return cur.rowcount > 0
 

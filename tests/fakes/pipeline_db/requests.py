@@ -38,6 +38,7 @@ from lib.pipeline_db._shared import (
 from lib.pipeline_db.decisions import (
     search_backoff_minutes,
 )
+from lib.pipeline_db.pg_safe import pg_safe_json
 from lib.pipeline_db.requests import (
     CAPTURE_DOWNLOAD_OUTCOMES,
     CAPTURE_IMPORT_JOB_TYPES,
@@ -514,10 +515,9 @@ class _FakeRequestsMixin(_FakePipelineDBBase):
         if injected is not None:
             raise injected
         try:
-            outgoing_state = json.loads(
-                state_json,
-                parse_constant=_reject_nonstandard_json_constant,
-            )
+            # Mirrors ``pg_jsonb_text``: decodable text is stored cleaned
+            # (NaN as null); undecodable text is PostgreSQL's rejection.
+            outgoing_state = pg_safe_json(json.loads(state_json))
         except ValueError as exc:
             import psycopg2.errors
             raise psycopg2.errors.InvalidTextRepresentation(

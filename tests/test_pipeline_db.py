@@ -12194,7 +12194,9 @@ class TestDownloadingStatus(unittest.TestCase):
                 psycopg2.errors.InvalidTextRepresentation,
             ),
             (
-                "nonstandard JSON constant",
+                # pg_jsonb_text decodes NaN and the Json adapter stores it as
+                # null (lib/pipeline_db/pg_safe.py), so this is a write.
+                "nonstandard JSON constant is stored as null",
                 "downloading",
                 state(witness),
                 (
@@ -12202,8 +12204,8 @@ class TestDownloadingStatus(unittest.TestCase):
                     f'"enqueued_at":"{witness}",'
                     '"files":[],"x":NaN}'
                 ),
+                True,
                 None,
-                psycopg2.errors.InvalidTextRepresentation,
             ),
         )
 
@@ -12288,7 +12290,10 @@ class TestDownloadingStatus(unittest.TestCase):
                 fake_after = fake.request(req_id)
                 assert real_after is not None
                 if expected_result:
-                    expected_state = json.loads(outgoing_json)
+                    # Non-standard constants (NaN/Infinity) are stored as null.
+                    expected_state = json.loads(
+                        outgoing_json, parse_constant=lambda _token: None,
+                    )
                     self.assertEqual(
                         real_after["active_download_state"],
                         expected_state,

@@ -63,6 +63,7 @@ from lib.pipeline_db.download_log import (
     GRAB_OUTCOMES,
     IMPORT_ACCEPTANCE_OUTCOMES,
 )
+from lib.pipeline_db.pg_safe import pg_jsonb_text
 from lib.search_classification import (
     SearchSummary as _SearchSummary,
 )
@@ -128,8 +129,9 @@ class _SearchPlanMixin(_PipelineDBBase):
         """Record one search attempt for an album request.
 
         ``candidates`` is the top-N forensic ``CandidateScore`` list (already
-        truncated by the caller). It is encoded via ``msgspec.json.encode``
-        and written to ``search_log.candidates`` JSONB. ``None`` writes SQL
+        truncated by the caller). It is bound as ``psycopg2.extras.Json`` (made
+        storable by ``lib/pipeline_db/pg_safe.py``) and written to
+        ``search_log.candidates`` JSONB. ``None`` writes SQL
         NULL — error / submission-failure rows have no scoring data to
         report. See ``.claude/rules/code-quality.md`` § Wire-boundary types
         for the symmetric encode/decode contract.
@@ -148,10 +150,9 @@ class _SearchPlanMixin(_PipelineDBBase):
         exercise the candidate JSONB) stay backwards-compatible while
         production callers populate every field.
         """
-        candidates_json: str | None = None
-        if candidates is not None:
-            import msgspec  # local import keeps top-of-module deps narrow
-            candidates_json = msgspec.json.encode(candidates).decode()
+        candidates_json = (
+            psycopg2.extras.Json(candidates) if candidates is not None else None
+        )
         self._execute("""
             INSERT INTO search_log (
                 request_id, query, result_count, elapsed_s, outcome,
@@ -407,9 +408,10 @@ class _SearchPlanMixin(_PipelineDBBase):
           contributes zero rows rather than raising (verified against the
           ephemeral PG). Its non-array half is fail-closed LEGISLATION,
           not a live path — ``jsonb_array_elements`` errors on a non-array
-          jsonb, and the only writer,
-          ``msgspec.json.encode(list[CandidateScore])``, cannot produce
-          one: measured on the live corpus 2026-09-09, ``candidates`` is
+          jsonb, and both writers (``log_search``'s
+          ``Json(list[CandidateScore])`` and
+          ``record_consumed_search_attempt``'s decoded caller list) bind a
+          list, so they cannot produce one: measured on the live corpus 2026-09-09, ``candidates`` is
           ``array`` on 498,528 rows and NULL on 649, with zero non-array
           values across 1,391,812 elements. It stays because the column is
           plain jsonb and the next writer is not bound by that encoder.
@@ -1764,7 +1766,7 @@ class _SearchPlanMixin(_PipelineDBBase):
                         attempt.result_count,
                         attempt.elapsed_s,
                         attempt.outcome,
-                        attempt.candidates_json,
+                        pg_jsonb_text(attempt.candidates_json),
                         attempt.variant,
                         attempt.final_state,
                         attempt.browse_time_s,
