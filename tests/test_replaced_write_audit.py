@@ -489,8 +489,9 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "``min(BASE * 2 ** prior, MAX)`` inline, and a lifecycle-bound "
             "fingerprint hashes the whole enclosing method AST. The PG-safe "
             "adapter change re-keyed it (c4d426397b1774f9 -> c31b7b477f4ab13d), "
-            "again with no SQL change: the enclosing method's audit binds now "
-            "go through ``pg_jsonb_text``)"
+            "again with no SQL change: a ``psycopg2.extras.Json(...)`` call "
+            "inside the enclosing method dropped its ``dumps=`` argument, "
+            "which the adapter now ignores)"
         ),
     ),
 }

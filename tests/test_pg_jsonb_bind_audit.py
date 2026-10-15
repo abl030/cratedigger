@@ -2,8 +2,9 @@
 
 ``lib/pipeline_db/pg_safe.py`` cleans every ``str`` and ``Json`` parameter,
 but it cannot see escapes (``\\u0000``, ``\\udce9``, ``NaN``) inside JSON
-text that was already encoded. Ten DB-layer sites used to encode a payload
-and bind the string; each one could fail a write on an unstorable value.
+text that was already encoded. Eight DB-layer sites used to encode a
+payload and bind the string; each one could fail a write on an unstorable
+value.
 
 Bounded grammar: inside ``lib/pipeline_db/``, a call to ``json.dumps``,
 ``msgspec.json.encode`` or any ``.to_json()`` may appear only in the named

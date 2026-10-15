@@ -18,11 +18,12 @@ row turned a recoverable outcome into a write failure.
 The fix lives at psycopg2's adaptation layer, not at call sites: every
 ``str`` parameter (scalars, ``text[]`` elements, ``execute_values`` rows,
 ``sql.Literal``) and every ``psycopg2.extras.Json`` is adapted through this
-module, so no writer — present or future, pooled or raw cursor — can bind an
-unstorable value. JSONB payloads must therefore be bound as
-``psycopg2.extras.Json(obj)`` — or, for a document a caller hands over
-already encoded, ``pg_jsonb_text(text)`` — never as a raw JSON string, whose
-escapes this layer cannot see.
+module, whichever writer binds it, pooled or raw cursor. What it does not
+cover: a raw JSON string bound to a JSONB column (its escapes are invisible
+here, so JSONB must be bound as ``psycopg2.extras.Json(obj)`` or, for a
+document a caller hands over already encoded, ``pg_jsonb_text(text)``),
+``bytes`` parameters, and encoders that raise before the bind is reached
+(msgspec on a lone surrogate — issue #1422).
 
 Cleaning is deliberately minimal and visible: trailing NULs (ID3 padding)
 are dropped, an interior NUL or a lone surrogate becomes U+FFFD so the
@@ -58,8 +59,11 @@ def pg_safe_json(value: object) -> object:
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if _is_object_dict(value):
+        # Only string keys are cleaned: a non-finite float key must stay a
+        # float, since msgspec rejects ``None`` keys.
         return {
-            pg_safe_json(key): pg_safe_json(item) for key, item in value.items()
+            pg_safe_text(key) if isinstance(key, str) else key: pg_safe_json(item)
+            for key, item in value.items()
         }
     if _is_object_list(value):
         return [pg_safe_json(item) for item in value]

@@ -9,6 +9,7 @@ exactly one U+FFFD.
 
 from __future__ import annotations
 
+import json
 import math
 import unittest
 
@@ -166,6 +167,23 @@ class TestRealWriterStoresEveryValue(unittest.TestCase):
         for name in stored_names:
             assert isinstance(name, str)
             self.assertEqual(_bad_count(name), 0)
+
+    @given(payload=_JSON)
+    @example(payload={"id": LIVE_TRACK_ID + "\x00", "ratio": math.nan})
+    def test_json_text_parameters(self, payload: object) -> None:
+        """Caller-encoded JSON text (stdlib, NaN tokens and escapes kept)."""
+        log_id = self.db.log_download(
+            self.request_id, outcome="failed", import_result=json.dumps(payload),
+        )
+        row = self.db._execute(
+            "SELECT import_result FROM download_log WHERE id = %s", (log_id,),
+        ).fetchone()
+        assert row is not None
+        stored = row["import_result"]
+        if payload is None:
+            self.assertIsNone(stored)
+            return
+        self.assertEqual(json_violations(payload, stored), [])
 
     @given(payload=_JSON)
     @example(payload=[{"items": [{"mb_trackid": LIVE_TRACK_ID + "\x00"}]}])

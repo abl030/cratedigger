@@ -22,7 +22,12 @@ from typing import ClassVar
 import msgspec
 import psycopg2.extras
 
-from lib.pipeline_db.pg_safe import pg_json_dumps, pg_safe_json, pg_safe_text
+from lib.pipeline_db.pg_safe import (
+    pg_json_dumps,
+    pg_jsonb_text,
+    pg_safe_json,
+    pg_safe_text,
+)
 from lib.quality import ChooseMatchMessage
 from tests.evidence_helpers import make_album_quality_evidence
 from tests.test_harness_wire_contract_audit import (
@@ -114,6 +119,12 @@ class TestPgJsonDumps(unittest.TestCase):
             pg_safe_json([math.nan, math.inf, -math.inf, 2.5]),
             [None, None, None, 2.5],
         )
+
+    def test_non_string_keys_are_left_alone(self) -> None:
+        self.assertEqual(pg_safe_json({1: "a\x00", 2.5: "b"}), {1: "a", 2.5: "b"})
+        nan_key = pg_safe_json({math.nan: 1})
+        assert isinstance(nan_key, dict)
+        self.assertTrue(all(isinstance(k, float) for k in nan_key))
 
     def test_pg_safe_json_leaves_scalars_alone(self) -> None:
         for value in (0, -7, True, None, 2**70, 0.0):
@@ -212,6 +223,186 @@ class TestEvidenceAudioValidationIsStorable(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         diagnostics = rows[0]["audio_validation"]["diagnostics"]
         self.assertEqual(diagnostics[0]["stderr_excerpt"], "Invalid data found")
+
+
+_DIRTY_JSON = json.dumps({"id": LIVE_TRACK_ID + "\x00", "ratio": math.nan})
+_CLEAN_STORED = {"id": LIVE_TRACK_ID, "ratio": None}
+
+
+@requires_postgres
+class TestEveryJsonbBindIsStorable(unittest.TestCase):
+    """One real write per JSONB bind the adapter change rewrote.
+
+    Each feeds a NUL-padded string and a NaN, the two values that reach
+    these binds from external text, and reads the column back.
+    """
+
+    def setUp(self) -> None:
+        self.db = make_db()
+        self.addCleanup(self.db.close)
+        self.request_id = self.db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="00000000-0000-0000-0000-0000000000aa",
+        )
+
+    def _one(self, sql: str, params: tuple[object, ...]) -> object:
+        row = self.db._execute(sql, params).fetchone()
+        assert row is not None
+        return next(iter(dict(row).values()))
+
+    def test_none_stays_sql_null(self) -> None:
+        self.assertIsNone(pg_jsonb_text(None))
+        log_id = self.db.log_download(self.request_id, outcome="failed")
+        self.assertEqual(
+            self._one(
+                "SELECT import_result IS NULL AND validation_result IS NULL"
+                " FROM download_log WHERE id = %s", (log_id,),
+            ),
+            True,
+        )
+
+    def test_log_download_json_text_params(self) -> None:
+        log_id = self.db.log_download(
+            self.request_id, outcome="failed",
+            import_result=_DIRTY_JSON, validation_result=_DIRTY_JSON,
+        )
+        row = self.db._execute(
+            "SELECT import_result, validation_result FROM download_log"
+            " WHERE id = %s", (log_id,),
+        ).fetchone()
+        assert row is not None
+        self.assertEqual(row["import_result"], _CLEAN_STORED)
+        self.assertEqual(row["validation_result"], _CLEAN_STORED)
+
+    def test_job_less_rejection_audit(self) -> None:
+        from lib import transitions
+        from lib.terminal_outcomes import (
+            RequestRejectionOutcome,
+            TerminalDownloadAudit,
+        )
+
+        result = self.db.persist_request_rejection_outcome(
+            RequestRejectionOutcome(
+                request_id=self.request_id,
+                audit=TerminalDownloadAudit(
+                    outcome="rejected",
+                    import_result=_DIRTY_JSON,
+                    validation_result=_DIRTY_JSON,
+                ),
+                transition=transitions.RequestTransition.to_wanted_fields(
+                    attempt_type="validation", fields={},
+                ),
+            ),
+        )
+        row = self.db._execute(
+            "SELECT import_result, validation_result FROM download_log"
+            " WHERE id = %s", (result.download_log_id,),
+        ).fetchone()
+        assert row is not None
+        self.assertEqual(row["import_result"], _CLEAN_STORED)
+        self.assertEqual(row["validation_result"], _CLEAN_STORED)
+
+    def _state(self) -> object:
+        return self._one(
+            "SELECT active_download_state FROM album_requests WHERE id = %s",
+            (self.request_id,),
+        )
+
+    def test_set_downloading(self) -> None:
+        self.assertTrue(self.db.set_downloading(self.request_id, _DIRTY_JSON))
+        self.assertEqual(self._state(), _CLEAN_STORED)
+
+    def _plan(self) -> tuple[int, list[dict[str, object]]]:
+        from lib.pipeline_db import SearchPlanItemInput
+
+        plan_id = self.db.create_successful_search_plan(
+            request_id=self.request_id, generator_id="g1",
+            items=[SearchPlanItemInput(
+                ordinal=0, strategy="slot_0", query="q0",
+                canonical_query_key="k0",
+            )],
+            set_active=True,
+        )
+        items = self.db._execute(
+            "SELECT id, ordinal FROM search_plan_items WHERE plan_id = %s",
+            (plan_id,),
+        ).fetchall()
+        return plan_id, [dict(r) for r in items]
+
+    def test_set_downloading_if_plan_current(self) -> None:
+        plan_id, _items = self._plan()
+        request = self.db.get_request(self.request_id)
+        assert request is not None
+        self.assertTrue(self.db.set_downloading_if_plan_current(
+            self.request_id, _DIRTY_JSON,
+            plan_id=plan_id,
+            plan_ordinal=int(request["next_plan_ordinal"]),
+            cycle_count_snapshot=int(request["plan_cycle_count"]),
+        ))
+        self.assertEqual(self._state(), _CLEAN_STORED)
+
+    def test_consumed_search_attempt_candidates(self) -> None:
+        from lib.pipeline_db import ConsumedAttemptInput
+
+        plan_id, items = self._plan()
+        request = self.db.get_request(self.request_id)
+        assert request is not None
+        self.db.record_consumed_search_attempt(ConsumedAttemptInput(
+            request_id=self.request_id,
+            plan_id=plan_id,
+            plan_item_id=int(str(items[0]["id"])),
+            plan_ordinal=0,
+            plan_strategy="slot_0",
+            plan_canonical_query_key="k0",
+            plan_repeat_group=None,
+            plan_generator_id="g1",
+            query="q0",
+            outcome="no_results",
+            plan_item_count=1,
+            cycle_count_snapshot=int(request["plan_cycle_count"]),
+            elapsed_s=1.0, result_count=0,
+            apply_scheduler_attempt=True,
+            scheduler_success=False,
+            candidates_json=json.dumps([{"user": "peer\x00", "score": math.nan}]),
+        ))
+        self.assertEqual(
+            self._one(
+                "SELECT candidates FROM search_log WHERE request_id = %s",
+                (self.request_id,),
+            ),
+            [{"user": "peer", "score": None}],
+        )
+
+    def test_wrong_match_triage(self) -> None:
+        from lib.validation_envelope import WrongMatchTriageAudit
+
+        log_id = self.db.log_download(self.request_id, outcome="rejected")
+        self.assertTrue(self.db.record_wrong_match_triage(
+            log_id,
+            WrongMatchTriageAudit(action="deleted_reject", error="boom\x00"),
+        ))
+        triage = self._one(
+            "SELECT validation_result -> 'wrong_match_triage'"
+            " FROM download_log WHERE id = %s", (log_id,),
+        )
+        assert isinstance(triage, dict)
+        self.assertEqual(triage["error"], "boom")
+
+    def test_jellyfin_pin_children(self) -> None:
+        pin_id = self.db.add_jellyfin_date_created_pin(
+            imported_path="/x",
+            original_date_created="2026-04-26T18:31:04.4425337Z",
+            album_item_id="alb-1",
+            children_item_ids=["tr-1\x00", "tr-2"],
+            request_id=None,
+        )
+        self.assertEqual(
+            self._one(
+                "SELECT children_item_ids FROM jellyfin_date_created_pins"
+                " WHERE id = %s", (pin_id,),
+            ),
+            ["tr-1", "tr-2"],
+        )
 
 
 def _nul_tagged_item() -> _Stub:
