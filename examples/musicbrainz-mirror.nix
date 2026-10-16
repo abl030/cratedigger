@@ -80,21 +80,34 @@ in
   };
 
   # Build any empty materialized tables (see the setup note above). Only
-  # the first run does real work (tens of minutes, during which artist
-  # browses wait on the table lock); later starts skip every table.
+  # the first run does real work (minutes, during which artist browses wait
+  # on the table lock); later starts skip every table.
+  #
+  # After a build that did work, the web service must restart: MusicBrainz
+  # decides once per worker process whether artist_release has data and
+  # caches the answer, so workers started while it was empty keep using
+  # the broken fallback query until they are replaced. Upstream prints
+  # "Done." only for a table it built, so a no-op start restarts nothing.
   systemd.services.musicbrainz-materialized-tables = {
     description = "Build MusicBrainz materialized tables when empty";
     after = [ "musicbrainz-mirror.service" ];
     requires = [ "musicbrainz-mirror.service" ];
     wantedBy = [ "multi-user.target" ];
-    path = [ pkgs.podman pkgs.podman-compose ];
+    path = [ pkgs.podman pkgs.podman-compose pkgs.gnugrep ];
     serviceConfig = {
       Type = "simple";
       WorkingDirectory = composeDir;
     };
     script = ''
-      podman-compose run --rm musicbrainz \
-        bash -c 'carton exec -- ./admin/BuildMaterializedTables --database=MAINTENANCE all'
+      out=$(podman-compose run --rm musicbrainz \
+        bash -c 'carton exec -- ./admin/BuildMaterializedTables --database=MAINTENANCE all' 2>&1) || {
+        printf '%s\n' "$out"
+        exit 1
+      }
+      printf '%s\n' "$out"
+      if printf '%s\n' "$out" | grep -qx 'Done\.'; then
+        podman-compose restart musicbrainz
+      fi
     '';
   };
 

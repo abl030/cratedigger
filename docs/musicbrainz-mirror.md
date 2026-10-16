@@ -64,6 +64,16 @@ SELECT (SELECT count(*) FROM artist_release)       AS artist_release,
 
 Both should be non-zero.
 
+**Then restart the web service.** MusicBrainz decides once per worker
+process whether `artist_release` has data (`Release.pm`'s
+`has_materialized_artist_release_data` caches it in a `state` variable),
+so workers started while the table was empty keep using the fallback
+query. On the operator's mirror the browse still returned 819 of 820 with
+16.4M `artist_release` rows, and 820 of 820 immediately after restarting
+the web container. Building the tables on a stopped stack, as in the
+one-time setup, avoids this; the sample unit restarts the web service
+itself after any build that did work.
+
 **Unrelated but similar:** a mirror's PostgreSQL that logs
 `database "musicbrainz_db" has a collation version mismatch` after an OS or
 image upgrade has text indexes in the old sort order. Rebuild them, then
