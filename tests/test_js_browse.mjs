@@ -16,6 +16,7 @@ import {
   reloadBrowseArtist,
   reloadExpansionsAfterCompare,
   resolverTargetIdentityKind,
+  isSearchableQuery,
   searchArtists,
   setBrowseSource,
 } from '../web/js/browse.js';
@@ -1007,6 +1008,26 @@ resetWorld();
   delete artistBody.querySelectorAll;
   delete artistBody.innerHTML;
   artistBody.innerHTML = painted;
+}
+
+// Single-character artist names exist ("@", issue: the search box never
+// searched them). The query predicate and the source-toggle re-search path
+// must both accept one character.
+t.section('a one-character query searches');
+t.equal(isSearchableQuery('@'), true, 'one character is searchable');
+t.equal(isSearchableQuery(''), false, 'an empty query is not searchable');
+resetWorld();
+{
+  const urls = [];
+  stubGlobals({ fetch: async url => {
+    urls.push(url);
+    return response(200, { artists: [] });
+  } });
+  elements.q.value = '@';
+  await setBrowseSource('discogs');
+  await new Promise(resolve => setImmediate(resolve));
+  t.anyContains(urls, '/api/discogs/search?q=%40',
+    'toggling source with "@" in the box re-runs the search for "@"');
 }
 
 t.done();
