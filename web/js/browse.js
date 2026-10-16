@@ -41,6 +41,17 @@ async function findArtistOnSource(name, src) {
 }
 
 /**
+ * Whether a trimmed browse query should be searched. One character is
+ * enough in every mode: artists such as "@" have single-character names,
+ * and Discogs IDs start at 1.
+ * @param {string} q - trimmed query
+ * @returns {boolean}
+ */
+export function isSearchableQuery(q) {
+  return q.length > 0;
+}
+
+/**
  * Reflect the active metadata source in the toggle buttons + the hint line.
  * The selected source authors expansion and action identity for associated
  * rows. Both sources still contribute to one semantic catalogue.
@@ -107,7 +118,7 @@ export async function setBrowseSource(src) {
   }
 
   const q = /** @type {HTMLInputElement} */ (document.getElementById('q')).value.trim();
-  if (q.length >= 2) searchArtists(q);
+  if (isSearchableQuery(q)) searchArtists(q);
 }
 
 /**
@@ -141,7 +152,7 @@ export function setSearchType(type) {
   if (state.browseLabel) closeLabelDetail();
   // Re-trigger search if there's a query
   const q = /** @type {HTMLInputElement} */ (document.getElementById('q')).value.trim();
-  if (q.length >= 2) searchArtists(q);
+  if (isSearchableQuery(q)) searchArtists(q);
 }
 
 /**

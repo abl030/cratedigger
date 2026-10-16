@@ -6,7 +6,7 @@
  */
 
 import { state } from './state.js';
-import { searchArtists, cancelBrowseSearch, setSearchType, setBrowseSource, openBrowseArtist, closeBrowseArtist, reloadBrowseArtist, invalidateBrowseArtist, closeVaFallback } from './browse.js';
+import { searchArtists, isSearchableQuery, cancelBrowseSearch, setSearchType, setBrowseSource, openBrowseArtist, closeBrowseArtist, reloadBrowseArtist, invalidateBrowseArtist, closeVaFallback } from './browse.js';
 import { loadReleaseGroup, addRelease, toggleReleaseDetail } from './discography.js';
 import { loadRecents, setRecentsFilter, setRecentsSub, renderRecentsItems } from './recents.js';
 import { loadPipeline, loadPipelineDashboard, mergeRekeyRequest, recheckRetagDivergenceAlbum, refreshLibraryCensus, setPipelineView, renderPipeline, syncRetagDivergenceAlbum, toggleCoverageMatchGraph, toggleDetail, toggleMarkIncomplete, deleteRequest, updateStatus } from './pipeline.js';
@@ -149,10 +149,7 @@ if (qInput) {
   qInput.addEventListener('input', () => {
     clearTimeout(state.searchTimer ?? undefined);
     const q = qInput.value.trim();
-    // ID mode parses single-character inputs (Discogs IDs start at 1);
-    // other modes need at least 2 chars before searching.
-    const minLen = state.browseSearchType === 'id' ? 1 : 2;
-    if (q.length < minLen) {
+    if (!isSearchableQuery(q)) {
       cancelBrowseSearch();
       const results = document.getElementById('results');
       if (results) results.innerHTML = '';
