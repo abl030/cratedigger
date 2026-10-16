@@ -42,6 +42,15 @@ The operator runs the official MusicBrainz mirror stack in dedicated CT 100
   <https://metabrainz.org/supporters/account-type> — dropped into the
   stack's config; the mirror then stays hours-fresh.
 - Size: plan ~100GB+ for the database + search indexes.
+- **Build the materialized tables** after the import
+  (`./admin/BuildMaterializedTables --database=MAINTENANCE all`; upstream
+  calls the step optional). Cratedigger needs them: with `artist_release`
+  empty, artist release browses can repeat one release and omit a tied
+  sibling pressing, and the artist page fails closed. The operator's mirror
+  was found without them on 2026-10-16. Details,
+  the one-line check, and the sample unit:
+  [`docs/musicbrainz-mirror.md`](musicbrainz-mirror.md),
+  [`examples/musicbrainz-mirror.nix`](../examples/musicbrainz-mirror.nix).
 - Wire it up: `services.cratedigger.musicbrainz.apiBase = "http://<host>:5200"`.
   Configure the external immutable Beets authority separately with the same
   host:port, plain HTTP, and ratelimit 100 values.

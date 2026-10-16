@@ -48,7 +48,18 @@ in
   #   echo "MB_REPLICATION_TOKEN=<token>" >> .env
   #   podman-compose build
   #   podman-compose run --rm musicbrainz createdb.sh -fetch   # the big one
+  #   podman-compose run --rm musicbrainz bash -c 'carton exec -- ./admin/BuildMaterializedTables --database=MAINTENANCE all'
   #   podman-compose run --rm indexer python -m sir reindex    # search indexes
+  #
+  # The materialized tables are REQUIRED for cratedigger, although upstream
+  # calls them optional. Without artist_release, /ws/2/release?artist=
+  # browses run a fallback query whose sort has no unique tiebreaker:
+  # releases tied on date/country/barcode/title can appear on two pages
+  # while a sibling pressing appears on none. Cratedigger's artist page then
+  # fails closed ("browse did not conserve N unique identities"); see
+  # docs/musicbrainz-mirror.md. The unit below re-runs the build on every
+  # start: upstream skips any table that already has rows, so it is a no-op
+  # once built, and replication keeps the tables current.
 
   # Day-2: the stack as a unit. Replication runs inside the stack (cron
   # in the musicbrainz container) once the token is configured.
@@ -66,6 +77,25 @@ in
       ExecStop = "${pkgs.podman-compose}/bin/podman-compose down";
       TimeoutStartSec = "10min";
     };
+  };
+
+  # Build any empty materialized tables (see the setup note above). Only
+  # the first run does real work (tens of minutes, during which artist
+  # browses wait on the table lock); later starts skip every table.
+  systemd.services.musicbrainz-materialized-tables = {
+    description = "Build MusicBrainz materialized tables when empty";
+    after = [ "musicbrainz-mirror.service" ];
+    requires = [ "musicbrainz-mirror.service" ];
+    wantedBy = [ "multi-user.target" ];
+    path = [ pkgs.podman pkgs.podman-compose ];
+    serviceConfig = {
+      Type = "simple";
+      WorkingDirectory = composeDir;
+    };
+    script = ''
+      podman-compose run --rm musicbrainz \
+        bash -c 'carton exec -- ./admin/BuildMaterializedTables --database=MAINTENANCE all'
+    '';
   };
 
   networking.firewall.allowedTCPPorts = [ port ];
