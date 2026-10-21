@@ -576,6 +576,19 @@ def ffprobe_audio_codec_name(fpath: str) -> str | None:
     return codec.strip().lower() or None
 
 
+def _filetype_extensions(filetype: str) -> set[str]:
+    return {
+        part.strip().lstrip(".")
+        for part in (filetype or "").lower().split(",")
+        if part.strip()
+    }
+
+
+def has_unambiguous_lossless_extension(filetype: str) -> bool:
+    """FLAC, WAV, and ALAC extensions are lossless without probing a file."""
+    return bool(_filetype_extensions(filetype) & {"flac", "wav", "alac"})
+
+
 def has_supported_lossless_audio(
     filetype: str,
     audio_files: Sequence[Path],
@@ -589,14 +602,9 @@ def has_supported_lossless_audio(
     Accepting the caller's paths keeps directory walking and codec probing at
     the measurement boundary instead of repeating them in downstream callers.
     """
-    extensions = {
-        part.strip().lstrip(".")
-        for part in (filetype or "").lower().split(",")
-        if part.strip()
-    }
-    if extensions & {"flac", "wav", "alac"}:
+    if has_unambiguous_lossless_extension(filetype):
         return True
-    if "m4a" not in extensions:
+    if "m4a" not in _filetype_extensions(filetype):
         return False
     probe = codec_probe or ffprobe_audio_codec_name
     codecs: list[str] = []
@@ -808,17 +816,16 @@ def measure_preimport_state(
     filetype_band = _filetype_band(download_filetype)
     # Enumerate candidate audio once. The same stable path set owns file-count
     # and layout facts, bad-hash lookup, and lossless-container detection. In
-    # particular, M4A codec probes happen here exactly once per necessary file.
+    # particular, M4A codec probes happen exactly once per necessary file, and
+    # only after the integrity decode passes (issue #1424): an M4A with no
+    # readable audio stream is the candidate's fault, and the decode says so
+    # as audio_corrupt where the probe could only raise a measurement crash.
     audio_files_for_count = _iter_audio_files(path)
     audio_file_count = len(audio_files_for_count)
     folder_layout: Literal["flat", "nested"] = (
         "nested"
         if any(str(audio.parent) != path for audio in audio_files_for_count)
         else "flat"
-    )
-    lossless_candidate = has_supported_lossless_audio(
-        filetype_band,
-        audio_files_for_count,
     )
     # This audit is intentionally separate from policy-facing
     # download_spectral/existing_spectral below. Early measurement-only exits
@@ -877,7 +884,10 @@ def measure_preimport_state(
             folder_layout=folder_layout,
             audio_file_count=audio_file_count,
             filetype_band=filetype_band,
-            lossless_candidate=lossless_candidate,
+            # A rejected candidate is never probed; ambiguous M4A reads lossy.
+            lossless_candidate=has_unambiguous_lossless_extension(
+                filetype_band,
+            ),
             min_bitrate_kbps=(
                 download_min_bitrate_bps // 1000
                 if download_min_bitrate_bps
@@ -889,6 +899,11 @@ def measure_preimport_state(
             existing_spectral_path=existing_spectral_path,
             spectral_audit=spectral_audit,
         )
+
+    lossless_candidate = has_supported_lossless_audio(
+        filetype_band,
+        audio_files_for_count,
+    )
 
     # --- Bad-audio-hash gate (plan 2026-04-29-005 / U5) ---
     # Hash candidate tracks and compare against the curator-reported
