@@ -489,9 +489,16 @@ class _DownloadLogMixin(_PipelineDBBase):
 
         ``measurement_failed`` means Cratedigger could not establish an audio
         fact because the surrounding world failed (for example permissions,
-        a vanished path, or a tool/process failure).  The source is therefore
-        audit evidence, not an ordinary abandoned download, and the disk
-        reaper must never remove it.
+        a vanished path, or a tool/process failure).  Any such source that
+        still exists is audit evidence, not an ordinary abandoned download,
+        so the slskd disk reaper must never remove it (issue #835).
+
+        This guards the reaper only; it is not a retention promise
+        (issue #1425).  Automation sources have lived in the processing tree
+        since 2026-07-23, outside the reaper's root, and the exact-owner
+        processing cleanup removes them at the terminal transaction like any
+        other reject.  For those the row itself is the evidence: its
+        ``MeasurementFailure`` reason and detail.
 
         A post-commit corrupt-audio quarantine audit is also retained. No
         current writer produces this key (issue #1077, D3: bad rips are now
