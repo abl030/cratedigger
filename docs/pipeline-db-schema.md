@@ -293,12 +293,20 @@ Untracked rows.
   and manual cursor advance reject the replaced ancestor.
 - `search_filetype_override TEXT` — transient CSV filetype list (e.g. `"lossless,mp3 v0,mp3 320"` or just `"lossless"`). Overrides global `allowed_filetypes` for search. The post-import policy — identical for automatic and force-import callers (decision 19) — writes `"lossless"` only for a transparent, spectrally genuine copy (decision 17: the grade's subject label does not gate narrowing) and for the provisional lossless-source lane; other unverified retained copies return to the full search surface. Only a proof-bearing copy completes acquisition. The `"lossless"` virtual tier matches FLAC, ALAC, and WAV.
 - `target_format TEXT` — persistent user intent for desired format on disk (`"lossless"` or NULL). Set only by user action (CLI/web set-intent toggle). Never cleared by quality gate. When set, keeps lossless on disk (normalizes ALAC/WAV → FLAC) instead of converting to V0/target.
+- `marked_complete_at TIMESTAMPTZ`, `marked_complete_findings JSONB` —
+  operator's complete mark (migration 087). NULL = unmarked. Set/cleared only
+  by `pipeline-cli mark-complete` / `POST /api/pipeline/mark-complete` / the
+  Library Completeness card. `marked_complete_findings` holds the exact census
+  findings (`[{kind, detail}]`, sorted) the operator reviewed; the dashboard
+  honours the mark only while the census still reports exactly those
+  findings, so a new or changed finding lists the album again. Setting it
+  clears `marked_incomplete_at`. Never read by the import decision path.
 - `marked_incomplete_at TIMESTAMPTZ` — operator's incomplete mark (issue
   #1241, migration 082). NULL = unmarked. Set/cleared only by
   `pipeline-cli mark-incomplete` / `POST /api/pipeline/mark-incomplete` /
   the dashboard's Library Completeness card — never by measurement — and
   cleared automatically by a terminal import acceptance whose candidate
-  beets proved whole. While set, the quality decider disregards the
+  beets proved whole. Setting it clears `marked_complete_at`. While set, the quality decider disregards the
   installed side for any beets-whole candidate (fresh-import admission);
   see `docs/quality-verification.md` § "Operator incomplete mark".
 - `min_bitrate INTEGER` — current min track bitrate in kbps (from beets).

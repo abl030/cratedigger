@@ -269,6 +269,42 @@ export async function toggleMarkIncomplete(requestId, marked, btn) {
 }
 
 /**
+ * Operator action: toggle the complete mark on a request from the Library
+ * Completeness card. Marked, the request's current census findings are
+ * recorded as reviewed and the card lists the album as verified until
+ * those findings change.
+ * @param {number} requestId
+ * @param {boolean} marked - true to set the mark, false to clear it
+ * @param {HTMLButtonElement} btn
+ */
+export async function toggleMarkComplete(requestId, marked, btn) {
+  btn.disabled = true;
+  btn.textContent = marked ? 'Marking...' : 'Clearing...';
+  try {
+    const r = await fetch(`${API}/api/pipeline/mark-complete`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id: requestId, marked}),
+    });
+    const data = await r.json();
+    if (r.ok) {
+      toast(marked
+        ? `Request #${requestId} marked complete — its census findings are acknowledged`
+        : `Request #${requestId} complete mark cleared`);
+      void loadPipelineDashboard();
+      return;
+    }
+    btn.disabled = false;
+    btn.textContent = marked ? 'Mark complete' : 'Clear complete mark';
+    toast(`mark-complete refused: ${data.error || r.status}`, true);
+  } catch (_e) {
+    btn.disabled = false;
+    btn.textContent = marked ? 'Mark complete' : 'Clear complete mark';
+    toast('mark-complete request failed', true);
+  }
+}
+
+/**
  * Operator action: request an out-of-schedule library-completeness
  * census run. The server writes the trigger file the census path unit
  * watches; the daily oneshot stays the single execution path, so the

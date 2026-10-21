@@ -381,6 +381,48 @@ def post_pipeline_mark_incomplete(
     h._json({"status": result.outcome, "id": result.request_id})
 
 
+class PipelineMarkCompleteRequest(BaseModel):
+    id: int = Field(gt=0)
+    marked: bool = Field(strict=True)
+
+
+def post_pipeline_mark_complete(
+    h: RouteHandler, body: dict[str, object],
+) -> None:
+    """Set/clear the operator's complete mark on a request.
+
+    Marked: the request's current library-completeness findings are
+    recorded as reviewed, and the census card lists the album as operator
+    verified until those findings change. Thin adapter over
+    ``lib.complete_mark_service.set_complete_mark`` — the same service
+    ``pipeline-cli mark-complete`` wraps (CLI ⇄ API symmetry).
+    """
+    from lib.complete_mark_service import (
+        COMPLETE_MARK_HTTP_STATUS,
+        set_complete_mark,
+    )
+
+    req_body = parse_body(h, body, PipelineMarkCompleteRequest)
+    if req_body is None:
+        return
+    rt = runtime()
+    result = set_complete_mark(
+        rt.db(), req_body.id, marked=req_body.marked,
+        snapshot_path=rt.library_completeness_snapshot_path,
+    )
+    status = COMPLETE_MARK_HTTP_STATUS[result.outcome]
+    if status != 200:
+        messages = {
+            "not_found": "Not found",
+            "replaced": "Request is a frozen replaced row",
+            "not_listed": "The library census lists no findings for this request",
+            "census_unavailable": "The library census snapshot is unavailable",
+        }
+        h._error(messages[result.outcome], status)
+        return
+    h._json({"status": result.outcome, "id": result.request_id})
+
+
 class PipelineUpdateRequest(BaseModel):
     id: int = Field(gt=0)
     status: Literal["wanted", "imported", "unsearchable"]
@@ -1025,6 +1067,13 @@ ROUTES: list[RouteRegistration] = [
         "Set/clear the operator's incomplete mark on a request; marked "
         "requests admit any beets-whole candidate as into an empty slot "
         "(#1241).",
+        classified=True,
+    ),
+    route(
+        "POST", "/api/pipeline/mark-complete", post_pipeline_mark_complete,
+        "Set/clear the operator's complete mark on a request; records the "
+        "request's current library-census findings as reviewed so the "
+        "census card lists the album as operator verified until they change.",
         classified=True,
     ),
     route(

@@ -68,6 +68,12 @@ EXTRA_SWEPT_MODULES: tuple[str, ...] = ("lib.beets_tag_sync",)
 
 REGISTRY: tuple[RegisteredOutcomeMaps, ...] = (
     RegisteredOutcomeMaps(
+        "lib.complete_mark_service",
+        "COMPLETE_MARK_HTTP_STATUS",
+        None,
+        "CompleteMarkOutcome",
+    ),
+    RegisteredOutcomeMaps(
         "lib.incomplete_mark_service",
         "INCOMPLETE_MARK_HTTP_STATUS",
         "INCOMPLETE_MARK_EXIT_CODES",

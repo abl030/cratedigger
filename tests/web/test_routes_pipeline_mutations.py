@@ -872,6 +872,78 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["status"], "already_clear")
 
+    def test_mark_complete_contract(self):
+        """POST /api/pipeline/mark-complete — records the request's current
+        census findings, idempotent re-mark, clear, and the refusals."""
+        from lib.library_completeness import (
+            CompletenessAlbum,
+            CompletenessCounts,
+            CompletenessFinding,
+            CompletenessReport,
+        )
+        from lib.library_completeness_snapshot import (
+            LibraryCompletenessSnapshot,
+            library_completeness_snapshot_path,
+            write_library_completeness_snapshot,
+        )
+
+        self.db.seed_request(make_request_row(
+            id=710, status="imported", mb_release_id="18004",
+            discogs_release_id="18004",
+        ))
+        self.db.seed_request(make_request_row(
+            id=711, status="imported", mb_release_id="not-in-census",
+        ))
+        self.db.set_marked_incomplete(710, marked=True)
+        finding = CompletenessFinding("missing_source_audio", "Nursery Rhyme / Breather")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = library_completeness_snapshot_path(tmpdir)
+            write_library_completeness_snapshot(path, LibraryCompletenessSnapshot(
+                "2026-10-22T00:00:00+00:00", 1.0,
+                CompletenessReport("incomplete", CompletenessCounts(1, 0, 1, 0, 0), (
+                    CompletenessAlbum(19925, "UNKLE", "Psyence Fiction", "18004",
+                                      (finding,), 13, 12, 12),
+                )),
+            ))
+            with install_runtime(replace(
+                runtime(), library_completeness_snapshot_path=path,
+            )):
+                status, data = self._post(
+                    "/api/pipeline/mark-complete", {"id": 710, "marked": True})
+                self.assertEqual(status, 200)
+                self.assertEqual(data, {"status": "marked", "id": 710})
+                row = self.db.get_request(710)
+                assert row is not None
+                self.assertEqual(row["marked_complete_findings"], [
+                    {"kind": "missing_source_audio", "detail": "Nursery Rhyme / Breather"},
+                ])
+                self.assertIsNone(row["marked_incomplete_at"])
+
+                status, data = self._post(
+                    "/api/pipeline/mark-complete", {"id": 710, "marked": True})
+                self.assertEqual((status, data["status"]), (200, "already_marked"))
+
+                status, _data = self._post(
+                    "/api/pipeline/mark-complete", {"id": 711, "marked": True})
+                self.assertEqual(status, 409)
+                status, _data = self._post(
+                    "/api/pipeline/mark-complete", {"id": 999888, "marked": True})
+                self.assertEqual(status, 404)
+                status, _data = self._post(
+                    "/api/pipeline/mark-complete", {"id": 710, "marked": "yes"})
+                self.assertEqual(status, 400)
+
+                status, data = self._post(
+                    "/api/pipeline/mark-complete", {"id": 710, "marked": False})
+                self.assertEqual((status, data["status"]), (200, "cleared"))
+
+        with install_runtime(replace(
+            runtime(), library_completeness_snapshot_path=None,
+        )):
+            status, _data = self._post(
+                "/api/pipeline/mark-complete", {"id": 710, "marked": True})
+        self.assertEqual(status, 503)
+
     def test_mark_incomplete_unknown_request_is_404(self):
         status, _data = self._post(
             "/api/pipeline/mark-incomplete", {"id": 999888, "marked": True},

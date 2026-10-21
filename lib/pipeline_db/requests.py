@@ -1148,14 +1148,91 @@ class _RequestsMixin(_PipelineDBBase):
             # The locked SELECT above already proved the row is live; the
             # WHERE guard restates it so the write itself carries the
             # not-replaced proof (tests/test_replaced_write_audit.py).
-            self._execute(
-                "UPDATE album_requests "
-                "SET marked_incomplete_at = %s, updated_at = %s "
-                "WHERE id = %s AND status != 'replaced'",
-                (now if marked else None, now, int(request_id)),
-            )
+            # Marking incomplete withdraws any operator complete mark: the
+            # two assertions are mutually exclusive.
+            if marked:
+                self._execute(
+                    "UPDATE album_requests "
+                    "SET marked_incomplete_at = %s, marked_complete_at = NULL, "
+                    "marked_complete_findings = NULL, updated_at = %s "
+                    "WHERE id = %s AND status != 'replaced'",
+                    (now, now, int(request_id)),
+                )
+            else:
+                self._execute(
+                    "UPDATE album_requests "
+                    "SET marked_incomplete_at = NULL, updated_at = %s "
+                    "WHERE id = %s AND status != 'replaced'",
+                    (now, int(request_id)),
+                )
             self.conn.commit()
             return "marked" if marked else "cleared"
+
+    def set_marked_complete(
+        self, request_id: int, *, findings: list[dict[str, str]] | None,
+    ) -> str:
+        """Atomically set/clear the operator's complete mark.
+
+        ``findings`` is the exact census finding list the operator reviewed
+        (``None`` clears the mark). Returns ``marked`` / ``cleared`` /
+        ``already_marked`` (same findings already acknowledged) /
+        ``already_clear`` / ``not_found`` / ``replaced``. Marking complete
+        withdraws any incomplete mark. ``replaced`` rows are frozen audit.
+        """
+        with self._atomic():
+            cur = self._execute(
+                "SELECT status, marked_complete_at, marked_complete_findings "
+                "FROM album_requests WHERE id = %s FOR UPDATE",
+                (int(request_id),),
+            )
+            row = cur.fetchone()
+            if row is None:
+                self.conn.commit()
+                return "not_found"
+            if row["status"] == "replaced":
+                self.conn.commit()
+                return "replaced"
+            current = row["marked_complete_at"]
+            if findings is not None and current is not None \
+                    and row["marked_complete_findings"] == findings:
+                self.conn.commit()
+                return "already_marked"
+            if findings is None and current is None:
+                self.conn.commit()
+                return "already_clear"
+            now = datetime.now(UTC)
+            if findings is not None:
+                self._execute(
+                    "UPDATE album_requests "
+                    "SET marked_complete_at = %s, marked_complete_findings = %s, "
+                    "marked_incomplete_at = NULL, updated_at = %s "
+                    "WHERE id = %s AND status != 'replaced'",
+                    (now, psycopg2.extras.Json(findings), now, int(request_id)),
+                )
+            else:
+                self._execute(
+                    "UPDATE album_requests "
+                    "SET marked_complete_at = NULL, marked_complete_findings = NULL, "
+                    "updated_at = %s "
+                    "WHERE id = %s AND status != 'replaced'",
+                    (now, int(request_id)),
+                )
+            self.conn.commit()
+            return "marked" if findings is not None else "cleared"
+
+    def list_marked_complete(self) -> list[dict[str, object]]:
+        """Every live request carrying an operator complete mark.
+
+        A narrow read for the dashboard's census join: id, both release-id
+        columns, and the acknowledged findings.
+        """
+        cur = self._execute(
+            "SELECT id, mb_release_id, discogs_release_id, "
+            "marked_complete_findings FROM album_requests "
+            "WHERE marked_complete_at IS NOT NULL AND status != 'replaced' "
+            "ORDER BY id",
+        )
+        return [dict(row) for row in cur.fetchall()]
 
     def update_status(
         self,

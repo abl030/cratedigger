@@ -754,6 +754,60 @@ class TestPipelineDashboardLibraryCompletenessContract(_FakeDbWebServerCase):
         self.assertIsNone(by_release["rel-unknown"]["request_id"])
         self.assertFalse(by_release["rel-unknown"]["marked_incomplete"])
 
+    def test_operator_complete_mark_moves_album_out_of_the_findings(self) -> None:
+        """An album whose current findings equal the acknowledged ones is
+        listed as operator verified: out of the finding counts, counted as
+        audio complete, status recomputed. A changed finding set lists the
+        album again."""
+        self.db.seed_request(make_request_row(
+            id=320, status="imported", mb_release_id="18004",
+            discogs_release_id="18004",
+        ))
+        self.db.seed_request(make_request_row(
+            id=321, status="imported", mb_release_id="rel-stale",
+        ))
+        breather = CompletenessFinding("missing_source_audio", "Breather")
+        self.db.set_marked_complete(
+            320, findings=[{"kind": "missing_source_audio", "detail": "Breather"}])
+        self.db.set_marked_complete(
+            321, findings=[{"kind": "unknown", "detail": "old finding"}])
+        snapshot = LibraryCompletenessSnapshot(
+            "2026-10-22T00:00:00+00:00", 2.0,
+            CompletenessReport(
+                "incomplete", CompletenessCounts(10, 8, 2, 0, 0), (
+                    CompletenessAlbum(
+                        19925, "UNKLE", "Psyence Fiction", "18004",
+                        (breather,), 13, 12, 12),
+                    CompletenessAlbum(
+                        2, "Artist", "Stale mark", "rel-stale",
+                        (CompletenessFinding("missing_source_audio", "new"),),
+                        1, 0, 0),
+                ),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = library_completeness_snapshot_path(tmpdir)
+            write_library_completeness_snapshot(path, snapshot)
+            with (
+                _library_completeness_snapshot_path_set(path),
+                install_runtime(
+                    make_web_runtime(runtime(), beets=_PoisonedBeetsDB()),
+                ),
+            ):
+                status, data = self._get("/api/pipeline/dashboard")
+        self.assertEqual(status, 200)
+        census = data["library_completeness"]
+        report = census["snapshot"]["report"]
+        by_release = {album["release_id"]: album for album in report["albums"]}
+        self.assertTrue(by_release["18004"]["marked_complete"])
+        self.assertEqual(by_release["18004"]["request_id"], 320)
+        self.assertFalse(by_release["rel-stale"]["marked_complete"])
+        self.assertEqual(report["counts"]["missing_source_audio"], 1)
+        self.assertEqual(report["counts"]["audio_complete"], 9)
+        self.assertEqual(report["counts"]["operator_verified"], 1)
+        self.assertEqual(report["status"], "incomplete")
+        self.assertEqual(census["albums_listed_total"], 1)
+
     def test_one_refused_presentation_row_degrades_one_album_only(self) -> None:
         """#1257 review F9: the presentation projection refuses a
         ``processing`` row missing its owner join (RuntimeError). One such

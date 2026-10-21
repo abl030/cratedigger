@@ -253,6 +253,22 @@ export function renderMarkIncompleteButton(row) {
 }
 
 /**
+ * Mark/clear-complete button for one census album row. The operator
+ * acknowledges the row's current findings as reviewed (e.g. a segued
+ * composite the silence-gap check cannot see into); the dashboard then
+ * lists the album as verified until its findings change. Rendered only
+ * when the dashboard route resolved a pipeline request for the row.
+ * @param {{request_id?: number|null, marked_complete?: boolean}} row
+ * @returns {string}
+ */
+export function renderMarkCompleteButton(row) {
+  if (row.request_id == null) return '';
+  return row.marked_complete
+    ? `<button class="p-btn" onclick="window.toggleMarkComplete(${row.request_id}, false, this)">Clear complete mark</button>`
+    : `<button class="p-btn" onclick="window.toggleMarkComplete(${row.request_id}, true, this)">Mark complete</button>`;
+}
+
+/**
  * Render the persisted read-only source/catalog/files census.
  * @param {any} census
  * @returns {string}
@@ -277,8 +293,10 @@ export function renderLibraryCompletenessCard(census) {
     {kind: 'catalog_drift', label: 'Catalog drift', tone: 'metric-warn'},
     {kind: 'unknown', label: 'Unknown', tone: 'metric-warn'},
   ];
+  const listedRows = rows.filter(row => !row.marked_complete);
+  const verifiedRows = rows.filter(row => row.marked_complete);
   const renderCategory = ({kind, label, tone}) => {
-    const categoryRows = rows.map(row => ({
+    const categoryRows = listedRows.map(row => ({
       row,
       details: (Array.isArray(row.findings) ? row.findings : [])
         .filter(finding => finding.kind === kind)
@@ -289,7 +307,7 @@ export function renderLibraryCompletenessCard(census) {
     return `<details class="completeness-category">
       <summary><span>${label}</span><strong class="${countTone}">${formatCount(total)}</strong></summary>
       <div class="completeness-category-body">
-        ${categoryRows.map(({row, details}) => `<div class="metric-row completeness-album-row"><span>#${esc(String(row.album_id ?? '?'))} ${esc(row.artist || '?')} — ${esc(row.title || '?')}</span><strong>${esc(details.join('; '))}</strong>${renderMarkIncompleteButton(row)}</div>`).join('')}
+        ${categoryRows.map(({row, details}) => `<div class="metric-row completeness-album-row"><span>#${esc(String(row.album_id ?? '?'))} ${esc(row.artist || '?')} — ${esc(row.title || '?')}</span><strong>${esc(details.join('; '))}</strong>${renderMarkIncompleteButton(row)}${renderMarkCompleteButton(row)}</div>`).join('')}
         ${categoryRows.length === 0 ? '<div class="completeness-category-empty">No albums</div>' : ''}
         ${categoryRows.length < total ? `<div class="completeness-category-limit">Showing ${formatCount(categoryRows.length)} of ${formatCount(total)}</div>` : ''}
       </div>
@@ -305,8 +323,26 @@ export function renderLibraryCompletenessCard(census) {
         <div class="metric-row"><span>Last run</span><strong class="metric-value-push">${snapshot.generated_at ? awstDateTime(snapshot.generated_at) : 'n/a'} (${formatDuration(snapshot.duration_seconds)})</strong>${runButton}</div>
         <div class="metric-row"><span>Audio complete</span><strong>${formatCount(counts.audio_complete)} / ${formatCount(counts.albums_scanned)}</strong></div>
         ${categories.map(renderCategory).join('')}
+        ${renderVerifiedCategory(verifiedRows)}
       </div>
     </div>`;
+}
+
+/**
+ * The albums whose census findings the operator acknowledged as complete.
+ * Each row still shows the acknowledged findings, so the reason stays
+ * visible, and offers the clear action.
+ * @param {any[]} verifiedRows
+ * @returns {string}
+ */
+export function renderVerifiedCategory(verifiedRows) {
+  if (verifiedRows.length === 0) return '';
+  return `<details class="completeness-category">
+      <summary><span>Verified complete by operator</span><strong class="metric-muted">${formatCount(verifiedRows.length)}</strong></summary>
+      <div class="completeness-category-body">
+        ${verifiedRows.map(row => `<div class="metric-row completeness-album-row"><span>#${esc(String(row.album_id ?? '?'))} ${esc(row.artist || '?')} — ${esc(row.title || '?')}</span><strong class="metric-muted">${esc((Array.isArray(row.findings) ? row.findings : []).map(/** @param {any} f */ f => f.detail || '').join('; '))}</strong>${renderMarkCompleteButton(row)}</div>`).join('')}
+      </div>
+    </details>`;
 }
 
 /**

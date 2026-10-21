@@ -143,6 +143,11 @@ class AlbumRequestRow(TypedDict):
     # NULL = unmarked. Never written by measurement; the census only informs
     # the operator's decision to set it.
     marked_incomplete_at: datetime | None
+    # Migration 087: operator-set mark that the installed copy is complete,
+    # with the exact census findings the operator reviewed. Honoured by the
+    # dashboard only while the census still reports exactly those findings.
+    marked_complete_at: datetime | None
+    marked_complete_findings: list[dict[str, str]] | None
 
 
 class AlbumRequestPresentationRow(AlbumRequestRow):

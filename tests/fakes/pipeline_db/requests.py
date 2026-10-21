@@ -169,8 +169,51 @@ class _FakeRequestsMixin(_FakePipelineDBBase):
             return "already_clear"
         now = datetime.now(UTC)
         row["marked_incomplete_at"] = now if marked else None
+        if marked:
+            row["marked_complete_at"] = None
+            row["marked_complete_findings"] = None
         row["updated_at"] = now
         return "marked" if marked else "cleared"
+
+    def set_marked_complete(
+        self, request_id: int, *, findings: list[dict[str, str]] | None,
+    ) -> str:
+        """Mirror ``PipelineDB.set_marked_complete``."""
+        row = self._requests.get(request_id)
+        if row is None:
+            return "not_found"
+        if row.get("status") == "replaced":
+            return "replaced"
+        current = row.get("marked_complete_at")
+        if (findings is not None and current is not None
+                and row.get("marked_complete_findings") == findings):
+            return "already_marked"
+        if findings is None and current is None:
+            return "already_clear"
+        now = datetime.now(UTC)
+        if findings is not None:
+            row["marked_complete_at"] = now
+            row["marked_complete_findings"] = [dict(f) for f in findings]
+            row["marked_incomplete_at"] = None
+        else:
+            row["marked_complete_at"] = None
+            row["marked_complete_findings"] = None
+        row["updated_at"] = now
+        return "marked" if findings is not None else "cleared"
+
+    def list_marked_complete(self) -> list[dict[str, object]]:
+        """Mirror ``PipelineDB.list_marked_complete``."""
+        return [
+            {
+                "id": request_id,
+                "mb_release_id": row.get("mb_release_id"),
+                "discogs_release_id": row.get("discogs_release_id"),
+                "marked_complete_findings": row.get("marked_complete_findings"),
+            }
+            for request_id, row in sorted(self._requests.items())
+            if row.get("marked_complete_at") is not None
+            and row.get("status") != "replaced"
+        ]
 
     def get_request_by_mb_release_id(self, mb_release_id: str) -> AlbumRequestRow | None:
         for row in self._requests.values():
@@ -1081,6 +1124,9 @@ class _FakeRequestsMixin(_FakePipelineDBBase):
             "prior_unfindable_category": None,
             # Migration 082 / issue #1241 — operator incomplete mark.
             "marked_incomplete_at": None,
+            # Migration 087 — operator complete mark.
+            "marked_complete_at": None,
+            "marked_complete_findings": None,
             # Migration 021 addressing FK.
             "current_evidence_id": None,
             # Migration 023 — supersede lineage.
