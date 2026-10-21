@@ -33,6 +33,3 @@ switch, and `cratedigger.service` (`restartIfChanged = false`) loads the new
 code on its next timer cycle, a few minutes at most. Exercise the real CLI,
 API, or UI path the change touched. If the change was not user-facing there is
 nothing to check, and no reason to have deployed.
-
-After a non-trivial series has shipped, run the post-ship reflection in
-`.claude/rules/deploy.md`.

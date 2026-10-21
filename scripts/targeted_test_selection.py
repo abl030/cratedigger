@@ -465,9 +465,6 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_run_beets_harness_script",
         "tests.test_beets_config_startup",
     ),
-    "tests/_docs_reference_audit.py": (
-        "tests.test_docs_audit",
-    ),
     "tests/_hypothesis_profiles.py": (
         # test_hypothesis_profile_audit is a pure AST audit (ast, os,
         # unittest, dataclasses only) — it checks that OTHER modules import
@@ -502,7 +499,6 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_source_pins",
         "tests.test_daily_flake_update",
         "tests.test_deploy",
-        "tests.test_docs_audit",
         "tests.test_fuzz_burst",
         "tests.test_issue_573_boundaries",
         "tests.test_issue_633_boundaries",
@@ -1184,11 +1180,6 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     # docstring mentions or from the string, unrelated
     # lib.beets_config_contract.check_beets_config function that
     # scripts/check_beets_config.py itself imports and wraps).
-    "scripts/audit_issue_references.py": (
-        # tests.test_issue_reference_contract:10 --
-        # "from scripts.audit_issue_references import find_closing_issue_references"
-        "tests.test_issue_reference_contract",
-    ),
     "scripts/check_beets_config.py": (
         # tests.test_beets_config_contract_integration launches this file
         # as a real subprocess (TestStandaloneBeetsConfigChecker._run,
