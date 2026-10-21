@@ -39,6 +39,7 @@ import copy
 import functools
 import io
 import json
+import math
 import sys
 import unittest
 from types import SimpleNamespace
@@ -559,6 +560,35 @@ class TestDroppedKeysFailLoudAtTheBoundary(unittest.TestCase):
         self.assertEqual(len(decoded.items), 1)
         self.assertEqual(len(target.mapping), 1)
         self.assertEqual(len(target.extra_tracks), 1)
+
+
+class TestSendRefusesNonFiniteFloats(unittest.TestCase):
+    """Stdlib ``json.dumps`` would write bare NaN, which strict readers reject."""
+
+    def _send(self, msg: dict[str, object]) -> str:
+        module_globals = vars(beets_harness)
+        prior = module_globals["_protocol_stdout"]
+        buffer = io.StringIO()
+        module_globals["_protocol_stdout"] = buffer
+        try:
+            beets_harness._send(msg)
+        finally:
+            module_globals["_protocol_stdout"] = prior
+        return buffer.getvalue()
+
+    def test_nan_fails_at_the_producer_naming_the_field(self) -> None:
+        for bad in (math.nan, math.inf, -math.inf):
+            with self.subTest(bad=bad), self.assertRaises(ValueError) as caught:
+                self._send({
+                    "type": "choose_match",
+                    "candidates": [{"distance": 0.1}, {"distance": bad}],
+                })
+            self.assertIn("'choose_match'", str(caught.exception))
+            self.assertIn("candidates[1].distance", str(caught.exception))
+
+    def test_finite_message_is_written_as_one_line(self) -> None:
+        line = self._send({"type": "session_end", "ratio": 0.5})
+        self.assertEqual(json.loads(line), {"type": "session_end", "ratio": 0.5})
 
 
 if __name__ == "__main__":

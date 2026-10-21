@@ -7,7 +7,8 @@ it is the one definition here that did not come from the #477 extraction.
 """
 
 import json
-from typing import Any, Literal, Self
+import math
+from typing import Any, Literal, Self, TypeGuard
 
 import msgspec
 
@@ -369,6 +370,12 @@ class ImportResult(msgspec.Struct):
             raise ValueError(
                 "legacy_projection_version is reserved for the v1/v2/v3 reader"
             )
+        # msgspec encodes NaN/±Infinity as null, so the strict reader past
+        # the sentinel would drop the whole result with no clue where the
+        # value came from. Refuse it at the producer, naming the field.
+        non_finite = _non_finite_float_paths(msgspec.to_builtins(self), "")
+        if non_finite:
+            raise ValueError(f"non-finite float at {', '.join(non_finite)}")
         target = self.target_quality_contract
         if target is not None and not target.format.strip():
             raise ValueError("target_quality_contract.format is required")
@@ -694,6 +701,37 @@ class ImportResult(msgspec.Struct):
     def from_json(cls, s: str) -> Self:
         """Deserialize from JSON string."""
         return cls.from_dict(json.loads(s))
+
+
+def _is_object_dict(value: object) -> TypeGuard[dict[object, object]]:
+    return isinstance(value, dict)
+
+
+def _is_object_list(
+    value: object,
+) -> TypeGuard[list[object] | tuple[object, ...]]:
+    return isinstance(value, (list, tuple))
+
+
+def _non_finite_float_paths(value: object, path: str) -> list[str]:
+    """Dotted paths of every NaN/±Infinity inside a builtins tree."""
+    if isinstance(value, float):
+        return [] if math.isfinite(value) else [path or "<root>"]
+    if _is_object_dict(value):
+        return [
+            found
+            for key, item in value.items()
+            for found in _non_finite_float_paths(
+                item, f"{path}.{key}" if path else str(key),
+            )
+        ]
+    if _is_object_list(value):
+        return [
+            found
+            for index, item in enumerate(value)
+            for found in _non_finite_float_paths(item, f"{path}[{index}]")
+        ]
+    return []
 
 
 def parse_import_result(stdout_text: str) -> ImportResult | None:
