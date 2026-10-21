@@ -47,7 +47,7 @@ class ReadOnlyQueryCursor(Protocol):
     def description(self) -> Sequence[Sequence[object]] | None: ...
 
     def execute(self, sql: str) -> None: ...
-    def fetchall(self) -> list[Mapping[str, object]]: ...
+    def fetchall(self) -> list[Sequence[object]]: ...
     def close(self) -> None: ...
 
 
@@ -254,22 +254,32 @@ class _CoreMixin(_PipelineDBBase):
         self,
         sql: str,
         params: Sequence[object] | Mapping[str, object] = (),
+        *,
+        positional: bool = False,
     ):
+        """Execute *sql*; rows are dicts unless *positional* asks for tuples.
+
+        Raw operator SQL needs tuples: a dict row keeps only the last value
+        of a repeated column name (``count(*), count(x)``), issue #1427.
+        """
         pin = self._owner_session_pin
         if pin is None:
-            return self._execute_locked(sql, params)
+            return self._execute_locked(sql, params, positional=positional)
         with pin.io_lock:
-            return self._execute_locked(sql, params)
+            return self._execute_locked(sql, params, positional=positional)
 
 
     def _execute_locked(
         self,
         sql: str,
         params: Sequence[object] | Mapping[str, object] = (),
+        *,
+        positional: bool = False,
     ):
         self._ensure_conn()
+        cursor_factory = None if positional else psycopg2.extras.RealDictCursor
         try:
-            cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur = self.conn.cursor(cursor_factory=cursor_factory)
             if params:
                 cur.execute(sql, params)
             else:
@@ -304,7 +314,7 @@ class _CoreMixin(_PipelineDBBase):
             if not self.conn.autocommit:
                 raise
             self.conn = self._connect()
-            cur = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur = self.conn.cursor(cursor_factory=cursor_factory)
             if params:
                 cur.execute(sql, params)
             else:
@@ -475,15 +485,17 @@ class _CoreMixin(_PipelineDBBase):
         could replay caller SQL on a fresh writable session after connection
         death.
 
+        Rows are tuples in column order, not dicts.
+
         Cleanup is best-effort.  A dead connection cannot retain a
         transaction, and its rollback failure must never hide the diagnostic
         error which caused the scope to exit.
         """
         self._ensure_conn()
         conn = self.conn
-        cur: ReadOnlyQueryCursor = conn.cursor(
-            cursor_factory=psycopg2.extras.RealDictCursor,
-        )
+        # Plain cursor: rows stay positional so repeated column names keep
+        # every value (issue #1427).
+        cur: ReadOnlyQueryCursor = conn.cursor()
         try:
             cur.execute("BEGIN TRANSACTION READ ONLY")
             # The raw-SQL lexer intentionally follows PostgreSQL's standard

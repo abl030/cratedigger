@@ -164,6 +164,7 @@ def analyze_spectral_audit_path(path: str) -> SpectralAnalysisDetail:
         bitrate_kbps=bitrate_kbps,
         suspect_pct=suspect_pct,
         per_track=per_track,
+        error=getattr(result, "error", None),
         cliff_hz=cliff_hz,
         codec_family=codec_family,
         ultrasonic_deficit_db=ultrasonic_deficit_db,

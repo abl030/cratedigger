@@ -661,6 +661,14 @@ def verify_ctdb_pcm(
     )
 
 
+class _NotCdShaped(ValueError):
+    """The source is not one admitted CD-shaped album: a routine withhold.
+
+    Lossy, hi-res, or oddly tagged sources land here every day; the verifier
+    logs them as one line rather than a traceback (issue #1426).
+    """
+
+
 def _probe_track(path: Path, *, deadline: float | None = None) -> _TrackShape:
     _check_deadline(deadline)
     timeout = 15.0
@@ -690,14 +698,14 @@ def _probe_track(path: Path, *, deadline: float | None = None) -> _TrackShape:
     elif extension in {".m4a", ".alac"} and codec == "alac":
         source_format = "alac"
     else:
-        raise ValueError("source is not exact FLAC or ALAC")
+        raise _NotCdShaped("source is not exact FLAC or ALAC")
     if facts.sample_rate != 44100 or facts.channels != 2:
-        raise ValueError("source is not 44.1 kHz stereo")
+        raise _NotCdShaped("source is not 44.1 kHz stereo")
     if facts.bit_depth != 16:
-        raise ValueError("source is not 16-bit PCM")
+        raise _NotCdShaped("source is not 16-bit PCM")
     samples = facts.sample_count
     if samples <= 0 or samples >= 2**32 or samples % SECTOR_SAMPLES:
-        raise ValueError("source is not an admitted CD-shaped track")
+        raise _NotCdShaped("source is not an admitted CD-shaped track")
     tags = {
         key.casefold(): value
         for key, value in payload.format.tags.items()
@@ -722,10 +730,10 @@ def _metadata_number(
     for value in values:
         text = str(value).split("/", 1)[0].strip()
         if re.fullmatch(r"[1-9]\d*", text) is None:
-            raise ValueError("invalid embedded CD track/disc number")
+            raise _NotCdShaped("invalid embedded CD track/disc number")
         parsed.add(int(text))
     if len(parsed) != 1:
-        raise ValueError("conflicting embedded CD track/disc numbers")
+        raise _NotCdShaped("conflicting embedded CD track/disc numbers")
     return next(iter(parsed))
 
 
@@ -734,19 +742,19 @@ def _order_tracks(shapes: list[_TrackShape]) -> list[_TrackShape]:
     with_track_tags = [shape.track_number is not None for shape in shapes]
     if any(with_track_tags):
         if not all(with_track_tags):
-            raise ValueError("partial embedded track ordering is ambiguous")
+            raise _NotCdShaped("partial embedded track ordering is ambiguous")
         disc_tags = [shape.disc_number is not None for shape in shapes]
         if any(disc_tags) and not all(disc_tags):
-            raise ValueError("partial embedded disc ordering is ambiguous")
+            raise _NotCdShaped("partial embedded disc ordering is ambiguous")
         discs = {
             shape.disc_number for shape in shapes
             if shape.disc_number is not None
         }
         if len(discs) > 1:
-            raise ValueError("multi-disc metadata is not one CD-shaped album")
+            raise _NotCdShaped("multi-disc metadata is not one CD-shaped album")
         numbers = [int(shape.track_number or 0) for shape in shapes]
         if sorted(numbers) != list(range(1, len(shapes) + 1)):
-            raise ValueError("embedded track numbers must be unique and contiguous")
+            raise _NotCdShaped("embedded track numbers must be unique and contiguous")
         return sorted(shapes, key=lambda shape: int(shape.track_number or 0))
 
     token_rows = [re.findall(r"\d+", shape.path.stem) for shape in shapes]
@@ -756,7 +764,7 @@ def _order_tracks(shapes: list[_TrackShape]) -> list[_TrackShape]:
         if sorted(values) == list(range(1, len(shapes) + 1)):
             aligned_candidates.add(tuple(values))
     if len(aligned_candidates) != 1:
-        raise ValueError(
+        raise _NotCdShaped(
             "filename fallback requires one aligned, unique, contiguous "
             "track-number token"
         )
@@ -782,21 +790,21 @@ def _album_shape(
         and entry.parent != root
     ]
     if nested_audio:
-        raise ValueError("nested CD audio is not admitted")
+        raise _NotCdShaped("nested CD audio is not admitted")
     audio = [
         entry for entry in root.iterdir()
         if entry.is_file()
         and entry.suffix.lower() in AUDIO_EXTENSIONS_DOTTED
     ]
     if not audio:
-        raise ValueError("album has no audio tracks")
+        raise _NotCdShaped("album has no audio tracks")
     shapes = _order_tracks([
         _probe_track(track, deadline=deadline) for track in audio
     ])
     if len({shape.source_format for shape in shapes}) != 1:
-        raise ValueError("mixed FLAC/ALAC album is not admitted")
+        raise _NotCdShaped("mixed FLAC/ALAC album is not admitted")
     if sum(shape.samples for shape in shapes) > MAX_DISC_SAMPLES:
-        raise ValueError("CD-shaped album exceeds the admitted disc duration")
+        raise _NotCdShaped("CD-shaped album exceeds the admitted disc duration")
     return shapes
 
 
@@ -1467,6 +1475,9 @@ def verify_cd_rip(
                 deadline=deadline,
             )
         return evidence
+    except _NotCdShaped as exc:
+        logger.info("CD rip verifier withheld evidence: %s", exc)
+        return None
     except Exception:
         logger.info("CD rip verifier withheld evidence", exc_info=True)
         return None

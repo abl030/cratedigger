@@ -2353,7 +2353,7 @@ class TestCmdQuery(unittest.TestCase):
         query_cur = MagicMock()
         query_cur.description = [("id",), ("artist_name",), ("details",)]
         query_cur.fetchall.return_value = [
-            {"id": 7, "artist_name": "Buke and Gase", "details": {"tracks": 3}},
+            (7, "Buke and Gase", {"tracks": 3}),
         ]
         db.queue_execute_results(
             MagicMock(), MagicMock(), query_cur, MagicMock())
@@ -2376,7 +2376,7 @@ class TestCmdQuery(unittest.TestCase):
         db = FakePipelineDB()
         query_cur = MagicMock()
         query_cur.description = [("value",)]
-        query_cur.fetchall.return_value = [{"value": 1}]
+        query_cur.fetchall.return_value = [(1,)]
         db.queue_execute_results(
             MagicMock(), MagicMock(), query_cur, MagicMock())
 
@@ -2393,7 +2393,7 @@ class TestCmdQuery(unittest.TestCase):
         db = FakePipelineDB()
         query_cur = MagicMock()
         query_cur.description = [("id",), ("status",)]
-        query_cur.fetchall.return_value = [{"id": 3, "status": "wanted"}]
+        query_cur.fetchall.return_value = [(3, "wanted")]
         db.queue_execute_results(
             MagicMock(), MagicMock(), query_cur, MagicMock())
 
@@ -2405,6 +2405,42 @@ class TestCmdQuery(unittest.TestCase):
         self.assertEqual(
             stdout.getvalue().strip(),
             '[\n  {\n    "id": 3,\n    "status": "wanted"\n  }\n]',
+        )
+
+    def test_query_table_keeps_every_value_of_repeated_column_names(self):
+        """Issue #1427: ``count(*), count(x)`` must not show one value twice."""
+        db = FakePipelineDB()
+        query_cur = MagicMock()
+        query_cur.description = [("a",), ("a",), ("a",)]
+        query_cur.fetchall.return_value = [(1, 2, 3)]
+        db.queue_execute_results(
+            MagicMock(), MagicMock(), query_cur, MagicMock())
+
+        args = MagicMock(sql="SELECT 1 AS a, 2 AS a, 3 AS a", json=False)
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            pipeline_cli.cmd_query(db, args)
+
+        lines = stdout.getvalue().splitlines()
+        self.assertEqual(lines[0], "a | a | a")
+        self.assertEqual(lines[2], "1 | 2 | 3")
+
+    def test_query_json_suffixes_repeated_column_names(self):
+        db = FakePipelineDB()
+        query_cur = MagicMock()
+        query_cur.description = [("count",), ("count",), ("count_2",)]
+        query_cur.fetchall.return_value = [(16, 2, 9)]
+        db.queue_execute_results(
+            MagicMock(), MagicMock(), query_cur, MagicMock())
+
+        args = MagicMock(sql="SELECT ...", json=True)
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            pipeline_cli.cmd_query(db, args)
+
+        self.assertEqual(
+            json.loads(stdout.getvalue()),
+            [{"count": 16, "count_3": 2, "count_2": 9}],
         )
 
     def test_query_reports_sql_errors_and_cleans_up(self):
@@ -2628,6 +2664,36 @@ class TestCmdQueryIntegration(unittest.TestCase):
             rc = pipeline_cli.cmd_query(self.db, args)
         self.assertIsNone(rc)
         self.assertIn("n", stdout.getvalue())
+
+    def test_read_only_query_keeps_repeated_column_values(self):
+        """Issue #1427 against the real cursor: no dict row collapses them."""
+        for json_mode in (False, True):
+            with self.subTest(json=json_mode):
+                args = argparse.Namespace(
+                    sql="SELECT 1 AS a, 2 AS a, 3 AS a", json=json_mode,
+                    write=False, confirm=None,
+                )
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    rc = pipeline_cli.cmd_query(self.db, args)
+                self.assertIsNone(rc)
+                if json_mode:
+                    self.assertEqual(
+                        json.loads(stdout.getvalue()),
+                        [{"a": 1, "a_2": 2, "a_3": 3}],
+                    )
+                else:
+                    self.assertIn("1 | 2 | 3", stdout.getvalue())
+
+    def test_write_query_keeps_repeated_column_values(self):
+        args = argparse.Namespace(
+            sql="SELECT 1 AS a, 2 AS a", json=False, write=True, confirm="WRITE",
+        )
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_query(self.db, args)
+        self.assertIsNone(rc)
+        self.assertIn("1 | 2", stdout.getvalue())
 
     def test_query_executes_confirmed_write_and_reports_no_result_success(self):
         request_id = self.db.add_request(

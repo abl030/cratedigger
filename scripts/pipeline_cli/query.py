@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Mapping
+from collections.abc import Sequence
 from contextlib import AbstractContextManager
 from datetime import date, datetime, time
 from decimal import Decimal
@@ -35,31 +35,52 @@ def _stringify_query_value(value: object) -> str:
 
 
 def _render_query_table(
-    rows: list[Mapping[str, object]], columns: list[str],
+    rows: list[Sequence[object]], columns: list[str],
 ) -> list[str]:
-    """Render SQL query results as a simple aligned table."""
-    widths = {col: len(col) for col in columns}
+    """Render SQL query results as a simple aligned table.
+
+    Rows are positional so repeated column names (``count(*), count(x)``)
+    each show their own value (issue #1427).
+    """
+    widths = [len(col) for col in columns]
     string_rows: list[list[str]] = []
 
     for row in rows:
-        rendered: list[str] = []
-        for col in columns:
-            text = _stringify_query_value(row.get(col))
-            widths[col] = max(widths[col], len(text))
-            rendered.append(text)
+        rendered = [_stringify_query_value(value) for value in row]
+        for index, text in enumerate(rendered):
+            widths[index] = max(widths[index], len(text))
         string_rows.append(rendered)
 
-    header = " | ".join(col.ljust(widths[col]) for col in columns)
-    divider = "-+-".join("-" * widths[col] for col in columns)
+    header = " | ".join(
+        col.ljust(width) for col, width in zip(columns, widths, strict=True))
+    divider = "-+-".join("-" * width for width in widths)
     lines = [header, divider]
     for rendered in string_rows:
         lines.append(" | ".join(
-            value.ljust(widths[col])
-            for col, value in zip(columns, rendered, strict=True)
+            value.ljust(width)
+            for value, width in zip(rendered, widths, strict=True)
         ))
     row_label = "row" if len(rows) == 1 else "rows"
     lines.append(f"({len(rows)} {row_label})")
     return lines
+
+
+def _unique_json_keys(columns: list[str]) -> list[str]:
+    """Suffix repeated column names (``count``, ``count_2``) for JSON objects."""
+    keys: list[str] = []
+    taken = set(columns)
+    seen: set[str] = set()
+    for col in columns:
+        key = col
+        if key in seen:
+            suffix = 2
+            while f"{col}_{suffix}" in taken:
+                suffix += 1
+            key = f"{col}_{suffix}"
+            taken.add(key)
+        seen.add(key)
+        keys.append(key)
+    return keys
 
 
 def _get_query_sql(args: argparse.Namespace) -> str:
@@ -217,7 +238,9 @@ class _QueryDB(Protocol):
     """Small raw-query seam: writes use ``_execute``; default reads use a
     pinned, non-retrying connection scope."""
 
-    def _execute(self, sql: str) -> ReadOnlyQueryCursor: ...
+    def _execute(
+        self, sql: str, *, positional: bool = False,
+    ) -> ReadOnlyQueryCursor: ...
     def read_only_query_cursor(self) -> AbstractContextManager[ReadOnlyQueryCursor]: ...
 
 
@@ -238,12 +261,12 @@ def cmd_query(db: _QueryDB, args: argparse.Namespace) -> int | None:
 
     if write_mode:
         try:
-            cur = db._execute(sql)
+            cur = db._execute(sql, positional=True)
             columns: list[str] = (
                 [str(desc[0]) for desc in cur.description] if cur.description else []
             )
-            rows: list[Mapping[str, object]] = (
-                [dict(row) for row in cur.fetchall()] if cur.description else []
+            rows: list[Sequence[object]] = (
+                [tuple(row) for row in cur.fetchall()] if cur.description else []
             )
         except psycopg2.Error as exc:
             message = exc.pgerror or str(exc)
@@ -254,14 +277,18 @@ def cmd_query(db: _QueryDB, args: argparse.Namespace) -> int | None:
             with db.read_only_query_cursor() as cur:
                 cur.execute(sql)
                 columns = [str(desc[0]) for desc in cur.description] if cur.description else []
-                rows = [dict(row) for row in cur.fetchall()] if cur.description else []
+                rows = [tuple(row) for row in cur.fetchall()] if cur.description else []
         except psycopg2.Error as exc:
             message = exc.pgerror or str(exc)
             print(f"  [ERROR] {message.strip()}", file=sys.stderr)
             return 1
 
     if args.json:
-        print(json.dumps(rows, indent=2, default=_json_default))
+        keys = _unique_json_keys(columns)
+        print(json.dumps(
+            [dict(zip(keys, row, strict=True)) for row in rows],
+            indent=2, default=_json_default,
+        ))
         return None
 
     if not columns:

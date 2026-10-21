@@ -48,6 +48,9 @@ DECISION_VERIFIED_LOSSLESS_LOCKED = "verified_lossless_locked"
 
 MeasurementFailureReason = Literal[
     "snapshot_stale",          # source folder changed after retry (AE5)
+    "snapshot_read_failed",    # host/storage error (ENOMEM, EIO, ESTALE)
+                               # while snapshotting; says nothing about
+                               # the source (issue #1428)
     "source_vanished",         # ENOENT mid-measure (AE6); also covers
                                # path-missing pre-claim and force-import
                                # failed_path-no-longer-on-disk cases

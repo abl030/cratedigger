@@ -152,6 +152,7 @@ class TestMeasurementFailureTaxonomyValidation(unittest.TestCase):
         this test flips RED and the operator must reconcile."""
         documented_reasons = [
             "snapshot_stale",
+            "snapshot_read_failed",
             "source_vanished",
             "materialization_error",
             "measurement_crashed",

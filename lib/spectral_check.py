@@ -302,6 +302,9 @@ class AlbumResult:
     codec_family: CodecFamily | None = None
     ultrasonic_deficit_db: float | None = None
     spectral_measurement_version: int | None = None
+    # Set only when every track errored (``grade == "error"``): why, from the
+    # per-track errors that ``tracks`` does not keep (issue #1428).
+    error: str | None = None
 
 
 # --- Core functions ---
@@ -725,10 +728,15 @@ def analyze_album(folder_path: str, trim_seconds: int = 30) -> AlbumResult:
 
     track_results: list[TrackResult] = []
     error_count = 0
+    first_error: str | None = None
     for filepath in files:
         result = analyze_track(filepath, trim_seconds)
         if result.grade == "error":
             error_count += 1
+            if first_error is None:
+                first_error = (
+                    f"{os.path.basename(filepath)}: {result.error or 'unknown error'}"
+                )
         else:
             track_results.append(result)
 
@@ -751,6 +759,10 @@ def analyze_album(folder_path: str, trim_seconds: int = 30) -> AlbumResult:
             # (issue #829 Phase 5 PR1 review round 2, should-fix 14 — the
             # old `if files else None` guard here was dead).
             codec_family=codec_family_from_extension(files[0]),
+            error=(
+                f"all {error_count} tracks failed spectral analysis; "
+                f"first: {first_error}"
+            ),
         )
 
     grade, suspect_pct = classify_album(track_results)

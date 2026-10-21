@@ -102,6 +102,7 @@ FAILURE_STAGES: tuple[FailureStage, ...] = (
     FailureStage("release_identity", "missing_release_id", "missing_release_id"),
     FailureStage("source_path", "source_vanished", "path_missing"),
     FailureStage("source_snapshot", "snapshot_stale", "evidence_snapshot_failed"),
+    FailureStage("source_snapshot_read", "snapshot_read_failed", "evidence_snapshot_failed"),
     FailureStage("materialization", "materialization_error", "materialization_failed"),
     FailureStage("candidate_measurement", "measurement_crashed", "measurement_crashed"),
     FailureStage("lossless_spectral", "measurement_crashed", "spectral_analysis_failed"),

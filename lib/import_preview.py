@@ -15,6 +15,7 @@ lives outside the previewed directory, via the single shared writer in
 
 from __future__ import annotations
 
+import errno
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -1072,11 +1073,12 @@ def measure_and_persist_candidate_evidence(
             # the external source after the descriptor copy completed.
             source_snapshot = snapshot_audio_files(preview_path)
         except OSError as exc:
+            reason, detail = _snapshot_failure(exc)
             return _measurement_failed_result(
                 mode="path",
-                reason="snapshot_stale",
+                reason=reason,
                 decision="evidence_snapshot_failed",
-                detail=str(exc),
+                detail=detail,
                 request_id=request_id,
                 download_log_id=download_log_id,
                 source_path=audit_path,
@@ -1505,6 +1507,21 @@ def _measurement_decision_hint(measurement: Any) -> str:
     if measurement.audio_file_count == 0:
         return "empty_fileset"
     return "evidence_ready"
+
+
+def _snapshot_failure(exc: OSError) -> tuple[MeasurementFailureReason, str]:
+    """Label an evidence-snapshot ``OSError`` as a changed source or a read failure.
+
+    A file that vanished mid-walk means the source changed underneath; any
+    other errno (ENOMEM, EIO, ESTALE) is the host failing to read it and says
+    nothing about the source (issue #1428). The detail leads with the errno
+    name so the record shows which.
+    """
+    errno_name = errno.errorcode.get(exc.errno or 0, "no errno")
+    reason: MeasurementFailureReason = (
+        "snapshot_read_failed" if _refusal_is_world_failure(exc) else "snapshot_stale"
+    )
+    return reason, f"{errno_name}: {exc}"
 
 
 def _refusal_is_world_failure(exc: BaseException) -> bool:
