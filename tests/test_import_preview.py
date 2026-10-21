@@ -1979,6 +1979,46 @@ class TestImportPreviewPath(unittest.TestCase):
         finally:
             shutil.rmtree(source, ignore_errors=True)
 
+    def test_snapshot_read_failure_is_not_labelled_a_stale_source(self):
+        """Issue #1428: ENOMEM while snapshotting is the host, not the source."""
+        import errno
+
+        from lib.quality_evidence import SnapshotAudioFilesError
+
+        cases = (
+            (errno.ENOMEM, "snapshot_read_failed", "ENOMEM"),
+            (errno.EIO, "snapshot_read_failed", "EIO"),
+            (errno.ENOENT, "snapshot_stale", "ENOENT"),
+        )
+        for errno_value, reason, errno_name in cases:
+            with self.subTest(errno=errno_name):
+                db = self._db()
+                source = self._source_dir()
+                try:
+                    with patch(
+                        "lib.config.read_runtime_config",
+                        return_value=_preview_config(),
+                    ), patch(
+                        "lib.import_preview.snapshot_audio_files",
+                        side_effect=SnapshotAudioFilesError(
+                            "could not stat audio file",
+                            errno_value=errno_value,
+                        ),
+                    ):
+                        result = measure_and_persist_candidate_evidence(
+                            db, request_id=42, path=source,
+                        )
+
+                    self.assertEqual(result.verdict, "measurement_failed")
+                    self.assertEqual(result.decision, "evidence_snapshot_failed")
+                    self.assertEqual(result.reason, reason)
+                    self.assertTrue(
+                        (result.detail or "").startswith(f"{errno_name}: "),
+                        result.detail,
+                    )
+                finally:
+                    shutil.rmtree(source, ignore_errors=True)
+
     def test_measurement_worker_stale_have_enrichment_fails_before_measurement(
         self,
     ):

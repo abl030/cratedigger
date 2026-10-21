@@ -488,6 +488,23 @@ class TestAlbumLevelSilentGenuineCollapse(unittest.TestCase):
         # all-errored album measured neither, so it must stay None.
         self.assertIsNone(result.spectral_measurement_version)
 
+    def test_all_tracks_error_carries_why(self):
+        """Issue #1428: the per-track errors are not kept in ``tracks``, so
+        the album result must say why, or preview reports nothing."""
+        from lib.spectral_check import analyze_album
+        result = analyze_album(self.tmpdir, trim_seconds=2)
+        self.assertIsNotNone(result.error)
+        assert result.error is not None
+        self.assertTrue(result.error.startswith(
+            "all 2 tracks failed spectral analysis; first: 01-track.m4a: "
+        ), result.error)
+
+    def test_all_tracks_error_reaches_the_spectral_audit_detail(self):
+        from lib.measurement import analyze_spectral_audit_path
+        detail = analyze_spectral_audit_path(self.tmpdir)
+        self.assertEqual(detail.grade, "error")
+        self.assertIn("tracks failed spectral analysis", detail.error or "")
+
 
 class TestRcZeroNoRmsLineNoLongerSilent(unittest.TestCase):
     """Sox returncode==0 with no 'RMS amplitude:' line in stderr was the

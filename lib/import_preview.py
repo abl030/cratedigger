@@ -15,6 +15,7 @@ lives outside the previewed directory, via the single shared writer in
 
 from __future__ import annotations
 
+import errno
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -1072,11 +1073,15 @@ def measure_and_persist_candidate_evidence(
             # the external source after the descriptor copy completed.
             source_snapshot = snapshot_audio_files(preview_path)
         except OSError as exc:
+            # A file that vanished mid-walk is a source that changed; any
+            # other errno is the host failing to read it (issue #1428).
+            read_failed = _refusal_is_world_failure(exc)
+            errno_name = errno.errorcode.get(exc.errno or 0, "no errno")
             return _measurement_failed_result(
                 mode="path",
-                reason="snapshot_stale",
+                reason="snapshot_read_failed" if read_failed else "snapshot_stale",
                 decision="evidence_snapshot_failed",
-                detail=str(exc),
+                detail=f"{errno_name}: {exc}",
                 request_id=request_id,
                 download_log_id=download_log_id,
                 source_path=audit_path,

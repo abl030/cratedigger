@@ -9,6 +9,7 @@ would scramble the post-deploy lookup.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import inspect
 import json
@@ -188,8 +189,23 @@ class TestFingerprintAlbumPath(unittest.TestCase):
                 os.path.join(tmp_dir, "does-not-exist.flac"),
                 os.path.join(tmp_dir, "01 Track.flac"),
             )
-            with self.assertRaises(SnapshotAudioFilesError):
+            with self.assertRaises(SnapshotAudioFilesError) as raised:
                 fingerprint_album_path(tmp_dir)
+            # The errno survives so preview can tell a vanished file from a
+            # host read failure (issue #1428).
+            self.assertEqual(raised.exception.errno, errno.ENOENT)
+
+    def test_an_unreadable_subdirectory_carries_its_errno(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            locked = os.path.join(tmp_dir, "Disc 1")
+            os.mkdir(locked)
+            os.chmod(locked, 0)
+            try:
+                with self.assertRaises(SnapshotAudioFilesError) as raised:
+                    snapshot_audio_files(tmp_dir)
+            finally:
+                os.chmod(locked, 0o700)
+            self.assertEqual(raised.exception.errno, errno.EACCES)
 
 
 class TestFingerprintAlbumPathConsumerWiring(unittest.TestCase):

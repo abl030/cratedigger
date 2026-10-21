@@ -297,7 +297,15 @@ def candidate_evidence_persistence_receipt_semantic_error(
 
 
 class SnapshotAudioFilesError(OSError):
-    """Raised when a source fileset cannot be snapshotted completely."""
+    """Raised when a source fileset cannot be snapshotted completely.
+
+    ``errno`` is the first underlying failure's, so callers can tell a file
+    that vanished (ENOENT) from a read failure (ENOMEM, EIO, ESTALE).
+    """
+
+    def __init__(self, message: str, *, errno_value: int | None) -> None:
+        super().__init__(message)
+        self.errno = errno_value
 
 
 @dataclass(frozen=True)
@@ -567,10 +575,10 @@ def snapshot_audio_files(root: str) -> list[AlbumQualityEvidenceFile]:
     if not os.path.isdir(root):
         return []
     files: list[AlbumQualityEvidenceFile] = []
-    walk_errors: list[str] = []
+    walk_errors: list[OSError] = []
 
     def onerror(exc: OSError) -> None:
-        walk_errors.append(str(exc))
+        walk_errors.append(exc)
 
     for dirpath, _dirnames, filenames in os.walk(root, onerror=onerror):
         for filename in filenames:
@@ -582,7 +590,8 @@ def snapshot_audio_files(root: str) -> list[AlbumQualityEvidenceFile]:
                 stat = os.stat(full_path)
             except OSError as exc:
                 raise SnapshotAudioFilesError(
-                    f"could not stat audio file {full_path}: {exc}"
+                    f"could not stat audio file {full_path}: {exc}",
+                    errno_value=exc.errno,
                 ) from exc
             relative_path = os.path.relpath(full_path, root)
             container = ext.lstrip(".")
@@ -597,7 +606,10 @@ def snapshot_audio_files(root: str) -> list[AlbumQualityEvidenceFile]:
                 )
             )
     if walk_errors:
-        raise SnapshotAudioFilesError("; ".join(walk_errors))
+        raise SnapshotAudioFilesError(
+            "; ".join(str(exc) for exc in walk_errors),
+            errno_value=walk_errors[0].errno,
+        )
     return sorted(files, key=lambda f: f.relative_path)
 
 
