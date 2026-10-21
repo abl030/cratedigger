@@ -7,8 +7,7 @@ contract. Five existing web mutations are deliberately API-backed: the CLI
 relays their canonical route response and does not construct a PipelineDB or
 configure mirrors. `pipeline-cli routes` (or `pipeline-cli routes --json`) discovers the
 live parser surface. This document is the authoritative active command
-reference; `tests/test_docs_audit.py` requires its capability list to match the
-parser exactly.
+reference.
 
 ## Access on doc2
 
