@@ -649,11 +649,13 @@ class CdShapeAndProviderBoundaryTest(unittest.TestCase):
         self.assertIsNone(logs.records[0].exc_info)
 
     def test_unexpected_verifier_failure_keeps_its_traceback(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir, patch(
-            "lib.cd_rip_verifier._album_shape",
-            side_effect=RuntimeError("verifier bug"),
-        ), self.assertLogs("lib.cd_rip_verifier", "INFO") as logs:
-            result = verify_cd_rip(tmpdir, CratediggerConfig(var_dir=tmpdir))
+        # A missing album directory is not a source-shape refusal.
+        with tempfile.TemporaryDirectory() as tmpdir, self.assertLogs(
+            "lib.cd_rip_verifier", "INFO",
+        ) as logs:
+            result = verify_cd_rip(
+                str(Path(tmpdir) / "missing"), CratediggerConfig(var_dir=tmpdir),
+            )
 
         self.assertIsNone(result)
         self.assertIsNotNone(logs.records[0].exc_info)
