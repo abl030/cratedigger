@@ -766,6 +766,120 @@ class TestMeasurePreimportState(unittest.TestCase):
             SPECTRAL_MEASUREMENT_VERSION,
         )
 
+    def _corrupt_m4a_result(self):
+        from lib.quality import AudioToolDiagnostic, AudioValidationReport
+        from lib.util import AudioValidationResult
+
+        return AudioValidationResult(
+            AudioValidationReport(
+                outcome="audio_corrupt",
+                files_checked=1,
+                files_failed=1,
+                diagnostics=[AudioToolDiagnostic(
+                    relative_path="01.m4a",
+                    category="decode_error",
+                    return_code=1,
+                    stderr_excerpt="Stream map '0:a' matches no streams.",
+                )],
+            ),
+            failed_paths=("01.m4a",),
+        )
+
+    def _measure_with_validation(self, folder, filetype, validation):
+        from lib.config import CratediggerConfig
+        from lib.measurement import (
+            ExistingSpectralAuditLookup,
+            measure_preimport_state,
+        )
+        from lib.quality import SpectralAnalysisDetail
+
+        with patch("lib.measurement.validate_audio", return_value=validation):
+            return measure_preimport_state(
+                path=folder,
+                mb_release_id="mbid-m4a",
+                label="M4A",
+                download_filetype=filetype,
+                download_min_bitrate_bps=256_000,
+                download_is_vbr=False,
+                cfg=CratediggerConfig(audio_check_mode="normal"),
+                spectral_detail_analyzer=(
+                    lambda _path: SpectralAnalysisDetail(attempted=False)
+                ),
+                existing_spectral_resolver=(
+                    lambda _release_id: ExistingSpectralAuditLookup()
+                ),
+            )
+
+    def test_undecodable_m4a_is_audio_corrupt_without_codec_probe(self):
+        """#1424: integrity classifies an M4A before the codec probe can crash.
+
+        ffprobe names no codec for a file with no readable audio stream. That
+        is a property of the candidate, and the integrity decode already says
+        so; the probe must not turn it into a measurement crash first.
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "01.m4a").write_bytes(b"not audio")
+            with patch(
+                "lib.measurement.ffprobe_audio_codec_name",
+                return_value=None,
+            ) as codec_probe:
+                measured = self._measure_with_validation(
+                    folder, "m4a", self._corrupt_m4a_result(),
+                )
+
+        self.assertTrue(measured.audio_corrupt)
+        self.assertEqual(measured.corrupt_files, ["01.m4a"])
+        self.assertFalse(measured.lossless_candidate)
+        codec_probe.assert_not_called()
+
+    def test_corrupt_unambiguous_lossless_keeps_lossless_candidate(self):
+        """The corrupt path still reports extension-certain lossless."""
+        from lib.quality import AudioToolDiagnostic, AudioValidationReport
+        from lib.util import AudioValidationResult
+
+        corrupt = AudioValidationResult(
+            AudioValidationReport(
+                outcome="audio_corrupt",
+                files_checked=1,
+                files_failed=1,
+                diagnostics=[AudioToolDiagnostic(
+                    relative_path="01.flac",
+                    category="decode_error",
+                    return_code=69,
+                    stderr_excerpt="invalid sync code",
+                )],
+            ),
+            failed_paths=("01.flac",),
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "01.flac").write_bytes(b"flac")
+            measured = self._measure_with_validation(folder, "flac", corrupt)
+
+        self.assertTrue(measured.audio_corrupt)
+        self.assertTrue(measured.lossless_candidate)
+
+    def test_decodable_m4a_with_unnamed_codec_still_raises(self):
+        """After a clean decode, a codec-less probe is a tool failure."""
+        from lib.measurement import AudioCodecProbeError
+        from lib.quality import AudioValidationReport
+        from lib.util import AudioValidationResult
+
+        passed = AudioValidationResult(
+            AudioValidationReport(
+                outcome="passed",
+                files_checked=1,
+                files_failed=0,
+                diagnostics=[],
+            ),
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "01.m4a").write_bytes(b"aac")
+            with patch(
+                "lib.measurement.ffprobe_audio_codec_name",
+                return_value=None,
+            ), self.assertRaises(AudioCodecProbeError):
+                self._measure_with_validation(folder, "m4a", passed)
+
     def test_empty_directory_reports_zero_file_count(self):
         """No audio files → audio_file_count=0, layout='flat'."""
         from lib.config import CratediggerConfig
