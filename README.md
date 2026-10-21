@@ -191,55 +191,15 @@ Every writer derives the interval from one function, `lib/pipeline_db/decisions.
 ## Development
 
 ```bash
-bash scripts/test.sh tests.test_X                        # target + adjacent/ambient gates
-nix-shell --run "python3 scripts/run_pyright_checks.py"  # both typing contracts
-nix-shell --run "bash scripts/run_tests.sh"              # complete suite
+nix-shell --run "bash scripts/run_tests.sh"                # full suite
+nix-shell --run "python3 -m unittest tests.test_X -v"      # one module while iterating
 ```
 
-`scripts/test.sh` expands the requested unittest selector with its generated or
-deterministic sibling, tests adjacent to every changed path, and every audit and
-ratchet. It also runs JavaScript, `tsc` over `web/js`, both Pyright contracts,
-Ruff, and Vulture in the same aggregate failure bundle. With no selector it derives targets from the
-working-tree diff. A changed shared `tests/**.py` module (a fake, helper, or
-other non-`test_*.py` file) with no registered mapping in
-`scripts/targeted_test_selection.py` fails closed with exit code 2 before any
-phase runs, JS and Pyright included — see that module's
-`EXACT_PATH_NEIGHBOURS` / `SHARED_MODULES_WITHOUT_COVERAGE` for the mapping
-and the admitted-gap registry. A changed `lib/**/*.py` module gets the same
-fail-closed treatment on the other side of the same gap: one that resolves
-zero test neighbours (the basename-only `tests.test_<stem>` probe misses real
-coverage filed under a nested path, e.g. `lib/dispatch/core.py`) fails closed
-too unless admitted in `LIB_MODULES_WITHOUT_SELECTION_COVERAGE`. A changed
-`scripts/**/*.py` or `scripts/**/*.sh` file — the shell wrappers included —
-is policed the same way through `SCRIPTS_MODULES_WITHOUT_SELECTION_COVERAGE`.
-`migrations/**/*.sql`, `nix/**/*.nix` and `*.json`, `web/**/*.py`,
-`harness/**/*.py` and `*.sh`, and a top-level `*.py` file are policed the
-same way too, each with its own admitted-gap registry (`web/js/*.js` is
-the one deliberate exception — the JavaScript phase always runs in full
-regardless of Python selection, so this mechanism does not police it).
-One row per root lives in `ROOT_COVERAGE_RULES`, eight rows in total;
-`tests/test_selection_coverage_audit.py` keeps every non-early-returning
-registry exact in both directions and checks every registry's entries for
-a rationale and a path that still exists. The `tests/` registry's own
-exactness lives in `tests/test_targeted_test_selection.py` and
-`tests/test_negative_coverage_audit.py` instead.
-
-To see why a path selects what it selects, ask it:
-
-```bash
-nix-shell --run "python3 scripts/targeted_test_selection.py explain lib/download.py"
-```
-
-It names the mechanism behind every selected module: the hand-authored
-`EXACT_PATH_NEIGHBOURS` entry, the self-selector, or one of the
-`SELECTION_RULES` rows (five basename conventions, ten directory rules).
-It also reports any module a rule looked for and did not find on disk, and
-whether the fail-closed contract is watching the path at all. The path need
-not exist yet, so a file can be explained before it is written.
-
-`run_tests.sh` remains the one canonical complete suite.
-`run_final_gate.sh` runs that exact suite on a clean commit and adds a receipt;
-it does not select different checks. CI does not enforce this local workflow.
+`run_tests.sh` runs every phase (JavaScript, `tsc`, both Pyright contracts,
+Ruff, Vulture, Python) to completion even when one fails, then prints one
+index of every failure. Green means done. CI does not run it; run it before
+merging. The nightly daily gate runs it on `main`'s tip, so `main` is known
+green and a red result on a branch belongs to that branch.
 
 The dev shell resolves the same pinned nixpkgs as the default module package
 set, and `tests/test_harness_beets2_contract.py` runs real Beets so runtime drift

@@ -53,9 +53,9 @@ SQL
 ## Working
 
 - Python always runs in the dev shell: `nix-shell --run "..."`.
-- Tests: `bash scripts/test.sh` (targets derived from the diff) or
-  `nix-shell --run "bash scripts/run_tests.sh"` (full suite). CI does not run
-  tests; you do.
+- Tests: `nix-shell --run "bash scripts/run_tests.sh"` runs everything and
+  reports every failure at once. Green before merge. CI does not run tests;
+  the nightly daily gate keeps `main` green, so a red branch is your change.
 - Merge PRs with "Create a merge commit". Merged `main` deploys itself
   nightly; `scripts/deploy.sh` (from the shared checkout) deploys now.
 - After editing `.claude/agents/` or `.mcp.json`:

@@ -52,7 +52,6 @@ from scripts.test_substrate import (
     default_min_headroom_bytes,
     private_runtime_dir,
     reap_stale_check_bundles,
-    reap_stale_final_gate_receipts,
 )
 
 SCHEMA_VERSION = 1
@@ -489,9 +488,8 @@ def _execute_suite(
     is held for this entire call, covering the whole run's tmpfs footprint,
     not just the preflight (issue #1111).
 
-    A trailing phase literally named "python" — the exact shape both
-    ``_default_phases()`` and ``scripts/run_targeted_tests.py::
-    targeted_phases()`` always produce — runs CONCURRENTLY with every
+    A trailing phase literally named "python" — the shape
+    ``_default_phases()`` produces — runs CONCURRENTLY with every
     phase before it (issue #1131): the five cheap gates (js-syntax,
     js-unit, pyright, ruff, vulture) total roughly 30s against a Python
     phase running 150-190s, on an otherwise mostly-idle box for that
@@ -796,8 +794,7 @@ def run_suite(
     """Admit one canonical suite at a time, then run every phase (issue #1111).
 
     Validates the runtime tmpfs, then acquires the exclusive admission lock
-    (bounded wait, reported progress), retires stale final-gate receipts,
-    reaps stale check bundles (and leaked scratch/test-fixture directories),
+    (bounded wait, reported progress), reaps stale check bundles (and leaked scratch/test-fixture directories),
     and checks headroom — all BEFORE any phase runs, so an unready
     environment fails once, immediately, with its real reason instead of
     tripping deep into a run after earlier phases already passed.
@@ -820,19 +817,6 @@ def run_suite(
         poll_seconds=admission_poll_seconds,
         progress_interval_seconds=admission_progress_interval_seconds,
     ):
-        # Retire eligible final-gate receipts BEFORE reaping check bundles:
-        # a retired receipt's own directory is gone from disk by the time
-        # reap_stale_check_bundles computes _receipt_protected_bundles, so
-        # its bundle protection lapses on this same admitted pass (issue
-        # #1208 item 4).
-        retired_receipts = reap_stale_final_gate_receipts(runtime)
-        if retired_receipts:
-            output.write(
-                f"retired {len(retired_receipts)} stale final-gate receipt(s): "
-                + ", ".join(str(path) for path in retired_receipts)
-                + "\n"
-            )
-            output.flush()
         reaped = reap_stale_check_bundles(
             runtime,
             max_age_seconds=reap_max_age_seconds,

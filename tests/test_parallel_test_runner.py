@@ -1179,7 +1179,6 @@ class TestModuleScheduling(unittest.TestCase):
                 "tests.test_nix_module",
                 "tests.test_world_model_coordinator",
                 "tests.test_fuzz_burst",
-                "tests.test_targeted_test_selection",
                 "tests.test_aac_lattice",
             }),
         )

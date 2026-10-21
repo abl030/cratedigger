@@ -72,7 +72,7 @@ pkgs.mkShell {
 
     # Echo to stderr so the banner doesn't pollute stdout when callers do
     # ``nix-shell --run "cmd" > out`` (e.g. regenerating the vulture whitelist).
-    echo "cratedigger dev shell — targeted: python3 scripts/run_targeted_tests.py tests.test_X" >&2
+    echo "cratedigger dev shell — full suite: bash scripts/run_tests.sh" >&2
 
     # Pin the IDE's pyright to THIS interpreter so in-editor diagnostics match
     # ``nix-shell --run "python3 scripts/run_pyright_checks.py"`` (the configs point
