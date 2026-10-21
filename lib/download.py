@@ -689,11 +689,13 @@ def _run_completed_processing(
         logger.exception(f"Error processing completed download {entry.artist} - {entry.title} "
                          f"— will retry local processing next cycle")
         # Name the exception: once the journal rotates, this detail is the
-        # only record of what failed (issue #1423).
+        # only record of what failed (issue #1423). Escape lone surrogates
+        # from non-UTF-8 filenames, which the DB write refuses (#1422).
+        message = str(exc).encode("utf-8", "backslashreplace").decode()
         return CompletionDeferred(
             detail=(
                 "unhandled_exception_during_local_processing: "
-                f"{type(exc).__name__}: {exc}"
+                f"{type(exc).__name__}: {message}"
             ),
         )
 

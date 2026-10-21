@@ -2424,6 +2424,27 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             updated.message or "",
         )
 
+    def test_local_processing_exception_with_surrogate_path_is_kept(self):
+        """A non-UTF-8 filename in the message must not break the write."""
+        db, _request_id, job_id = _seed_running_import(automation_state=True)
+        self.addCleanup(db.close)
+
+        def explode(*_args: object, **_kwargs: object) -> CompletionResult:
+            raise ValueError("bad tag in caf\udce9.flac")
+
+        updated = self._run_job_backed_automation_result(
+            db,
+            job_id,
+            Completed(),
+            process_album_fn=explode,
+        )
+
+        assert updated is not None
+        self.assertIn(
+            "ValueError: bad tag in caf\\udce9.flac",
+            updated.message or "",
+        )
+
     def test_job_backed_completion_failed_commits_attempt_audit_and_job_once(self):
         db, request_id, job_id = _seed_running_import(automation_state=True)
         self.addCleanup(db.close)
