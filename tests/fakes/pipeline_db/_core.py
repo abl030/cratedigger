@@ -8,7 +8,6 @@ from collections.abc import (
     Callable,
     Generator,
     Iterator,
-    Mapping,
     Sequence,
 )
 from contextlib import contextmanager
@@ -39,7 +38,7 @@ class _FakeReadOnlyQueryCursor:
     def execute(self, sql: str) -> None:
         self._query_cursor = self._db._execute(sql)
 
-    def fetchall(self) -> list[Mapping[str, object]]:
+    def fetchall(self) -> list[Sequence[object]]:
         return self._cursor().fetchall()
 
     def close(self) -> None:
@@ -67,13 +66,18 @@ class _FakeCoreMixin(_FakePipelineDBBase):
         """
         self._execute_queue = list(results)
 
-    def _execute(self, sql: str, params: tuple[Any, ...] = ()) -> Any:
+    def _execute(
+        self, sql: str, params: tuple[Any, ...] = (), *, positional: bool = False,
+    ) -> Any:
         """Stand-in for ``PipelineDB._execute``.
 
         Records the call and returns the next entry from
         ``queue_execute_results``. If the queue is empty, returns
         ``self._execute_default`` (an empty :class:`FakeCursor` —
-        mirrors production's "query ran, zero rows" contract)."""
+        mirrors production's "query ran, zero rows" contract).
+
+        ``positional`` only selects production's row shape; queued cursors
+        already carry whatever rows the test scripted."""
         self.execute_calls.append((sql, params))
         if not self._execute_queue:
             return self._execute_default

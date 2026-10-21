@@ -78,7 +78,10 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
     # caught libpq error (`as exc`) and chains it into OwnerSessionLost
     # (`from exc`, flake8-bugbear B904 via #1322); the forwarded SQL and
     # parameters are unchanged, so the rationales stand.
-    ("lib/pipeline_db/_core.py", "66fe24eb3159d4c4"): (
+    # Re-pinned 2026-10-21 (#1427): the wrapper takes a keyword-only
+    # ``positional`` flag that only picks the cursor row shape (tuples for
+    # raw operator SQL); the forwarded SQL and parameters are unchanged.
+    ("lib/pipeline_db/_core.py", "e0bd8845727f81e8"): (
         (
             "shared execute wrapper forwards caller-owned SQL with the caller's "
             "unchanged positional or mapping parameters"
@@ -88,7 +91,7 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "unchanged positional or mapping parameters outside atomic scopes"
         ),
     ),
-    ("lib/pipeline_db/_core.py", "6420f3f43e2ae9fb"): (
+    ("lib/pipeline_db/_core.py", "13593fad7670ee9a"): (
         (
             "shared execute wrapper forwards parameterless caller-owned SQL"
         ),
@@ -103,7 +106,9 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "statement timeout before a fixed SELECT"
         ),
     ),
-    ("scripts/pipeline_cli/query.py", "f1e566c44edc8feb"): (
+    # Re-pinned 2026-10-21 (#1427): both seams now fetch positional rows;
+    # the SQL each one forwards is unchanged.
+    ("scripts/pipeline_cli/query.py", "04eef7e7efc2db58"): (
         (
             "deliberate raw-write operator seam, gated by exact "
             "--write --confirm WRITE rather than a lifecycle-safe typed mutation"
