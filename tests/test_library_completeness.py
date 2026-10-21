@@ -314,6 +314,35 @@ class TestLiveIncidentPins(unittest.TestCase):
     def test_short_mb_churn_rejects_one_title_variant(self) -> None:
         self.assertEqual(self._mb_churn_world(2, {2}), {"unknown"})
 
+    def test_mb_churn_title_differing_only_in_punctuation_corroborates(self) -> None:
+        # The live killie shape: an upstream merge replaced every track and
+        # recording id, and the survivor spells track 1 "H19.09.07 / 09.17"
+        # where the installed tag says "H19.09.07,09.17". Same characters,
+        # different separators -- that is corroboration, not a variant.
+        release = "529c6f67-f602-4edd-a955-888c8faa6ef9"
+        source_titles = ["H19.09.07 / 09.17", "H17.07", "H19.08.26", "H18.05", "H19.09.07", "H19.08.18"]
+        installed_titles = ["H19.09.07,09.17", *source_titles[1:]]
+        rows = [(f"new-{index}", f"new-rec-{index}", title, False)
+                for index, title in enumerate(source_titles, 1)]
+        paths = {f"/album/{index:02}.opus": (f"old-{index}", f"old-rec-{index}")
+                 for index in range(1, len(source_titles) + 1)}
+        catalog = tuple(CatalogItem(path, tags[0], tags[1], installed_titles[index - 1], index)
+                        for index, (path, tags) in enumerate(paths.items(), 1))
+        album = LibraryAlbum(19346, "killie", "Offering", ReleaseIdentity("musicbrainz", release),
+                             "/album", catalog)
+        self.assertEqual(self._classify(album, _mb_raw(rows), tags=paths), set())
+
+    def test_mb_churn_title_differing_in_characters_still_rejects(self) -> None:
+        # Punctuation tolerance must not swallow a real character change.
+        rows = [("new-1", "new-rec-1", "H19.09.07 / 09.17", False),
+                ("new-2", "new-rec-2", "H17.07", False)]
+        paths = {"/album/01.opus": ("old-1", "old-rec-1"), "/album/02.opus": ("old-2", "old-rec-2")}
+        album = LibraryAlbum(1, "a", "b", ReleaseIdentity("musicbrainz", "r"), "/album", (
+            CatalogItem("/album/01.opus", "old-1", "old-rec-1", "H19.09.07,09.18", 1),
+            CatalogItem("/album/02.opus", "old-2", "old-rec-2", "H17.07", 2),
+        ))
+        self.assertEqual(self._classify(album, _mb_raw(rows), tags=paths), {"unknown"})
+
     def test_discogs_never_uses_musicbrainz_program_fallback(self) -> None:
         release = "4738671"
         album = LibraryAlbum(1255, "Dirt Dress", "Theme Songs", ReleaseIdentity("discogs", release), "/album", (
