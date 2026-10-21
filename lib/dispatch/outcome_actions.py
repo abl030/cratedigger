@@ -609,8 +609,13 @@ def _record_preview_measurement_failed(
         ``MeasurementFailure`` JSON as ``validation_result``; its detail is
         also persisted as the operator-facing ``error_message``.
       * Parent request → ``wanted`` for automation, otherwise unchanged.
-      * No denylist write: this is a measurement-world failure, not evidence
-        that the source audio itself is bad.
+        The automation requeue counts a download attempt so search backoff
+        grows across repeated failures (issue #1423: one request failed
+        16 times in seven hours at plain search cadence).
+      * No denylist, cooldown or peer attribution: this is a
+        measurement-world failure, not evidence against the source. A
+        failure that IS the source's fault belongs in a source-fault
+        outcome, not here.
       * ``import_jobs.status='failed'`` via ``persist_preview_terminal_
         outcome``'s own inline ``UPDATE`` (``lib/pipeline_db/terminal_
         outcomes.py``) so the poll loop's active-import-job guard releases
@@ -637,6 +642,11 @@ def _record_preview_measurement_failed(
             transitions.RequestTransition.to_wanted(
                 from_status=(
                     "processing"
+                    if automation_terminal_authority is not None
+                    else None
+                ),
+                attempt_type=(
+                    "download"
                     if automation_terminal_authority is not None
                     else None
                 ),
