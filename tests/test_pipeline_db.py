@@ -22174,5 +22174,117 @@ class TestSetMarkedIncompleteRoundTrip(unittest.TestCase):
         self.assertIsNone(row["marked_incomplete_at"])
 
 
+
+@requires_postgres
+class TestSetMarkedCompleteRoundTrip(unittest.TestCase):
+    """Rule A round-trip for set_marked_complete (migration 087).
+
+    The acknowledged findings survive the JSONB seam unchanged, the mark
+    and the incomplete mark exclude each other in both directions, and the
+    frozen ``replaced`` audit state refuses the write.
+    """
+
+    FINDINGS: ClassVar[list[dict[str, str]]] = [
+        {"kind": "missing_source_audio", "detail": "Nursery Rhyme / Breather"},
+    ]
+
+    def setUp(self):
+        self.db = make_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _seed(self, mb_release_id: str) -> int:
+        return self.db.add_request(
+            artist_name="UNKLE",
+            album_title="Psyence Fiction",
+            source="request",
+            mb_release_id=mb_release_id,
+            status="imported",
+        )
+
+    def test_mark_round_trip_idempotence_and_list(self):
+        request_id = self._seed("complete-mbid")
+        self.assertEqual(
+            self.db.set_marked_complete(request_id, findings=self.FINDINGS),
+            "marked",
+        )
+        row = self.db.get_request(request_id)
+        assert row is not None
+        self.assertIsNotNone(row["marked_complete_at"])
+        self.assertEqual(row["marked_complete_findings"], self.FINDINGS)
+        listed = [m for m in self.db.list_marked_complete() if m["id"] == request_id]
+        self.assertEqual(listed, [{
+            "id": request_id, "mb_release_id": "complete-mbid",
+            "discogs_release_id": None, "marked_complete_findings": self.FINDINGS,
+        }])
+        self.assertEqual(
+            self.db.set_marked_complete(request_id, findings=self.FINDINGS),
+            "already_marked",
+        )
+        changed = [{"kind": "unknown", "detail": "something new"}]
+        self.assertEqual(
+            self.db.set_marked_complete(request_id, findings=changed), "marked",
+        )
+        row = self.db.get_request(request_id)
+        assert row is not None
+        self.assertEqual(row["marked_complete_findings"], changed)
+
+    def test_clear_round_trip(self):
+        request_id = self._seed("complete-mbid-clear")
+        self.db.set_marked_complete(request_id, findings=self.FINDINGS)
+        self.assertEqual(
+            self.db.set_marked_complete(request_id, findings=None), "cleared",
+        )
+        row = self.db.get_request(request_id)
+        assert row is not None
+        self.assertIsNone(row["marked_complete_at"])
+        self.assertIsNone(row["marked_complete_findings"])
+        self.assertNotIn(
+            request_id, [m["id"] for m in self.db.list_marked_complete()])
+        self.assertEqual(
+            self.db.set_marked_complete(request_id, findings=None),
+            "already_clear",
+        )
+
+    def test_marks_exclude_each_other(self):
+        request_id = self._seed("complete-mbid-exclusive")
+        self.db.set_marked_incomplete(request_id, marked=True)
+        self.db.set_marked_complete(request_id, findings=self.FINDINGS)
+        row = self.db.get_request(request_id)
+        assert row is not None
+        self.assertIsNone(row["marked_incomplete_at"])
+        self.db.set_marked_incomplete(request_id, marked=True)
+        row = self.db.get_request(request_id)
+        assert row is not None
+        self.assertIsNotNone(row["marked_incomplete_at"])
+        self.assertIsNone(row["marked_complete_at"])
+        self.assertIsNone(row["marked_complete_findings"])
+
+    def test_not_found_and_replaced(self):
+        self.assertEqual(
+            self.db.set_marked_complete(987654, findings=self.FINDINGS),
+            "not_found",
+        )
+        old_id = self._seed("complete-mbid-old")
+        self.db.supersede_request_mbid(
+            old_id,
+            new_mb_release_id="complete-mbid-new",
+            new_mb_release_group_id="rg-complete",
+            new_mb_artist_id="art-complete",
+            new_artist_name="UNKLE",
+            new_album_title="Psyence Fiction",
+            new_year=1998,
+            new_country="GB",
+            new_tracks=[
+                {"disc_number": 1, "track_number": 1, "title": "Guns Blazing"},
+            ],
+        )
+        self.assertEqual(
+            self.db.set_marked_complete(old_id, findings=self.FINDINGS),
+            "replaced",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -77,7 +77,8 @@ waiting for (or triggering) the real ~200s whole-library scan.
 `library-completeness.json` snapshot for the Library Completeness card. It
 never starts a source, Beets, or filesystem census from the dev server. The
 card's census listing stays read-only; its per-album "Mark incomplete"
-button (issue #1241) POSTs `/api/pipeline/mark-incomplete`, and its
+button (issue #1241) POSTs `/api/pipeline/mark-incomplete`, its "Mark
+complete" button POSTs `/api/pipeline/mark-complete`, and its
 "Run census now" button POSTs
 `/api/pipeline/dashboard/library-census/refresh` — the GET-only live-db
 dev server dispatches neither (both 405, observed in the census button's

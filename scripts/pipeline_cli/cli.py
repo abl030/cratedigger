@@ -23,6 +23,7 @@ from scripts.pipeline_cli.album_requests import (
 )
 from scripts.pipeline_cli.api_mutations import (
     cmd_library_census_refresh,
+    cmd_mark_complete,
     cmd_merge_rekey,
     cmd_pipeline_delete,
     cmd_resolve_rg,
@@ -123,6 +124,7 @@ def main(*, api_socket: str | None = None):
         "wrong-match-converge": cmd_wrong_match_converge,
         "resolve-rg": cmd_resolve_rg,
         "merge-rekey": cmd_merge_rekey,
+        "mark-complete": cmd_mark_complete,
         "library-census-refresh": cmd_library_census_refresh,
         "sync-file-tags": cmd_sync_file_tags,
         "wrong-match-delete": cmd_wrong_match_delete,

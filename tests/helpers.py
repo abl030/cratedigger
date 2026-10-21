@@ -406,6 +406,8 @@ def make_request_row(**overrides: object) -> dict[str, Any]:
         "prior_unfindable_category": None,
         # Migration 082 / issue #1241 — operator-set incomplete mark.
         "marked_incomplete_at": None,
+        "marked_complete_at": None,
+        "marked_complete_findings": None,
         # Migration 021 addressing FK.
         "current_evidence_id": None,
         # Migration 023 — supersede lineage.

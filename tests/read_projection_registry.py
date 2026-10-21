@@ -137,6 +137,17 @@ def _seed_get_request(db: Any) -> "list[dict[str, Any]]":
     return _one(db.get_request(rid))
 
 
+def _seed_list_marked_complete(
+    db: PipelineDB | FakePipelineDB,
+) -> "list[dict[str, Any]]":
+    rid = db.add_request(
+        "Parity Artist", "Parity Album", "request",
+        mb_release_id="mbrel-marked-complete")
+    db.set_marked_complete(
+        rid, findings=[{"kind": "unknown", "detail": "parity"}])
+    return list(db.list_marked_complete())
+
+
 def _seed_get_request_by_mb_release_id(db: Any) -> "list[dict[str, Any]]":
     db.add_request(
         "Parity Artist", "Parity Album", "request",
@@ -573,6 +584,7 @@ PARITY_REGISTRY: dict[str, Seeder] = {
     "list_non_replaced_requests": _seed_list_non_replaced_requests,
     "list_requests_by_artist": _seed_list_requests_by_artist,
     "list_requests_in_release_group": _seed_list_requests_in_release_group,
+    "list_marked_complete": _seed_list_marked_complete,
     # Tracks / downloading / denylist / field-resolution.
     "get_tracks": _seed_get_tracks,
     "get_downloading": _seed_get_downloading,

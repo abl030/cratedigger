@@ -390,6 +390,12 @@ inside socket authorization, never credentials.
   the installed copy for any candidate beets proves whole, so a complete
   candidate is admitted as into an empty slot; a covered terminal acceptance
   clears the mark automatically (issue #1241).
+- `pipeline-cli mark-complete` — Set/clear the operator's complete mark on a
+  request (`--clear` to unmark), relayed to `POST /api/pipeline/mark-complete`.
+  Marking records the request's current library-census findings as reviewed;
+  the Library Completeness card lists the album under "Verified complete by
+  operator" until those findings change. Marking complete withdraws an
+  incomplete mark, and marking incomplete withdraws a complete mark.
 - `pipeline-cli library-census-refresh` — Request an out-of-schedule
   library-completeness census run through its canonical web route: writes
   the trigger file the module's census path unit watches (the daily

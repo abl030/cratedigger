@@ -534,6 +534,22 @@ def cmd_library_census_refresh(_db: object, args: argparse.Namespace) -> int:
     ))
 
 
+def cmd_mark_complete(_db: object, args: argparse.Namespace) -> int:
+    """Thin HTTP adapter for ``POST /api/pipeline/mark-complete``.
+
+    The route is the one canonical execution path
+    (``lib.complete_mark_service.set_complete_mark``). Relayed because the
+    mark records the request's current findings from the census snapshot,
+    which lives in the web service's state dir. Every status the service
+    can produce (``COMPLETE_MARK_HTTP_STATUS`` — 200/404/409/503) matches
+    the default status→exit mapping.
+    """
+    return _relay(args.api_endpoint, _ApiMutation(
+        path="/api/pipeline/mark-complete",
+        body={"id": args.request_id, "marked": not args.clear},
+    ))
+
+
 def add_api_mutation_subparsers(
     sub: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
@@ -560,6 +576,18 @@ def add_api_mutation_subparsers(
     converge.add_argument("request_id", type=int)
     converge.add_argument("threshold_milli", type=int)
     converge.add_argument("--apply", action="store_true")
+
+    mark_complete = sub.add_parser(
+        "mark-complete",
+        help="Acknowledge a request's library-census findings as reviewed "
+             "(the installed copy is complete) via the web API; --clear "
+             "withdraws the mark",
+    )
+    mark_complete.add_argument("request_id", type=int)
+    mark_complete.add_argument(
+        "--clear", action="store_true",
+        help="Clear the mark instead of setting it",
+    )
 
     resolve = sub.add_parser("resolve-rg", help="Resolve one request release-group via the web API")
     resolve.add_argument("request_id", type=int)

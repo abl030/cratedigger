@@ -9,6 +9,7 @@ import {
   renderDiskCoverageCard,
   renderDriftRow,
   renderLibraryCompletenessCard,
+  renderMarkCompleteButton,
   renderMarkIncompleteButton,
   renderPeerBrowseHeavyQueries,
   renderPeersCard,
@@ -890,6 +891,61 @@ t.section('renderLibraryCompletenessCard() wires the mark buttons per row (#1241
     'card never wires an action to an unresolvable album');
 }
 
+t.section('renderMarkCompleteButton() three-state contract');
+{
+  const clearHtml = renderMarkCompleteButton({request_id: 320, marked_complete: true});
+  t.contains(clearHtml, '>Clear complete mark</button>',
+    'verified row offers the clear action');
+  t.contains(clearHtml, 'window.toggleMarkComplete(320, false, this)',
+    'clear action sends marked=false for THIS request');
+  const markHtml = renderMarkCompleteButton({request_id: 321, marked_complete: false});
+  t.contains(markHtml, '>Mark complete</button>',
+    'listed row offers the mark action');
+  t.contains(markHtml, 'window.toggleMarkComplete(321, true, this)',
+    'mark action sends marked=true for THIS request');
+  t.ok(renderMarkCompleteButton({request_id: null}) === '',
+    'a census album with no resolvable request renders no button');
+}
+
+t.section('renderLibraryCompletenessCard() lists operator-verified albums apart');
+{
+  const html = renderLibraryCompletenessCard({
+    state: 'ok', error: null, albums_shown: 1, albums_listed_total: 1,
+    snapshot: {
+      generated_at: new Date().toISOString(),
+      duration_seconds: 10.0,
+      report: {
+        status: 'incomplete',
+        counts: {albums_scanned: 10, audio_complete: 9,
+                 missing_source_audio: 1, catalog_drift: 0, unknown: 0,
+                 operator_verified: 1},
+        albums: [
+          {album_id: 2, artist: 'Stellastarr*', title: 'Harmonies',
+           release_id: 'rel-listed', request_id: 321,
+           marked_incomplete: false, marked_complete: false,
+           findings: [{kind: 'missing_source_audio', detail: 'Hidden'}]},
+          {album_id: 19925, artist: 'UNKLE', title: 'Psyence Fiction',
+           release_id: '18004', request_id: 320,
+           marked_incomplete: false, marked_complete: true,
+           findings: [{kind: 'missing_source_audio', detail: 'Breather'}]},
+        ],
+      },
+    },
+  });
+  const verifiedAt = html.indexOf('Verified complete by operator');
+  t.ok(verifiedAt >= 0, 'card renders the verified category');
+  t.ok(html.indexOf('Psyence Fiction') > verifiedAt,
+    'the verified album appears only under the verified category');
+  t.ok(html.indexOf('Harmonies') < verifiedAt,
+    'the listed album stays in its finding category');
+  t.contains(html, 'window.toggleMarkComplete(320, false, this)',
+    'verified album offers the clear action');
+  t.contains(html, 'window.toggleMarkComplete(321, true, this)',
+    'listed album offers the mark-complete action');
+  t.excludes(html, 'window.toggleMarkIncomplete(320',
+    'verified album offers no incomplete action');
+}
+
 t.section('renderLibraryCompletenessCard() offers Run census now in every branch');
 {
   const missing = renderLibraryCompletenessCard({state: 'missing'});
@@ -949,6 +1005,10 @@ t.section('main.js binds window.refreshLibraryCensus (the onclick dead-end guard
     const mark = globalThis.window.toggleMarkIncomplete;
     t.ok(typeof mark === 'function',
       'main.js wires window.toggleMarkIncomplete (#1241)');
+    /** @type {any} */
+    const markComplete = globalThis.window.toggleMarkComplete;
+    t.ok(typeof markComplete === 'function',
+      'main.js wires window.toggleMarkComplete');
   } finally {
     globals.restore();
   }

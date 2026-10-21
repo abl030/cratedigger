@@ -11,11 +11,15 @@ import os
 import msgspec
 
 from lib import redis_cache as cache_api
+from lib.complete_mark_service import canonical_findings, request_release_ids
 from lib.disk_coverage_service import disk_coverage
+from lib.json_narrow import is_object_list, is_str_object_dict
 from lib.library_completeness_snapshot import (
+    LibraryCompletenessSnapshot,
     read_library_completeness_snapshot,
     request_library_completeness_census,
 )
+from lib.release_identity import normalize_release_id
 from lib.retag_divergence_census_snapshot import (
     read_retag_divergence_census_snapshot,
 )
@@ -165,11 +169,17 @@ def _dashboard_library_completeness() -> dict[str, object]:
         return result
     if snapshot is None:
         return _empty_library_completeness("missing")
+    snapshot, verified_indexes = _apply_operator_complete_marks(snapshot)
     snapshot_dict = msgspec.to_builtins(snapshot)
     report = snapshot_dict["report"]
-    albums = report["albums"]
+    report["counts"]["operator_verified"] = len(verified_indexes)
+    albums: list[dict[str, object]] = []
+    verified: list[dict[str, object]] = []
+    for index, album in enumerate(report["albums"]):
+        album["marked_complete"] = index in verified_indexes
+        (verified if album["marked_complete"] else albums).append(album)
     total = len(albums)
-    report["albums"] = albums[:DASHBOARD_LIBRARY_COMPLETENESS_ALBUM_CAP]
+    report["albums"] = albums[:DASHBOARD_LIBRARY_COMPLETENESS_ALBUM_CAP] + verified
     # Issue #1241: enrich each embedded album with its pipeline request and
     # the operator's incomplete-mark state so the card can offer the
     # mark/clear action inline. Joined only for the capped embed, never for
@@ -196,6 +206,59 @@ def _dashboard_library_completeness() -> dict[str, object]:
         "state": "ok", "error": None, "snapshot": snapshot_dict,
         "albums_shown": len(report["albums"]), "albums_listed_total": total,
     }
+
+
+def _apply_operator_complete_marks(
+    snapshot: LibraryCompletenessSnapshot,
+) -> tuple[LibraryCompletenessSnapshot, set[int]]:
+    """Honour the operator's complete marks against the published census.
+
+    A mark is honoured only while the census still reports exactly the
+    findings the operator acknowledged; anything new or changed lists the
+    album again. Honoured albums leave the finding counts, count as audio
+    complete, and the report status is recomputed from the adjusted counts.
+    Returns the adjusted snapshot and the indexes of the honoured albums.
+    A failed mark read degrades to "nothing verified", never a 500.
+    """
+    try:
+        marks = runtime().db().list_marked_complete()
+    except Exception:
+        log.exception("library completeness complete-mark read failed")
+        return snapshot, set()
+    acknowledged: dict[str, list[dict[str, str]]] = {}
+    for mark in marks:
+        stored = mark.get("marked_complete_findings")
+        if not is_object_list(stored):
+            continue
+        findings = canonical_findings(f for f in stored if is_str_object_dict(f))
+        for release_id in request_release_ids(mark):
+            acknowledged[release_id] = findings
+    report = snapshot.report
+    counts = report.counts
+    verified: set[int] = set()
+    for index, album in enumerate(report.albums):
+        findings = canonical_findings(
+            {"kind": f.kind, "detail": f.detail} for f in album.findings)
+        if not findings or acknowledged.get(normalize_release_id(album.release_id)) != findings:
+            continue
+        verified.add(index)
+        kinds = {f.kind for f in album.findings}
+        counts = msgspec.structs.replace(
+            counts,
+            missing_source_audio=counts.missing_source_audio - ("missing_source_audio" in kinds),
+            catalog_drift=counts.catalog_drift - ("catalog_drift" in kinds),
+            unknown=counts.unknown - ("unknown" in kinds),
+            audio_complete=counts.audio_complete
+            + bool(kinds & {"missing_source_audio", "unknown"}),
+        )
+    if not verified:
+        return snapshot, verified
+    status = report.status
+    if status in {"incomplete", "unknown"}:
+        status = ("unknown" if counts.unknown
+                  else "incomplete" if counts.missing_source_audio else "complete")
+    report = msgspec.structs.replace(report, counts=counts, status=status)
+    return msgspec.structs.replace(snapshot, report=report), verified
 
 
 def _empty_library_completeness(state: str) -> dict[str, object]:

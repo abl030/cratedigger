@@ -74,6 +74,7 @@ from scripts.pipeline_cli.album_requests import (
     tracks_from_mb_release,
 )
 from scripts.pipeline_cli.api_mutations import (
+    cmd_mark_complete,
     cmd_merge_rekey,
     cmd_pipeline_delete,
     cmd_resolve_rg,
@@ -154,6 +155,7 @@ __all__ = [
     "cmd_library_delete",
     "cmd_list",
     "cmd_long_tail",
+    "cmd_mark_complete",
     "cmd_mark_incomplete",
     "cmd_merge_rekey",
     "cmd_pipeline_delete",
