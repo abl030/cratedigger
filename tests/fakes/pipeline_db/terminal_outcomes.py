@@ -8,6 +8,7 @@ import copy
 import json
 from collections.abc import (
     Callable,
+    Sequence,
 )
 from dataclasses import fields, replace
 from datetime import timedelta
@@ -955,15 +956,14 @@ class _FakeTerminalOutcomesMixin(_FakePipelineDBBase):
     def _fake_finish_processing_request(
         self,
         request,
-        command: ImportTerminalOutcome,
+        *,
+        request_id: int,
+        request_transitions: Sequence[transitions.RequestTransition | None],
         boundary: Callable[[str], None],
     ) -> tuple[transitions.TransitionApplied, ...]:
         sequence = tuple(
             transition
-            for transition in (
-                command.initial_transition,
-                *command.post_audit_transitions,
-            )
+            for transition in request_transitions
             if transition is not None
         )
         if not sequence:
@@ -1029,7 +1029,7 @@ class _FakeTerminalOutcomesMixin(_FakePipelineDBBase):
             request.update(fields)
             imported_seen = imported_seen or virtual == "imported"
             applied.append(transitions.TransitionApplied(
-                request_id=command.request_id,
+                request_id=request_id,
                 from_status=previous,
                 target_status=virtual,
             ))
@@ -1192,8 +1192,12 @@ class _FakeTerminalOutcomesMixin(_FakePipelineDBBase):
                 boundary("processing_cleanup.consumed")
             applied = self._fake_finish_processing_request(
                 request,
-                command,
-                boundary,
+                request_id=command.request_id,
+                request_transitions=(
+                    command.initial_transition,
+                    *command.post_audit_transitions,
+                ),
+                boundary=boundary,
             )
             job = ImportJob.from_row(copy.deepcopy(job_row))
         except Exception:
@@ -1374,25 +1378,13 @@ class _FakeTerminalOutcomesMixin(_FakePipelineDBBase):
                     (command.import_job_id, command.request_id)
                 ]
                 boundary("processing_cleanup.consumed")
-            transition = command.request_transition
-            if transition is None:
-                raise ImportJobTerminalConflict(
-                    "automation terminal outcome has no private request edge"
-                )
-            request["status"] = transition.target_status
-            request.update(dict(transition.fields))
-            request["active_download_state"] = None
-            request["active_automation_import_job_id"] = None
-            request["updated_at"] = now
-            boundary(
-                f"request.processing_to_{transition.target_status}"
-            )
-            applied = (
-                transitions.TransitionApplied(
-                    request_id=command.request_id,
-                    from_status="processing",
-                    target_status=transition.target_status,
-                ),
+            # Same request edge as the import path, as production's
+            # ``_finish_processing_request_last`` is shared by both.
+            applied = self._fake_finish_processing_request(
+                request,
+                request_id=command.request_id,
+                request_transitions=(command.request_transition,),
+                boundary=boundary,
             )
             job = ImportJob.from_row(copy.deepcopy(job_row))
         except Exception:

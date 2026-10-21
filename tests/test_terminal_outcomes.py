@@ -1073,6 +1073,8 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             (
                 real_request["status"],
                 real_request["active_automation_import_job_id"],
+                real_request["validation_attempts"],
+                real_request["next_retry_after"] is not None,
                 real_result.job.status,
                 real_result.job.preview_status,
                 real_result.job.result["processing_cleanup"]["action"],
@@ -1080,6 +1082,8 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             (
                 fake_request["status"],
                 fake_request["active_automation_import_job_id"],
+                fake_request["validation_attempts"],
+                fake_request["next_retry_after"] is not None,
                 fake_result.job.status,
                 fake_result.job.preview_status,
                 fake_result.job.result["processing_cleanup"]["action"],

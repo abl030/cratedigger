@@ -7348,6 +7348,38 @@ class TestRecordPreviewMeasurementFailedSlice(unittest.TestCase):
         assert job_row is not None
         self.assertEqual(job_row.status, "failed")
 
+    def test_automation_measurement_failed_requeue_backs_off(self):
+        """Issue #1423: a materialize failure requeued every ~20 minutes
+        for seven hours. The requeue counts a download attempt so search
+        backoff grows; it still names no peer and denylists nothing."""
+        from lib.dispatch import _record_preview_measurement_failed
+        from lib.quality import MeasurementFailure
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, download_attempts=3))
+        source_path = "/Incoming/auto-import/Test - Album"
+        job = handoff_automation_owner(db, 42, canonical_path=source_path)
+
+        _record_preview_measurement_failed(
+            db,
+            request_id=42,
+            import_job_id=job.id,
+            payload=MeasurementFailure(
+                reason="measurement_crashed",
+                detail="materialize failed",
+                source_path=source_path),
+            automation_terminal_authority=(
+                self._automation_terminal_authority(
+                    db, job, source_path=source_path)),
+        )
+
+        row = db.request(42)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["download_attempts"], 4)
+        self.assertIsNotNone(row["next_retry_after"])
+        self.assertEqual(len(db.denylist), 0)
+        self.assertIsNone(db.download_logs[0].soulseek_username)
+
     def test_source_vanished_no_denylist_when_username_unknown(self):
         """source_vanished + no source_username → no denylist write.
         Request and job still finalize normally."""
