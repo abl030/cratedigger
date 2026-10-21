@@ -18,7 +18,12 @@ import psycopg2.errors
 from lib import transitions
 from lib.dispatch import DispatchOutcome
 from lib.dispatch.types import PostCommitCleanup
-from lib.download_processing import Completed, CompletionFailed, CompletionResult
+from lib.download_processing import (
+    Completed,
+    CompletionFailed,
+    CompletionResult,
+    ProcessAlbumFn,
+)
 from lib.import_execution import (
     AutomationOwnerFailStop,
     CancellationToken,
@@ -2330,6 +2335,8 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
         db: PipelineDB,
         job_id: int,
         completion: CompletionResult,
+        *,
+        process_album_fn: ProcessAlbumFn | None = None,
     ) -> ImportJob | None:
         from scripts import importer
 
@@ -2337,7 +2344,7 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
         assert job is not None
         execution_lease = execution_lease_from_job(job)
         assert execution_lease is not None
-        process_album = RecordingProcessAlbum(outcome=completion)
+        process_album = process_album_fn or RecordingProcessAlbum(outcome=completion)
 
         # Deliberate seam: the real-PG db rides in the fake source, whose
         # only surface this flow reaches is ``_get_db()`` (plus the mock
@@ -2394,6 +2401,49 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
         history = db.get_download_history(request_id)
         self.assertEqual(len(history), 1)
         self.assertEqual(history[0]["outcome"], "success")
+
+    def test_local_processing_exception_is_named_in_the_job_record(self):
+        """Issue #1423 A': the deferred detail says which exception it was."""
+        db, _request_id, job_id = _seed_running_import(automation_state=True)
+        self.addCleanup(db.close)
+
+        def explode(*_args: object, **_kwargs: object) -> CompletionResult:
+            raise RuntimeError("disk on fire")
+
+        updated = self._run_job_backed_automation_result(
+            db,
+            job_id,
+            Completed(),
+            process_album_fn=explode,
+        )
+
+        assert updated is not None
+        self.assertIn(
+            "unhandled_exception_during_local_processing: "
+            "RuntimeError: disk on fire",
+            updated.message or "",
+        )
+
+    def test_local_processing_exception_with_surrogate_path_is_kept(self):
+        """A non-UTF-8 filename in the message must not break the write."""
+        db, _request_id, job_id = _seed_running_import(automation_state=True)
+        self.addCleanup(db.close)
+
+        def explode(*_args: object, **_kwargs: object) -> CompletionResult:
+            raise ValueError("bad tag in caf\udce9.flac")
+
+        updated = self._run_job_backed_automation_result(
+            db,
+            job_id,
+            Completed(),
+            process_album_fn=explode,
+        )
+
+        assert updated is not None
+        self.assertIn(
+            "ValueError: bad tag in caf\\udce9.flac",
+            updated.message or "",
+        )
 
     def test_job_backed_completion_failed_commits_attempt_audit_and_job_once(self):
         db, request_id, job_id = _seed_running_import(automation_state=True)
