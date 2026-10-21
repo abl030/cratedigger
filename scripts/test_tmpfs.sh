@@ -71,33 +71,11 @@ setup_cratedigger_test_tmpfs() {
         current="$(dirname -- "$current")"
     done
 
-    # scripts/test.sh sets this before its own `nix develop` invocation, and
-    # the final gate (scripts/test_substrate.py, reached through
-    # scripts/run_final_gate.sh) sets it in the environment of the
-    # `nix develop` child it launches: run_suite() (scripts/run_test_suite.py)
-    # takes an exclusive admission lock and its own post-lock headroom
-    # precondition for every suite run, canonical or targeted, so it is the
-    # single enforcement point there. Without this skip, a second concurrently-
-    # launched suite would die right here at shell entry with this unnamed
-    # message instead of queueing on the lock (issue #1111 review M2) — this
-    # setup still runs in full otherwise; only the free-bytes refusal defers.
-    # This is inherited process environment, not an entry-time flag: a
-    # NESTED nix-shell a test spawns as its own subprocess also inherits it
-    # from the enclosing suite and skips the same refusal — deliberately,
-    # since the enclosing run_suite() already owns headroom enforcement for
-    # the whole run. No test currently nests a nix-shell this way —
-    # tests/test_decision_corpus_export.py used to nest six such calls;
-    # issue #1131 removed the nesting since the already-active interpreter
-    # needed no re-entry. This is the SAME `if` check either way, so it is
-    # not dormant: it still runs, and skips, on every suite invocation
-    # started by scripts/test.sh, the final gate,
-    # scripts/daily_flake_update.sh, and scripts/daily_beets_tip_update.sh,
-    # which all set this var before the dev-shell entry they drive. Only the NESTED case — one shell
-    # spawning another as its own subprocess and inheriting the var that
-    # way — currently has no live example; nothing here needs to change
-    # for the next test that legitimately needs it. Only a genuinely
-    # interactive nix-shell entry, started outside any suite run, never has
-    # this set and keeps its own entry guard.
+    # Automated suite launchers (the daily gate scripts) set this: run_suite()
+    # (scripts/run_test_suite.py) takes an exclusive admission lock and checks
+    # headroom itself after the lock, so a second concurrent suite queues there
+    # instead of dying at shell entry. Only the free-bytes refusal is skipped;
+    # an interactive nix-shell entry keeps it.
     if [[ "${CRATEDIGGER_SUITE_OWNS_HEADROOM:-}" != "1" ]]; then
         available_bytes="$(
             df -B1 --output=avail "$parent" | tail -n 1 | tr -d '[:space:]'

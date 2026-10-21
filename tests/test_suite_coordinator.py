@@ -40,7 +40,6 @@ from scripts.run_python_tests import (
     TEST_HOST_MEMORY_EXHAUSTED_EXIT_CODE,
     TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE,
 )
-from scripts.run_targeted_tests import targeted_phases
 from scripts.run_test_suite import (
     CheckSummary,
     PhaseSpec,
@@ -53,7 +52,6 @@ from scripts.test_substrate import (
     _HEADROOM_BASE_BYTES,
     _HEADROOM_PER_WORKER_BYTES,
     DEFAULT_MIN_HEADROOM_BYTES,
-    DEFAULT_RECEIPT_RETIREMENT_MAX_AGE_SECONDS,
     SCRATCH_TREE_OWNER_MARKER_NAME,
     SCRATCH_TREE_PREFIX,
     TEST_RAM_ROOT_EXHAUSTED,
@@ -69,7 +67,6 @@ from scripts.test_substrate import (
     default_min_headroom_bytes,
     headroom_floor_bytes,
     reap_stale_check_bundles,
-    reap_stale_final_gate_receipts,
 )
 from tests.parent_signal_guard import guard_kill_statement, guard_source_prelude
 
@@ -207,12 +204,8 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
         self.assertGreater(len(default_phases), 1)
         self.assertEqual(default_phases[-1].name, "python")
 
-        selected_phases = targeted_phases(("tests.test_typing_ratchet",))
-        self.assertGreater(len(selected_phases), 1)
-        self.assertEqual(selected_phases[-1].name, "python")
-
     def test_summary_records_the_actual_invoked_suite_command(self) -> None:
-        command = "python3 scripts/run_targeted_tests.py tests.test_alpha"
+        command = "python3 scripts/run_test_suite.py --custom"
 
         result, _output = self._run(
             (PhaseSpec("alpha", _python_command("ok", 0), "alpha", _no_dialect),),
@@ -533,7 +526,7 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
         self,
     ) -> None:
         """Issue #1131: every phase before a phase literally named "python"
-        (the shape both _default_phases() and targeted_phases() always
+        (the shape _default_phases() always
         produce) must run CONCURRENTLY with it, not serially.
 
         Proven with a bounded rendezvous rather than a timing measurement:
@@ -949,27 +942,14 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
     ) -> None:
         """Issue #1111 review M4(a)/m14: TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE
         must stay outside the "python" phase's declared failure_exit_codes
-        in BOTH the canonical suite's _default_phases() and the targeted
-        runner's targeted_phases() — either one silently regaining it would
+        in the canonical suite's _default_phases() — silently regaining it would
         let the infrastructure-failure promotion revert with no test
         noticing, exactly the shape M4 closed for the plain exit-code
         contract."""
         canonical_python = next(
             phase for phase in _default_phases() if phase.name == "python"
         )
-        targeted_python = next(
-            phase
-            for phase in targeted_phases(("tests.test_typing_ratchet",))
-            if phase.name == "python"
-        )
-        for desc, phase in (
-            ("canonical _default_phases", canonical_python),
-            ("targeted targeted_phases", targeted_python),
-        ):
-            with self.subTest(desc=desc):
-                self.assertNotIn(
-                    TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE, phase.failure_exit_codes
-                )
+        self.assertNotIn(TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE, canonical_python.failure_exit_codes)
 
     def test_pure_ram_root_exhaustion_promotes_the_suite_to_infrastructure_failure(
         self,
@@ -1028,7 +1008,7 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
         is tautological — the exact anti-pattern code-quality.md records
         from #1088/#1090). This test instead asserts the constant's value
         stays OUTSIDE the "python" phase's declared failure_exit_codes in
-        BOTH _default_phases() and targeted_phases(), and stays DISTINCT
+        _default_phases(), and stays DISTINCT
         from its sibling constant.
         """
         self.assertNotEqual(
@@ -1037,19 +1017,7 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
         canonical_python = next(
             phase for phase in _default_phases() if phase.name == "python"
         )
-        targeted_python = next(
-            phase
-            for phase in targeted_phases(("tests.test_typing_ratchet",))
-            if phase.name == "python"
-        )
-        for desc, phase in (
-            ("canonical _default_phases", canonical_python),
-            ("targeted targeted_phases", targeted_python),
-        ):
-            with self.subTest(desc=desc):
-                self.assertNotIn(
-                    TEST_HOST_MEMORY_EXHAUSTED_EXIT_CODE, phase.failure_exit_codes
-                )
+        self.assertNotIn(TEST_HOST_MEMORY_EXHAUSTED_EXIT_CODE, canonical_python.failure_exit_codes)
 
     def test_pure_memory_exhaustion_promotes_the_suite_to_infrastructure_failure(
         self,
@@ -1188,8 +1156,7 @@ class SuiteAdmissionTestCase(unittest.TestCase):
         """Issue #1111 review m9: a waiter's progress message names the
         actual current holder (pid + start ticks), read from what
         acquire_suite_admission itself writes on acquisition — not just a
-        generic "another canonical suite" with no identity, matching
-        run_final_gate.sh's own helper/gate pid+start-ticks precedent."""
+        generic "another canonical suite" with no identity."""
         holder_ready = threading.Event()
         release_holder = threading.Event()
 
@@ -1500,49 +1467,6 @@ class StaleCheckBundleReapTestCase(unittest.TestCase):
         for path in stale:
             self.assertFalse(path.exists())
         self.assertTrue(fresh.exists())
-
-    def _receipt(self, name: str, *, bundle: Path) -> Path:
-        receipt = self.runtime / name
-        receipt.mkdir(mode=0o700)
-        (receipt / "bundle").write_text(f"{bundle}\n", encoding="utf-8")
-        return receipt
-
-    def test_never_reaps_a_bundle_a_live_receipt_still_references(self) -> None:
-        """Issue #1111 review m13: a run_final_gate.sh receipt's own bundle
-        survives regardless of age, preserving both verdict and evidence
-        for a long-running review."""
-        now = time.time()
-        referenced = self._bundle(
-            "cratedigger-checks.referenced", age_seconds=999, now=now
-        )
-        self._receipt("cratedigger-final-gate.live", bundle=referenced)
-
-        reaped = reap_stale_check_bundles(
-            self.runtime, max_age_seconds=100, reference_time=now
-        )
-
-        self.assertEqual(reaped, ())
-        self.assertTrue(referenced.exists())
-
-    def test_still_reaps_an_unreferenced_bundle_alongside_a_protected_one(
-        self,
-    ) -> None:
-        now = time.time()
-        referenced = self._bundle(
-            "cratedigger-checks.referenced", age_seconds=999, now=now
-        )
-        unreferenced = self._bundle(
-            "cratedigger-checks.unreferenced", age_seconds=999, now=now
-        )
-        self._receipt("cratedigger-final-gate.live", bundle=referenced)
-
-        reaped = reap_stale_check_bundles(
-            self.runtime, max_age_seconds=100, reference_time=now
-        )
-
-        self.assertEqual(reaped, (unreferenced,))
-        self.assertTrue(referenced.exists())
-        self.assertFalse(unreferenced.exists())
 
     def test_never_reaps_a_bundle_owned_by_a_foreign_uid(self) -> None:
         """Issue #1208 review D-F1: the foreign-uid guard
@@ -2026,408 +1950,6 @@ class StaleCheckBundleReapTestCase(unittest.TestCase):
 
         self.assertEqual(reaped, ())
         self.assertTrue(tree.exists())
-
-
-class FinalGateReceiptRetirementTestCase(unittest.TestCase):
-    """Contracts for age-gated run_final_gate.sh receipt retirement (#1208 item 4)."""
-
-    def setUp(self) -> None:
-        shared = Path(
-            os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-        )
-        self.assertTrue(
-            shared.is_dir(),
-            "private runtime tmpfs is required for this test",
-        )
-        self.runtime = Path(
-            tempfile.mkdtemp(dir=shared, prefix="cratedigger-reap-test-")
-        )
-
-    def tearDown(self) -> None:
-        shutil.rmtree(self.runtime, ignore_errors=True)
-
-    @staticmethod
-    def _live_identity() -> tuple[str, str]:
-        """This test process's own real pid+ticks pair — genuinely alive,
-        same precedent as test_read_lock_holder_identity_parses_well_
-        formed_live_content above."""
-        ticks = _proc_start_ticks(os.getpid())
-        assert ticks is not None
-        return str(os.getpid()), ticks
-
-    @staticmethod
-    def _dead_identity() -> tuple[str, str]:
-        """A syntactically well-formed but guaranteed-dead pid+ticks pair —
-        same precedent as test_read_lock_holder_identity_rejects_a_stale_
-        dead_pid above (a PID far past any real process on this host)."""
-        return "999999999", "123456"
-
-    def _receipt(
-        self,
-        name: str,
-        *,
-        age_seconds: float,
-        now: float,
-        terminal: bool,
-        helper_identity: tuple[str, str] | None = None,
-        gate_identity: tuple[str, str] | None = None,
-    ) -> Path:
-        receipt = self.runtime / name
-        receipt.mkdir(mode=0o700)
-        if helper_identity is not None:
-            (receipt / "helper_pid").write_text(f"{helper_identity[0]}\n")
-            (receipt / "helper_start_ticks").write_text(f"{helper_identity[1]}\n")
-        if gate_identity is not None:
-            (receipt / "gate_pid").write_text(f"{gate_identity[0]}\n")
-            (receipt / "gate_start_ticks").write_text(f"{gate_identity[1]}\n")
-        stamp = now - age_seconds
-        if terminal:
-            terminal_path = receipt / "terminal"
-            terminal_path.write_text("pass 0\n")
-            os.utime(terminal_path, (stamp, stamp))
-            # Deliberately leave the receipt directory's own mtime alone
-            # (fresh, "now" — it was just mkdir'd above): production
-            # creates the receipt directory BEFORE the run and writes
-            # `terminal` only at the end, so age_seconds should always be
-            # measured from the terminal file, never the directory.
-            # Backdating only the terminal file here proves
-            # _receipt_last_activity actually reads it, rather than
-            # accidentally passing because both timestamps happen to agree.
-        else:
-            os.utime(receipt, (stamp, stamp))
-        return receipt
-
-    def test_retires_a_terminal_receipt_older_than_the_floor(self) -> None:
-        now = time.time()
-        receipt = self._receipt(
-            "cratedigger-final-gate.done", age_seconds=999, now=now, terminal=True
-        )
-
-        retired = reap_stale_final_gate_receipts(
-            self.runtime, max_age_seconds=100, reference_time=now
-        )
-
-        self.assertEqual(retired, (receipt,))
-        self.assertFalse(receipt.exists())
-
-    def test_keeps_a_terminal_receipt_within_the_floor(self) -> None:
-        now = time.time()
-        receipt = self._receipt(
-            "cratedigger-final-gate.recent", age_seconds=10, now=now, terminal=True
-        )
-
-        retired = reap_stale_final_gate_receipts(
-            self.runtime, max_age_seconds=100, reference_time=now
-        )
-
-        self.assertEqual(retired, ())
-        self.assertTrue(receipt.exists())
-
-    def test_keeps_an_old_receipt_whose_gate_process_is_still_live(self) -> None:
-        """Never retire a receipt whose recorded gate identity is still
-        live, however old — an in-progress or genuinely long final gate."""
-        now = time.time()
-        receipt = self._receipt(
-            "cratedigger-final-gate.running",
-            age_seconds=999,
-            now=now,
-            terminal=False,
-            helper_identity=self._dead_identity(),
-            gate_identity=self._live_identity(),
-        )
-
-        retired = reap_stale_final_gate_receipts(
-            self.runtime, max_age_seconds=100, reference_time=now
-        )
-
-        self.assertEqual(retired, ())
-        self.assertTrue(receipt.exists())
-
-    def test_keeps_an_old_receipt_whose_helper_process_is_still_live(self) -> None:
-        """Symmetric to the gate check: EITHER recorded identity being live
-        blocks retirement, not only the gate (asymmetric-mutant guard)."""
-        now = time.time()
-        receipt = self._receipt(
-            "cratedigger-final-gate.wrapper-alive",
-            age_seconds=999,
-            now=now,
-            terminal=False,
-            helper_identity=self._live_identity(),
-            gate_identity=self._dead_identity(),
-        )
-
-        retired = reap_stale_final_gate_receipts(
-            self.runtime, max_age_seconds=100, reference_time=now
-        )
-
-        self.assertEqual(retired, ())
-        self.assertTrue(receipt.exists())
-
-    def test_retires_an_old_receipt_with_no_terminal_and_dead_processes(self) -> None:
-        now = time.time()
-        receipt = self._receipt(
-            "cratedigger-final-gate.crashed",
-            age_seconds=999,
-            now=now,
-            terminal=False,
-            helper_identity=self._dead_identity(),
-            gate_identity=self._dead_identity(),
-        )
-
-        retired = reap_stale_final_gate_receipts(
-            self.runtime, max_age_seconds=100, reference_time=now
-        )
-
-        self.assertEqual(retired, (receipt,))
-        self.assertFalse(receipt.exists())
-
-    def test_keeps_a_fresh_receipt_with_no_terminal_and_dead_processes(self) -> None:
-        """The age gate applies independently of liveness: dead recorded
-        processes alone are not sufficient — it must ALSO be old."""
-        now = time.time()
-        receipt = self._receipt(
-            "cratedigger-final-gate.fresh-crash",
-            age_seconds=1,
-            now=now,
-            terminal=False,
-            helper_identity=self._dead_identity(),
-            gate_identity=self._dead_identity(),
-        )
-
-        retired = reap_stale_final_gate_receipts(
-            self.runtime, max_age_seconds=100, reference_time=now
-        )
-
-        self.assertEqual(retired, ())
-        self.assertTrue(receipt.exists())
-
-    def test_retires_an_old_receipt_with_no_process_identity_recorded(self) -> None:
-        """A missing pid/ticks file (interrupted before the first write) is
-        "not live", never assumed live — same posture as
-        _read_lock_holder_identity's own unreadable-content fallback."""
-        now = time.time()
-        receipt = self._receipt(
-            "cratedigger-final-gate.no-identity",
-            age_seconds=999,
-            now=now,
-            terminal=False,
-        )
-
-        retired = reap_stale_final_gate_receipts(
-            self.runtime, max_age_seconds=100, reference_time=now
-        )
-
-        self.assertEqual(retired, (receipt,))
-        self.assertFalse(receipt.exists())
-
-    def test_retirement_does_not_crash_on_a_non_decimal_unicode_digit_identity(
-        self,
-    ) -> None:
-        """Issue #1208 review D-F7: the identical isdigit()-vs-isdecimal()
-        bug in ``_receipt_process_field_live`` — a superscript "\u00b9"
-        passes ``str.isdigit()`` but ``int("\u00b9")`` raises
-        ``ValueError``, which would abort the whole suite instead of
-        degrading to "not live", same as the fix for
-        ``_scratch_tree_owner_dead``. A malformed identity degrades
-        gracefully to "not live" (retirement proceeds), never crashes."""
-        now = time.time()
-        receipt = self._receipt(
-            "cratedigger-final-gate.baddigit",
-            age_seconds=999,
-            now=now,
-            terminal=False,
-            helper_identity=("\u00b9", "123456"),
-            gate_identity=self._dead_identity(),
-        )
-
-        retired = reap_stale_final_gate_receipts(
-            self.runtime, max_age_seconds=100, reference_time=now
-        )
-
-        self.assertEqual(retired, (receipt,))
-        self.assertFalse(receipt.exists())
-
-    def test_retiring_a_receipt_releases_its_bundle_protection(self) -> None:
-        """Retirement and bundle reaping run in the SAME admitted pass —
-        run_suite calls reap_stale_final_gate_receipts before
-        reap_stale_check_bundles — so a retired receipt's bundle is no
-        longer protected on the very next reap call. One lifecycle owner,
-        no second cleanup path."""
-        now = time.time()
-        bundle = self.runtime / "cratedigger-checks.orphaned"
-        bundle.mkdir(mode=0o700)
-        summary = bundle / "summary.json"
-        summary.write_text("{}\n")
-        stamp = now - 999
-        os.utime(summary, (stamp, stamp))
-        receipt = self._receipt(
-            "cratedigger-final-gate.protecting",
-            age_seconds=999,
-            now=now,
-            terminal=True,
-        )
-        (receipt / "bundle").write_text(f"{bundle}\n")
-
-        retired = reap_stale_final_gate_receipts(
-            self.runtime, max_age_seconds=100, reference_time=now
-        )
-        self.assertEqual(retired, (receipt,))
-
-        reaped = reap_stale_check_bundles(
-            self.runtime, max_age_seconds=100, reference_time=now
-        )
-
-        self.assertEqual(reaped, (bundle,))
-        self.assertFalse(bundle.exists())
-
-    # --- Issue #1208 review D6: per-clause coverage for
-    # reap_stale_final_gate_receipts's non-dir/symlink and foreign-uid
-    # guards — untested gaps review found by planting mutants that
-    # survived. Recorded honestly: for THESE two clauses specifically,
-    # shutil.rmtree already refuses to operate on a symlink or a
-    # non-directory (raises OSError, caught by this function's own
-    # `except OSError: continue`), so removing either guard clause does
-    # NOT change the observable `retired` return value or which entities
-    # survive on disk — the tests below pin that real end-to-end safety
-    # property (proven empirically: shutil.rmtree(symlink) raises
-    # "Cannot call rmtree on a symbolic link", shutil.rmtree(regular_file)
-    # raises NotADirectoryError), not the specific guard-clause mutant,
-    # which this composition genuinely cannot distinguish from "no guard
-    # at all". They still matter as regression coverage: if a future
-    # change ever replaced shutil.rmtree with something that lacks its
-    # built-in refusal, these would be the tests that catch it.
-
-    def test_never_retires_a_symlink_named_like_a_receipt(self) -> None:
-        now = time.time()
-        real_target = self.runtime / "not-actually-a-receipt"
-        real_target.mkdir(mode=0o700)
-        (real_target / "terminal").write_text("pass 0\n")
-        stamp = now - 999
-        os.utime(real_target / "terminal", (stamp, stamp))
-        link = self.runtime / "cratedigger-final-gate.symlink"
-        link.symlink_to(real_target)
-
-        retired = reap_stale_final_gate_receipts(
-            self.runtime, max_age_seconds=100, reference_time=now
-        )
-
-        self.assertEqual(retired, ())
-        self.assertTrue(link.exists())
-        self.assertTrue(real_target.exists())
-
-    def test_never_retires_a_non_directory_named_like_a_receipt(self) -> None:
-        now = time.time()
-        stray_file = self.runtime / "cratedigger-final-gate.strayfile"
-        stray_file.write_text("not a receipt directory\n")
-        stamp = now - 999
-        os.utime(stray_file, (stamp, stamp))
-
-        retired = reap_stale_final_gate_receipts(
-            self.runtime, max_age_seconds=100, reference_time=now
-        )
-
-        self.assertEqual(retired, ())
-        self.assertTrue(stray_file.exists())
-
-    def test_never_retires_a_receipt_owned_by_a_foreign_uid(self) -> None:
-        """Issue #1208 review D-F1: the third guard clause
-        (``info.st_uid != os.getuid()``) — D6 originally recorded this as
-        untestable without root; that claim was false, closed via
-        ``_chown_via_user_namespace``. A second correction: a delete
-        attempt run from a normal process against that chowned directory
-        is ALSO invisible to this specific clause, because ordinary
-        POSIX permissions already block it — see
-        ``_run_in_uid_remapped_namespace`` for the actual discriminating
-        world (the delete attempt run AS fake-root INSIDE the same
-        namespace that performed the chown, where only the software
-        guard stands between it and deletion)."""
-        receipt = self.runtime / "cratedigger-final-gate.foreignowner"
-        script = (
-            "import os\n"
-            "import time\n"
-            "from pathlib import Path\n"
-            "from scripts.test_substrate import reap_stale_final_gate_receipts\n"
-            "\n"
-            f"runtime = Path({str(self.runtime)!r})\n"
-            f"receipt = Path({str(receipt)!r})\n"
-            "receipt.mkdir(mode=0o700)\n"
-            "terminal = receipt / 'terminal'\n"
-            "terminal.write_text('pass 0\\n')\n"
-            "now = time.time()\n"
-            "stamp = now - 999\n"
-            "os.utime(terminal, (stamp, stamp))\n"
-            "os.chown(receipt, 1, 1)\n"
-            "\n"
-            "retired = reap_stale_final_gate_receipts(\n"
-            "    runtime, max_age_seconds=100, reference_time=now\n"
-            ")\n"
-            "ok = retired == () and receipt.exists()\n"
-            "print('RESULT:' + ('PASS' if ok else 'FAIL'))\n"
-        )
-        try:
-            completed = _run_in_uid_remapped_namespace(script)
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertIn(
-                "RESULT:PASS",
-                completed.stdout,
-                f"stdout={completed.stdout!r} stderr={completed.stderr!r}",
-            )
-        finally:
-            if receipt.exists():
-                _chown_via_user_namespace(receipt, "0:0", recursive=True)
-
-    def test_default_retirement_floor_is_seven_days(self) -> None:
-        """Pins the documented constant directly — a change here is a
-        deliberate policy change, not an accident."""
-        self.assertEqual(
-            DEFAULT_RECEIPT_RETIREMENT_MAX_AGE_SECONDS, 7 * 24 * 60 * 60
-        )
-
-    def test_run_suite_retires_eligible_receipts_before_reaping_bundles(
-        self,
-    ) -> None:
-        """Wiring pin: run_suite's own admitted pass must actually call
-        reap_stale_final_gate_receipts, and BEFORE reap_stale_check_bundles
-        — proven end-to-end through the real run_suite entry point (a
-        headroom failure short-circuits before any phase runs, so this
-        never executes the real suite)."""
-        now = time.time()
-        bundle = self.runtime / "cratedigger-checks.orphaned"
-        bundle.mkdir(mode=0o700)
-        summary = bundle / "summary.json"
-        summary.write_text("{}\n")
-        stale = now - (5 * 60 * 60)
-        os.utime(summary, (stale, stale))
-        receipt = self._receipt(
-            "cratedigger-final-gate.old",
-            age_seconds=8 * 24 * 60 * 60,
-            now=now,
-            terminal=True,
-        )
-        (receipt / "bundle").write_text(f"{bundle}\n")
-
-        phases = (
-            PhaseSpec(
-                "must-not-run", (sys.executable, "-c", "pass"), "n", _no_dialect
-            ),
-        )
-        stream = io.StringIO()
-
-        with self.assertRaises(RamRootExhaustedError):
-            run_suite(
-                repo_root=REPO_ROOT,
-                phases=phases,
-                runtime_dir=self.runtime,
-                stream=stream,
-                min_headroom_bytes=1 << 62,
-            )
-
-        self.assertFalse(receipt.exists(), "an eligible receipt must retire")
-        self.assertFalse(
-            bundle.exists(),
-            "its now-unprotected bundle must reap in the same admitted pass",
-        )
-        self.assertIn("retired 1 stale final-gate receipt(s)", stream.getvalue())
 
 
 class SuiteHeadroomPreconditionTestCase(unittest.TestCase):

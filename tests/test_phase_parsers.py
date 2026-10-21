@@ -15,7 +15,6 @@ from __future__ import annotations
 import os
 import sys
 import unittest
-from pathlib import Path
 
 import msgspec
 
@@ -32,7 +31,6 @@ from scripts.phase_parsers import (
     ruff,
     tsc,
 )
-from scripts.targeted_test_selection import expand_test_selection
 
 
 def _log(text: str, *, rerun: str = "bash scripts/rerun.sh") -> PhaseLog:
@@ -339,8 +337,7 @@ class TestTypeScriptDialect(unittest.TestCase):
         """The dev shell's own banner reaches the log on stderr."""
         parsed = tsc.parse_failures(
             _log(
-                "cratedigger dev shell — targeted: python3 "
-                "scripts/run_targeted_tests.py tests.test_X\n"
+                "cratedigger dev shell — full suite: bash scripts/run_tests.sh\n"
                 "web/js/recents.js(27,3): error TS2322: real one"
             )
         )
@@ -609,63 +606,6 @@ class TestPythonSchedulerDialect(unittest.TestCase):
             python_tests.parse_failures(
                 _log(python_tests.FAILURE_MARKER_PREFIX + "not json")
             )
-
-
-class TestEveryParserSelectsThisModule(unittest.TestCase):
-    """Editing a parser must run its dialect tests, all seven of them.
-
-    Six of the seven fail closed without the `prefix:scripts/phase_parsers/`
-    row, because the basename probe derives `tests.test_<stem>` and no
-    `tests/test_ruff.py`, `test_dead_code.py`, `test_js_checks.py`,
-    `test_python_tests.py`, `test_tsc.py` or `test___init__.py` exists.
-    `pyright_checks.py` is the exception and the reason this pin was
-    written: `tests/test_pyright_checks.py` DOES exist, for
-    `scripts/run_pyright_checks.py`, so that one file would quietly
-    resolve a wrong-subject module instead of raising.
-
-    `MASKABLE_RULE_PINS` in tests/test_selection_coverage_audit.py now
-    carries that deletion-visibility contract for every rule row, this one
-    included (issue #1313, batch D). What stays here is what a one-path pin
-    cannot say: the package's own file list, and that ALL seven parsers
-    reach the dialect tests.
-
-    Deleting the row, and narrowing it so that `pyright_checks.py` still
-    matches while its siblings stop, both go red in both places: the pins
-    watch what the pinned path loses AND freeze every pinned row's path
-    conditions. What is still only here is the per-file evidence — that all
-    seven parsers really do reach the dialect tests, against this package's
-    own file list, rather than one sampled path standing in for the rest.
-    """
-
-    def test_each_parser_module_resolves_the_dialect_tests(self) -> None:
-        repo_root = Path(__file__).resolve().parent.parent
-        package = repo_root / "scripts" / "phase_parsers"
-        modules = sorted(path.name for path in package.glob("*.py"))
-        self.assertEqual(
-            modules,
-            [
-                "__init__.py",
-                "dead_code.py",
-                "js_checks.py",
-                "pyright_checks.py",
-                "python_tests.py",
-                "ruff.py",
-                "tsc.py",
-            ],
-        )
-        for name in modules:
-            with self.subTest(module=name):
-                selected = expand_test_selection(
-                    (),
-                    changed_paths=(f"scripts/phase_parsers/{name}",),
-                    repo_root=repo_root,
-                )
-                # Both of the row's named modules, not just the first:
-                # dropping `tests.test_suite_coordinator` from it leaves
-                # the parsers' one real composition seam unselected, and
-                # survived every test before this (#1313 runner mutant M9).
-                self.assertIn("tests.test_phase_parsers", selected)
-                self.assertIn("tests.test_suite_coordinator", selected)
 
 
 class TestDialectsDoNotOverlap(unittest.TestCase):

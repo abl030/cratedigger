@@ -111,7 +111,7 @@ def low_headroom_environment(
     """Force the helper's real default tmpfs root below the headroom gate.
 
     Explicitly clears CRATEDIGGER_SUITE_OWNS_HEADROOM: when this test suite
-    itself runs via scripts/test.sh or the final gate, THAT launcher sets
+    itself runs via an automated launcher (the daily gate), THAT launcher sets
     the var in the ambient environment of the whole dev-shell invocation it
     drives (issue #1111 review M2), so a naive dict(os.environ) copy here
     would silently inherit the skip and defeat the very refusal this fixture
@@ -182,7 +182,7 @@ class TestTmpfsSetup(unittest.TestCase):
         )
 
     def test_suite_owns_headroom_skips_only_the_free_bytes_refusal(self) -> None:
-        """Issue #1111 review M2: scripts/test.sh and the final gate set
+        """Issue #1111 review M2: the automated suite launchers set
         CRATEDIGGER_SUITE_OWNS_HEADROOM=1 for the dev-shell invocation each
         drives, so run_suite()'s own post-lock headroom precondition is
         the single enforcement point for suite runs — this proves the skip

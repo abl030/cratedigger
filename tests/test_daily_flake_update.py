@@ -456,8 +456,7 @@ class TestDailyFlakeUpdateScript(FakeRunnerCase):
         launcher dies at shell entry under contention with the old unnamed
         message, and run_stage records that as an indistinguishable "FAIL
         deterministic full suite" rather than the named exhaustion. Pinned
-        as an exact block, the same grep-the-source shape as
-        tests/test_targeted_test_selection.py's scripts/test.sh pin, so
+        as an exact block, so
         deleting just this var (not some other CRATEDIGGER_SUITE_OWNS_
         HEADROOM occurrence) fails this test."""
         source = pinned_source(SCRIPT)

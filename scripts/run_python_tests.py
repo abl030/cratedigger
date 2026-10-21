@@ -119,7 +119,6 @@ AUDITED_FRONTLOAD_MODULES = frozenset({
     "tests.test_nix_module",
     "tests.test_world_model_coordinator",
     "tests.test_fuzz_burst",
-    "tests.test_targeted_test_selection",
     "tests.test_aac_lattice",
 })
 #: tests.test_nix_module (issue #1131) is NOT method_batch here on purpose.
