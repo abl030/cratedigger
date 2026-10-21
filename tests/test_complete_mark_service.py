@@ -132,6 +132,19 @@ class TestSetCompleteMark(unittest.TestCase):
             "replaced",
         )
 
+    def test_surrogate_escaped_path_in_a_finding_is_stored_jsonb_safe(self) -> None:
+        finding = CompletenessFinding(
+            "unknown", "audio inventory entry is not a regular file: /mnt/\udcff.flac")
+        path = _write_snapshot(self.tmp.name, _album("18004", finding))
+        self.assertEqual(self._mark(path).outcome, "marked")
+        row = self.db.get_request(5096)
+        assert row is not None
+        stored = row["marked_complete_findings"] or []
+        stored[0]["detail"].encode("utf-8")  # no lone surrogate survives
+        self.assertIn("\\udcff", stored[0]["detail"])
+        self.assertEqual(
+            stored, canonical_findings([{"kind": finding.kind, "detail": finding.detail}]))
+
     def test_canonical_findings_ignore_order(self) -> None:
         a = {"kind": "unknown", "detail": "x"}
         b = {"kind": "catalog_drift", "detail": "y"}

@@ -78,12 +78,21 @@ class _CompleteMarkDB(Protocol):
 
 
 def canonical_findings(findings: Iterable[Mapping[str, object]]) -> list[dict[str, str]]:
-    """The order-free form a mark stores and the dashboard compares."""
+    """The order-free form a mark stores and the dashboard compares.
+
+    A finding can quote a surrogate-escaped Beets path, which JSONB refuses;
+    backslashreplace keeps it readable, and both sides of the comparison
+    pass through here, so they still agree.
+    """
     return sorted(
-        ({"kind": str(f.get("kind") or ""), "detail": str(f.get("detail") or "")}
+        ({"kind": _jsonb_safe(f.get("kind")), "detail": _jsonb_safe(f.get("detail"))}
          for f in findings),
         key=lambda f: (f["kind"], f["detail"]),
     )
+
+
+def _jsonb_safe(value: object) -> str:
+    return str(value or "").encode("utf-8", "backslashreplace").decode("utf-8")
 
 
 def request_release_ids(request: Mapping[str, object]) -> set[str]:

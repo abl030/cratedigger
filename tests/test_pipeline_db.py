@@ -22230,6 +22230,22 @@ class TestSetMarkedCompleteRoundTrip(unittest.TestCase):
         assert row is not None
         self.assertEqual(row["marked_complete_findings"], changed)
 
+    def test_escaped_surrogate_detail_round_trips(self):
+        from lib.complete_mark_service import canonical_findings
+
+        request_id = self._seed("complete-mbid-surrogate")
+        findings = canonical_findings(
+            [{"kind": "unknown", "detail": "not a regular file: /mnt/\udcff.flac"}])
+        self.assertEqual(
+            self.db.set_marked_complete(request_id, findings=findings), "marked")
+        row = self.db.get_request(request_id)
+        assert row is not None
+        self.assertEqual(row["marked_complete_findings"], findings)
+        self.assertEqual(
+            self.db.set_marked_complete(request_id, findings=findings),
+            "already_marked",
+        )
+
     def test_clear_round_trip(self):
         request_id = self._seed("complete-mbid-clear")
         self.db.set_marked_complete(request_id, findings=self.FINDINGS)
