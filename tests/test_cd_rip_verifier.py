@@ -633,6 +633,31 @@ class CdShapeAndProviderBoundaryTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "16-bit"):
                 _probe_track(target)
 
+    def test_non_cd_source_withhold_logs_one_line_without_traceback(self) -> None:
+        """Issue #1426: a routine shape refusal is not logged as a crash."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            album = Path(tmpdir) / "album"
+            _write_flac(album, np.zeros(12 * 588, dtype=np.uint32), sample_bits=24)
+            with self.assertLogs("lib.cd_rip_verifier", "INFO") as logs:
+                result = verify_cd_rip(str(album), CratediggerConfig(var_dir=tmpdir))
+
+        self.assertIsNone(result)
+        self.assertEqual(
+            [record.getMessage() for record in logs.records],
+            ["CD rip verifier withheld evidence: source is not 16-bit PCM"],
+        )
+        self.assertIsNone(logs.records[0].exc_info)
+
+    def test_unexpected_verifier_failure_keeps_its_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir, patch(
+            "lib.cd_rip_verifier._album_shape",
+            side_effect=RuntimeError("verifier bug"),
+        ), self.assertLogs("lib.cd_rip_verifier", "INFO") as logs:
+            result = verify_cd_rip(tmpdir, CratediggerConfig(var_dir=tmpdir))
+
+        self.assertIsNone(result)
+        self.assertIsNotNone(logs.records[0].exc_info)
+
     def test_decode_does_not_expand_subsecond_remaining_deadline(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             fifo = Path(tmpdir) / "blocked.flac"
