@@ -18,11 +18,12 @@ import argparse
 import importlib
 import json
 import logging
+import math
 import os
 import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, TextIO
+from typing import TYPE_CHECKING, TextIO, TypeGuard
 
 from beets import config, library, plugins
 from beets.autotag import AlbumInfo, AlbumMatch, TrackInfo, TrackMatch
@@ -443,8 +444,49 @@ def _send(msg: dict[str, object]) -> None:
     """Write one JSON protocol message to the private original stdout fd."""
     if _protocol_stdout is None:
         raise RuntimeError("harness protocol stdout has not been reserved")
-    _protocol_stdout.write(json.dumps(msg) + "\n")
+    try:
+        line = json.dumps(msg, allow_nan=False)
+    except ValueError as exc:
+        # Stdlib would emit bare NaN/Infinity, which strict readers reject
+        # far from here. Fail at the producer, naming the field.
+        paths = ", ".join(_non_finite_float_paths(msg, "")) or "?"
+        raise ValueError(
+            f"harness {msg.get('type')!r} message has a non-finite float"
+            f" at {paths}",
+        ) from exc
+    _protocol_stdout.write(line + "\n")
     _protocol_stdout.flush()
+
+
+def _is_object_dict(value: object) -> TypeGuard[dict[object, object]]:
+    return isinstance(value, dict)
+
+
+def _is_object_list(
+    value: object,
+) -> TypeGuard[list[object] | tuple[object, ...]]:
+    return isinstance(value, (list, tuple))
+
+
+def _non_finite_float_paths(value: object, path: str) -> list[str]:
+    """Dotted paths of every NaN/±Infinity inside a JSON-shaped value."""
+    if isinstance(value, float):
+        return [] if math.isfinite(value) else [path or "<root>"]
+    if _is_object_dict(value):
+        return [
+            found
+            for key, item in value.items()
+            for found in _non_finite_float_paths(
+                item, f"{path}.{key}" if path else str(key),
+            )
+        ]
+    if _is_object_list(value):
+        return [
+            found
+            for index, item in enumerate(value)
+            for found in _non_finite_float_paths(item, f"{path}[{index}]")
+        ]
+    return []
 
 
 def _recv() -> dict[str, object]:

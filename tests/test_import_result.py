@@ -3,6 +3,7 @@
 RED/GREEN TDD — these tests define the contract before implementation.
 """
 import json
+import math
 import os
 import sys
 import unittest
@@ -1247,6 +1248,24 @@ class TestSentinelLine(unittest.TestCase):
         parsed = json.loads(json_part)
         self.assertEqual(parsed["decision"], "downgrade")
         self.assertEqual(parsed["exit_code"], 5)
+
+    def test_non_finite_float_is_refused_naming_its_path(self):
+        """msgspec would encode NaN/±Inf as null; refuse it at the producer."""
+        for bad in (math.nan, math.inf, -math.inf):
+            with self.subTest(bad=bad):
+                r = ImportResult(
+                    decision="import",
+                    spectral=SpectralDetail(per_track=[
+                        SpectralTrackDetail(grade="genuine"),
+                        SpectralTrackDetail(grade="suspect", hf_deficit_db=bad),
+                    ]),
+                )
+                with self.assertRaises(ValueError) as caught:
+                    r.to_sentinel_line()
+                self.assertEqual(
+                    str(caught.exception),
+                    "non-finite float at spectral.per_track[1].hf_deficit_db",
+                )
 
 
 class TestParseImportResult(unittest.TestCase):

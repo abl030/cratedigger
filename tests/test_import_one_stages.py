@@ -7,6 +7,7 @@ import contextlib
 import dataclasses
 import io
 import json
+import math
 import os
 import signal
 import subprocess
@@ -250,6 +251,34 @@ class TestTerminalCrashAcknowledgement(unittest.TestCase):
         self.assertEqual(parsed.decision, "crash")
         self.assertEqual(parsed.exit_code, 99)
         self.assertIn("source measurement must not carry", parsed.error or "")
+
+    def test_non_finite_partial_result_crash_names_the_field(self):
+        """msgspec would write NaN as null; the crash says which field."""
+        from harness import import_one
+        from lib.quality import ImportResult, parse_import_result
+
+        poisoned = ImportResult(apply_beets_distance=math.nan)
+
+        def emit_poisoned() -> None:
+            import_one._current_result = poisoned
+            import_one._emit_and_exit(poisoned)
+
+        stdout = io.StringIO()
+        with (
+            patch("sys.stdout", stdout),
+            patch.object(import_one, "_import_total_start", None),
+            self.assertRaises(SystemExit) as caught,
+        ):
+            import_one._run_entrypoint(main_fn=emit_poisoned)
+
+        self.assertEqual(caught.exception.code, 99)
+        parsed = parse_import_result(stdout.getvalue())
+        assert parsed is not None
+        self.assertEqual(parsed.decision, "crash")
+        self.assertEqual(
+            parsed.error,
+            "ValueError: non-finite float at apply_beets_distance",
+        )
 
     def test_valid_partial_result_retains_post_mutation_audit(self):
         """Representable Beets audit survives an unrelated outer crash."""
