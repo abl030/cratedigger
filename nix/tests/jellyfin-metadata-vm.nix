@@ -193,24 +193,41 @@ pkgs.testers.nixosTest {
         "paths": "/srv/unrelated",
         "refreshLibrary": "false",
     })
-    curl(
-        "/Library/VirtualFolders?" + target_query,
-        token=token,
-        method="POST",
-        body="${libraryOptionsJson}",
-    )
+    # Every AddVirtualFolder POST awaits ValidateTopLibraryFolders, which
+    # rebuilds the shared in-memory library list; refreshLibrary=true also
+    # starts a background scan that rebuilds it again. Creating the
+    # refreshing library first let that scan race the second POST's rebuild
+    # and publish a list without the second library, whose ItemId then stayed
+    # absent (#1433). Create the non-refreshing library first so the last
+    # rebuild always sees both, and still wait for both ids to be observable.
     curl(
         "/Library/VirtualFolders?" + unrelated_query,
         token=token,
         method="POST",
         body="${libraryOptionsJson}",
     )
-
-    folders = get_json("/Library/VirtualFolders", token=token)
-    target_id = next(row["ItemId"] for row in folders if row["Name"] == "Target Music")
-    unrelated_id = next(
-        row["ItemId"] for row in folders if row["Name"] == "Unrelated Music"
+    curl(
+        "/Library/VirtualFolders?" + target_query,
+        token=token,
+        method="POST",
+        body="${libraryOptionsJson}",
     )
+
+    folder_ids = {}
+
+    def folder_ids_landed(_):
+        observed = {
+            row["Name"]: row.get("ItemId")
+            for row in get_json("/Library/VirtualFolders", token=token)
+        }
+        if not (observed.get("Target Music") and observed.get("Unrelated Music")):
+            return False
+        folder_ids.update(observed)
+        return True
+
+    retry(folder_ids_landed, timeout_seconds=120)
+    target_id = folder_ids["Target Music"]
+    unrelated_id = folder_ids["Unrelated Music"]
 
     def libraries_idle(_):
         current = get_json("/Library/VirtualFolders", token=token)
@@ -238,7 +255,7 @@ pkgs.testers.nixosTest {
 
     def existing_landed(_):
         matches = [row for row in albums(target_id) if row["Name"] == "Existing Tagged Album"]
-        if not matches:
+        if not matches or not matches[0].get("ImageTags", {}).get("Primary"):
             return False
         existing.update(matches[0])
         return True
