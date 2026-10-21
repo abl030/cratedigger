@@ -68,8 +68,12 @@ Matches source via `lib.wrong_matches.cleanup_wrong_match_source` (the same
 helper the cleanup reducer uses), not the disposable private action copy.
 No `failed_path` is ever recorded, so the row never reaches the Wrong
 Matches worklist and the independent cleanup reducer never sees it either.
-A `measurement_failed` attempt writes no denylist and its
-retained source path is protected from the disk reaper. Diagnostics are capped
+A `measurement_failed` attempt writes no denylist, and its source path, if
+still present, is protected from the slskd disk reaper. That is not
+retention: automation sources live in the processing tree, and processing
+cleanup removes them at the terminal transaction like any other reject. The
+row's `MeasurementFailure` reason and detail are the evidence (issue #1425).
+Diagnostics are capped
 at 16 files and 2 KiB per normalized stderr excerpt; success carries no
 stderr.
 
