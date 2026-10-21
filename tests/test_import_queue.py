@@ -7738,6 +7738,101 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             db.request(42)["active_automation_import_job_id"],
         )
 
+    def test_materialize_outcome_reason_reaches_the_preview_record(
+        self,
+    ) -> None:
+        """Issue #1423 A: the failure record names why materialization stopped."""
+        from lib.download_materialization import (
+            MaterializeFailed,
+            MaterializeGuarded,
+        )
+
+        for outcome, expected in (
+            (
+                MaterializeFailed(reason="event_path_never_stamped"),
+                "(failed: event_path_never_stamped)",
+            ),
+            (
+                MaterializeGuarded(detail="incomplete_or_unsafe_canonical"),
+                "(guarded: incomplete_or_unsafe_canonical)",
+            ),
+        ):
+            with self.subTest(outcome=outcome):
+                updated = self._preview_with_materialize_outcome(outcome)
+                assert updated is not None
+                self.assertEqual(updated.status, "failed")
+                assert updated.preview_result is not None
+                self.assertIn(expected, updated.preview_result["detail"])
+
+    def _preview_with_materialize_outcome(
+        self, outcome: object,
+    ) -> ImportJob | None:
+        from scripts import import_preview_worker
+
+        with tempfile.TemporaryDirectory() as staged:
+            with open(os.path.join(staged, "01.flac"), "wb") as handle:
+                handle.write(b"audio")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42,
+                active_download_state={
+                    "filetype": "flac",
+                    "enqueued_at": "2026-04-25T00:00:00+00:00",
+                    "current_path": staged,
+                    "files": [{
+                        "username": "alice",
+                        "filename": "Artist\\Album\\01.flac",
+                        "file_dir": "Artist\\Album",
+                        "size": 5,
+                    }],
+                },
+            ))
+            handoff_automation_owner(
+                db,
+                42,
+                state=db.request(42)["active_download_state"],
+                canonical_path=staged,
+            )
+            lease = _preview_execution_lease("manifest-before-evidence")
+            claimed = claim_next_import_preview_job(
+                db,
+                worker_id="preview",
+                execution_lease=lease,
+            )
+            assert claimed is not None
+            authority = import_preview_worker._AutomationPreviewAuthority(
+                request=db.request(42),
+                state=ActiveDownloadState.from_raw(
+                    db.request(42)["active_download_state"]
+                ),
+                canonical_path=staged,
+            )
+            self._seed_evidence_for_job(
+                import_preview_worker._AutomationPreviewDB(db, lease),
+                claimed.id,
+                staged,
+            )
+
+            def reject_manifest(
+                *_args: object,
+                **_kwargs: object,
+            ) -> object:
+                return outcome
+
+            token = CancellationToken()
+            with db._pin_owner_session(token) as owner_session_identity:
+                updated = import_preview_worker.process_claimed_preview_job(
+                    db,
+                    claimed,
+                    execution_lease=lease,
+                    automation_authority=authority,
+                    cancellation_token=token,
+                    owner_session_identity=owner_session_identity,
+                    automation_materialize_fn=reject_manifest,
+                )
+
+        return updated
+
     @given(
         variant=st.sampled_from((
             "empty",

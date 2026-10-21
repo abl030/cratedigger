@@ -685,10 +685,17 @@ def _run_completed_processing(
         )
     except ExecutionCancelled:
         raise
-    except Exception:
+    except Exception as exc:
         logger.exception(f"Error processing completed download {entry.artist} - {entry.title} "
                          f"— will retry local processing next cycle")
-        return CompletionDeferred(detail="unhandled_exception_during_local_processing")
+        # Name the exception: once the journal rotates, this detail is the
+        # only record of what failed (issue #1423).
+        return CompletionDeferred(
+            detail=(
+                "unhandled_exception_during_local_processing: "
+                f"{type(exc).__name__}: {exc}"
+            ),
+        )
 
 
 def _local_completion_terminal_outcome(

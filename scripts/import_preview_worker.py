@@ -449,6 +449,8 @@ def _materialize_automation_authority(
     from lib.context import CratediggerContext, WorkerCollaborators
     from lib.download_materialization import (
         Materialized,
+        MaterializeFailed,
+        MaterializeGuarded,
         _materialize_processing_dir,
     )
     from lib.download_reconstruction import reconstruct_grab_list_entry
@@ -485,8 +487,17 @@ def _materialize_automation_authority(
         cancellation_token=cancellation_token,
     )
     if not isinstance(materialized, Materialized):
+        # The reason is the only record of why once the journal rotates
+        # (issue #1423): carry it into the measurement-failure detail.
+        if isinstance(materialized, MaterializeFailed):
+            why = f"failed: {materialized.reason}"
+        elif isinstance(materialized, MaterializeGuarded):
+            why = f"guarded: {materialized.detail}"
+        else:
+            why = f"unexpected result {materialized!r}"
         raise RuntimeError(  # noqa: TRY004 - state-machine outcome, not caller type
-            f"Album request {job.request_id} could not be materialized for preview"
+            f"Album request {job.request_id} could not be materialized "
+            f"for preview ({why})"
         )
     cancellation_token.raise_if_cancelled()
     if os.path.abspath(staged_album.current_path) != os.path.abspath(

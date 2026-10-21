@@ -368,6 +368,21 @@ def _record_materialize_failure(
     return MaterializeFailed(reason=reason)
 
 
+def _record_materialize_guarded(
+    request_id: int | None,
+    detail: str,
+) -> MaterializeGuarded:
+    """Journal the guard, then return it (issue #1423).
+
+    The guarded stop used to leave no journal line at all, so a caller that
+    dropped ``detail`` left nothing to diagnose it from.
+    """
+    logger.warning(
+        "MATERIALIZE GUARDED request=%s detail=%s", request_id, detail,
+    )
+    return MaterializeGuarded(detail=detail)
+
+
 def _fsync_private_directory(fd: int, subject: str) -> None:
     """Flush one private directory, naming the fault if the flush fails.
 
@@ -574,7 +589,7 @@ def _materialize_processing_dir(
                 albums_fd, canonical_name, destination_names,
             ):
                 if not same_open_directory(processing_dir, processing_fd):
-                    return MaterializeGuarded(detail="processing_root_relocated")
+                    return _record_materialize_guarded(request_id, "processing_root_relocated")
                 staged_album.current_path = canonical_path
                 album_data.import_folder = canonical_path
                 return Materialized()
@@ -583,7 +598,7 @@ def _materialize_processing_dir(
             except FileNotFoundError:
                 pass
             else:
-                return MaterializeGuarded(detail="incomplete_or_unsafe_canonical")
+                return _record_materialize_guarded(request_id, "incomplete_or_unsafe_canonical")
 
             # Preflight *all* event-stamped sources before creating a
             # destination. Missing stamps, path escapes, symlinks and
@@ -695,11 +710,11 @@ def _materialize_processing_dir(
                 if not _canonical_manifest_complete(
                     albums_fd, canonical_name, destination_names,
                 ):
-                    return MaterializeGuarded(
-                        detail="incomplete_or_unsafe_canonical",
+                    return _record_materialize_guarded(
+                        request_id, "incomplete_or_unsafe_canonical",
                     )
                 if not same_open_directory(processing_dir, processing_fd):
-                    return MaterializeGuarded(detail="processing_root_relocated")
+                    return _record_materialize_guarded(request_id, "processing_root_relocated")
                 staged_album.current_path = canonical_path
                 album_data.import_folder = canonical_path
                 return Materialized()
@@ -708,13 +723,13 @@ def _materialize_processing_dir(
             # inode before publishing/persisting its pathname or
             # deleting source bytes.
             if not same_open_directory(processing_dir, processing_fd):
-                return MaterializeGuarded(detail="processing_root_relocated")
+                return _record_materialize_guarded(request_id, "processing_root_relocated")
 
             # Reopen the winner for convergence proof. A success
             # cannot coexist with a stale transaction under this lock.
             with open_relative_directory(albums_fd, canonical_name) as winner_fd:
                 if set(os.listdir(winner_fd)) != set(destination_names):
-                    return MaterializeGuarded(detail="published_manifest_mismatch")
+                    return _record_materialize_guarded(request_id, "published_manifest_mismatch")
                 for name in destination_names:
                     winner = open_regular_relative(winner_fd, name)
                     winner.close()
