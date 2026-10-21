@@ -805,6 +805,10 @@ def _titles_corrobate(left: str, right: str) -> bool:
             if (token := "".join(ch for ch in part if ch.isalnum()))
         )
     a, b = words(left), words(right)
+    # Separator-only churn ("H19.09.07,09.17" vs "H19.09.07 / 09.17") moves
+    # word boundaries without changing a single title character.
+    if a and "".join(a) == "".join(b):
+        return True
     shortest = min(len(a), len(b))
     return shortest >= 1 and a[:shortest] == b[:shortest]
 
