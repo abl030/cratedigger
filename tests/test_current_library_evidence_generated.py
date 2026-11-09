@@ -213,7 +213,9 @@ def _drive_world(world: HaveWorld) -> list[str]:
         with open(os.path.join(source, "01.mp3"), "wb") as handle:
             handle.write(b"audio")
         with open(os.path.join(existing, installed_name), "wb") as handle:
-            handle.write(b"audio")
+            # Distinct from the candidate bytes: both rows are bound to the
+            # request's release, so equal snapshots would share one row.
+            handle.write(b"have-audio")
         db = _OrderRecordingDB()
         db.seed_request(make_request_row(id=42, mb_release_id="mbid-42"))
         if world.preserve_source:
@@ -301,7 +303,7 @@ def _drive_world(world: HaveWorld) -> list[str]:
         assert claimed is not None
         _seed_candidate_for_download_log(
             db, download_log_id,
-            mb_release_id="mbid-frontgate-generated",
+            mb_release_id="mbid-42",  # reuse requires the request release
             files=snapshot_audio_files(source),
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=245,
