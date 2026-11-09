@@ -38,6 +38,13 @@ def _render_replace(status: int, payload: dict[str, object]) -> None:
         print(f"  Descendant id:     {payload['descendant_request_id']}")
     if payload.get("reason") is not None:
         print(f"  Reason:            {payload['reason']}")
+    if payload.get("adopt_download_log_id") is not None:
+        print(f"  Adopted candidate: {payload['adopt_download_log_id']}")
+        job_id = payload.get("adopt_import_job_id")
+        print(
+            "  Adopt import job:  "
+            + (str(job_id) if job_id is not None else "NOT QUEUED (see warnings)")
+        )
     owner = payload.get("processing_owner")
     if is_str_object_dict(owner):
         print(
@@ -88,6 +95,7 @@ def cmd_replace(_db: object, args: argparse.Namespace) -> int:
                 # store_true: the parser always sets it, so a hand-built
                 # Namespace must too (no getattr default to hide a typo).
                 "cross_pathway": bool(args.cross_pathway),
+                "adopt_download_log_id": args.adopt_download_log_id,
             },
         ),
         render=_render_replace,
@@ -117,5 +125,11 @@ def add_replace_subparser(
         help="Accept a target on the other pathway (Discogs for an MB "
              "source, MB for a Discogs source): your assertion that the "
              "paired MB release group and Discogs master are one album")
+    p_replace.add_argument(
+        "--adopt", dest="adopt_download_log_id", type=int, default=None,
+        help="download_log id of a Wrong Matches candidate of the source "
+             "request that IS the target pressing: it moves to the new "
+             "request (surviving the Wrong Matches cleanup) and a "
+             "force-import is queued for it there")
     p_replace.add_argument("--json", action="store_true",
                            help="Print structured JSON instead of text")

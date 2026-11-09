@@ -267,7 +267,8 @@ class TestPipelineReplaceContract(_FakeDbWebServerCase):
         self.assertEqual(svc.call_args.args, (100,))
         self.assertEqual(
             svc.call_args.kwargs,
-            {"target_mb_release_id": "1002", "cross_pathway": True},
+            {"target_mb_release_id": "1002", "cross_pathway": True,
+             "adopt_download_log_id": None},
         )
         with self._patch_service(
             outcome="replaced", request_id=100, new_request_id=200,
@@ -278,8 +279,40 @@ class TestPipelineReplaceContract(_FakeDbWebServerCase):
             )
         self.assertEqual(
             svc.call_args.kwargs,
-            {"target_mb_release_id": "1002", "cross_pathway": False},
+            {"target_mb_release_id": "1002", "cross_pathway": False,
+             "adopt_download_log_id": None},
         )
+
+    def test_replace_forwards_adopt_and_returns_its_job(self):
+        with self._patch_service(
+            outcome="replaced", request_id=100, new_request_id=200,
+            adopt_download_log_id=7, adopt_import_job_id=31,
+        ) as svc:
+            status, data = self._post(
+                "/api/pipeline/100/replace",
+                {"target_mb_release_id": "1002", "adopt_download_log_id": 7},
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            svc.call_args.kwargs,
+            {"target_mb_release_id": "1002", "cross_pathway": False,
+             "adopt_download_log_id": 7},
+        )
+        self.assertEqual(data["adopt_download_log_id"], 7)
+        self.assertEqual(data["adopt_import_job_id"], 31)
+
+    def test_replace_rejects_non_integer_adopt(self):
+        for bad in ("7", 0, True):
+            with self._patch_service(
+                outcome="replaced", request_id=100, new_request_id=200,
+            ) as svc:
+                status, _data = self._post(
+                    "/api/pipeline/100/replace",
+                    {"target_mb_release_id": "1002",
+                     "adopt_download_log_id": bad},
+                )
+            self.assertEqual(status, 400, bad)
+            svc.assert_not_called()
 
     def test_replace_rejects_non_boolean_cross_pathway(self):
         """``cross_pathway`` is strict: a string "true" is not the

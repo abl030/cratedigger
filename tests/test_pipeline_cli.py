@@ -5892,7 +5892,8 @@ class TestCmdReplace(_FakeDbWebServerCase):
     historical exit codes and text/JSON output survive the move."""
 
     def _run(self, *, mock_outcome, mock_kwargs=None, json_out=False,
-             req_id=42, target_mbid="new-mbid", cross_pathway=False):
+             req_id=42, target_mbid="new-mbid", cross_pathway=False,
+             adopt=None):
         from lib.mbid_replace_service import ReplaceResult
 
         result = ReplaceResult(
@@ -5903,6 +5904,7 @@ class TestCmdReplace(_FakeDbWebServerCase):
         args = argparse.Namespace(
             id=req_id, target_mb_release_id=target_mbid, json=json_out,
             cross_pathway=cross_pathway,
+            adopt_download_log_id=adopt,
             api_endpoint=TcpApiEndpoint(self.base),
         )
         stdout = io.StringIO()
@@ -5932,7 +5934,8 @@ class TestCmdReplace(_FakeDbWebServerCase):
         self.assertEqual(rc, 0)
         self.assertEqual(
             self._service_call.kwargs,
-            {"target_mb_release_id": "1002", "cross_pathway": True},
+            {"target_mb_release_id": "1002", "cross_pathway": True,
+             "adopt_download_log_id": None},
         )
         self._run(
             mock_outcome="replaced",
@@ -5941,8 +5944,54 @@ class TestCmdReplace(_FakeDbWebServerCase):
         )
         self.assertEqual(
             self._service_call.kwargs,
-            {"target_mb_release_id": "1002", "cross_pathway": False},
+            {"target_mb_release_id": "1002", "cross_pathway": False,
+             "adopt_download_log_id": None},
         )
+
+    def test_adopt_flag_reaches_the_service_and_renders_the_job(self):
+        """``--adopt`` rides the route body to the service keyword, and
+        the adopted candidate plus its queued import job are printed."""
+        rc, out = self._run(
+            mock_outcome="replaced",
+            mock_kwargs={
+                "new_request_id": 99,
+                "adopt_download_log_id": 42786,
+                "adopt_import_job_id": 555,
+            },
+            target_mbid="1002",
+            adopt=42786,
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            self._service_call.kwargs,
+            {"target_mb_release_id": "1002", "cross_pathway": False,
+             "adopt_download_log_id": 42786},
+        )
+        self.assertIn("Adopted candidate: 42786", out)
+        self.assertIn("Adopt import job:  555", out)
+
+    def test_adopt_without_a_job_says_not_queued(self):
+        rc, out = self._run(
+            mock_outcome="replaced",
+            mock_kwargs={
+                "new_request_id": 99,
+                "adopt_download_log_id": 42786,
+                "warnings": ("adopt: force-import not queued",),
+            },
+            adopt=42786,
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("NOT QUEUED", out)
+
+    def test_adopt_is_a_parser_flag(self):
+        from scripts.pipeline_cli.routes_meta import _build_parser
+
+        parser, _, _ = _build_parser()
+        parsed = parser.parse_args(
+            ["replace", "7", "--to", "x", "--adopt", "42786"])
+        self.assertEqual(parsed.adopt_download_log_id, 42786)
+        plain = parser.parse_args(["replace", "7", "--to", "x"])
+        self.assertIsNone(plain.adopt_download_log_id)
 
     def test_route_refusal_without_an_outcome_renders_the_api_error(self):
         """A route refusal that never reaches the service carries no

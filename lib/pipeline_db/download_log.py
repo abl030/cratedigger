@@ -1050,6 +1050,32 @@ class _DownloadLogMixin(_PipelineDBBase):
         return cur.rowcount
 
 
+    def reassign_wrong_match_source(
+        self,
+        failed_path: str,
+        *,
+        from_request_id: int,
+        to_request_id: int,
+    ) -> int:
+        """Move every rejected row of ``from_request_id`` whose failed_path is
+        ``failed_path`` onto ``to_request_id`` (Replace ``--adopt``).
+
+        All rows sharing the folder move together: Wrong Matches collapses
+        rows per ``(request_id, failed_path)``, so an older duplicate left
+        on the source request would still name the folder, and the source's
+        group cleanup would delete it through that row.
+        """
+        cur = self._execute("""
+            UPDATE download_log
+            SET request_id = %s
+            WHERE request_id = %s
+              AND outcome = 'rejected'
+              AND validation_result->>%s = %s
+        """, (to_request_id, from_request_id, FAILED_PATH_KEY, failed_path))
+        self.conn.commit()
+        return cur.rowcount
+
+
     def record_wrong_match_triage(
         self,
         log_id: int,
