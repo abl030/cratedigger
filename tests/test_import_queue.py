@@ -186,6 +186,19 @@ def _seed_candidate_for_download_log(db, log_id: int, *, mb_release_id: str,
     return persisted
 
 
+def _request_release_for_job(db: object, job_id: int) -> str:
+    """The release of ``job_id``'s request, through the lease wrapper."""
+    from scripts.import_preview_worker import _AutomationPreviewDB
+
+    base = db._db if isinstance(db, _AutomationPreviewDB) else db
+    assert isinstance(base, FakePipelineDB)
+    job = base.get_import_job(job_id)
+    assert job is not None and job.request_id is not None
+    request = base.get_request(job.request_id)
+    assert request is not None
+    return str(request["mb_release_id"])
+
+
 def _seed_candidate_for_import_job(db, job_id: int, *, mb_release_id: str,
                                    expected_execution_lease=None,
                                    **kwargs):
@@ -4868,10 +4881,17 @@ class TestImportPreviewWorker(unittest.TestCase):
         db: object,
         job_id: int,
         source_path: str,
+        *,
+        mb_release_id: str | None = None,
     ) -> None:
         _seed_candidate_for_import_job(
             db, job_id,
-            mb_release_id=f"mbid-job-{job_id}",
+            # Bound to the job's own request release: reuse requires it.
+            mb_release_id=(
+                mb_release_id
+                if mb_release_id is not None
+                else _request_release_for_job(db, job_id)
+            ),
             files=snapshot_audio_files(source_path),
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=245,
@@ -5575,6 +5595,7 @@ class TestImportPreviewWorker(unittest.TestCase):
                     preview_db,
                     job.id,
                     canonical_path,
+                    mb_release_id=str(request["mb_release_id"]),
                 )
                 return self._preview(
                     "would_import",
@@ -6818,7 +6839,8 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
     ) -> None:
         _seed_candidate_for_import_job(
             db, job_id,
-            mb_release_id=f"mbid-frontgate-job-{job_id}",
+            # Bound to the job's own request release: reuse requires it.
+            mb_release_id=_request_release_for_job(db, job_id),
             files=snapshot_audio_files(source_path),
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=245,
@@ -6838,9 +6860,14 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         download_log_id: int,
         source_path: str,
     ) -> None:
+        # Bound to the download's own request release: reuse requires it.
+        entry = db.get_download_log_entry(download_log_id)
+        assert entry is not None
+        request = db.get_request(entry["request_id"])
+        assert request is not None
         _seed_candidate_for_download_log(
             db, download_log_id,
-            mb_release_id=f"mbid-frontgate-dl-{download_log_id}",
+            mb_release_id=str(request["mb_release_id"]),
             files=snapshot_audio_files(source_path),
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=245,
@@ -6864,7 +6891,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
              tempfile.TemporaryDirectory() as existing:
             for root in (source, existing):
                 with open(os.path.join(root, "01.mp3"), "wb") as handle:
-                    handle.write(b"audio")
+                    handle.write(b"audio" if root == source else b"have-audio")
             db = FakePipelineDB()
             db.seed_request(make_request_row(id=42))
             _seed_current_for_request(
@@ -7075,7 +7102,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
              tempfile.TemporaryDirectory() as existing:
             for root in (source, existing):
                 with open(os.path.join(root, "01.mp3"), "wb") as handle:
-                    handle.write(b"audio")
+                    handle.write(b"audio" if root == source else b"have-audio")
             db = FakePipelineDB()
             db.seed_request(make_request_row(id=42, mb_release_id="mbid-42"))
             _seed_current_for_request(
@@ -7182,7 +7209,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
              tempfile.TemporaryDirectory() as existing:
             for root in (source, existing):
                 with open(os.path.join(root, "01.mp3"), "wb") as handle:
-                    handle.write(b"audio")
+                    handle.write(b"audio" if root == source else b"have-audio")
             db = FakePipelineDB()
             db.seed_request(make_request_row(id=42, mb_release_id="mbid-42"))
             _seed_current_for_request(
@@ -7296,7 +7323,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
              tempfile.TemporaryDirectory() as existing:
             for root in (source, existing):
                 with open(os.path.join(root, "01.mp3"), "wb") as handle:
-                    handle.write(b"audio")
+                    handle.write(b"audio" if root == source else b"have-audio")
             db = OrderRecordingDB()
             db.seed_request(make_request_row(id=42, mb_release_id="mbid-42"))
             _seed_current_for_request(
@@ -7387,7 +7414,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
              tempfile.TemporaryDirectory() as existing:
             for root in (source, existing):
                 with open(os.path.join(root, "01.mp3"), "wb") as handle:
-                    handle.write(b"audio")
+                    handle.write(b"audio" if root == source else b"have-audio")
             db = FakePipelineDB()
             db.seed_request(make_request_row(id=42, mb_release_id="mbid-42"))
             _seed_current_for_request(
@@ -7513,6 +7540,71 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         self.assertEqual(updated.status, "queued")
         self.assertEqual(updated.preview_status, "evidence_ready")
         self.assertIsNotNone(updated.importable_at)
+
+    def test_evidence_for_another_release_is_remeasured_not_reused(self):
+        """Replace --adopt moves a download_log to a request for a sibling
+        pressing; its linked evidence still names the OLD release. Reusing
+        it marks the job importable only for Beets launch authorization
+        (``evidence.mb_release_id = request.mb_release_id``) to refuse it —
+        the live failure of import jobs 62725/62726. Re-measure instead."""
+        from lib.quality import MeasurementFailure
+        from scripts import import_preview_worker
+
+        with _force_preview_source() as (source, cfg):
+            with open(os.path.join(source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(id=42, mb_release_id="new-pressing"))
+            download_log_id = _force_download_log(db, 42, source)
+            db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(download_log_id),
+                payload=force_import_payload(
+                    download_log_id=download_log_id,
+                    failed_path=source,
+                    source_username="alice",
+                ),
+            )
+            claimed = claim_next_import_preview_job(db, worker_id="preview")
+            assert claimed is not None
+            stale = _seed_candidate_for_download_log(
+                db, download_log_id,
+                mb_release_id="old-pressing",
+                files=snapshot_audio_files(source),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=245, avg_bitrate_kbps=256,
+                    median_bitrate_kbps=252, format="MP3",
+                    spectral_grade="genuine",
+                ),
+                codec="mp3", container="mp3", storage_format="MP3",
+            )
+
+            measured: list[str] = []
+
+            def measurement(_db: object, **kwargs: object) -> ImportPreviewResult:
+                measured.append(str(kwargs.get("mb_release_id", "")))
+                return ImportPreviewResult(
+                    mode="path",
+                    verdict="measurement_failed",
+                    failure=MeasurementFailure(
+                        reason="measurement_crashed",
+                        detail="stub",
+                        source_path=source,
+                    ),
+                )
+
+            updated = import_preview_worker.process_claimed_preview_job(
+                db,
+                claimed,
+                runtime_config=cfg,
+                candidate_measurement_fn=measurement,
+            )
+
+        assert updated is not None
+        self.assertEqual(len(measured), 1)
+        self.assertNotEqual(updated.candidate_evidence_id, stale.id)
+        self.assertNotEqual(updated.preview_status, "evidence_ready")
 
     def test_reused_evidence_does_not_call_candidate_analyzer(self):
         from scripts import import_preview_worker

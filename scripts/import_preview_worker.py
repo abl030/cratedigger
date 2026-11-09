@@ -790,6 +790,9 @@ def _action_copy_front_gate(
             result.status == "ready"
             and result.evidence is not None
             and result.evidence.id is not None
+            and _evidence_release_matches_request(
+                db, job, result.evidence.mb_release_id,
+            )
         ):
             db.set_import_job_candidate_evidence(job.id, result.evidence.id)
         return result, raw_path, action_path
@@ -806,6 +809,43 @@ def _action_copy_front_gate(
         # for a later failure audit even when its isolated snapshot was not
         # available; only the evidence-reuse optimization failed.
         return None, raw_path, None
+
+
+class _RequestReader(Protocol):
+    def get_request(
+        self, request_id: int,
+    ) -> Mapping[str, object] | None: ...
+
+
+def _evidence_release_matches_request(
+    db: _RequestReader,
+    job: ImportJob,
+    evidence_release_id: str,
+) -> bool:
+    """Stored candidate evidence may stand in for measurement only when it
+    was measured against the job's CURRENT request release.
+
+    Beets launch authorization requires ``evidence.mb_release_id =
+    request.mb_release_id``, so reusing evidence bound to another release
+    can only end in a refused launch. That happens when a candidate's
+    download_log moves to a new request (Replace ``--adopt``): its linked
+    evidence still names the old pressing. Falling through re-measures the
+    files against the new release instead.
+    """
+    if job.request_id is None:
+        return False
+    request = db.get_request(job.request_id)
+    if request is None:
+        return False
+    if request.get("mb_release_id") == evidence_release_id:
+        return True
+    logger.info(
+        "Candidate evidence for import job %s is bound to release %s, not "
+        "request %s's %s; re-measuring",
+        job.id, evidence_release_id, job.request_id,
+        request.get("mb_release_id"),
+    )
+    return False
 
 
 def _front_gate_check(
@@ -1326,6 +1366,9 @@ def process_claimed_preview_job(
         and front_gate_result.status == "ready"
         and front_gate_result.evidence is not None
         and front_gate_source is not None
+        and _evidence_release_matches_request(
+            db, job, front_gate_result.evidence.mb_release_id,
+        )
     ):
         # Re-derive with the SAME rule as front_gate_audit_source above,
         # but from a point where pyright has already narrowed
