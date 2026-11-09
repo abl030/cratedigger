@@ -101,7 +101,7 @@ from lib.pipeline_db import (
     MbidCollisionError,
     SupersedeRaceError,
 )
-from lib.processing_paths import stage_to_ai_path
+from lib.processing_paths import normalize_source_dirs, stage_to_ai_path
 from lib.release_identity import (
     ReleaseIdentity,
     detect_release_source,
@@ -135,6 +135,7 @@ from lib.replace_status import (
 )
 from lib.search_plan_service import SearchPlanDB, SearchPlanService
 from lib.util import (
+    observe_failed_path,
     trigger_jellyfin_scan,
     trigger_plex_scan,
 )
@@ -143,6 +144,7 @@ from lib.wrong_match_delete_service import (
     WrongMatchDeleteDB,
     delete_wrong_match_group,
 )
+from lib.wrong_matches import equivalent_failed_path_aliases
 
 logger = logging.getLogger(__name__)
 
@@ -649,14 +651,36 @@ class MbidReplaceService:
                 f"candidate (outcome={entry.get('outcome')!r})"
             )
         else:
-            failed_path = decode_validation_envelope(
+            validation = decode_validation_envelope(
                 entry.get("validation_result"),
-            ).failed_path
+            )
+            failed_path = validation.failed_path
             if not failed_path:
                 problem = (
                     f"download_log {download_log_id} has no Wrong Matches "
                     "folder"
                 )
+            elif not observe_failed_path(failed_path).present:
+                problem = (
+                    f"download_log {download_log_id}'s folder {failed_path} "
+                    "is not observably present"
+                )
+            else:
+                # An existing import job for this candidate would be
+                # deduped onto by the later enqueue and stay bound to the
+                # source request, which becomes ``replaced`` and is never
+                # claimable again.
+                active = self.db.list_active_import_jobs_for_wrong_match(
+                    download_log_id=download_log_id,
+                    request_id=request_id,
+                    failed_paths=[failed_path],
+                    source_dirs=normalize_source_dirs(validation.source_dirs),
+                )
+                if active:
+                    problem = (
+                        f"download_log {download_log_id} already has active "
+                        f"import job(s) {[job.id for job in active]}"
+                    )
         if problem is not None or failed_path is None:
             return ReplaceResult(
                 outcome=RESULT_TARGET_INVALID,
@@ -667,6 +691,50 @@ class MbidReplaceService:
         return _AdoptCandidate(
             download_log_id=download_log_id, failed_path=failed_path,
         )
+
+    def _move_adopted_candidate(
+        self,
+        adopt: _AdoptCandidate,
+        *,
+        from_request_id: int,
+        to_request_id: int,
+        warnings: list[str],
+    ) -> bool:
+        """Move every source row naming the adopted folder — under ANY
+        stored spelling — onto the new request. True only when the folder
+        was observed and no source row still resolves to it afterwards,
+        i.e. when the source's group cleanup can no longer reach it."""
+        observation = observe_failed_path(adopt.failed_path)
+        if not observation.present or observation.path is None:
+            warnings.append(
+                f"adopt: folder {adopt.failed_path} not observable at move "
+                "time"
+            )
+            return False
+        spellings = list(dict.fromkeys([
+            adopt.failed_path,
+            *equivalent_failed_path_aliases(
+                self.db, from_request_id, observation.path,
+            ),
+        ]))
+        moved = sum(
+            self.db.reassign_wrong_match_source(
+                spelling,
+                from_request_id=from_request_id,
+                to_request_id=to_request_id,
+            )
+            for spelling in spellings
+        )
+        leftover = equivalent_failed_path_aliases(
+            self.db, from_request_id, observation.path,
+        )
+        if moved == 0 or leftover:
+            warnings.append(
+                f"adopt: moved {moved} row(s) of request {from_request_id}; "
+                f"still resolving to the folder: {leftover}"
+            )
+            return False
+        return True
 
     def _resolve_mb_target(
         self,
@@ -1342,17 +1410,12 @@ class MbidReplaceService:
             adopt_moved = False
             if adopt is not None:
                 try:
-                    moved = self.db.reassign_wrong_match_source(
-                        adopt.failed_path,
+                    adopt_moved = self._move_adopted_candidate(
+                        adopt,
                         from_request_id=request_id,
                         to_request_id=new_request_id,
+                        warnings=warnings,
                     )
-                    adopt_moved = moved > 0
-                    if not adopt_moved:
-                        warnings.append(
-                            f"adopt: no rows of request {request_id} at "
-                            f"{adopt.failed_path} to move"
-                        )
                 except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                     warnings.append(
                         f"adopt: moving download_log "
@@ -1465,8 +1528,16 @@ class MbidReplaceService:
                 if (
                     queued.outcome == FORCE_IMPORT_RESULT_QUEUED
                     and queued.job is not None
+                    and queued.job.request_id == new_request_id
+                    and not queued.job.deduped
                 ):
                     adopt_import_job_id = queued.job.id
+                elif queued.job is not None:
+                    warnings.append(
+                        f"adopt: force-import deduped onto existing job "
+                        f"{queued.job.id} (request {queued.job.request_id}), "
+                        f"not a fresh job for request {new_request_id}"
+                    )
                 else:
                     warnings.append(
                         f"adopt: force-import of download_log "

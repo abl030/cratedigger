@@ -112,6 +112,62 @@ class TestReplaceAdopt(_ServiceCase):
             os.path.realpath(adopted.path),
         )
 
+    def test_other_spelling_of_the_same_folder_moves_too(self):
+        """Wrong Matches groups by raw path text, so a second spelling of
+        the same folder is a separate source candidate. Left behind, the
+        group cleanup would resolve it and rmtree the adopted folder."""
+        adopted = self._seed("Sibling Pressing [aaaa]")
+        alias = os.path.join(
+            self.albums, "wrong_matches", ".", "Sibling Pressing [aaaa]")
+        alias_log = self.db.log_download(
+            42, outcome="rejected",
+            validation_result={"scenario": "wrong_match",
+                               "failed_path": alias},
+        )
+
+        result = self._replace(adopted.download_log_id)
+
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        self.assertEqual(result.warnings, ())
+        self.assertIsNotNone(result.adopt_import_job_id)
+        self.assertTrue(os.path.isdir(adopted.path))
+        entry = self.db.get_download_log_entry(alias_log)
+        assert entry is not None
+        self.assertEqual(entry["request_id"], result.new_request_id)
+
+    def test_candidate_with_an_active_import_job_is_refused(self):
+        """A live job for the candidate would be deduped onto and stay
+        bound to the soon-``replaced`` source request, never claimable."""
+        adopted = self._seed("Sibling Pressing [aaaa]")
+        self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key=f"force_import:{adopted.download_log_id}",
+            payload={"download_log_id": adopted.download_log_id,
+                     "failed_path": adopted.path},
+        )
+
+        result = self._replace(adopted.download_log_id)
+
+        self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+        self.assertEqual(result.reason, REPLACE_REASON_ADOPT_CANDIDATE_INVALID)
+        assert result.error_message is not None
+        self.assertIn("active import job", result.error_message)
+        old = self.db.get_request(42)
+        assert old is not None
+        self.assertEqual(old["status"], "wanted")
+        self.assertIsNone(self.db.get_request_by_mb_release_id(NEW_MBID))
+
+    def test_candidate_whose_folder_is_gone_is_refused(self):
+        adopted = self._seed("Sibling Pressing [aaaa]")
+        os.rename(adopted.path, adopted.path + ".moved")
+
+        result = self._replace(adopted.download_log_id)
+
+        self.assertEqual(result.outcome, RESULT_TARGET_INVALID)
+        self.assertEqual(result.reason, REPLACE_REASON_ADOPT_CANDIDATE_INVALID)
+        self._assert_nothing_superseded()
+
     def test_without_adopt_the_group_cleanup_takes_every_candidate(self):
         """Control: the same world without ``adopt`` loses the folder —
         the behaviour ``adopt`` exists to avoid."""

@@ -206,7 +206,7 @@ def _has_wrong_match_source_ancestor(path: str) -> bool:
     return False
 
 
-def _equivalent_failed_path_aliases(
+def equivalent_failed_path_aliases(
     db: WrongMatchSourceDB,
     request_id: int | None,
     resolved_path: str | None,
@@ -274,7 +274,7 @@ def cleanup_wrong_match_source(
     resolved_path = observation.path
     candidates = _path_candidates(
         *candidates,
-        *_equivalent_failed_path_aliases(db, request_id, resolved_path),
+        *equivalent_failed_path_aliases(db, request_id, resolved_path),
     )
 
     if resolved_path is not None:
