@@ -3630,11 +3630,12 @@ def assert_classification_coherent(
         if name != fact:
             raise AssertionError(
                 f"integrity fact {fact} named {name!r} for dispatch")
-    elif decision.get("imported"):
-        if verdict != "would_import" or cleanup_eligible:
-            raise AssertionError(
-                f"imported decision classified as "
-                f"({verdict!r}, cleanup_eligible={cleanup_eligible!r})")
+    elif decision.get("imported") and (
+        verdict != "would_import" or cleanup_eligible
+    ):
+        raise AssertionError(
+            f"imported decision classified as "
+            f"({verdict!r}, cleanup_eligible={cleanup_eligible!r})")
 
 
 class TestGeneratedEvidenceDecider(unittest.TestCase):

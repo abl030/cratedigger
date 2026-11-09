@@ -79,12 +79,11 @@ class ProcessObservation:
         elif self.state == "absent":
             if self.observed_start_ticks is not None or self.cgroup_path is not None:
                 raise ValueError("absent process cannot have observed identity")
-        elif self.state == "reused":
-            if (
-                self.observed_start_ticks is None
-                or self.observed_start_ticks == self.identity.start_ticks
-            ):
-                raise ValueError("reused PID needs different start ticks")
+        elif self.state == "reused" and (
+            self.observed_start_ticks is None
+            or self.observed_start_ticks == self.identity.start_ticks
+        ):
+            raise ValueError("reused PID needs different start ticks")
 
 
 @dataclass(frozen=True)
