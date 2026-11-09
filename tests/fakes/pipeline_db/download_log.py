@@ -767,6 +767,28 @@ class _FakeDownloadLogMixin(_FakePipelineDBBase):
             cleared += 1
         return cleared
 
+    def reassign_wrong_match_source(
+        self,
+        failed_path: str,
+        *,
+        from_request_id: int,
+        to_request_id: int,
+    ) -> int:
+        """Move rejected rows of ``from_request_id`` at ``failed_path``."""
+        moved = 0
+        for entry in self.download_logs:
+            if (
+                entry.request_id != from_request_id
+                or entry.outcome != "rejected"
+            ):
+                continue
+            vr = self._validation_result_dict(entry.validation_result)
+            if not vr or vr.get("failed_path") != failed_path:
+                continue
+            entry.request_id = to_request_id
+            moved += 1
+        return moved
+
     def record_wrong_match_triage(
         self,
         log_id: int,

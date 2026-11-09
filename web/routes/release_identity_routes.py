@@ -305,6 +305,9 @@ class PipelineReplaceRequest(BaseModel):
     # is the same album (issue #1366). Strict: a JSON string is a caller
     # bug, never an assertion.
     cross_pathway: bool = Field(default=False, strict=True)
+    # A Wrong Matches candidate (download_log id) of the source request that
+    # IS the target pressing: moved to the new request and force-imported.
+    adopt_download_log_id: int | None = Field(default=None, gt=0, strict=True)
 
 
 def post_pipeline_replace(
@@ -322,7 +325,9 @@ def post_pipeline_replace(
     target must share the source's release group/master; a target on the
     other pathway needs ``cross_pathway: true``, the operator's explicit
     assertion that the paired MB release group and Discogs master are one
-    album (issue #1366).
+    album (issue #1366). Optional ``adopt_download_log_id`` names a Wrong
+    Matches candidate of the source request that is the target pressing;
+    it moves to the new request and a force-import is queued for it.
 
     Status-code mapping mirrors the CLI exit codes:
       * 200 — ``RESULT_REPLACED``
@@ -374,6 +379,7 @@ def post_pipeline_replace(
         request_id,
         target_mb_release_id=target,
         cross_pathway=req_body.cross_pathway,
+        adopt_download_log_id=req_body.adopt_download_log_id,
     )
 
     payload: dict[str, object] = {
@@ -388,6 +394,8 @@ def post_pipeline_replace(
         "processing_owner": transitions.processing_owner_payload(
             result.processing_owner
         ),
+        "adopt_download_log_id": result.adopt_download_log_id,
+        "adopt_import_job_id": result.adopt_import_job_id,
     }
     if result.outcome == RESULT_REPLACED:
         h._json(payload)

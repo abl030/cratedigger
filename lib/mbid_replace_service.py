@@ -89,12 +89,19 @@ from lib.beets_delete import (
     run_beets_delete,
 )
 from lib.config import CratediggerConfig
+from lib.force_import_service import (
+    RESULT_QUEUED as FORCE_IMPORT_RESULT_QUEUED,
+)
+from lib.force_import_service import (
+    ForceImportDB,
+    enqueue_force_import,
+)
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_IMPORT,
     MbidCollisionError,
     SupersedeRaceError,
 )
-from lib.processing_paths import stage_to_ai_path
+from lib.processing_paths import normalize_source_dirs, stage_to_ai_path
 from lib.release_identity import (
     ReleaseIdentity,
     detect_release_source,
@@ -107,6 +114,7 @@ from lib.release_payload import (
     release_tracks,
 )
 from lib.replace_status import (
+    REPLACE_REASON_ADOPT_CANDIDATE_INVALID,
     REPLACE_REASON_CROSS_PATHWAY_TARGET,
     REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
     REPLACE_REASON_CURRENT_BEETS_UNAVAILABLE,
@@ -127,20 +135,23 @@ from lib.replace_status import (
 )
 from lib.search_plan_service import SearchPlanDB, SearchPlanService
 from lib.util import (
+    observe_failed_path,
     trigger_jellyfin_scan,
     trigger_plex_scan,
 )
+from lib.validation_envelope import decode_validation_envelope
 from lib.wrong_match_delete_service import (
     WrongMatchDeleteDB,
     delete_wrong_match_group,
 )
+from lib.wrong_matches import equivalent_failed_path_aliases
 
 logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
 class MbidReplaceDB(
-    WrongMatchDeleteDB, SearchPlanDB, Protocol,
+    WrongMatchDeleteDB, SearchPlanDB, ForceImportDB, Protocol,
 ):
     """The PipelineDB surface the Replace action uses (#409).
 
@@ -177,6 +188,14 @@ class MbidReplaceDB(
         new_discogs_release_id: str | None = None,
     ) -> int: ...
 
+    def reassign_wrong_match_source(
+        self,
+        failed_path: str,
+        *,
+        from_request_id: int,
+        to_request_id: int,
+    ) -> int: ...
+
 
 class ReplaceResult(msgspec.Struct, frozen=True):
     """Outcome of a single ``replace_request_mbid`` call.
@@ -201,6 +220,11 @@ class ReplaceResult(msgspec.Struct, frozen=True):
       and the HTTP response body both surface every field).
     - ``warnings``: filesystem-cleanup failures that did NOT roll back
       the DB change (R26 non-fatal semantics).
+    - ``adopt_download_log_id`` / ``adopt_import_job_id``: set when the
+      call adopted a Wrong Matches candidate (``--adopt``). The job id is
+      the force-import queued against the new request; ``None`` with the
+      log id set means the adopt half failed after the supersede and a
+      warning says why.
     """
 
     outcome: str
@@ -212,6 +236,8 @@ class ReplaceResult(msgspec.Struct, frozen=True):
     reason: str | None = None
     warnings: tuple[str, ...] = ()
     processing_owner: ProcessingOwnerProjection | None = None
+    adopt_download_log_id: int | None = None
+    adopt_import_job_id: int | None = None
 
 
 def _processing_locked_replace(
@@ -241,6 +267,20 @@ def _processing_locked_replace(
         ),
         processing_owner=owner,
     )
+
+
+@dataclass(frozen=True)
+class _AdoptCandidate:
+    """A Wrong Matches candidate of the source request that Replace moves
+    onto the new request and force-imports there (``--adopt``).
+
+    The operator's assertion is that this download IS the target pressing;
+    force-import still re-validates the files against the new request's
+    exact release before anything reaches Beets.
+    """
+
+    download_log_id: int
+    failed_path: str
 
 
 @dataclass(frozen=True)
@@ -350,8 +390,16 @@ class MbidReplaceService:
         *,
         target_mb_release_id: str,
         cross_pathway: bool = False,
+        adopt_download_log_id: int | None = None,
     ) -> ReplaceResult:
         """Supersede ``request_id`` with a new row at ``target_mb_release_id``.
+
+        ``adopt_download_log_id`` names a Wrong Matches candidate of the
+        source request that the operator says IS the target pressing. It is
+        validated before any mutation; after the supersede its rows move to
+        the new request (so the source's Wrong Matches cleanup cannot delete
+        its folder) and a force-import is queued for it against the new
+        request.
 
         ``cross_pathway`` is the operator's explicit assertion that a target
         on the other pathway (a Discogs release for an MB source, or an MB
@@ -428,6 +476,15 @@ class MbidReplaceService:
                 ),
             )
 
+        adopt: _AdoptCandidate | None = None
+        if adopt_download_log_id is not None:
+            adopt_or_error = self._resolve_adopt_candidate(
+                request_id, adopt_download_log_id,
+            )
+            if isinstance(adopt_or_error, ReplaceResult):
+                return adopt_or_error
+            adopt = adopt_or_error
+
         source_identity = ReleaseIdentity.from_strict_fields(
             source.get("mb_release_id"),
             source.get("discogs_release_id"),
@@ -486,6 +543,7 @@ class MbidReplaceService:
                 source_mbid,
                 target_mb_release_id,
                 target_source,
+                adopt=adopt,
             )
 
         if source_mbid == target_mb_release_id:
@@ -501,6 +559,7 @@ class MbidReplaceService:
         if source_source == "discogs":
             return self._replace_discogs_target(
                 request_id, source, source_mbid, target_mb_release_id,
+                adopt=adopt,
             )
 
         source_rg = source.get("mb_release_group_id")
@@ -565,7 +624,117 @@ class MbidReplaceService:
             target_rg=resolved.group_id,
             target_data=resolved.data,
             new_discogs_release_id=None,
+            adopt=adopt,
         )
+
+    def _resolve_adopt_candidate(
+        self,
+        request_id: int,
+        download_log_id: int,
+    ) -> _AdoptCandidate | ReplaceResult:
+        """Phase 0 check for ``--adopt`` (read-only): the row must exist,
+        belong to the source request, be a rejection, and still name its
+        Wrong Matches folder."""
+        entry = self.db.get_download_log_entry(download_log_id)
+        problem: str | None = None
+        failed_path: str | None = None
+        if entry is None:
+            problem = f"download_log {download_log_id} not found"
+        elif entry["request_id"] != request_id:
+            problem = (
+                f"download_log {download_log_id} belongs to request "
+                f"{entry['request_id']}, not {request_id}"
+            )
+        elif entry.get("outcome") != "rejected":
+            problem = (
+                f"download_log {download_log_id} is not a rejected "
+                f"candidate (outcome={entry.get('outcome')!r})"
+            )
+        else:
+            validation = decode_validation_envelope(
+                entry.get("validation_result"),
+            )
+            failed_path = validation.failed_path
+            if not failed_path:
+                problem = (
+                    f"download_log {download_log_id} has no Wrong Matches "
+                    "folder"
+                )
+            elif not observe_failed_path(failed_path).present:
+                problem = (
+                    f"download_log {download_log_id}'s folder {failed_path} "
+                    "is not observably present"
+                )
+            else:
+                # An existing import job for this candidate would be
+                # deduped onto by the later enqueue and stay bound to the
+                # source request, which becomes ``replaced`` and is never
+                # claimable again.
+                active = self.db.list_active_import_jobs_for_wrong_match(
+                    download_log_id=download_log_id,
+                    request_id=request_id,
+                    failed_paths=[failed_path],
+                    source_dirs=normalize_source_dirs(validation.source_dirs),
+                )
+                if active:
+                    problem = (
+                        f"download_log {download_log_id} already has active "
+                        f"import job(s) {[job.id for job in active]}"
+                    )
+        if problem is not None or failed_path is None:
+            return ReplaceResult(
+                outcome=RESULT_TARGET_INVALID,
+                request_id=request_id,
+                reason=REPLACE_REASON_ADOPT_CANDIDATE_INVALID,
+                error_message=problem,
+            )
+        return _AdoptCandidate(
+            download_log_id=download_log_id, failed_path=failed_path,
+        )
+
+    def _move_adopted_candidate(
+        self,
+        adopt: _AdoptCandidate,
+        *,
+        from_request_id: int,
+        to_request_id: int,
+        warnings: list[str],
+    ) -> bool:
+        """Move every source row naming the adopted folder — under ANY
+        stored spelling — onto the new request. True only when the folder
+        was observed and no source row still resolves to it afterwards,
+        i.e. when the source's group cleanup can no longer reach it."""
+        observation = observe_failed_path(adopt.failed_path)
+        if not observation.present or observation.path is None:
+            warnings.append(
+                f"adopt: folder {adopt.failed_path} not observable at move "
+                "time"
+            )
+            return False
+        spellings = list(dict.fromkeys([
+            adopt.failed_path,
+            *equivalent_failed_path_aliases(
+                self.db, from_request_id, observation.path,
+            ),
+        ]))
+        moved = sum(
+            self.db.reassign_wrong_match_source(
+                spelling,
+                from_request_id=from_request_id,
+                to_request_id=to_request_id,
+            )
+            for spelling in spellings
+        )
+        leftover = equivalent_failed_path_aliases(
+            self.db, from_request_id, observation.path,
+        )
+        if moved == 0 or leftover:
+            warnings.append(
+                f"adopt: moved {moved} row(s) of request {from_request_id}; "
+                f"still resolving to the folder: {leftover}"
+            )
+            return False
+        return True
 
     def _resolve_mb_target(
         self,
@@ -706,6 +875,8 @@ class MbidReplaceService:
         source_mbid: str,
         target_mb_release_id: str,
         target_source: str,
+        *,
+        adopt: _AdoptCandidate | None = None,
     ) -> ReplaceResult:
         """Cross-pathway arm (issue #1366) — reached only under the
         operator's explicit ``cross_pathway`` opt-in with a target on the
@@ -774,6 +945,7 @@ class MbidReplaceService:
             target_rg=resolved.group_id,
             target_data=resolved.data,
             new_discogs_release_id=new_discogs_release_id,
+            adopt=adopt,
         )
 
     def _mb_lookup_or_error(
@@ -831,6 +1003,8 @@ class MbidReplaceService:
         source: AlbumRequestRow,
         source_mbid: str,
         target_mb_release_id: str,
+        *,
+        adopt: _AdoptCandidate | None = None,
     ) -> ReplaceResult:
         """Discogs arm of Phase 0 — mirror of the MB decision order
         (guardrails before IO), then delegate to the shared Phase 1-5.
@@ -913,6 +1087,7 @@ class MbidReplaceService:
             target_rg=resolved.group_id,
             target_data=resolved.data,
             new_discogs_release_id=resolved.canonical_id,
+            adopt=adopt,
         )
 
     def _resolve_discogs_target(
@@ -1059,6 +1234,7 @@ class MbidReplaceService:
         target_rg: str | None,
         target_data: dict[str, object],
         new_discogs_release_id: str | None,
+        adopt: _AdoptCandidate | None = None,
     ) -> ReplaceResult:
         """Phases 1-5 — the mutation half, shared by the MB, Discogs, and
         cross-pathway arms once the target identity is resolved and
@@ -1228,6 +1404,25 @@ class MbidReplaceService:
                     ),
                 )
 
+            # Phase 4a — move the adopted candidate onto the new request
+            # BEFORE the source's Wrong Matches group cleanup runs, so that
+            # cleanup no longer sees (and deletes) its folder.
+            adopt_moved = False
+            if adopt is not None:
+                try:
+                    adopt_moved = self._move_adopted_candidate(
+                        adopt,
+                        from_request_id=request_id,
+                        to_request_id=new_request_id,
+                        warnings=warnings,
+                    )
+                except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
+                    warnings.append(
+                        f"adopt: moving download_log "
+                        f"{adopt.download_log_id} raised "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+
             # Phase 4 — filesystem cleanup (non-fatal). Keyed on the fresh
             # exact Beets album PK — never on request status. "wanted" does not
             # mean "nothing on disk": library-backfill rows (2026-06-04)
@@ -1255,26 +1450,35 @@ class MbidReplaceService:
                         f"{type(exc).__name__}: {exc}"
                     )
 
-            try:
-                wm_summary = delete_wrong_match_group(self.db, request_id)
-                if not wm_summary.success:
-                    # Skipped-without-error is just as silent a failure as
-                    # an error: sources and their pointers survive while
-                    # Replace claims a clean supersede (issue #1063).
-                    # ``success`` already requires ``remaining == 0`` on
-                    # both of its branches, so it is the whole condition.
-                    warnings.append(
-                        f"wrong-matches cleanup did not complete: "
-                        f"{wm_summary.errors} errors, "
-                        f"{wm_summary.skipped} skipped, "
-                        f"{wm_summary.unavailable} unavailable, "
-                        f"{wm_summary.remaining} remaining"
-                    )
-            except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
+            if adopt is not None and not adopt_moved:
+                # The candidate still hangs off the source request; its
+                # folder must survive, so the whole group stays put.
                 warnings.append(
-                    f"wrong-matches cleanup raised "
-                    f"{type(exc).__name__}: {exc}"
+                    "wrong-matches cleanup skipped: the adopted candidate "
+                    f"{adopt.download_log_id} could not be moved to request "
+                    f"{new_request_id}"
                 )
+            else:
+                try:
+                    wm_summary = delete_wrong_match_group(self.db, request_id)
+                    if not wm_summary.success:
+                        # Skipped-without-error is just as silent a failure as
+                        # an error: sources and their pointers survive while
+                        # Replace claims a clean supersede (issue #1063).
+                        # ``success`` already requires ``remaining == 0`` on
+                        # both of its branches, so it is the whole condition.
+                        warnings.append(
+                            f"wrong-matches cleanup did not complete: "
+                            f"{wm_summary.errors} errors, "
+                            f"{wm_summary.skipped} skipped, "
+                            f"{wm_summary.unavailable} unavailable, "
+                            f"{wm_summary.remaining} remaining"
+                        )
+                except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
+                    warnings.append(
+                        f"wrong-matches cleanup raised "
+                        f"{type(exc).__name__}: {exc}"
+                    )
 
             if old_status == "downloading":
                 warnings.append(
@@ -1315,6 +1519,38 @@ class MbidReplaceService:
         # and the importer worker only acquires the per-request lock when
         # it has work to do. Releasing early caps lock-hold at fs
         # cleanup (sub-second) rather than ~30s worst case.
+        adopt_import_job_id: int | None = None
+        if adopt is not None and adopt_moved:
+            try:
+                queued = enqueue_force_import(
+                    self.db, self.config, adopt.download_log_id,
+                )
+                if (
+                    queued.outcome == FORCE_IMPORT_RESULT_QUEUED
+                    and queued.job is not None
+                    and queued.job.request_id == new_request_id
+                    and not queued.job.deduped
+                ):
+                    adopt_import_job_id = queued.job.id
+                elif queued.job is not None:
+                    warnings.append(
+                        f"adopt: force-import deduped onto existing job "
+                        f"{queued.job.id} (request {queued.job.request_id}), "
+                        f"not a fresh job for request {new_request_id}"
+                    )
+                else:
+                    warnings.append(
+                        f"adopt: force-import of download_log "
+                        f"{adopt.download_log_id} not queued: "
+                        f"{queued.outcome}"
+                        + (f" ({queued.detail})" if queued.detail else "")
+                    )
+            except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
+                warnings.append(
+                    f"adopt: force-import enqueue raised "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
         try:
             self.search_plan_service.generate_for_request(
                 new_request_id, regenerate=False,
@@ -1353,4 +1589,8 @@ class MbidReplaceService:
             request_id=request_id,
             new_request_id=new_request_id,
             warnings=tuple(warnings),
+            adopt_download_log_id=(
+                adopt.download_log_id if adopt is not None else None
+            ),
+            adopt_import_job_id=adopt_import_job_id,
         )

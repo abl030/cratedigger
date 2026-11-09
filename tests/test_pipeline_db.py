@@ -13194,6 +13194,37 @@ class TestGetWrongMatches(unittest.TestCase):
             (self.req2, "other-request"),
         })
 
+    def test_reassign_wrong_match_source_moves_every_row_of_that_folder(self):
+        """Replace --adopt: duplicates of one folder move together, rows of
+        other folders, other requests and non-rejections stay put."""
+        self._log_rejected(self.req1, "old-dup", "/abs/Album")
+        self._log_rejected(self.req1, "new-dup", "/abs/Album")
+        self._log_rejected(self.req1, "other-path", "/abs/Other")
+        self._log_rejected(self.req2, "other-request", "/abs/Album")
+        self.db.log_download(
+            request_id=self.req1,
+            soulseek_username="successful",
+            outcome="success",
+            validation_result=json.dumps({"failed_path": "/abs/Album"}),
+        )
+        target = self.db.add_request(
+            mb_release_id="reassign-target", artist_name="A",
+            album_title="T", source="request")
+
+        moved = self.db.reassign_wrong_match_source(
+            "/abs/Album", from_request_id=self.req1, to_request_id=target)
+
+        self.assertEqual(moved, 2)
+        cur = self.db._execute(
+            "SELECT soulseek_username, request_id FROM download_log")
+        owners = {r["soulseek_username"]: r["request_id"]
+                  for r in cur.fetchall()}
+        self.assertEqual(owners["old-dup"], target)
+        self.assertEqual(owners["new-dup"], target)
+        self.assertEqual(owners["other-path"], self.req1)
+        self.assertEqual(owners["other-request"], self.req2)
+        self.assertEqual(owners["successful"], self.req1)
+
     def test_excludes_non_rejected_outcomes(self):
         """success / force_import / timeout must never surface in wrong-matches."""
         self._log_rejected(self.req1, "reject-me", "/fi/keep")
