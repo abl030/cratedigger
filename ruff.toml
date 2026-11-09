@@ -13,8 +13,14 @@ extend-exclude = ["mutants"]
 # enabling any: these three found zero present-day bugs (full bugbear had
 # three cosmetic hits, fixed in the same change; DTZ and BLE001 had none)
 # and are kept as legislation against future drift, not as a finding.
-# The style families (SIM, C4, RET, PERF, RUF, TRY) were rejected there
-# with their numbers; do not add them without a new measurement.
+#
+# Everything else comes from Ruff's own default rule set, which is wide
+# (~420 rules across SIM, RUF, PERF, TRY, RET, PL*, UP, FURB, ... as of
+# 0.16/0.17) and is ridden deliberately: the repository follows Ruff's
+# best practice as it evolves. Do NOT replace `extend-select` with an
+# explicit `select` to dodge upstream churn. When a nixpkgs bump tightens
+# a rule (e.g. #1447, SIM102 in 0.17.4), the daily unstable gate rejects
+# the lock and the fix is to change the code, not loosen the config.
 extend-select = [
   "B",       # flake8-bugbear: mutable defaults, loop-variable capture, raise-from
   "BLE001",  # blind `except Exception`: every broad except must say why (`# noqa: BLE001`)
