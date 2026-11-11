@@ -1297,6 +1297,41 @@ t.section('renderTrackComparison() escapes disc metadata');
   t.ok(metadataHtmlIsEscaped(html, '<i>x</i>'), 'disctitle escaped');
 }
 
+t.section('renderTrackComparison() never trusts Discogs medium formats');
+{
+  // Discogs stamps every track with the release's first format: a
+  // [DVD, CD] release would otherwise paint its CD as video.
+  const c = cdPlusDvdCandidate();
+  c.data_source = 'Discogs';
+  c.media = 'DVD';
+  for (const m of c.mapping) m.track.media = 'DVD';
+  const html = renderTrackComparison(c);
+  t.equal(countOccurrences(html, 'wm-disc-header'), 2, 'still grouped by disc');
+  t.excludes(html, 'wm-disc-video', 'no disc claimed as video');
+  t.excludes(html, 'Disc 1 · DVD', 'no format named for a Discogs disc');
+  const perTrack = cdPlusDvdCandidate();
+  for (const m of perTrack.mapping) m.track.data_source = 'Discogs';
+  t.excludes(renderTrackComparison(perTrack), 'wm-disc-video',
+    'a Discogs track-level data_source alone also suppresses the format');
+}
+
+t.section('renderEntry() prefixes missing tracks when only they sit on another disc');
+{
+  // CD-only rip of a CD + DVD release: every matched track is disc 1,
+  // every missing track is disc 2.
+  const c = cdPlusDvdCandidate();
+  const missing = c.mapping.filter((m) => m.track.medium === 2).map((m) => m.track);
+  c.mapping = c.mapping.filter((m) => m.track.medium === 1);
+  const html = renderEntry({ download_log_id: 78, candidate: { ...c, extra_tracks: missing } }, 180, 42);
+  t.contains(html, '2-1. Up the Bracket', 'disc 2 missing track carries its disc prefix');
+  t.contains(html, '2-3. I Get Along', 'every disc 2 missing track is prefixed');
+  const single = renderEntry({ download_log_id: 79, candidate: {
+    mapping: [{ track: { title: 'A', medium: 1, medium_index: 1 }, item: { title: 'A' } }],
+    extra_tracks: [{ title: 'B', medium: 1, medium_index: 2 }],
+  } }, 180, 42);
+  t.contains(single, '<div>2. B</div>', 'single-disc missing tracks stay unprefixed');
+}
+
 t.section('renderEntry() tags missing video tracks with disc and format');
 {
   const html = renderEntry({

@@ -94,6 +94,10 @@ export function isVideoMedia(format) {
  * @returns {string}
  */
 function trackMedia(track, candidate) {
+  // Discogs stamps every track (and the album) with the release's first
+  // format, so on a mixed CD+DVD release it names the wrong carrier for
+  // some discs. Show no format rather than a confident wrong one.
+  if (candidate?.data_source === 'Discogs' || track?.data_source === 'Discogs') return '';
   if (track?.media) return String(track.media);
   const albumMedia = candidate?.media;
   return albumMedia && albumMedia !== 'Media' ? String(albumMedia) : '';
@@ -1512,8 +1516,10 @@ function renderEntryDetail(e, job, requestId) {
   if (c && c.extra_tracks && c.extra_tracks.length > 0) {
     html += `<div style="margin-top:6px;font-size:0.78em;color:#f88;">Missing MB tracks (${c.extra_tracks.length}):</div>`;
     html += '<div style="font-size:0.75em;padding-left:8px;color:#888;">';
-    const multiDisc = new Set(c.extra_tracks.map(mediumNumber)).size > 1
-      || (c.mapping || []).some((m) => mediumNumber(m.track) > 1);
+    const multiDisc = new Set([
+      ...c.extra_tracks.map(mediumNumber),
+      ...(c.mapping || []).map((m) => mediumNumber(m.track)),
+    ]).size > 1;
     for (const t of c.extra_tracks) {
       const num = t.medium_index || t.index || t.track || '?';
       const media = trackMedia(t, c);
