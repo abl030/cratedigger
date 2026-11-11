@@ -58,10 +58,123 @@ const MUSICBRAINZ_TAG_ENTITY_PATH = {
  * @param {number} s
  * @returns {string}
  */
-function fmtLen(s) {
-  const m = Math.floor(s / 60);
-  const sec = Math.round(s % 60);
+export function fmtLen(s) {
+  // Round the total first: rounding only the seconds part turns 179.6s
+  // into "2:60" instead of "3:00".
+  const total = Math.round(s);
+  const m = Math.floor(total / 60);
+  const sec = total % 60;
   return `${m}:${sec < 10 ? '0' : ''}${sec}`;
+}
+
+// MusicBrainz medium formats that carry video rather than audio. A rip of
+// the release never contains these tracks, so the comparison flags them.
+// Plain "DVD" is video in practice; "DVD-Audio" and "DualDisc" are not
+// listed because their programme is audio.
+const VIDEO_MEDIA = new Set([
+  'dvd', 'dvd-video', 'blu-ray', 'hd-dvd', 'vhs', 'betamax', 'vcd', 'svcd',
+  'laserdisc', 'cdv', 'vhd', 'umd', 'video', 'video 8', 'hi8', 'minidv',
+]);
+
+/**
+ * Whether a medium format names a video carrier.
+ * @param {string|null|undefined} format
+ * @returns {boolean}
+ */
+export function isVideoMedia(format) {
+  return VIDEO_MEDIA.has(String(format || '').trim().toLowerCase());
+}
+
+/**
+ * Medium format for a serialized track. Rows logged before the harness
+ * emitted per-track ``media`` fall back to the album-level value, which
+ * beets only sets to a real format when every medium shares it.
+ * @param {Object|null|undefined} track
+ * @param {Object} candidate
+ * @returns {string}
+ */
+function trackMedia(track, candidate) {
+  if (track?.media) return String(track.media);
+  const albumMedia = candidate?.media;
+  return albumMedia && albumMedia !== 'Media' ? String(albumMedia) : '';
+}
+
+/**
+ * @param {Object|null|undefined} track
+ * @returns {number}
+ */
+function mediumNumber(track) {
+  const n = Number(track?.medium);
+  return Number.isFinite(n) && n > 0 ? n : 1;
+}
+
+/**
+ * Header for one disc of the comparison. Video discs get a tinted band so
+ * an operator sees at a glance which target tracks no audio rip can hold.
+ * @param {number} medium
+ * @param {string} media
+ * @param {string|null|undefined} disctitle
+ * @returns {string}
+ */
+function discHeader(medium, media, disctitle) {
+  const video = isVideoMedia(media);
+  const parts = [`Disc ${medium}`];
+  if (media) parts.push(esc(media));
+  if (disctitle) parts.push(esc(disctitle));
+  const badge = video
+    ? ' <span class="badge" style="background:#5b3f8c;color:#e6dcff;margin-left:6px;">video</span>'
+    : '';
+  const style = video
+    ? 'background:rgba(140,100,220,0.18);color:#c9b3f5;border-left:3px solid #9a7be0;'
+    : 'background:rgba(255,255,255,0.04);color:#999;border-left:3px solid #555;';
+  return `<div class="wm-disc-header${video ? ' wm-disc-video' : ''}" style="grid-column:1 / -1;margin-top:6px;padding:3px 6px;font-weight:600;${style}">${parts.join(' · ')}${badge}</div>`;
+}
+
+/**
+ * Side-by-side target vs on-disk track comparison, grouped by disc. A
+ * single audio disc renders without headers, exactly as before.
+ * @param {Object} c - candidate summary
+ * @returns {string}
+ */
+export function renderTrackComparison(c) {
+  const mapping = Array.isArray(c?.mapping) ? c.mapping : [];
+  if (mapping.length === 0) return '';
+  const position = (track) => Number(track?.medium_index ?? track?.index ?? 0) || 0;
+  const rows = mapping
+    .map((m, i) => ({ m, i, medium: mediumNumber(m.track) }))
+    .sort((a, b) => (a.medium - b.medium)
+      || (position(a.m.track) - position(b.m.track))
+      || (a.i - b.i));
+  const mediums = new Set(rows.map((r) => r.medium));
+  const anyVideo = rows.some((r) => isVideoMedia(trackMedia(r.m.track, c)));
+  const showDiscs = mediums.size > 1 || anyVideo;
+
+  let html = '<div class="wm-track-compare" style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:0 8px;font-size:0.78em;">';
+  html += '<div style="color:#6a9;font-weight:600;font-size:0.9em;padding-bottom:4px;">MB target</div>';
+  html += '<div style="color:#da6;font-weight:600;font-size:0.9em;padding-bottom:4px;">On disk</div>';
+  let currentMedium = null;
+  for (const { m, medium } of rows) {
+    const media = trackMedia(m.track, c);
+    const video = isVideoMedia(media);
+    if (showDiscs && medium !== currentMedium) {
+      currentMedium = medium;
+      html += discHeader(medium, media, m.track?.disctitle);
+    }
+    const mbNum = m.track?.medium_index || m.track?.index || '?';
+    const mbTitle = m.track?.title || '?';
+    const mbLen = m.track?.length ? fmtLen(m.track.length) : '';
+    const localTitle = m.item?.title || m.item?.path || '?';
+    const localLen = m.item?.length ? fmtLen(m.item.length) : '';
+    const localFmt = m.item?.format ? ` ${esc(m.item.format)}` : '';
+    const localBr = m.item?.bitrate ? ` ${Math.round(m.item.bitrate / 1000)}k` : '';
+    const titleMatch = mbTitle.toLowerCase().replace(/\s*\(demo\)\s*/g, '').trim() === (localTitle || '').toLowerCase().trim();
+    const mismatchStyle = titleMatch ? '' : 'color:#f88;';
+    const rowBg = video ? 'background:rgba(140,100,220,0.10);' : '';
+    html += `<div style="padding:1px 0 1px 4px;color:#aaa;${rowBg}">${mbNum}. ${esc(mbTitle)} <span style="color:#555;">${mbLen}</span></div>`;
+    html += `<div style="padding:1px 0;${rowBg}${mismatchStyle}">${esc(localTitle)}<span style="color:#555;"> ${localLen}${localFmt}${localBr}</span></div>`;
+  }
+  html += '</div>';
+  return html;
 }
 
 /**
@@ -1385,25 +1498,7 @@ function renderEntryDetail(e, job, requestId) {
     }
   }
 
-  if (c && c.mapping && c.mapping.length > 0) {
-    html += `<div style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:0 8px;font-size:0.78em;">`;
-    html += `<div style="color:#6a9;font-weight:600;font-size:0.9em;padding-bottom:4px;">MB target</div>`;
-    html += `<div style="color:#da6;font-weight:600;font-size:0.9em;padding-bottom:4px;">On disk</div>`;
-    for (const m of c.mapping) {
-      const mbNum = m.track?.medium_index || m.track?.index || '?';
-      const mbTitle = m.track?.title || '?';
-      const mbLen = m.track?.length ? fmtLen(m.track.length) : '';
-      const localTitle = m.item?.title || m.item?.path || '?';
-      const localLen = m.item?.length ? fmtLen(m.item.length) : '';
-      const localFmt = m.item?.format ? ` ${esc(m.item.format)}` : '';
-      const localBr = m.item?.bitrate ? ` ${Math.round(m.item.bitrate / 1000)}k` : '';
-      const titleMatch = mbTitle.toLowerCase().replace(/\s*\(demo\)\s*/g, '').trim() === (localTitle || '').toLowerCase().trim();
-      const mismatchStyle = titleMatch ? '' : 'color:#f88;';
-      html += `<div style="padding:1px 0;color:#aaa;">${mbNum}. ${esc(mbTitle)} <span style="color:#555;">${mbLen}</span></div>`;
-      html += `<div style="padding:1px 0;${mismatchStyle}">${esc(localTitle)}<span style="color:#555;"> ${localLen}${localFmt}${localBr}</span></div>`;
-    }
-    html += '</div>';
-  }
+  if (c) html += renderTrackComparison(c);
 
   if (c && c.extra_items && c.extra_items.length > 0) {
     html += `<div style="margin-top:6px;font-size:0.78em;color:#da6;">Extra local files (${c.extra_items.length}):</div>`;
@@ -1417,9 +1512,16 @@ function renderEntryDetail(e, job, requestId) {
   if (c && c.extra_tracks && c.extra_tracks.length > 0) {
     html += `<div style="margin-top:6px;font-size:0.78em;color:#f88;">Missing MB tracks (${c.extra_tracks.length}):</div>`;
     html += '<div style="font-size:0.75em;padding-left:8px;color:#888;">';
+    const multiDisc = new Set(c.extra_tracks.map(mediumNumber)).size > 1
+      || (c.mapping || []).some((m) => mediumNumber(m.track) > 1);
     for (const t of c.extra_tracks) {
       const num = t.medium_index || t.index || t.track || '?';
-      html += `<div>${num}. ${esc(t.title || '?')}</div>`;
+      const media = trackMedia(t, c);
+      const prefix = multiDisc ? `${mediumNumber(t)}-` : '';
+      const tag = isVideoMedia(media)
+        ? ` <span style="color:#c9b3f5;">[${esc(media)} · video]</span>`
+        : '';
+      html += `<div>${prefix}${num}. ${esc(t.title || '?')}${tag}</div>`;
     }
     html += '</div>';
   }

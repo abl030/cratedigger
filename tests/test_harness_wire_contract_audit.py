@@ -121,6 +121,7 @@ def _track_stub() -> _Stub:
         release_track_id="eeeeeeee-dddd-cccc-bbbb-aaaaaaaaaaaa",
         track_alt=None,
         disctitle=None,
+        media="CD",
         data_source="MusicBrainz",
     )
 

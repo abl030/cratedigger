@@ -94,6 +94,8 @@ class HarnessTrackInfo(msgspec.Struct):
     release_track_id: str = ""
     track_alt: str | None = None
     disctitle: str | None = None
+    # Format of this track's medium ("CD", "DVD-Video", ...); display only.
+    media: str = ""
     data_source: str = ""
     # Cratedigger's Discogs compatibility layer sets this only when Beets
     # coalesces multiple flat indexed entries into one physical-track slot.

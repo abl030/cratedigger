@@ -154,6 +154,10 @@ def _serialize_track_info(ti: TrackInfo) -> dict[str, object]:
         "release_track_id": _id_str(getattr(ti, "release_track_id", None)),
         "track_alt": getattr(ti, "track_alt", None),
         "disctitle": getattr(ti, "disctitle", None),
+        # Format of this track's medium ("CD", "DVD-Video", ...). Display
+        # only: lets the wrong-matches view mark video discs, which
+        # ``ignore_video_tracks = false`` keeps in the track contract.
+        "media": getattr(ti, "media", None) or "",
         "data_source": getattr(ti, "data_source", None) or "",
         "discogs_indexed_component_count": (
             discogs_patches.discogs_indexed_component_count(ti)

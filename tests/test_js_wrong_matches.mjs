@@ -17,9 +17,11 @@ import {
   entrySpectralCell,
   explorerListingIsRepairable,
   forceImportWrongMatch,
+  fmtLen,
   formatEntryEvidence,
   invalidateWrongMatches,
   isConvergeGreen,
+  isVideoMedia,
   loadWrongMatches,
   maybeLoadWrongMatchExplorer,
   normalizeThreshold,
@@ -31,6 +33,7 @@ import {
   renderEntry,
   renderLatestImport,
   renderQualityBadges,
+  renderTrackComparison,
   renderWrongMatchExplorer,
   renderWrongMatches,
   retryTriageStatusOnce,
@@ -1205,6 +1208,107 @@ t.section('renderWrongMatches() escapes candidate metadata at the live HTML sink
         `local format escaped: ${JSON.stringify(format)}`);
     }
   }
+}
+
+t.section('fmtLen() carries rounded seconds into the minute');
+{
+  t.equal(fmtLen(179.6), '3:00', '179.6s renders 3:00, never 2:60');
+  t.equal(fmtLen(157), '2:37', 'whole seconds unchanged');
+  t.equal(fmtLen(59.4), '0:59', 'sub-minute rounds down');
+}
+
+t.section('isVideoMedia() separates video carriers from audio ones');
+{
+  for (const f of ['DVD-Video', 'DVD', 'Blu-ray', 'VHS', 'dvd-video', ' LaserDisc ']) {
+    t.ok(isVideoMedia(f), `${JSON.stringify(f)} is video`);
+  }
+  for (const f of ['CD', 'DVD-Audio', 'DualDisc', 'Vinyl', '12" Vinyl', 'Digital Media', '', null, undefined]) {
+    t.ok(!isVideoMedia(f), `${JSON.stringify(f)} is not video`);
+  }
+}
+
+/** Libertines "Up the Bracket" GB 2003: 13-track CD + 3-track DVD-Video. */
+function cdPlusDvdCandidate({ perTrackMedia = true } = {}) {
+  const track = (medium, idx, title, media) => ({
+    title, medium, medium_index: idx, length: 160,
+    ...(perTrackMedia ? { media } : {}),
+  });
+  const mapping = [];
+  // Deliberately shuffled: disc 2 rows first, to prove ordering is by disc.
+  mapping.push({ track: track(2, 1, 'Up the Bracket', 'DVD-Video'), item: { title: 'Up the Bracket', format: 'FLAC' } });
+  for (let i = 1; i <= 13; i += 1) {
+    mapping.push({ track: track(1, i, `Song ${i}`, 'CD'), item: { title: `Song ${i}`, format: 'FLAC' } });
+  }
+  mapping.push({ track: track(2, 3, 'I Get Along', 'DVD-Video'), item: { title: 'Death on the Stairs', format: 'FLAC' } });
+  mapping.push({ track: track(2, 2, 'Time for Heroes', 'DVD-Video'), item: { title: 'Time for Heroes', format: 'FLAC' } });
+  return { artist: 'The Libertines', album: 'Up the Bracket', media: 'Media', mediums: 2, mapping };
+}
+
+t.section('renderTrackComparison() groups a CD + DVD-Video release by disc');
+{
+  const html = renderTrackComparison(cdPlusDvdCandidate());
+  t.equal(countOccurrences(html, 'wm-disc-header'), 2, 'one header per disc');
+  t.contains(html, 'Disc 1 · CD', 'disc 1 header names its format');
+  t.contains(html, 'Disc 2 · DVD-Video', 'disc 2 header names its format');
+  t.equal(countOccurrences(html, 'wm-disc-video'), 1, 'only the DVD header is marked video');
+  t.ok(html.indexOf('Disc 1 · CD') < html.indexOf('1. Song 1 '),
+    'disc 1 header precedes disc 1 tracks');
+  const disc2At = html.indexOf('Disc 2 · DVD-Video');
+  t.ok(disc2At > html.indexOf('Song 13'), 'all disc 1 rows render before the disc 2 header');
+  t.ok(html.indexOf('1. Up the Bracket') > disc2At, 'disc 2 tracks render under the disc 2 header');
+  t.ok(html.indexOf('2. Time for Heroes') < html.indexOf('3. I Get Along'),
+    'tracks within a disc are in medium_index order');
+  t.equal(countOccurrences(html, 'background:rgba(140,100,220,0.10)'), 6,
+    'both cells of each of the three video rows are tinted');
+}
+
+t.section('renderTrackComparison() keeps single-disc audio releases headerless');
+{
+  const c = cdPlusDvdCandidate();
+  c.mapping = c.mapping.filter((m) => m.track.medium === 1);
+  c.media = 'CD';
+  const html = renderTrackComparison(c);
+  t.excludes(html, 'wm-disc-header', 'no disc headers for a plain one-CD release');
+  t.contains(html, 'MB target', 'column headings still render');
+  t.equal(renderTrackComparison({ mapping: [] }), '', 'empty mapping renders nothing');
+}
+
+t.section('renderTrackComparison() still groups rows logged before per-track media');
+{
+  const html = renderTrackComparison(cdPlusDvdCandidate({ perTrackMedia: false }));
+  t.equal(countOccurrences(html, 'wm-disc-header'), 2, 'grouped by medium number alone');
+  t.excludes(html, 'wm-disc-video', 'mixed album media ("Media") cannot claim video');
+  const single = renderTrackComparison({
+    media: 'DVD-Video',
+    mapping: [{ track: { title: 'Clip', medium: 1, medium_index: 1 }, item: { title: 'Clip' } }],
+  });
+  t.contains(single, 'wm-disc-video', 'a uniform album-level video format marks the disc');
+}
+
+t.section('renderTrackComparison() escapes disc metadata');
+{
+  const html = renderTrackComparison({
+    mapping: [
+      { track: { title: 'A', medium: 1, medium_index: 1, media: '<b>CD</b>', disctitle: '<i>x</i>' }, item: { title: 'A' } },
+      { track: { title: 'B', medium: 2, medium_index: 1, media: 'CD' }, item: { title: 'B' } },
+    ],
+  });
+  t.ok(metadataHtmlIsEscaped(html, '<b>CD</b>'), 'media escaped');
+  t.ok(metadataHtmlIsEscaped(html, '<i>x</i>'), 'disctitle escaped');
+}
+
+t.section('renderEntry() tags missing video tracks with disc and format');
+{
+  const html = renderEntry({
+    download_log_id: 77,
+    candidate: {
+      ...cdPlusDvdCandidate(),
+      extra_tracks: [{ title: 'Some Clip', medium: 2, medium_index: 4, media: 'DVD-Video' }],
+    },
+  }, 180, 42);
+  t.contains(html, '2-4. Some Clip', 'missing track carries its disc prefix');
+  t.contains(html, '[DVD-Video · video]', 'missing track marked as video');
+  t.contains(html, 'wm-track-compare', 'entry detail renders the grouped comparison');
 }
 
 t.section('renderWrongMatchExplorer() collapses shared album tags and hides replaygain noise');
