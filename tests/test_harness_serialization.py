@@ -148,6 +148,21 @@ class TestTrackInfoIdCoercion(unittest.TestCase):
         self.assertEqual(out["track_id"], "")
         self.assertEqual(out["release_track_id"], "")
 
+    def test_musicbrainz_medium_format_emitted(self):
+        out = beets_harness._serialize_track_info(self._track_info(media="DVD-Video"))
+        self.assertEqual(out["media"], "DVD-Video")
+
+    def test_discogs_medium_format_withheld(self):
+        # Beets' Discogs plugin stamps every track with the release's first
+        # format; on a [DVD, CD] release that would label the CD as video.
+        out = beets_harness._serialize_track_info(
+            self._track_info(media="DVD", data_source="Discogs"))
+        self.assertEqual(out["media"], "")
+
+    def test_missing_medium_format_becomes_empty_string(self):
+        out = beets_harness._serialize_track_info(self._track_info(media=None))
+        self.assertEqual(out["media"], "")
+
 
 # ---------------------------------------------------------------------------
 # _serialize_track_candidate — singleton TrackMatch IDs
