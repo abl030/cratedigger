@@ -15,6 +15,11 @@ ROOT = Path(__file__).resolve().parents[1]
 ARTIST_ID = "artist-id"
 PROVENANCE = ("ordinary", "promo", "unofficial")
 STRUCTURAL_TYPES = ("Album", "EP", "Single")
+# Every request status migration 066 allows, plus "no request".
+PIPELINE_STATUSES = (
+    None, "initializing", "wanted", "downloading", "processing",
+    "imported", "unsearchable", "replaced",
+)
 
 
 _ARTIST_PAGE_WORKER = """
@@ -282,9 +287,7 @@ row_strategy = st.builds(
         "is_appearance": is_appearance,
         "pipeline_status": pipeline_status,
     },
-    pipeline_status=st.sampled_from(
-        (None, "wanted", "downloading", "imported", "replaced"),
-    ),
+    pipeline_status=st.sampled_from(PIPELINE_STATUSES),
     primary_type=st.sampled_from((*STRUCTURAL_TYPES, "Other")),
     provenance=st.lists(
         st.sampled_from(PROVENANCE), max_size=3, unique=True,
@@ -366,6 +369,8 @@ class TestGeneratedSimpleArtistCatalogue(unittest.TestCase):
         source=st.sampled_from(("mb", "discogs")),
         mb_owned=st.booleans(),
         discogs_owned=st.booleans(),
+        mb_status=st.sampled_from(PIPELINE_STATUSES),
+        discogs_status=st.sampled_from(PIPELINE_STATUSES),
         mb_provenance=st.lists(
             st.sampled_from(PROVENANCE), max_size=3, unique=True,
         ),
@@ -395,16 +400,29 @@ class TestGeneratedSimpleArtistCatalogue(unittest.TestCase):
     )
     @example(
         source="discogs", mb_owned=True, discogs_owned=False,
+        mb_status=None, discogs_status=None,
         mb_provenance=["ordinary"], discogs_provenance=["ordinary"],
         mb_primary=["Album"], discogs_primary=["Album"],
         mb_secondary=["Live"], discogs_secondary=[],
         mb_qualifiers=["Demo"], discogs_qualifiers=["Remix"],
+    )
+    @example(
+        # The counterpart's live request must never pin the selected
+        # exceptional work mainline.
+        source="mb", mb_owned=False, discogs_owned=False,
+        mb_status=None, discogs_status="wanted",
+        mb_provenance=["unofficial"], discogs_provenance=[],
+        mb_primary=["Album"], discogs_primary=[],
+        mb_secondary=[], discogs_secondary=[],
+        mb_qualifiers=[], discogs_qualifiers=[],
     )
     def test_pair_projection_keeps_selected_exact_identity_and_source_evidence(
         self,
         source: str,
         mb_owned: bool,
         discogs_owned: bool,
+        mb_status: str | None,
+        discogs_status: str | None,
         mb_provenance: list[str],
         discogs_provenance: list[str],
         mb_primary: list[str],
@@ -417,14 +435,14 @@ class TestGeneratedSimpleArtistCatalogue(unittest.TestCase):
         mb = {
             "id": "mb-rg", "title": "Shared", "source": "mb",
             "identity_kind": "work", "provenance": mb_provenance,
-            "in_library": mb_owned,
+            "in_library": mb_owned, "pipeline_status": mb_status,
             "primary_types": mb_primary, "secondary_types": mb_secondary,
             "format_qualifiers": mb_qualifiers,
         }
         discogs = {
             "id": "3938744", "title": "Shared", "source": "discogs",
             "identity_kind": "release", "provenance": discogs_provenance,
-            "in_library": discogs_owned,
+            "in_library": discogs_owned, "pipeline_status": discogs_status,
             "primary_types": discogs_primary,
             "secondary_types": discogs_secondary,
             "format_qualifiers": discogs_qualifiers,
@@ -477,11 +495,16 @@ class TestGeneratedSimpleArtistCatalogue(unittest.TestCase):
             discogs_qualifiers=discogs_qualifiers,
         )
         display_provenance = set(mb_provenance) | set(discogs_provenance)
-        # Only the selected row's own exact ownership pins an exceptional
-        # work mainline; the counterpart's ownership never does.
+        # Only the selected row's own exact ownership or live request pins
+        # an exceptional work mainline; the counterpart's never does.
+        selected_status = selected["pipeline_status"]
+        selected_requested = (
+            isinstance(selected_status, str) and selected_status != "replaced"
+        )
         expected_bucket = (
             "inLibrary" if selected["in_library"]
-            else "missing" if "ordinary" in display_provenance
+            else "missing"
+            if "ordinary" in display_provenance or selected_requested
             else "other"
         )
         self.assertEqual(row["_bucket"], expected_bucket)
