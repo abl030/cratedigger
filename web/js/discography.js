@@ -365,6 +365,21 @@ export function synthesizeMasterlessRow(data) {
 }
 
 /**
+ * True when the operator holds a claim on this exact identity: it is in
+ * the library, or it carries a pipeline request that is still live
+ * (``replaced`` is an abandoned request, not a claim). A pinned row is
+ * never collapsed out of sight for being non-official — not at the
+ * pressing level (splitPressings) and not at the artist-page level
+ * (``artist_page.js::classifyArtistRows``).
+ * @param {Object} row - Row with the pipeline/library overlay fields.
+ * @returns {boolean}
+ */
+export function isOperatorPinned(row) {
+  return row.in_library === true
+    || (!!row.pipeline_status && row.pipeline_status !== 'replaced');
+}
+
+/**
  * Split a release group's date-sorted pressing rows into the visible
  * list and the collapsed Bootleg / Promo bucket.
  *
@@ -383,12 +398,10 @@ export function synthesizeMasterlessRow(data) {
  * @returns {{visible: Object[], hidden: Object[]}}
  */
 export function splitPressings(rows) {
-  const pinned = (r) => r.in_library === true
-    || (!!r.pipeline_status && r.pipeline_status !== 'replaced');
   const official = (r) => r.status === 'Official' || !r.status;
   return {
-    visible: rows.filter(r => official(r) || pinned(r)),
-    hidden: rows.filter(r => !official(r) && !pinned(r)),
+    visible: rows.filter(r => official(r) || isOperatorPinned(r)),
+    hidden: rows.filter(r => !official(r) && !isOperatorPinned(r)),
   };
 }
 

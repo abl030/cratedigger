@@ -152,7 +152,13 @@ def assert_simple_partition(
         provenance = set(
             raw_provenance if isinstance(raw_provenance, list) else []
         )
-        if row.get("is_appearance") is True or "ordinary" not in provenance:
+        status = row.get("pipeline_status")
+        operator_pinned = row.get("in_library") is True or (
+            isinstance(status, str) and status != "" and status != "replaced"
+        )
+        if row.get("is_appearance") is True or (
+            "ordinary" not in provenance and not operator_pinned
+        ):
             expected["other"].append(index)
         elif row.get("in_library") is True:
             expected["inLibrary"].append(index)
@@ -264,7 +270,7 @@ def assert_mb_work_classification_precedence(
 
 row_strategy = st.builds(
     lambda primary_type, provenance, in_library, is_appearance,
-           secondary_type: {
+           secondary_type, pipeline_status: {
         "type": primary_type,
         "primary_types": (
             [primary_type] if primary_type in STRUCTURAL_TYPES else []
@@ -274,7 +280,11 @@ row_strategy = st.builds(
         "provenance": provenance,
         "in_library": in_library,
         "is_appearance": is_appearance,
+        "pipeline_status": pipeline_status,
     },
+    pipeline_status=st.sampled_from(
+        (None, "wanted", "downloading", "imported", "replaced"),
+    ),
     primary_type=st.sampled_from((*STRUCTURAL_TYPES, "Other")),
     provenance=st.lists(
         st.sampled_from(PROVENANCE), max_size=3, unique=True,
@@ -467,8 +477,10 @@ class TestGeneratedSimpleArtistCatalogue(unittest.TestCase):
             discogs_qualifiers=discogs_qualifiers,
         )
         display_provenance = set(mb_provenance) | set(discogs_provenance)
+        # Only the selected row's own exact ownership pins an exceptional
+        # work mainline; the counterpart's ownership never does.
         expected_bucket = (
-            "inLibrary" if selected["in_library"] and "ordinary" in display_provenance
+            "inLibrary" if selected["in_library"]
             else "missing" if "ordinary" in display_provenance
             else "other"
         )
@@ -612,11 +624,22 @@ class TestGeneratedSimpleArtistCatalogue(unittest.TestCase):
             },
         })
         assert_simple_vocabulary(html)
-        other_tail = html.split('id="catalogue-other-releases"', 1)[1]
-        outer = other_tail.split('<div class="type-body', 1)[1].split('>', 1)[0]
-        self.assertNotIn("open", outer.split())
+        # Exact ownership pins the bootleg into the open In library area
+        # (operator pin); a title-only collision stays in the collapsed
+        # Other releases area and never inherits ownership.
+        home = (
+            'id="catalogue-in-library"' if exact_owned
+            else 'id="catalogue-other-releases"'
+        )
+        self.assertEqual(
+            'id="catalogue-other-releases"' in html, not exact_owned,
+        )
+        section_tail = html.split(home, 1)[1]
+        self.assertIn(f'data-rg-id="{row_id}"', section_tail)
+        outer = section_tail.split('<div class="type-body', 1)[1].split('"', 1)[0]
+        self.assertEqual("open" in outer.split(), exact_owned)
         type_tail = html.split(f"{qualifier}s" if qualifier == "Compilation" else qualifier, 1)[1]
-        type_body = type_tail.split('<div class="type-body', 1)[1].split('>', 1)[0]
+        type_body = type_tail.split('<div class="type-body', 1)[1].split('"', 1)[0]
         self.assertNotIn("open", type_body.split())
         row_header = html.split(f'data-rg-id="{row_id}"', 1)[1].split('</div>', 1)[0]
         self.assertEqual("in library" in row_header, exact_owned)
