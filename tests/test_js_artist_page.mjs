@@ -462,17 +462,55 @@ t.section('Rolling Stones title collision never claims ownership or expands exce
   }
 }
 
-t.section('even exact-owned exceptional rows leave Other releases collapsed');
+t.section('owned or actively requested exceptional own works are never buried');
 {
-  const html = renderArtistSections(classify([
-    work('owned-live', {
-      provenance: ['unofficial'], secondary_types: ['Live'], in_library: true,
+  // Limp Bizkit "Smelly Beaver" (request 6343): an MB release group whose
+  // only release is a Bootleg, owned and still wanted for upgrade. The
+  // artist page buried it two collapsed levels deep (Other releases ->
+  // Compilations), contradicting splitPressings' operator-pin invariant.
+  const world = [
+    work('owned-bootleg-comp', {
+      provenance: ['unofficial'], secondary_types: ['Compilation'],
+      in_library: true, pipeline_status: 'wanted',
     }),
-  ]), { artistId: ARTIST_ID, artistName: ARTIST_NAME });
+    work('wanted-promo', { provenance: ['promo'], pipeline_status: 'wanted' }),
+    work('downloading-unknown', {
+      provenance: [], pipeline_status: 'downloading',
+    }),
+    work('replaced-bootleg', {
+      provenance: ['unofficial'], pipeline_status: 'replaced',
+    }),
+    work('unowned-bootleg', { provenance: ['unofficial'] }),
+    work('owned-appearance', {
+      provenance: ['unofficial'], is_appearance: true, in_library: true,
+    }),
+    work('owned-foreign', {
+      provenance: ['unofficial'], in_library: true,
+      primary_artist_id: 'other', artist_credit: 'Someone Else',
+    }),
+  ];
+  const sections = classify(world);
+  t.equal(sections.inLibrary.map(row => row.id).join(','), 'owned-bootleg-comp',
+    'an exact-owned bootleg own work is In library');
+  t.equal(sections.missing.map(row => row.id).join(','),
+    'wanted-promo,downloading-unknown',
+    'an actively requested exceptional own work is Missing');
+  t.equal(sections.otherReleases.map(row => row.id).join(','),
+    'replaced-bootleg,unowned-bootleg,owned-appearance,owned-foreign',
+    'replaced, unclaimed, appearance and foreign rows stay in Other releases');
+  const html = renderArtistSections(sections, {
+    artistId: ARTIST_ID, artistName: ARTIST_NAME,
+  });
+  const libraryHtml = html.slice(
+    html.indexOf('id="catalogue-in-library"'),
+    html.indexOf('id="catalogue-missing"'),
+  );
+  t.contains(libraryHtml, 'data-rg-id="owned-bootleg-comp"',
+    'the owned bootleg renders inside In library');
+  t.contains(libraryHtml, '>unofficial</span>',
+    'the hoisted row keeps its unofficial provenance chip');
   t.equal(bodyIsOpenAfter(html, 'id="catalogue-other-releases"'), false,
-    'Other releases always starts collapsed');
-  t.equal(bodyIsOpenAfter(html, 'Live <span'), false,
-    'types inside Other releases always start collapsed');
+    'Other releases still starts collapsed');
 }
 
 t.section('mixed source-authored provenance stays visible on its row');

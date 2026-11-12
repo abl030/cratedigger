@@ -15,6 +15,11 @@ ROOT = Path(__file__).resolve().parents[1]
 ARTIST_ID = "artist-id"
 PROVENANCE = ("ordinary", "promo", "unofficial")
 STRUCTURAL_TYPES = ("Album", "EP", "Single")
+# Every request status migration 066 allows, plus "no request".
+PIPELINE_STATUSES = (
+    None, "initializing", "wanted", "downloading", "processing",
+    "imported", "unsearchable", "replaced",
+)
 
 
 _ARTIST_PAGE_WORKER = """
@@ -152,7 +157,13 @@ def assert_simple_partition(
         provenance = set(
             raw_provenance if isinstance(raw_provenance, list) else []
         )
-        if row.get("is_appearance") is True or "ordinary" not in provenance:
+        status = row.get("pipeline_status")
+        operator_pinned = row.get("in_library") is True or (
+            isinstance(status, str) and status != "" and status != "replaced"
+        )
+        if row.get("is_appearance") is True or (
+            "ordinary" not in provenance and not operator_pinned
+        ):
             expected["other"].append(index)
         elif row.get("in_library") is True:
             expected["inLibrary"].append(index)
@@ -264,7 +275,7 @@ def assert_mb_work_classification_precedence(
 
 row_strategy = st.builds(
     lambda primary_type, provenance, in_library, is_appearance,
-           secondary_type: {
+           secondary_type, pipeline_status: {
         "type": primary_type,
         "primary_types": (
             [primary_type] if primary_type in STRUCTURAL_TYPES else []
@@ -274,7 +285,9 @@ row_strategy = st.builds(
         "provenance": provenance,
         "in_library": in_library,
         "is_appearance": is_appearance,
+        "pipeline_status": pipeline_status,
     },
+    pipeline_status=st.sampled_from(PIPELINE_STATUSES),
     primary_type=st.sampled_from((*STRUCTURAL_TYPES, "Other")),
     provenance=st.lists(
         st.sampled_from(PROVENANCE), max_size=3, unique=True,
@@ -356,6 +369,8 @@ class TestGeneratedSimpleArtistCatalogue(unittest.TestCase):
         source=st.sampled_from(("mb", "discogs")),
         mb_owned=st.booleans(),
         discogs_owned=st.booleans(),
+        mb_status=st.sampled_from(PIPELINE_STATUSES),
+        discogs_status=st.sampled_from(PIPELINE_STATUSES),
         mb_provenance=st.lists(
             st.sampled_from(PROVENANCE), max_size=3, unique=True,
         ),
@@ -385,16 +400,29 @@ class TestGeneratedSimpleArtistCatalogue(unittest.TestCase):
     )
     @example(
         source="discogs", mb_owned=True, discogs_owned=False,
+        mb_status=None, discogs_status=None,
         mb_provenance=["ordinary"], discogs_provenance=["ordinary"],
         mb_primary=["Album"], discogs_primary=["Album"],
         mb_secondary=["Live"], discogs_secondary=[],
         mb_qualifiers=["Demo"], discogs_qualifiers=["Remix"],
+    )
+    @example(
+        # The counterpart's live request must never pin the selected
+        # exceptional work mainline.
+        source="mb", mb_owned=False, discogs_owned=False,
+        mb_status=None, discogs_status="wanted",
+        mb_provenance=["unofficial"], discogs_provenance=[],
+        mb_primary=["Album"], discogs_primary=[],
+        mb_secondary=[], discogs_secondary=[],
+        mb_qualifiers=[], discogs_qualifiers=[],
     )
     def test_pair_projection_keeps_selected_exact_identity_and_source_evidence(
         self,
         source: str,
         mb_owned: bool,
         discogs_owned: bool,
+        mb_status: str | None,
+        discogs_status: str | None,
         mb_provenance: list[str],
         discogs_provenance: list[str],
         mb_primary: list[str],
@@ -407,14 +435,14 @@ class TestGeneratedSimpleArtistCatalogue(unittest.TestCase):
         mb = {
             "id": "mb-rg", "title": "Shared", "source": "mb",
             "identity_kind": "work", "provenance": mb_provenance,
-            "in_library": mb_owned,
+            "in_library": mb_owned, "pipeline_status": mb_status,
             "primary_types": mb_primary, "secondary_types": mb_secondary,
             "format_qualifiers": mb_qualifiers,
         }
         discogs = {
             "id": "3938744", "title": "Shared", "source": "discogs",
             "identity_kind": "release", "provenance": discogs_provenance,
-            "in_library": discogs_owned,
+            "in_library": discogs_owned, "pipeline_status": discogs_status,
             "primary_types": discogs_primary,
             "secondary_types": discogs_secondary,
             "format_qualifiers": discogs_qualifiers,
@@ -467,9 +495,16 @@ class TestGeneratedSimpleArtistCatalogue(unittest.TestCase):
             discogs_qualifiers=discogs_qualifiers,
         )
         display_provenance = set(mb_provenance) | set(discogs_provenance)
+        # Only the selected row's own exact ownership or live request pins
+        # an exceptional work mainline; the counterpart's never does.
+        selected_status = selected["pipeline_status"]
+        selected_requested = (
+            isinstance(selected_status, str) and selected_status != "replaced"
+        )
         expected_bucket = (
-            "inLibrary" if selected["in_library"] and "ordinary" in display_provenance
-            else "missing" if "ordinary" in display_provenance
+            "inLibrary" if selected["in_library"]
+            else "missing"
+            if "ordinary" in display_provenance or selected_requested
             else "other"
         )
         self.assertEqual(row["_bucket"], expected_bucket)
@@ -612,11 +647,22 @@ class TestGeneratedSimpleArtistCatalogue(unittest.TestCase):
             },
         })
         assert_simple_vocabulary(html)
-        other_tail = html.split('id="catalogue-other-releases"', 1)[1]
-        outer = other_tail.split('<div class="type-body', 1)[1].split('>', 1)[0]
-        self.assertNotIn("open", outer.split())
+        # Exact ownership pins the bootleg into the open In library area
+        # (operator pin); a title-only collision stays in the collapsed
+        # Other releases area and never inherits ownership.
+        home = (
+            'id="catalogue-in-library"' if exact_owned
+            else 'id="catalogue-other-releases"'
+        )
+        self.assertEqual(
+            'id="catalogue-other-releases"' in html, not exact_owned,
+        )
+        section_tail = html.split(home, 1)[1]
+        self.assertIn(f'data-rg-id="{row_id}"', section_tail)
+        outer = section_tail.split('<div class="type-body', 1)[1].split('"', 1)[0]
+        self.assertEqual("open" in outer.split(), exact_owned)
         type_tail = html.split(f"{qualifier}s" if qualifier == "Compilation" else qualifier, 1)[1]
-        type_body = type_tail.split('<div class="type-body', 1)[1].split('>', 1)[0]
+        type_body = type_tail.split('<div class="type-body', 1)[1].split('"', 1)[0]
         self.assertNotIn("open", type_body.split())
         row_header = html.split(f'data-rg-id="{row_id}"', 1)[1].split('</div>', 1)[0]
         self.assertEqual("in library" in row_header, exact_owned)

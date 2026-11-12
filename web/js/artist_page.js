@@ -1,7 +1,7 @@
 // @ts-check
 /** Unified artist-page semantic catalogue and simple #601 presentation. */
 import { renderTypedSections } from './grouping.js';
-import { renderRgRow } from './discography.js';
+import { isOperatorPinned, renderRgRow } from './discography.js';
 import { renderLibraryAlbumRow } from './library.js';
 
 
@@ -107,9 +107,11 @@ export function composeCompareCatalogue(compare, source) {
 
 /**
  * Split one semantic catalogue into the original simple page model.
- * Ordinary own rows go to exact In library or Missing. Everything
- * exceptional, unknown, appearance-shaped, or an unassociated masterless
- * Discogs release goes to one collapsed Other releases area. A masterless
+ * Ordinary own rows go to exact In library or Missing, as do exceptional
+ * (promo/bootleg/unknown-status) own works the operator owns or actively
+ * requests (``isOperatorPinned``). Every other exceptional row, anything
+ * appearance-shaped, and an unassociated masterless Discogs release goes
+ * to one collapsed Other releases area. A masterless
  * release associated with an MB work participates normally through its pair.
  * @param {{artistId:string, artistName:string, releaseGroups:Object[],
  *          ungroupedReleases?:Object[], libraryAlbums:Object[]}} input
@@ -128,9 +130,14 @@ export function classifyArtistRows({
       || credit.startsWith(nameLC + ',') || !credit;
     const provenance = displayProvenance(row);
     const unmatchedRelease = row.identity_kind === 'release' && !row.counterpart;
+    // A promo/bootleg/unknown-status own work the operator owns or is
+    // actively requesting stays mainline (with its provenance chip), the
+    // same pin splitPressings applies one level down. Limp Bizkit "Smelly
+    // Beaver" — an owned, wanted, bootleg-only work — was otherwise buried
+    // under Other releases -> Compilations.
+    const exceptional = !provenance.has('ordinary') && !isOperatorPinned(row);
     if (row.catalogue_placement === 'other' || unmatchedRelease
-        || row.is_appearance === true || !isOwn
-        || !provenance.has('ordinary')) {
+        || row.is_appearance === true || !isOwn || exceptional) {
       otherReleases.push(row);
     } else {
       (row.in_library === true ? inLibrary : missing).push(row);
