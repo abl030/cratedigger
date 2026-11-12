@@ -634,6 +634,33 @@ class TestWorldAuditService(unittest.TestCase):
             set(self._codes(report, "A")),
         )
 
+    def test_denylist_authority_follows_a_row_adopted_away(self) -> None:
+        """Issue #1453: Replace --adopt moved the rejection onto the
+        successor; the replaced source's denylist row still traces to it."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=3, mb_release_id=RELEASE_A, status="replaced",
+        ))
+        db.seed_request(make_request_row(
+            id=4, mb_release_id=RELEASE_AMBIGUOUS, status="imported",
+        ))
+        db.log_download(
+            3, outcome="rejected", soulseek_username="ancestor-peer",
+            validation_result={"valid": False, "failed_path": "/wm/x"},
+        )
+        db.add_denylist(3, "ancestor-peer", "beets validation rejected")
+        db.reassign_wrong_match_source(
+            "/wm/x", from_request_id=3, to_request_id=4,
+        )
+
+        report = audit_world(db, FakeBeetsDB())
+
+        self.assertEqual(report.counts.denylist_rows, 1)
+        self.assertNotIn(
+            "denylist_without_authority",
+            set(self._codes(report, "A")),
+        )
+
     def test_conflicting_request_identity_is_reported_without_resolution(self) -> None:
         db = FakePipelineDB()
         db.seed_request(make_request_row(

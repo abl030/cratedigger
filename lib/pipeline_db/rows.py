@@ -250,6 +250,10 @@ class DownloadLogRow(TypedDict):
     # merge/delete audits, YouTube queue rows, force/local imports) and
     # on every row written before the link existed.
     search_log_id: int | None
+    # Migration 088 (issue #1453) — the request this rejected row belonged
+    # to before Replace --adopt moved it onto the successor. NULL on every
+    # row that was never adopted.
+    adopted_from_request_id: int | None
 
 
 def download_log_row(raw: Mapping[str, object]) -> DownloadLogRow:

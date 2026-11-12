@@ -13225,6 +13225,42 @@ class TestGetWrongMatches(unittest.TestCase):
         self.assertEqual(owners["other-request"], self.req2)
         self.assertEqual(owners["successful"], self.req1)
 
+    def test_reassign_records_the_original_request_for_denylist_authority(
+        self,
+    ):
+        """Issue #1453: each moved row keeps the request that rejected it,
+        across a second adopt too, and the adopted-history reader returns it
+        keyed by that request."""
+        self._log_rejected(self.req1, "adopted", "/abs/Album")
+        middle = self.db.add_request(
+            mb_release_id="adopt-middle", artist_name="A",
+            album_title="T", source="request")
+        final = self.db.add_request(
+            mb_release_id="adopt-final", artist_name="A",
+            album_title="T", source="request")
+
+        self.db.reassign_wrong_match_source(
+            "/abs/Album", from_request_id=self.req1, to_request_id=middle)
+        self.db.reassign_wrong_match_source(
+            "/abs/Album", from_request_id=middle, to_request_id=final)
+
+        cur = self.db._execute(
+            "SELECT request_id, adopted_from_request_id FROM download_log "
+            "WHERE soulseek_username = 'adopted'")
+        row = cur.fetchone()
+        self.assertEqual(
+            (row["request_id"], row["adopted_from_request_id"]),
+            (final, self.req1),
+        )
+        adopted = self.db.get_adopted_download_history_batch(
+            [self.req1, middle])
+        self.assertEqual(set(adopted), {self.req1})
+        self.assertEqual(
+            [r["soulseek_username"] for r in adopted[self.req1]],
+            ["adopted"],
+        )
+        self.assertEqual(self.db.get_adopted_download_history_batch([]), {})
+
     def test_excludes_non_rejected_outcomes(self):
         """success / force_import / timeout must never surface in wrong-matches."""
         self._log_rejected(self.req1, "reject-me", "/fi/keep")

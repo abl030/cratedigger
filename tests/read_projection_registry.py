@@ -378,6 +378,27 @@ def _seed_get_download_history_batch(db: Any) -> "list[dict[str, Any]]":
     return _flatten_map_of_lists(db.get_download_history_batch([rid]))
 
 
+def _seed_get_adopted_download_history_batch(
+    db: PipelineDB | FakePipelineDB,
+) -> "list[dict[str, Any]]":
+    source = db.add_request(
+        "Parity Artist", "Parity Album", "request",
+        mb_release_id="dladopted-source-parity")
+    target = db.add_request(
+        "Parity Artist", "Parity Album", "request",
+        mb_release_id="dladopted-target-parity")
+    db.log_download(
+        source, outcome="rejected",
+        validation_result='{"failed_path": "/parity/adopted"}')
+    db.reassign_wrong_match_source(
+        "/parity/adopted", from_request_id=source, to_request_id=target)
+    return [
+        dict(row)
+        for rows in db.get_adopted_download_history_batch([source]).values()
+        for row in rows
+    ]
+
+
 def _seed_get_latest_download_summaries(db: Any) -> "list[dict[str, Any]]":
     rid = db.add_request(
         "Parity Artist", "Parity Album", "request",
@@ -595,6 +616,8 @@ PARITY_REGISTRY: dict[str, Seeder] = {
     "get_download_log_entry": _seed_get_download_log_entry,
     "get_download_history": _seed_get_download_history,
     "get_download_history_batch": _seed_get_download_history_batch,
+    "get_adopted_download_history_batch":
+        _seed_get_adopted_download_history_batch,
     "get_latest_download_summaries": _seed_get_latest_download_summaries,
     "get_log": _seed_get_log,
     "get_linked_import_logs": _seed_get_linked_import_logs,
