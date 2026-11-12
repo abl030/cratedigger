@@ -37,6 +37,9 @@ class DownloadLogRow:
     # Migration 086 (issue #811): the search_log row whose ``found``
     # outcome produced this grab. NULL on every non-grab row.
     search_log_id: int | None = None
+    # Migration 088 (issue #1453): the request this row belonged to before
+    # Replace --adopt moved it. NULL on every row never adopted.
+    adopted_from_request_id: int | None = None
     # Migration 037 — source discriminator + YT-specific JSONB blob.
     # ``source`` defaults to ``'slskd'`` matching the production NOT NULL
     # DEFAULT. ``youtube_metadata`` is NULL unless this row was written

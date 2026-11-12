@@ -873,6 +873,46 @@ class _DownloadLogMixin(_PipelineDBBase):
         return result
 
 
+    def get_adopted_download_history_batch(
+        self, request_ids: list[int],
+    ) -> dict[int, list[DownloadLogWithEvidenceRow]]:
+        """Rows Replace ``--adopt`` moved AWAY from each request (#1453).
+
+        Keyed by ``adopted_from_request_id``, most recent first: the
+        rejections a request decided before its folder was adopted onto a
+        successor. The world audit adds these to the request's own history
+        so its ``source_denylist`` rows still trace to their authority.
+        """
+        if not request_ids:
+            return {}
+        cur = self._execute(
+            f"""
+            SELECT dl.*,
+                   {_CANDIDATE_EVIDENCE_COLUMNS}
+                   ar.mb_release_id AS _request_mb_release_id,
+                   origin.beets_distance AS original_beets_distance
+            FROM download_log dl
+            JOIN album_requests ar ON ar.id = dl.request_id
+            LEFT JOIN album_quality_evidence e
+                ON e.id = dl.candidate_evidence_id
+            LEFT JOIN download_log origin
+                ON origin.id = dl.source_download_log_id
+            WHERE dl.adopted_from_request_id = ANY(%s)
+            ORDER BY dl.id DESC
+            """,
+            ([int(request_id) for request_id in request_ids],),
+        )
+        result: dict[int, list[DownloadLogWithEvidenceRow]] = {}
+        for row in cur.fetchall():
+            r = download_log_with_evidence_row(
+                overlay_evidence_onto_download_log_row(dict(row))
+            )
+            source_id = r["adopted_from_request_id"]
+            assert source_id is not None
+            result.setdefault(source_id, []).append(r)
+        return result
+
+
     def get_latest_download_summaries(
         self, request_ids: list[int],
     ) -> dict[int, LatestDownloadSummary]:
@@ -1064,10 +1104,18 @@ class _DownloadLogMixin(_PipelineDBBase):
         rows per ``(request_id, failed_path)``, so an older duplicate left
         on the source request would still name the folder, and the source's
         group cleanup would delete it through that row.
+
+        Each moved row keeps the request it came from in
+        ``adopted_from_request_id`` (issue #1453): the rejection was decided
+        against that request, and its ``source_denylist`` row still cites
+        the rejection as authority. ``COALESCE`` keeps the ORIGINAL rejecting
+        request when a row is adopted onward a second time.
         """
         cur = self._execute("""
             UPDATE download_log
-            SET request_id = %s
+            SET adopted_from_request_id = COALESCE(
+                    adopted_from_request_id, request_id),
+                request_id = %s
             WHERE request_id = %s
               AND outcome = 'rejected'
               AND validation_result->>%s = %s

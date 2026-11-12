@@ -1984,7 +1984,12 @@ class LifecycleWorld:
                 ),
             ))
         for request_id in sorted(self._release_by_request):
-            history = self.db.get_download_history(request_id)
+            history = [
+                *self.db.get_download_history(request_id),
+                *self.db.get_adopted_download_history_batch(
+                    [request_id],
+                ).get(request_id, []),
+            ]
             denylist = sorted(
                 self.db.get_denylisted_users(request_id),
                 key=lambda row: str(row.get("username") or ""),

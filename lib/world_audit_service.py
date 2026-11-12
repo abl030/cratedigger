@@ -168,6 +168,11 @@ class WorldAuditPipelineDB(Protocol):
         request_ids: list[int],
     ) -> dict[int, list[DownloadLogWithEvidenceRow]]: ...
 
+    def get_adopted_download_history_batch(
+        self,
+        request_ids: list[int],
+    ) -> dict[int, list[DownloadLogWithEvidenceRow]]: ...
+
     def list_denylist_rows(self) -> list[dict[str, Any]]: ...
 
 
@@ -362,6 +367,12 @@ def audit_world(
         for row in denylist_rows
     })
     histories = pipeline_db.get_download_history_batch(denylist_request_ids)
+    # Issue #1453: Replace --adopt moves a rejected row onto the successor,
+    # but the rejection was decided against the source request, whose
+    # denylist row still cites it. Follow the provenance back.
+    adopted_histories = pipeline_db.get_adopted_download_history_batch(
+        denylist_request_ids,
+    )
     memberships: list[RequestMembershipSnapshot] = []
     evidence_snapshots: list[EvidenceDiskSnapshot] = []
     fingerprint_failures: set[int] = set()
@@ -465,7 +476,10 @@ def audit_world(
     denylist_snapshots: list[DenylistAuthoritySnapshot] = []
     for row in denylist_rows:
         request_id = int(row["request_id"])
-        history = histories.get(request_id, [])
+        history = [
+            *histories.get(request_id, []),
+            *adopted_histories.get(request_id, []),
+        ]
         username = str(row.get("username") or "")
         denylist_snapshots.append(DenylistAuthoritySnapshot(
             request_id=request_id,

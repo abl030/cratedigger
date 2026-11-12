@@ -401,6 +401,33 @@ class _FakeDownloadLogMixin(_FakePipelineDBBase):
                 self._download_log_evidence_dict(entry))
         return cast("dict[int, list[DownloadLogWithEvidenceRow]]", result)
 
+    def get_adopted_download_history_batch(
+        self, request_ids: list[int],
+    ) -> dict[int, list[DownloadLogWithEvidenceRow]]:
+        """Mirror ``PipelineDB.get_adopted_download_history_batch``:
+        rows moved away by Replace --adopt, keyed by their source (#1453)."""
+        wanted = set(request_ids)
+        owners = sorted({
+            entry.request_id
+            for entry in self.download_logs
+            if entry.adopted_from_request_id in wanted
+        })
+        rows = sorted(
+            (
+                row
+                for history in self.get_download_history_batch(owners).values()
+                for row in history
+            ),
+            key=lambda row: row["id"],
+            reverse=True,
+        )
+        result: dict[int, list[DownloadLogWithEvidenceRow]] = {}
+        for row in rows:
+            source_id = row["adopted_from_request_id"]
+            if source_id is not None and source_id in wanted:
+                result.setdefault(source_id, []).append(row)
+        return result
+
     def get_latest_download_summaries(
         self, request_ids: list[int],
     ) -> dict[int, LatestDownloadSummary]:
@@ -452,6 +479,8 @@ class _FakeDownloadLogMixin(_FakePipelineDBBase):
             # Migration 086 (issue #811) — the search row that produced
             # this grab. Part of ``dl.*``, so every reader sees it.
             "search_log_id": entry.search_log_id,
+            # Migration 088 (issue #1453) — Replace --adopt provenance.
+            "adopted_from_request_id": entry.adopted_from_request_id,
             "original_beets_distance": next(
                 (
                     origin.beets_distance
@@ -785,6 +814,8 @@ class _FakeDownloadLogMixin(_FakePipelineDBBase):
             vr = self._validation_result_dict(entry.validation_result)
             if not vr or vr.get("failed_path") != failed_path:
                 continue
+            if entry.adopted_from_request_id is None:
+                entry.adopted_from_request_id = entry.request_id
             entry.request_id = to_request_id
             moved += 1
         return moved

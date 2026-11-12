@@ -31,7 +31,8 @@ from lib.mbid_replace_service import (
     RESULT_TARGET_INVALID,
 )
 from lib.replace_status import REPLACE_REASON_ADOPT_CANDIDATE_INVALID
-from tests.fakes import FakePipelineDB
+from lib.world_audit_service import audit_world
+from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row, seed_visible_wrong_match
 from tests.test_mbid_replace_service import NEW_MBID, _ServiceCase
 
@@ -110,6 +111,43 @@ class TestReplaceAdopt(_ServiceCase):
         self.assertEqual(
             os.path.realpath(job.payload.failed_path),
             os.path.realpath(adopted.path),
+        )
+
+    def test_source_denylist_keeps_its_authority_after_adopt(self):
+        """Issue #1453: the source request's denylist row cites the
+        rejection that adopt moves onto the successor. The row stays on the
+        source (the successor must NOT deny the peer whose folder it
+        imports) and the world audit still finds its authority."""
+        adopted = seed_visible_wrong_match(
+            self.db, self.albums, request_id=42,
+            name="Sibling Pressing [aaaa]", soulseek_username="fisaal",
+        )
+        self.db.add_denylist(42, "fisaal", "beets validation rejected")
+        before = audit_world(self.db, FakeBeetsDB())
+        self.assertNotIn(
+            "denylist_without_authority",
+            {v.code for v in _violations(before)},
+        )
+
+        result = self._replace(adopted.download_log_id)
+
+        self.assertEqual(result.outcome, RESULT_REPLACED, result)
+        new_id = result.new_request_id
+        assert new_id is not None
+        entry = self.db.get_download_log_entry(adopted.download_log_id)
+        assert entry is not None
+        self.assertEqual(entry["request_id"], new_id)
+        self.assertEqual(entry["adopted_from_request_id"], 42)
+        self.assertEqual(
+            [row["username"] for row in self.db.get_denylisted_users(42)],
+            ["fisaal"],
+        )
+        self.assertEqual(self.db.get_denylisted_users(new_id), [])
+
+        after = audit_world(self.db, FakeBeetsDB())
+        self.assertNotIn(
+            "denylist_without_authority",
+            {v.code for v in _violations(after)},
         )
 
     def test_other_spelling_of_the_same_folder_moves_too(self):
@@ -268,7 +306,34 @@ class TestReplaceAdopt(_ServiceCase):
         self.assertEqual(entry["request_id"], result.new_request_id)
 
 
+def _violations(report):
+    return [
+        member
+        for group in (report.groups.a, report.groups.b, report.groups.c)
+        for member in group.members
+    ]
+
+
 class TestReassignWrongMatchSourceFake(unittest.TestCase):
+    def test_records_the_original_request_across_repeated_adopts(self):
+        db = FakePipelineDB()
+        log_id = db.log_download(
+            1, outcome="rejected", validation_result={"failed_path": "/a"})
+
+        db.reassign_wrong_match_source("/a", from_request_id=1, to_request_id=2)
+        db.reassign_wrong_match_source("/a", from_request_id=2, to_request_id=3)
+
+        entry = db.get_download_log_entry(log_id)
+        assert entry is not None
+        self.assertEqual(entry["request_id"], 3)
+        self.assertEqual(entry["adopted_from_request_id"], 1)
+        self.assertEqual(
+            [row["id"] for row in
+             db.get_adopted_download_history_batch([1, 2])[1]],
+            [log_id],
+        )
+        self.assertNotIn(2, db.get_adopted_download_history_batch([1, 2]))
+
     def test_moves_only_rejected_rows_of_the_source_at_that_path(self):
         db = FakePipelineDB()
         keep_other_path = db.log_download(
