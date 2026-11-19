@@ -1558,6 +1558,14 @@ def _shared_module_worlds_rest() -> dict[str, object]:
                 expectedLibrary = "/beets-library.db";
               });
             };
+            # #1456: the importer gets write access to the whole state
+            # directory, so it must hold nothing else Beets owns.
+            sharedStateDirectory = builtins.listToAttrs (map (directory: {
+              name = directory;
+              value = failures (runtime // {
+                expectedStateFile = "${directory}/state.pickle";
+              });
+            }) [ "" "/etc/beets" "/srv/beets" "/srv/music" "/run/secrets" ]);
             rootIdentity = identityFailures "root" "root";
             numericIdentity = identityFailures "0" "0";
             inherit defaultIdentity;
@@ -2818,6 +2826,22 @@ class TestExternalBeetsRuntimeCapability(unittest.TestCase):
                 ),
                 (field, messages),
             )
+        shared_state = worlds["sharedStateDirectory"]
+        assert isinstance(shared_state, dict)
+        self.assertEqual(
+            set(shared_state),
+            {"", "/etc/beets", "/srv/beets", "/srv/music", "/run/secrets"},
+        )
+        for directory, value in shared_state.items():
+            messages = self._string_list(value)
+            self.assertTrue(
+                any(
+                    "beets.runtime.expectedStateFile must sit in its own dedicated directory"
+                    in message
+                    for message in messages
+                ),
+                (directory, messages),
+            )
         root_identity = self._string_list(worlds["rootIdentity"])
         self.assertTrue(
             any("guarded application identity" in message for message in root_identity),
@@ -2876,10 +2900,12 @@ class TestExternalBeetsRuntimeCapability(unittest.TestCase):
             else:
                 self.assertLessEqual(readiness, set(unit["requires"]), role)
             self.assertNotIn("/etc/beets", unit["readWritePaths"], role)
-        state = "/var/lib/beets/state.pickle"
+        # #1456: units bind the dedicated state directory, never the file:
+        # Beets replaces the state atomically through a sibling temp file.
+        state = "/var/lib/beets"
         for role in ("main", "preview", "web", "census"):
             # #1142: the census oneshot calls enforce_beets_startup(role="web")
-            # and must bind the state file read-only exactly like the other
+            # and must bind the state read-only exactly like the other
             # web-role/observer callers, or the host-writable group
             # permission trips state_writable_by_reader at startup.
             self.assertIn(f"-{state}", typed_units[role]["bindReadOnlyPaths"], role)
@@ -2897,7 +2923,7 @@ class TestExternalBeetsRuntimeCapability(unittest.TestCase):
         text = _nix_source(MODULE_NIX)
         self.assertIn('missingOkExternalPath = path: map (value: "-${value}")', text)
         self.assertIn(
-            'BindPaths = missingOkExternalPath cfg.beets.runtime.expectedStateFile;',
+            "BindPaths = beetsStatePaths;",
             text,
         )
 

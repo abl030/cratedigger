@@ -23,7 +23,9 @@ let
   cratediggerPkgs = config.services.cratedigger.packageSet;
   beetsLibrary = "/var/lib/beets-library/beets-library.db";
   beetsDirectory = "/srv/music/library";
-  beetsStateFile = "/var/lib/beets/state.pickle";
+  # Alone in a dedicated directory the importer may write: Beets saves the
+  # state by replacing it atomically through a sibling temp file (#1456).
+  beetsStateFile = "/var/lib/beets/state/state.pickle";
   beetsSecretInclude = "/run/secrets/beets-discogs.yaml";
 
   # Optional mirror patches are deployment package choices, not Cratedigger
@@ -124,6 +126,7 @@ let
     install -d -o cratedigger -g users -m 2775 ${beetsDirectory}
     install -d -o cratedigger -g cratedigger-ops -m 2770 /var/lib/beets-library
     install -d -o root -g cratedigger-ops -m 0750 /var/lib/beets
+    install -d -o root -g cratedigger-ops -m 0770 /var/lib/beets/state
     test -r ${beetsSecretInclude}
     if test ! -e ${beetsStateFile}; then
       ${beetsPython}/bin/python - <<'PY'
@@ -131,9 +134,11 @@ let
     from pathlib import Path
     Path("${beetsStateFile}").write_bytes(pickle.dumps({}))
     PY
-      chown root:cratedigger-ops ${beetsStateFile}
-      chmod 0660 ${beetsStateFile}
     fi
+    # Every importer save leaves a new file owned by the importer; hand it
+    # back to the deployment on each readiness run.
+    chown root:cratedigger-ops ${beetsStateFile}
+    chmod 0660 ${beetsStateFile}
     if test ! -e ${beetsLibrary}; then
       BEETSDIR=${beetsConfigDir} ${beetsPython}/bin/python - <<'PY'
     from beets.library import Library
@@ -391,5 +396,6 @@ in
     "d /srv/music/incoming 2775 cratedigger users -"
     "d /var/lib/beets-library 2770 cratedigger cratedigger-ops -"
     "d /var/lib/beets 0750 root cratedigger-ops -"
+    "d /var/lib/beets/state 0770 root cratedigger-ops -"
   ];
 }

@@ -9,6 +9,7 @@ import sys
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 import msgspec
 import yaml
@@ -458,6 +459,90 @@ class TestGeneratedEffectiveSettings(unittest.TestCase):
             self.assertTrue(report.ok, report.hard_failures)
             self.assertEqual(world.state_file.stat().st_uid, os.geteuid())
             self.assertNotEqual(world.state_dir.stat().st_uid, os.geteuid())
+
+    def test_importer_admits_state_after_its_own_atomic_save(self) -> None:
+        # Beets #7057 saves by writing <state>.tmp beside the state and
+        # replacing it (#1456). The importer must be able to do that, and
+        # the result -- a state leaf it now owns -- must still be admitted.
+        with BeetsContractWorld(role="importer") as world:
+            temporary = Path(f"{world.state_file}.tmp")
+            temporary.write_bytes(b"state-after")
+            os.replace(temporary, world.state_file)
+
+            report = check_beets_config(world.cfg(), role="importer")
+
+            self.assertTrue(report.ok, report.hard_failures)
+            self.assertEqual(world.state_file.read_bytes(), b"state-after")
+            self.assertEqual(world.state_file.stat().st_uid, os.geteuid())
+            self.assertEqual(sorted(p.name for p in world.state_dir.iterdir()),
+                             ["state.pickle"])
+
+    @given(role=st.sampled_from(("main", "preview", "web")))
+    def test_readers_refuse_the_importers_replaceable_state(
+        self,
+        role: BeetsRole,
+    ) -> None:
+        with BeetsContractWorld(role="importer") as world:
+            report = check_beets_config(world.cfg(), role=role)
+
+            assert_hard_code(report.hard_failures, "state_replaceable")
+
+    @given(mode=st.sampled_from((0o550, 0o1770)))
+    def test_importer_refuses_state_it_cannot_atomically_replace(
+        self,
+        mode: int,
+    ) -> None:
+        # 0550: the pre-#1456 layout, no temp file can be created.
+        # 1770: sticky, so the externally owned leaf cannot be replaced.
+        with BeetsContractWorld(role="importer") as world:
+            world.set_authority_mode(world.state_dir, mode)
+
+            report = check_beets_config(world.cfg(), role="importer")
+
+            assert_hard_code(
+                report.hard_failures, "state_not_replaceable_by_importer"
+            )
+
+    def test_importer_refuses_a_symlinked_state_leaf(self) -> None:
+        with BeetsContractWorld(role="importer") as world:
+            world.unseal()
+            target = world.state_dir / "state-target.pickle"
+            target.write_bytes(world.state_file.read_bytes())
+            link = world.state_dir / "state-link.pickle"
+            link.symlink_to(target)
+            world._write_runtime_config(state_file=str(link))
+            world._write_main_config(statefile=str(link))
+            world._seal("importer")
+
+            report = check_beets_config(world.cfg(), role="importer")
+
+            assert_hard_code(report.hard_failures, "state_symlink")
+
+    @given(role=st.sampled_from(("main", "preview", "web")))
+    def test_reader_may_own_the_state_only_on_a_read_only_mount(
+        self,
+        role: BeetsRole,
+    ) -> None:
+        # Observer units bind the state directory read-only. Once the
+        # importer's atomic save leaves the leaf app-owned, the reader owns
+        # it but cannot chmod it there.
+        with BeetsContractWorld(role=role) as world:
+            world.make_state_leaf_app_owned(0o440)
+            real_statvfs = os.statvfs
+            state = os.fspath(world.state_file)
+
+            def statvfs(path):
+                result = real_statvfs(path)
+                if os.fspath(path) != state:
+                    return result
+                fields = list(result)
+                fields[8] |= os.ST_RDONLY
+                return os.statvfs_result(fields)
+
+            with mock.patch("lib.beets_config_contract.os.statvfs", statvfs):
+                report = check_beets_config(world.cfg(), role=role)
+
+            self.assertTrue(report.ok, report.hard_failures)
 
     @given(
         variant=st.sampled_from((

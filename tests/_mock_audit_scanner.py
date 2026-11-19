@@ -116,7 +116,7 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^requests\."),
     # OS / filesystem leaf seams (stdlib os.*)
     re.compile(r"\.os\.path\."),
-    re.compile(r"\.os\.(remove|rename|makedirs|mkdir|listdir|stat|write|unlink|rmdir|getcwd|getpgid|killpg|kill|chmod|symlink|umask)$"),
+    re.compile(r"\.os\.(remove|rename|makedirs|mkdir|listdir|stat|write|unlink|rmdir|getcwd|getpgid|killpg|kill|chmod|symlink|umask|statvfs)$"),
     re.compile(r"\.shutil\."),
     re.compile(r"^os\.path\."),
     re.compile(r"^shutil\."),

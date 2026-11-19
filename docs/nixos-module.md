@@ -44,7 +44,7 @@ upstream module and adds:
 | `beets.runtime.configDir` | required | Absolute external immutable `BEETSDIR` containing the effective non-secret configuration. Cratedigger never renders or writes it. |
 | `beets.runtime.expectedLibrary` | required | Absolute canonical external Beets SQLite database path. Must equal Beets' resolved `library`. |
 | `beets.runtime.expectedDirectory` | required | Absolute canonical external Beets library root. Must equal Beets' resolved `directory`. |
-| `beets.runtime.expectedStateFile` | required | Absolute, externally provisioned, persistent host-local Beets state file. Importer gets exact write capability; main, preview, and web get read-only access. |
+| `beets.runtime.expectedStateFile` | required | Absolute, externally provisioned, persistent host-local Beets state file, alone in a dedicated directory the importer may write (e.g. `0770 root:<shared group>`). Beets saves the state by replacing it atomically through a sibling temp file, so the importer gets that directory read-write; main, preview, and web get it read-only. The directory must not be `/`, BEETSDIR, the library root, the database parent, or the secret-include parent. |
 | `beets.runtime.expectedSecretInclude` | required | Absolute designated runtime include. Its only admitted content is a non-empty `discogs.user_token` scalar. |
 | `beets.runtime.readinessUnits` | `[]` | Deployment-owned units that must complete before guarded applications start, such as storage/state/secret provisioning. Long-running workers use `After=` + `Requires=`; the timer-owned main cycle uses `After=` + `Wants=` so a readiness restart cannot kill an active cycle. |
 | `musicbrainz.apiBase` | `https://musicbrainz.org` | Cratedigger's MB origin for web, CLI, and pipeline lookups. The external Beets owner must configure its own corresponding `musicbrainz` policy. Public default is functional but ~1 req/s. |
@@ -79,6 +79,31 @@ upstream module and adds:
 | `importer.enable` | `true` | Enable both long-lived queue workers: async preview and the serial importer. Disabled queues remain non-runnable. |
 | `importer.previewWorkers` | `2` | Async preview worker concurrency when `importer.enable = true`. Must be at least 1. |
 | `logging.{level,format,datefmt}` | INFO | Python logging config. |
+
+### Upgrading: the Beets state needs its own directory (#1456)
+
+Beets >= beetbox/beets#7057 saves the import state atomically: it writes
+`<statefile>.tmp` beside the state and renames it over, and only logs
+`state file could not be written` when that fails. Cratedigger therefore
+binds the state's **directory** into its units (read-write for the importer,
+read-only for main, preview, and web) and refuses to start the importer if
+it cannot replace the state there (`state_not_replaceable_by_importer`).
+Revisions before this change refuse the new layout (`state_replaceable`), so
+move the state in the same deployment that picks up the new revision:
+
+1. Create a dedicated directory that holds only the state, owned by root and
+   group-writable by the Cratedigger user, not sticky. For example
+   `/var/lib/beets/state` at `0770 root:cratedigger-ops`.
+2. Move the existing file into it once (`mv /var/lib/beets/state.pickle
+   /var/lib/beets/state/state.pickle`) so incremental-import history
+   survives, then point both Beets' `statefile` and
+   `beets.runtime.expectedStateFile` at the new path.
+3. Have the readiness unit `chown root:<group>` and `chmod 0660` the state
+   on every run. Each importer save leaves a new file owned by the
+   Cratedigger user. The read-only binds make that harmless, but the
+   deployment should keep owning its authority.
+
+`examples/cratedigger.nix` shows the complete provisioning.
 
 ## Search loop tunables
 
@@ -949,7 +974,7 @@ the module VM, because it can prevent an owned file mutation after the worker st
 | Unit | Writable paths |
 |---|---|
 | web | `stateDir`, `processingDir`, `slskd.downloadDir`, external Beets root/database parent for the explicit exact-delete lane, validation staging root |
-| importer | web paths plus parent of `beets.validation.trackingFile` and the exact external Beets state file |
+| importer | web paths plus parent of `beets.validation.trackingFile` and the dedicated external Beets state directory |
 | import-preview-worker | `stateDir`, `processingDir`, `slskd.downloadDir` |
 | youtube-ingest | `stateDir`, `youtubeIngest.tempDir`, validation staging root |
 

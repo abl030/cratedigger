@@ -31,6 +31,7 @@ let
   externalLibraryDb = "/var/lib/cratedigger-beets-db/beets-library.db";
   externalLibraryDbParent = builtins.dirOf externalLibraryDb;
   externalStateFile = "/var/lib/cratedigger-beets-state/state.pickle";
+  externalStateDir = builtins.dirOf externalStateFile;
   externalSecretInclude = "/run/cratedigger-test-beets/discogs.yaml";
 
   externalBeetsSettings = {
@@ -385,9 +386,11 @@ pkgs.testers.nixosTest {
           -o root -g beets-library -m 2775 \
           ${externalLibraryRoot} \
           $(${pkgs.coreutils}/bin/dirname ${externalLibraryDb})
+        # #1456: a dedicated state directory the importer's group may write,
+        # so Beets can replace the state atomically through a sibling file.
         ${pkgs.coreutils}/bin/install -d \
-          -o root -g root -m 0755 \
-          $(${pkgs.coreutils}/bin/dirname ${externalStateFile})
+          -o root -g beets-library -m 0770 \
+          ${externalStateDir}
         ${pkgs.coreutils}/bin/install -d \
           -o root -g beets-library -m 0750 \
           $(${pkgs.coreutils}/bin/dirname ${externalSecretInclude})
@@ -438,11 +441,18 @@ pkgs.testers.nixosTest {
         ${if stateWritable then ''
           ${pkgs.python3}/bin/python3 -c \
             'import os; fd=os.open("${externalStateFile}", os.O_WRONLY); os.close(fd)'
+          ${pkgs.coreutils}/bin/touch ${externalStateDir}/.importer-state-probe
+          ${pkgs.coreutils}/bin/rm ${externalStateDir}/.importer-state-probe
         '' else ''
           if ${pkgs.python3}/bin/python3 -c \
             'import os; fd=os.open("${externalStateFile}", os.O_WRONLY); os.close(fd)' \
             2>/dev/null; then
             echo "${name} could write importer-only Beets state" >&2
+            exit 1
+          fi
+          if ${pkgs.coreutils}/bin/touch \
+            ${externalStateDir}/.${name}-state-probe 2>/dev/null; then
+            echo "${name} could create an entry in the importer-only state directory" >&2
             exit 1
           fi
         ''}
@@ -513,6 +523,22 @@ pkgs.testers.nixosTest {
           "$state_before" "$state_after" "$config_after" \
           > "$incremental_receipt"
       fi
+
+      # #1456: Beets >= beetbox/beets#7057 saves the state by writing a
+      # sibling temp file and renaming it over. Do exactly that on every
+      # start, inside the real sandbox: a file bind would refuse the rename
+      # (EBUSY). The new leaf is owned by cratedigger until readiness
+      # re-normalizes it, which observers must still admit.
+      ${externalBeetsPython}/bin/python - <<'PY'
+      import os
+      from pathlib import Path
+
+      state = Path("${externalStateFile}")
+      temporary = Path(f"{state}.tmp")
+      temporary.write_bytes(state.read_bytes())
+      os.replace(temporary, state)
+      PY
+      test ! -e ${externalStateFile}.tmp
 
       # Each importer authority root must remain writable inside the mount
       # namespace. A world-writable directory outside ReadWritePaths must not.
@@ -1615,7 +1641,7 @@ pkgs.testers.nixosTest {
         "/var/lib/cratedigger-music/Incoming",
     ], [
         "-${externalBeetsConfigDir}",
-        "-${externalStateFile}",
+        "-${externalStateDir}",
     ])
     _assert_sandbox_contract("cratedigger-importer.service", [
         "/var/lib/cratedigger",
@@ -1625,15 +1651,15 @@ pkgs.testers.nixosTest {
         "-/var/lib/cratedigger-beets-db",
         "/var/lib/cratedigger-music/Incoming",
         "/var/lib/cratedigger-music/Re-download",
-        "-/var/lib/cratedigger-beets-state/state.pickle",
-    ], ["-${externalBeetsConfigDir}"], ["-${externalStateFile}"])
+        "-${externalStateDir}",
+    ], ["-${externalBeetsConfigDir}"], ["-${externalStateDir}"])
     _assert_sandbox_contract("cratedigger-import-preview-worker.service", [
         "/var/lib/cratedigger",
         "/var/lib/cratedigger/processing",
         "/var/lib/cratedigger-downloads",
     ], [
         "-${externalBeetsConfigDir}",
-        "-${externalStateFile}",
+        "-${externalStateDir}",
     ])
     _assert_sandbox_contract("cratedigger-youtube-ingest.service", [
         "/var/lib/cratedigger",
@@ -1659,7 +1685,7 @@ pkgs.testers.nixosTest {
         for entry in main_properties["BindReadOnlyPaths"].split()
     } == {
         "-${externalBeetsConfigDir}",
-        "-${externalStateFile}",
+        "-${externalStateDir}",
         "-${externalLibraryRoot}",
         "-${externalLibraryDbParent}",
     }, main_properties
@@ -1683,6 +1709,23 @@ pkgs.testers.nixosTest {
         "read before after config < /var/lib/cratedigger/beets-incremental-vm.receipt; "
         "test \"$before\" != \"$after\"; test -n \"$config\""
     )
+    # #1456: the importer's atomic replace left the state leaf owned by the
+    # shared application UID. An observer binds the state directory
+    # read-only, so owning the leaf grants nothing and must still admit.
+    machine.succeed(
+        "test \"$(stat -c %U:%G:%a ${externalStateDir})\" = root:beets-library:770"
+    )
+    machine.succeed("test \"$(stat -c %U ${externalStateFile})\" = cratedigger")
+    machine.succeed("systemctl restart cratedigger-web.service")
+    machine.wait_for_unit("cratedigger-web.service")
+    app_owned_state_invocation = machine.succeed(
+        "systemctl show cratedigger-web.service -p InvocationID --value"
+    ).strip()
+    machine.wait_until_succeeds(
+        f"journalctl _SYSTEMD_INVOCATION_ID={app_owned_state_invocation} -o cat "
+        "| grep -q 'Beets configuration admitted for web'"
+    )
+    machine.succeed("test \"$(stat -c %U ${externalStateFile})\" = cratedigger")
     for root in (
         "/var/lib/cratedigger",
         "/var/lib/cratedigger/processing",

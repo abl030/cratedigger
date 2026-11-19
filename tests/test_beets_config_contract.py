@@ -49,7 +49,10 @@ class TestBeetsConfigContract(unittest.TestCase):
         self.assertEqual(report.authority.config_dir, str(self.world.beets_dir))
         self.assertEqual(report.authority.state_file, str(self.world.state_file))
         self.assertNotEqual(self.world.state_dir.stat().st_uid, os.geteuid())
-        self.assertFalse(self.world.state_dir.stat().st_mode & stat.S_IWGRP)
+        # #1456: the importer may replace the state leaf atomically, so its
+        # externally owned, non-sticky directory is group-writable.
+        self.assertTrue(self.world.state_dir.stat().st_mode & stat.S_IWGRP)
+        self.assertFalse(self.world.state_dir.stat().st_mode & stat.S_ISVTX)
         self.assertTrue(self.world.state_file.stat().st_mode & stat.S_IWGRP)
 
     def test_admitted_plugin_contract_reports_every_required_plugin(self):
