@@ -618,6 +618,51 @@ def _same_executable(expected: str) -> bool:
     return _invocation_path(expected) == _invocation_path(sys.executable)
 
 
+def _on_read_only_mount(path: Path) -> bool:
+    try:
+        return bool(os.statvfs(path).f_flag & os.ST_RDONLY)
+    except OSError:
+        return False
+
+
+def _importer_state_replacement_issues(
+    state_source: _DeclaredPath,
+) -> tuple[ContractFinding, ...]:
+    """Admit the importer's atomic save and nothing wider (issue #1456).
+
+    Beets writes ``<statefile>.tmp`` beside the state and ``os.replace``s it
+    in (beetbox/beets#7057), logging and dropping the write when either step
+    fails. The importer therefore has to be able to replace the state entry
+    in its directory. That directory, and everything above it, must still be
+    beyond the importer's reach.
+    """
+    issues: list[ContractFinding] = []
+    directory = _DeclaredPath(
+        lexical=state_source.lexical.parent,
+        resolved=state_source.resolved.parent,
+    )
+    if (
+        not _nonreplaceable_declared_path(directory)
+        or _has_app_owned_component(directory.lexical)
+        or _has_app_owned_component(directory.resolved)
+    ):
+        issues.append(_finding(
+            "state_replaceable",
+            "Beets state directory is replaceable or owned by this process",
+        ))
+    if state_source.lexical.is_symlink():
+        issues.append(_finding(
+            "state_symlink",
+            "Beets state file must not be a symlink: an atomic save replaces the link",
+        ))
+    elif not _entry_is_replaceable(state_source.lexical):
+        issues.append(_finding(
+            "state_not_replaceable_by_importer",
+            "importer cannot atomically replace the Beets state file in its directory",
+        ))
+    return tuple(issues)
+
+
 def _state_access_issues(
     state_source: _DeclaredPath,
     role: BeetsRole,
@@ -626,7 +671,9 @@ def _state_access_issues(
     if not state.is_absolute():
         return (_finding("state_relative", "Beets state file must be absolute"),)
     issues: list[ContractFinding] = []
-    if not _nonreplaceable_declared_path(state_source):
+    if role == "importer":
+        issues.extend(_importer_state_replacement_issues(state_source))
+    elif not _nonreplaceable_declared_path(state_source):
         issues.append(_finding(
             "state_replaceable",
             "Beets state path is replaceable by this process",
@@ -651,7 +698,10 @@ def _state_access_issues(
             state_owned_by_reader = state.stat().st_uid == os.geteuid()
         except OSError:
             state_owned_by_reader = True
-        if state_owned_by_reader:
+        # The importer's atomic save leaves the state owned by the
+        # application UID, which every role shares. Owning it only matters
+        # if the reader could chmod it, and nobody can on a read-only mount.
+        if state_owned_by_reader and not _on_read_only_mount(state):
             issues.append(_finding(
                 "state_owned_by_reader",
                 f"{role} owns the Beets state file and can make it writable",

@@ -793,8 +793,17 @@
   presentExternalPath = path: optional (path != null) path;
   missingOkExternalPath = path: map (value: "-${value}") (presentExternalPath path);
   beetsConfigReadOnlyPaths = missingOkExternalPath cfg.beets.runtime.configDir;
-  beetsObserverReadOnlyPaths = beetsConfigReadOnlyPaths ++
-    missingOkExternalPath cfg.beets.runtime.expectedStateFile;
+  # Issue #1456: Beets saves its state atomically (beetbox/beets#7057): it
+  # writes <statefile>.tmp beside the state, then renames it over. A file
+  # bind cannot be renamed over (EBUSY), and observers holding a file bind
+  # would keep the replaced inode. Every unit binds the dedicated state
+  # directory instead: read-write for the importer, read-only for the rest.
+  beetsStateDir =
+    if cfg.beets.runtime.expectedStateFile == null
+    then null
+    else dirOf cfg.beets.runtime.expectedStateFile;
+  beetsStatePaths = missingOkExternalPath beetsStateDir;
+  beetsObserverReadOnlyPaths = beetsConfigReadOnlyPaths ++ beetsStatePaths;
   beetsLibraryAuthorityRoots = lib.unique (
     presentExternalPath cfg.beets.runtime.expectedDirectory
     ++ optional
@@ -829,7 +838,7 @@
     cfg.processingDir
   ] ++ slskdWritePaths ++ beetsMutationWritePaths ++ validationStagingWritePaths
     ++ validationTrackingWritePaths
-    ++ missingOkExternalPath cfg.beets.runtime.expectedStateFile;
+    ++ beetsStatePaths;
   previewWorkerSandboxWritePaths = [
     cfg.stateDir
     cfg.processingDir
@@ -1599,7 +1608,15 @@ in {
         expectedStateFile = mkOption {
           type = types.nullOr types.str;
           default = null;
-          description = "Externally provisioned host-local Beets state file. Required when Cratedigger is enabled.";
+          description = ''
+            Externally provisioned host-local Beets state file. Required when
+            Cratedigger is enabled. It must sit alone in a dedicated directory
+            that the importer may write (for example root-owned, mode 0770,
+            group shared with the Cratedigger user) because Beets replaces the
+            state atomically through a sibling temporary file. That directory
+            is bound read-write into the importer and read-only into every
+            other unit.
+          '';
         };
         expectedSecretInclude = mkOption {
           type = types.nullOr types.str;
@@ -2121,6 +2138,19 @@ in {
       {
         assertion = isAbsoluteNormalizedPath cfg.beets.runtime.expectedStateFile;
         message = "services.cratedigger.beets.runtime.expectedStateFile must be an absolute normalized path.";
+      }
+      {
+        assertion =
+          beetsStateDir == null
+          || !(builtins.elem beetsStateDir ([
+            "/"
+          ] ++ lib.filter (path: path != null) [
+            cfg.beets.runtime.configDir
+            cfg.beets.runtime.expectedDirectory
+            (if cfg.beets.runtime.expectedLibrary == null then null else dirOf cfg.beets.runtime.expectedLibrary)
+            (if cfg.beets.runtime.expectedSecretInclude == null then null else dirOf cfg.beets.runtime.expectedSecretInclude)
+          ]));
+        message = "services.cratedigger.beets.runtime.expectedStateFile must sit in its own dedicated directory: the importer gets write access to that whole directory so Beets can replace the state atomically.";
       }
       {
         assertion = isAbsoluteNormalizedPath cfg.beets.runtime.expectedSecretInclude;
@@ -2704,7 +2734,7 @@ in {
         Group = cfg.group;
         # #1142: the runner calls enforce_beets_startup(role="web") like
         # cratedigger-web/cratedigger-import-preview-worker, so it owes the
-        # same read-only state-file bind those observer-role units use
+        # same read-only state-directory bind those observer-role units use
         # (beetsObserverReadOnlyPaths) — otherwise the host-writable
         # cratedigger-ops group permission on state.pickle trips the
         # startup contract's state_writable_by_reader check. No
@@ -2831,7 +2861,7 @@ in {
         Group = cfg.group;
         UMask = "0000";
         BindReadOnlyPaths = beetsConfigReadOnlyPaths ++ localImportReadOnlyPaths;
-        BindPaths = missingOkExternalPath cfg.beets.runtime.expectedStateFile;
+        BindPaths = beetsStatePaths;
         Environment = "PIPELINE_DB_DSN=${pipelineDsn}";
         ExecStart = "${importerPkg}/bin/cratedigger-importer";
         WorkingDirectory = cfg.stateDir;

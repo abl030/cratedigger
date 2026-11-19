@@ -528,6 +528,11 @@ class BeetsContractWorld:
             path.chmod(
                 stat.S_IRUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP
             )
+        if role == "importer":
+            # Production shape (#1456): a dedicated, externally owned state
+            # directory the importer's group may write, so Beets can save the
+            # state by replacing it atomically.
+            self.state_dir.chmod(stat.S_IRWXU | stat.S_IRWXG)
         if self.secret_include.exists():
             self.secret_include.chmod(stat.S_IRUSR | stat.S_IRGRP)
         self.secret_dir.chmod(

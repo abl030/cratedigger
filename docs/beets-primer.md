@@ -368,7 +368,11 @@ packager, container, or conventional service can supply:
 - one immutable, non-secret `BEETSDIR` containing the effective configuration;
 - the canonical SQLite database and canonical library root;
 - a distinct absolute, persistent, host-local Beets state file writable by
-  the importer and librarian but read-only to the main, preview, and web roles;
+  the importer and librarian but read-only to the main, preview, and web roles.
+  It must sit alone in a dedicated directory the importer can write: Beets
+  saves the state by writing `<statefile>.tmp` beside it and renaming it over
+  (beetbox/beets#7057), and silently drops the save when it cannot. The
+  startup contract refuses an importer that cannot replace the state there;
 - one designated mutable secret include containing exactly a non-empty
   `discogs.user_token` scalar and no other key; and
 - deployment-owned readiness edges that complete storage, state, and secret
@@ -379,7 +383,8 @@ directory, and secret-include path consistent across Beets, Cratedigger's
 six-field `[Beets]` runtime section, the harness, checker, and operator
 environment. The config directory stays immutable to every application
 identity. The state file must not live beneath it or share catalog storage; a
-common host path is `/var/lib/beets/state.pickle`. The secret include is a
+common host path is `/var/lib/beets/state/state.pickle`, with `state/` at
+`0770 root:<shared group>`. The secret include is a
 fixed-schema credential channel, never a mutable configuration overlay. Encode
 a hostile-looking token as a scalar value rather than interpolating YAML, and
 restart every guarded application after config or token rotation; there is no
@@ -430,7 +435,7 @@ effective config or secret include in place.
 # Library
 directory: /mnt/virtio/Music/Beets
 library: /mnt/virtio/cratedigger/beets-db/beets-library.db
-statefile: /var/lib/beets/state.pickle
+statefile: /var/lib/beets/state/state.pickle
 include:
   - /run/beets/secrets.yaml  # exactly discogs.user_token
 

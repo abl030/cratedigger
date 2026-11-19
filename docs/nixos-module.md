@@ -44,7 +44,7 @@ upstream module and adds:
 | `beets.runtime.configDir` | required | Absolute external immutable `BEETSDIR` containing the effective non-secret configuration. Cratedigger never renders or writes it. |
 | `beets.runtime.expectedLibrary` | required | Absolute canonical external Beets SQLite database path. Must equal Beets' resolved `library`. |
 | `beets.runtime.expectedDirectory` | required | Absolute canonical external Beets library root. Must equal Beets' resolved `directory`. |
-| `beets.runtime.expectedStateFile` | required | Absolute, externally provisioned, persistent host-local Beets state file. Importer gets exact write capability; main, preview, and web get read-only access. |
+| `beets.runtime.expectedStateFile` | required | Absolute, externally provisioned, persistent host-local Beets state file, alone in a dedicated directory the importer may write (e.g. `0770 root:<shared group>`). Beets saves the state by replacing it atomically through a sibling temp file, so the importer gets that directory read-write; main, preview, and web get it read-only. The directory must not be `/`, BEETSDIR, the library root, the database parent, or the secret-include parent. |
 | `beets.runtime.expectedSecretInclude` | required | Absolute designated runtime include. Its only admitted content is a non-empty `discogs.user_token` scalar. |
 | `beets.runtime.readinessUnits` | `[]` | Deployment-owned units that must complete before guarded applications start, such as storage/state/secret provisioning. Long-running workers use `After=` + `Requires=`; the timer-owned main cycle uses `After=` + `Wants=` so a readiness restart cannot kill an active cycle. |
 | `musicbrainz.apiBase` | `https://musicbrainz.org` | Cratedigger's MB origin for web, CLI, and pipeline lookups. The external Beets owner must configure its own corresponding `musicbrainz` policy. Public default is functional but ~1 req/s. |
@@ -949,7 +949,7 @@ the module VM, because it can prevent an owned file mutation after the worker st
 | Unit | Writable paths |
 |---|---|
 | web | `stateDir`, `processingDir`, `slskd.downloadDir`, external Beets root/database parent for the explicit exact-delete lane, validation staging root |
-| importer | web paths plus parent of `beets.validation.trackingFile` and the exact external Beets state file |
+| importer | web paths plus parent of `beets.validation.trackingFile` and the dedicated external Beets state directory |
 | import-preview-worker | `stateDir`, `processingDir`, `slskd.downloadDir` |
 | youtube-ingest | `stateDir`, `youtubeIngest.tempDir`, validation staging root |
 

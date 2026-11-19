@@ -109,7 +109,7 @@ aliases.
 
 The imported, commented example includes slskd plus the complete external Beets
 composition: `nix/beets.nix` instantiation, immutable config, canonical
-catalog/root, `/var/lib/beets/state.pickle`, token-only include, readiness
+catalog/root, `/var/lib/beets/state/state.pickle`, token-only include, readiness
 unit, exact `beets.runtime.*` options, and plain operator `beet`. Copy and adapt
 it; do not use the example hostname or secret paths unchanged. Misconfigurations
 fail at evaluation or intrinsic application startup with actionable categories.
