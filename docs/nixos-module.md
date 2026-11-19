@@ -80,6 +80,31 @@ upstream module and adds:
 | `importer.previewWorkers` | `2` | Async preview worker concurrency when `importer.enable = true`. Must be at least 1. |
 | `logging.{level,format,datefmt}` | INFO | Python logging config. |
 
+### Upgrading: the Beets state needs its own directory (#1456)
+
+Beets >= beetbox/beets#7057 saves the import state atomically: it writes
+`<statefile>.tmp` beside the state and renames it over, and only logs
+`state file could not be written` when that fails. Cratedigger therefore
+binds the state's **directory** into its units (read-write for the importer,
+read-only for main, preview, and web) and refuses to start the importer if
+it cannot replace the state there (`state_not_replaceable_by_importer`).
+Revisions before this change refuse the new layout (`state_replaceable`), so
+move the state in the same deployment that picks up the new revision:
+
+1. Create a dedicated directory that holds only the state, owned by root and
+   group-writable by the Cratedigger user, not sticky. For example
+   `/var/lib/beets/state` at `0770 root:cratedigger-ops`.
+2. Move the existing file into it once (`mv /var/lib/beets/state.pickle
+   /var/lib/beets/state/state.pickle`) so incremental-import history
+   survives, then point both Beets' `statefile` and
+   `beets.runtime.expectedStateFile` at the new path.
+3. Have the readiness unit `chown root:<group>` and `chmod 0660` the state
+   on every run. Each importer save leaves a new file owned by the
+   Cratedigger user. The read-only binds make that harmless, but the
+   deployment should keep owning its authority.
+
+`examples/cratedigger.nix` shows the complete provisioning.
+
 ## Search loop tunables
 
 Three options under `services.cratedigger.searchSettings.*` control the slskd search window and the persisted-search-plans escalation ladder. Listed together here because they're easy to forget when triaging stuck releases.
