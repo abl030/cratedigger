@@ -947,7 +947,7 @@ def run_fuzz_targets(
     """
     results: list[FuzzRunResult] = []
     infrastructure_failures: list[FuzzInfrastructureFailure] = []
-    pending = list(enumerate(targets))
+    pending: list[tuple[int, FuzzTarget]] = list(enumerate(targets))
     infrastructure_aborted = False
     headroom_exhausted = False
     completed_count = 0

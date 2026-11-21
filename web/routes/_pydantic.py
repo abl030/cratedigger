@@ -12,11 +12,33 @@ handled; routes never catch it inline.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, TypeVar
+from typing import Annotated, Any, TypeVar
 
-from pydantic import BaseModel, ValidationError
+from pydantic import (
+    BaseModel,
+    PositiveInt,
+    Strict,
+    StrictBool,
+    StringConstraints,
+    ValidationError,
+)
 
 M = TypeVar("M", bound=BaseModel)
+
+# Request-field constraints as ``Annotated`` metadata rather than
+# ``pydantic.Field(...)``: same validation and error types, but no
+# dependency on ``Field``'s overloads, whose ``default: ellipsis`` parameter
+# is unknown to Pyright >= 1.1.415 (typeshed dropped ``builtins.ellipsis``).
+NonEmptyStr = Annotated[str, StringConstraints(min_length=1)]
+StrictPositiveInt = Annotated[PositiveInt, Strict()]
+
+__all__ = [
+    "NonEmptyStr",
+    "PositiveInt",
+    "StrictBool",
+    "StrictPositiveInt",
+    "parse_body",
+]
 
 
 def parse_body[M: BaseModel](handler: Any, body: Any, model: type[M]) -> M | None:

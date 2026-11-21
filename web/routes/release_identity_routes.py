@@ -7,7 +7,7 @@ Split from web/routes/pipeline.py (#522); merge-rekey added by #1089.
 import json
 import logging
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from lib import discogs_api, mb_api, transitions
 from lib.beets_db import (
@@ -33,7 +33,7 @@ from lib.replace_status import (
     RESOLVE_STATUS_RESOLVED,
     RESOLVE_STATUS_TRANSIENT,
 )
-from web.routes._pydantic import parse_body
+from web.routes._pydantic import NonEmptyStr, StrictBool, StrictPositiveInt, parse_body
 from web.routes._registry import RouteHandler, RouteRegistration, pattern_route
 from web.runtime import runtime
 
@@ -300,14 +300,14 @@ def post_pipeline_resolve_rg(
 
 
 class PipelineReplaceRequest(BaseModel):
-    target_mb_release_id: str = Field(min_length=1)
+    target_mb_release_id: NonEmptyStr
     # The operator's explicit assertion that a target on the other pathway
     # is the same album (issue #1366). Strict: a JSON string is a caller
     # bug, never an assertion.
-    cross_pathway: bool = Field(default=False, strict=True)
+    cross_pathway: StrictBool = False
     # A Wrong Matches candidate (download_log id) of the source request that
     # IS the target pressing: moved to the new request and force-imported.
-    adopt_download_log_id: int | None = Field(default=None, gt=0, strict=True)
+    adopt_download_log_id: StrictPositiveInt | None = None
 
 
 def post_pipeline_replace(

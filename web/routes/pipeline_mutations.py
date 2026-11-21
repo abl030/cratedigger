@@ -12,7 +12,7 @@ import urllib.error
 from collections.abc import Mapping
 from typing import Literal, Self
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, model_validator
 
 from lib import discogs_api, mb_api
 from lib.config import read_runtime_config
@@ -23,7 +23,7 @@ from lib.request_creation_service import (
     RequestCreationResult,
     RequestCreationService,
 )
-from web.routes._pydantic import parse_body
+from web.routes._pydantic import NonEmptyStr, PositiveInt, StrictBool, parse_body
 from web.routes._registry import RouteHandler, RouteRegistration, route
 from web.routes.pipeline import _serialize_import_job
 from web.runtime import runtime
@@ -341,8 +341,8 @@ def post_pipeline_add(h: RouteHandler, body: dict[str, object]) -> None:
 
 
 class PipelineMarkIncompleteRequest(BaseModel):
-    id: int = Field(gt=0)
-    marked: bool = Field(strict=True)
+    id: PositiveInt
+    marked: StrictBool
 
 
 def post_pipeline_mark_incomplete(
@@ -382,8 +382,8 @@ def post_pipeline_mark_incomplete(
 
 
 class PipelineMarkCompleteRequest(BaseModel):
-    id: int = Field(gt=0)
-    marked: bool = Field(strict=True)
+    id: PositiveInt
+    marked: StrictBool
 
 
 def post_pipeline_mark_complete(
@@ -424,7 +424,7 @@ def post_pipeline_mark_complete(
 
 
 class PipelineUpdateRequest(BaseModel):
-    id: int = Field(gt=0)
+    id: PositiveInt
     status: Literal["wanted", "imported", "unsearchable"]
 
 
@@ -487,7 +487,7 @@ def post_pipeline_update(h: RouteHandler, body: dict[str, object]) -> None:
 class PipelineUpgradeRequest(BaseModel):
     """HTTP body for ``POST /api/pipeline/upgrade``."""
 
-    mb_release_id: str = Field(min_length=1)
+    mb_release_id: NonEmptyStr
 
 
 def post_pipeline_upgrade(h: RouteHandler, body: dict[str, object]) -> None:
@@ -598,7 +598,7 @@ def post_pipeline_upgrade(h: RouteHandler, body: dict[str, object]) -> None:
 
 
 class PipelineSetQualityRequest(BaseModel):
-    mb_release_id: str = Field(min_length=1)
+    mb_release_id: NonEmptyStr
     status: Literal["", "wanted", "imported", "unsearchable"] = ""
     min_bitrate: int | None = None
 
@@ -718,7 +718,7 @@ class PipelineSetIntentRequest(BaseModel):
     the route's structured 400 rather than a bare validation error.
     """
 
-    id: int = Field(gt=0)
+    id: PositiveInt
     intent: str = ""
 
 
@@ -769,7 +769,7 @@ def post_pipeline_set_intent(h: RouteHandler, body: dict[str, object]) -> None:
 
 
 class PipelineBanSourceRequest(BaseModel):
-    request_id: int = Field(gt=0)
+    request_id: PositiveInt
     confirm: Literal["BAN"]
     mb_release_id: str | None = None
 
@@ -871,7 +871,7 @@ def post_pipeline_ban_source(h: RouteHandler, body: dict[str, object]) -> None:
 
 
 class PipelineForceImportRequest(BaseModel):
-    download_log_id: int = Field(gt=0)
+    download_log_id: PositiveInt
 
 
 def post_pipeline_force_import(h: RouteHandler, body: dict[str, object]) -> None:
@@ -934,9 +934,9 @@ def post_pipeline_force_import(h: RouteHandler, body: dict[str, object]) -> None
 
 
 class PipelineImportLocalRequest(BaseModel):
-    request_id: int = Field(gt=0)
-    source_path: str = Field(min_length=1)
-    upstream_musicbrainz: bool = Field(default=False, strict=True)
+    request_id: PositiveInt
+    source_path: NonEmptyStr
+    upstream_musicbrainz: StrictBool = False
 
 
 def post_pipeline_import_local(h: RouteHandler, body: dict[str, object]) -> None:
@@ -998,7 +998,7 @@ def post_pipeline_import_local(h: RouteHandler, body: dict[str, object]) -> None
 
 
 class PipelineDeleteRequest(BaseModel):
-    id: int = Field(gt=0)
+    id: PositiveInt
 
 
 def post_pipeline_delete(h: RouteHandler, body: dict[str, object]) -> None:

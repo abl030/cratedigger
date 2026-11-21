@@ -2,10 +2,10 @@
 
 from typing import Literal, assert_never
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from lib import transitions
-from web.routes._pydantic import parse_body
+from web.routes._pydantic import PositiveInt, parse_body
 from web.routes._registry import RouteHandler, RouteRegistration, pattern_route, route
 from web.runtime import runtime
 
@@ -51,7 +51,7 @@ class BeetsDeleteRequest(BaseModel):
     accidental destructive calls (the frontend dialog wires this).
     """
 
-    id: int = Field(gt=0)
+    id: PositiveInt
     confirm: Literal["DELETE"]
     purge_pipeline: bool = False
     pipeline_id: int | None = None

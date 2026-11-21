@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 
 import msgspec
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from lib.beets_db import beets_authority_availability_category
 from lib.beets_tag_sync import (
@@ -20,7 +20,7 @@ from lib.retag_divergence_audit import (
     scan_retag_divergence_from_borrowed_factory,
     scan_retag_divergence_single_album_from_borrowed_factory,
 )
-from web.routes._pydantic import parse_body
+from web.routes._pydantic import NonEmptyStr, parse_body
 from web.routes._registry import (
     RouteHandler,
     RouteRegistration,
@@ -223,7 +223,7 @@ class TagSyncBody(BaseModel):
     """Body of ``POST .../album/<id>/sync-tags`` — the identity the
     operator saw on the card, re-pinned server-side (compare-and-set)."""
 
-    expected_mb_albumid: str = Field(min_length=1)
+    expected_mb_albumid: NonEmptyStr
 
 
 def post_retag_divergence_sync_tags(

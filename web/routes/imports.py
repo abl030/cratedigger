@@ -6,7 +6,7 @@ from email.message import Message
 from io import BufferedIOBase
 from typing import Any, Protocol, Self, TypedDict
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from lib import transitions
 from lib.config import read_runtime_config
@@ -58,7 +58,7 @@ from lib.wrong_match_delete_service import (
     delete_wrong_match_group,
 )
 from web.overlay import compute_library_rank
-from web.routes._pydantic import parse_body
+from web.routes._pydantic import PositiveInt, parse_body
 from web.routes._registry import RouteHandler, RouteRegistration, route
 from web.routes.pipeline import _serialize_import_job
 from web.runtime import runtime
@@ -303,7 +303,7 @@ def _delete_wrong_match_row(
 
 
 class WrongMatchDeleteRequest(BaseModel):
-    download_log_id: int = Field(gt=0)
+    download_log_id: PositiveInt
 
 
 def post_wrong_match_delete(h: RouteHandler, body: dict[str, object]) -> None:
@@ -353,7 +353,7 @@ _WRONG_MATCH_DELETE_ERROR_STATUS: dict[str, int] = {
 
 
 class WrongMatchDeleteGroupRequest(BaseModel):
-    request_id: int = Field(gt=0)
+    request_id: PositiveInt
 
 
 def post_wrong_match_delete_group(
@@ -411,7 +411,7 @@ class _GreenCandidate(TypedDict):
 
 
 class WrongMatchConvergeRequest(BaseModel):
-    request_id: int = Field(gt=0)
+    request_id: PositiveInt
     threshold_milli: Any = None
 
 
@@ -621,7 +621,7 @@ class ImportPreviewRequest(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
 
     values: ImportPreviewValuesRequest | None = None
-    download_log_id: int | None = Field(default=None, gt=0)
+    download_log_id: PositiveInt | None = None
 
     @model_validator(mode="after")
     def _one_mode(self) -> Self:

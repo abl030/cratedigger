@@ -123,7 +123,7 @@ def assert_clean_generic_failure(
     if detail in json.dumps(data):
         raise AssertionError("exception detail leaked in generic 500 body")
     if not any(
-        record.exc_info is not None
+        isinstance(record.exc_info, tuple)
         and record.exc_info[1] is not None
         and detail in str(record.exc_info[1])
         for record in records

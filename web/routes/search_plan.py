@@ -11,11 +11,11 @@ import logging
 from typing import Self
 
 import msgspec
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, model_validator
 
 from lib.quality import CandidateScore
 from web.overlay import serialize_row
-from web.routes._pydantic import parse_body
+from web.routes._pydantic import StrictBool, parse_body
 from web.routes._registry import RouteHandler, RouteRegistration, pattern_route
 from web.runtime import runtime
 
@@ -305,10 +305,10 @@ def get_pipeline_search_plan_history(
 
 
 class PipelineSearchPlanRegenerateRequest(BaseModel):
-    # ``strict=True`` because Pydantic v2's default lax mode coerces
+    # ``StrictBool`` because Pydantic v2's default lax mode coerces
     # ``"true"``/``"false"`` strings to bool — the regenerate route's
     # contract is JSON-bool only and the test pins that.
-    prepend_artist: bool | None = Field(default=None, strict=True)
+    prepend_artist: StrictBool | None = None
 
 
 def post_pipeline_search_plan_regenerate(
