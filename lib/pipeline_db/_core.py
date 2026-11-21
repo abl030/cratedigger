@@ -54,7 +54,10 @@ class ReadOnlyQueryCursor(Protocol):
 class _PollingConnection(Protocol):
     """libpq surface used by the process-wide bounded wait callback."""
 
-    OperationalError: type[Exception]
+    # Read-only so psycopg2's narrower, mutable
+    # ``OperationalError: type[OperationalError]`` attribute still matches.
+    @property
+    def OperationalError(self) -> type[Exception]: ...
 
     def poll(self) -> int: ...
     def fileno(self) -> int: ...

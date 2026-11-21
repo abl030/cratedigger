@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 
 import msgspec
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from lib import discogs_api, mb_api
 from lib.youtube_album_service import (
@@ -36,7 +36,7 @@ from lib.youtube_ingest_service import (
     default_youtube_ingest_service_factory,
 )
 from lib.youtube_transport import build_youtube_client as _build_youtube_client
-from web.routes._pydantic import parse_body
+from web.routes._pydantic import StrictBool, parse_body
 from web.routes._registry import (
     RouteHandler,
     RouteRegistration,
@@ -116,7 +116,7 @@ class YoutubeAlbumRequest(BaseModel):
     """Cache-writing resolver request body."""
 
     identifier: str
-    refresh: bool = Field(default=False, strict=True)
+    refresh: StrictBool = False
     watch_url: str | None = None
 
 

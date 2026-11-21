@@ -10,10 +10,10 @@ the unrelated "wrong-match triage" console in web/routes/imports.py
 ``lib.triage_service`` surface (``/api/triage/*``).
 """
 
-from typing import Literal
+from typing import Annotated, Literal
 
 import msgspec
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, StringConstraints
 
 from lib.convergence_service import SIGNAL_TOKEN_PATTERN
 
@@ -256,9 +256,12 @@ class StopConvergedSearchRequest(BaseModel):
     """Exact signal identity plus an explicit reversible STOP confirmation."""
 
     confirm: Literal["STOP"]
-    signal_token: str = Field(
-        min_length=64, max_length=64, pattern=SIGNAL_TOKEN_PATTERN,
-    )
+    signal_token: Annotated[
+        str,
+        StringConstraints(
+            min_length=64, max_length=64, pattern=SIGNAL_TOKEN_PATTERN,
+        ),
+    ]
 
 
 def post_stop_converged_search(
