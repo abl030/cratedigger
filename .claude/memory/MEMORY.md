@@ -20,3 +20,4 @@
 - [Mutation testing __pycache__ trap](feedback_mutation_testing_pycache_trap.md) — same-second mutate/test/revert gives FALSE "survived"; always PYTHONDONTWRITEBYTECODE=1
 - [Alert blast radius](feedback_alert_blast_radius.md) — never fix a silent-alert path by paging unconditionally; enumerate cases, fix only the broken one
 - [Mutant restore git-checkout trap](feedback_mutant_restore_git_checkout_trap.md) — restoring a mutant via git checkout wipes uncommitted edits in the same file; restore by inverse edit
+- [Ride Ruff defaults](feedback_ride_ruff_defaults.md) — keep Ruff's wide default set; upstream lint drift = fix the code, never loosen ruff.toml
