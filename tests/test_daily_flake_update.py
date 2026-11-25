@@ -316,14 +316,22 @@ class TestDailyFlakeUpdateScript(FakeRunnerCase):
         self.assertIn("PASS mirror-harness smoke", proc.stdout)
 
     def _write_bundles(self) -> Path:
-        """Have the suite stages leave fake bundles; return the keep root."""
+        """Have the suite stages leave fake bundles; return the keep root.
+
+        The runner scans the whole of $XDG_RUNTIME_DIR, and the caller's
+        real one holds the live bundle of whatever suite is running this
+        test, its mtime bumped each time a parallel phase publishes a
+        summary. So these runs get a private runtime directory: a child of
+        the inherited one, so the resource monitor still sees the same
+        tmpfs it always measures.
+        """
         self.fake.update_state(write_bundles=True)
-
-        def remove_bundles() -> None:
-            for bundle in self.fake.state["bundles"]:
-                shutil.rmtree(bundle, ignore_errors=True)
-
-        self.addCleanup(remove_bundles)
+        runtime = tempfile.mkdtemp(
+            prefix="daily-gate-runtime.",
+            dir=self.fake.environment()["XDG_RUNTIME_DIR"],
+        )
+        self.addCleanup(shutil.rmtree, runtime, ignore_errors=True)
+        self.bundle_env = {"XDG_RUNTIME_DIR": runtime}
         return self.fake.automation_state / "failed-check-bundles"
 
     def test_failed_gate_preserves_this_runs_check_bundles(self) -> None:
@@ -333,7 +341,7 @@ class TestDailyFlakeUpdateScript(FakeRunnerCase):
         keep_root = self._write_bundles()
         self.fake.update_state(fault="world")
 
-        proc = self.fake.run(SCRIPT)
+        proc = self.fake.run(SCRIPT, extra_env=self.bundle_env)
         state = self.fake.state
 
         self.assertNotEqual(proc.returncode, 0)
@@ -356,7 +364,7 @@ class TestDailyFlakeUpdateScript(FakeRunnerCase):
     def test_green_gate_preserves_nothing(self) -> None:
         keep_root = self._write_bundles()
 
-        proc = self.fake.run(SCRIPT)
+        proc = self.fake.run(SCRIPT, extra_env=self.bundle_env)
 
         self.assertEqual(proc.returncode, 0, gate_run_diagnosis(proc))
         self.assertEqual(len(self.fake.state["bundles"]), 2)
@@ -369,7 +377,7 @@ class TestDailyFlakeUpdateScript(FakeRunnerCase):
             keep_root.joinpath(name).mkdir(parents=True)
         self.fake.update_state(fault="suite")
 
-        proc = self.fake.run(SCRIPT)
+        proc = self.fake.run(SCRIPT, extra_env=self.bundle_env)
 
         self.assertNotEqual(proc.returncode, 0)
         kept = sorted(path.name for path in keep_root.iterdir())
