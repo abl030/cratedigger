@@ -449,9 +449,22 @@ import:
 
 # Path templates
 paths:
-  default: $albumartist/$year - $album%aunique{albumartist album,path_disambig}/$track $title
-  comp: Compilations/$album%aunique{albumartist album,path_disambig}/$track $title
+  default: $albumartist/$year - $album%aunique{ascii_albumartist ascii_album,path_disambig}/$track $title
+  comp: Compilations/$album%aunique{ascii_albumartist ascii_album,path_disambig}/$track $title
   singleton: Non-Album/$artist/$title
+album_fields:
+  path_disambig: albumdisambig or releasegroupdisambig or catalognum or label or str(year)
+  ascii_albumartist: __import__('unidecode').unidecode(albumartist)
+  ascii_album: __import__('unidecode').unidecode(album)
+# %aunique finds an album's siblings by exact equality on its key fields, but
+# asciify_paths folds the rendered folder name with unidecode. Raw
+# `albumartist album` keys let `En nuestro desafío` and `En nuestro desafio`
+# miss each other, render no bracket, and asciify into one shared folder
+# (issue #1463, Tristeza). The keys are the asciified values, so any two
+# albums that could render the same folder are always one %aunique set.
+# Cost: computed keys make %aunique's sibling query a Python scan of every
+# album (~0.3 s per album at 8k albums, memoized per album per process) —
+# negligible per import, hours for a whole-library `beet move`.
 # path_disambig is an inline-plugin album field: the first non-empty of
 # albumdisambig / releasegroupdisambig / catalognum / label / str(year).
 # It is never empty by construction — beets' %aunique renders an album's

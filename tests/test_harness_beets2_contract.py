@@ -493,7 +493,7 @@ FIELD_STATES = [("", ""), ("X", ""), ("X", "X"), ("X", "Y")]
 SWEEP_FIELDS = ("albumdisambig", "releasegroupdisambig", "catalognum", "label")
 
 
-def find_collisions(lib, template, worlds):
+def find_collisions(template, worlds):
     """Return violating pairs under the collision invariant.
 
     A violation is EITHER two same-key siblings rendering the same
@@ -532,13 +532,16 @@ with tempfile.TemporaryDirectory() as d:
         bconfig["album_fields"][name] = expr
     bconfig["plugins"] = "inline"
     bplugins.load_plugins()
-    lib = Library(os.path.join(d, "lib.db"), d)
-
     worlds = []
     n = 0
     for states in itertools.product(FIELD_STATES, repeat=len(SWEEP_FIELDS)):
         for year_b in (2011, 2012):
             n += 1
+            # One library per pair: the pairs are independent, and the
+            # asciified %aunique keys are computed fields whose sibling query
+            # scans every album in Python, so one shared library would make
+            # the sweep quadratic.
+            lib = Library(os.path.join(d, f"passenger-{n}.db"), d)
             fields_a = {f: s[0] for f, s in zip(SWEEP_FIELDS, states)}
             fields_b = {f: s[1] for f, s in zip(SWEEP_FIELDS, states)}
             a = Album(albumartist="Lisa Hannigan", album=f"Passenger {n}",
@@ -553,15 +556,79 @@ with tempfile.TemporaryDirectory() as d:
             lib.add(b)
             worlds.append((a, b))
 
-    collisions = find_collisions(lib, TEMPLATE, worlds)
+    collisions = find_collisions(TEMPLATE, worlds)
     if collisions:
         print("SHIPPED_TEMPLATE_COLLISIONS=%d" % len(collisions))
         print("first:", collisions[0])
         sys.exit(1)
     print("AUNIQUE_SHIPPED_OK worlds=%d" % len(worlds))
 
+    # Tristeza class (#1463): siblings whose albumartist/album differ only
+    # in ways asciify_paths folds away (accent, typographic quote, NFD vs
+    # NFC). Raw-value %aunique keys never match them, so neither gets a
+    # bracket and both asciify into one folder. Each pair lives in its own
+    # library so the only possible sibling is the other half of the pair.
+    import re as _re
+
+    from beets.util import asciify_path
+
+    bconfig["asciify_paths"] = True
+    VARIANTS = [
+        (("Tristeza", "En nuestro desafío"), ("Tristeza", "En nuestro desafio")),
+        (("Mercury Rev", "Deserter’s Songs"), ("Mercury Rev", "Deserter's Songs")),
+        (("Björk", "Debut"), ("Bjork", "Debut")),
+        (("Sigur Rós", "Takk"), ("Sigur Rós", "Takk")),
+    ]
+    VARIANT_FIELD_STATES = [
+        ({}, {}),
+        ({"label": "Better Looking Records", "catalognum": "BLR025"},
+         {"label": "Better Looking Records", "catalognum": "BLR025"}),
+        ({"label": "Better Looking Records"}, {}),
+        ({}, {"albumdisambig": "reissue"}),
+    ]
+    variant_libs = itertools.count()
+
+    def variant_collisions(template):
+        stem_tmpl = _re.sub(r"%aunique\{[^}]*\}", "", template)
+        bad = []
+        for idx, ((artist_a, album_a), (artist_b, album_b)) in enumerate(VARIANTS):
+            for fields_a, fields_b in VARIANT_FIELD_STATES:
+                vlib = Library(
+                    os.path.join(d, f"variant-{next(variant_libs)}.db"), d
+                )
+                a = Album(albumartist=artist_a, album=album_a, year=2006,
+                          albumtype="album", mb_albumid=f"a-{idx}", **fields_a)
+                vlib.add(a)
+                b = Album(albumartist=artist_b, album=album_b, year=2006,
+                          albumtype="album", mb_albumid=f"b-{idx}", **fields_b)
+                vlib.add(b)
+
+                def folder(album, tmpl):
+                    rendered = album.evaluate_template(tmpl, True)
+                    return asciify_path(rendered.rsplit("/", 1)[0])
+
+                da, db = folder(a, template), folder(b, template)
+                if (da == db or da == folder(a, stem_tmpl)
+                        or db == folder(b, stem_tmpl)):
+                    bad.append((da, db))
+        return bad
+
+    variant_bad = variant_collisions(TEMPLATE)
+    if variant_bad:
+        print("SHIPPED_TEMPLATE_ASCIIFY_COLLISIONS=%d" % len(variant_bad))
+        print("first:", variant_bad[0])
+        sys.exit(1)
+    print("AUNIQUE_ASCIIFY_SHIPPED_OK")
+
+    raw_key_bad = variant_collisions(consumer["historical_raw_key_template"])
+    assert raw_key_bad, (
+        "asciify sweep failed to detect the raw-key %aunique collision "
+        "(#1463) -- the checker is toothless"
+    )
+    print("AUNIQUE_RAW_KEY_KNOWN_BAD_DETECTED=%d" % len(raw_key_bad))
+
     # Known-bad: the poisoned historical template must trip the checker.
-    old_collisions = find_collisions(lib, OLD_TEMPLATE, worlds)
+    old_collisions = find_collisions(OLD_TEMPLATE, worlds)
     assert old_collisions, (
         "sweep failed to detect the known-bad empty-disambiguator "
         "collision in the pre-fix template — the checker is toothless"
@@ -767,6 +834,7 @@ def _consumer_aunique_config() -> dict:
     """Extract path policy from the deployment-owned consumer example."""
     from tests.beets_world import (
         HISTORICAL_PASSENGER_PATH_TEMPLATE,
+        HISTORICAL_RAW_KEY_PATH_TEMPLATE,
         extract_consumer_beets_world_config,
     )
 
@@ -775,6 +843,7 @@ def _consumer_aunique_config() -> dict:
         "template": consumer.default_path_template,
         "album_fields": dict(consumer.album_fields),
         "historical_passenger_template": HISTORICAL_PASSENGER_PATH_TEMPLATE,
+        "historical_raw_key_template": HISTORICAL_RAW_KEY_PATH_TEMPLATE,
     }
 
 
@@ -810,6 +879,8 @@ class TestAuniqueCollisionContract(unittest.TestCase):
         )
         self.assertIn("AUNIQUE_SHIPPED_OK", proc.stdout)
         self.assertIn("AUNIQUE_KNOWN_BAD_DETECTED", proc.stdout)
+        self.assertIn("AUNIQUE_ASCIIFY_SHIPPED_OK", proc.stdout)
+        self.assertIn("AUNIQUE_RAW_KEY_KNOWN_BAD_DETECTED", proc.stdout)
 
 
 class TestHarnessBeets2Contract(unittest.TestCase):

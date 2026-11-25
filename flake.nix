@@ -185,11 +185,13 @@ import:
   duplicate_keys:
     album: [mb_albumid, discogs_albumid]
 paths:
-  default: $albumartist/$year - $album%aunique{albumartist album,path_disambig}/$track $title
-  comp: Compilations/$album%aunique{albumartist album,path_disambig}/$track $title
+  default: $albumartist/$year - $album%aunique{ascii_albumartist ascii_album,path_disambig}/$track $title
+  comp: Compilations/$album%aunique{ascii_albumartist ascii_album,path_disambig}/$track $title
   singleton: Non-Album/$artist/$title
 album_fields:
   path_disambig: albumdisambig or releasegroupdisambig or catalognum or label or str(year)
+  ascii_albumartist: __import__('unidecode').unidecode(albumartist)
+  ascii_album: __import__('unidecode').unidecode(album)
 permissions:
   file: "0664"
   dir: "02775"

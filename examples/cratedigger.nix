@@ -59,12 +59,16 @@ let
       };
     };
     paths = {
-      default = "$albumartist/$year - $album%aunique{albumartist album,path_disambig}/$track $title";
+      default = "$albumartist/$year - $album%aunique{ascii_albumartist ascii_album,path_disambig}/$track $title";
       singleton = "Non-Album/$artist/$title";
-      comp = "Compilations/$album%aunique{albumartist album,path_disambig}/$track $title";
+      comp = "Compilations/$album%aunique{ascii_albumartist ascii_album,path_disambig}/$track $title";
     };
     album_fields.path_disambig =
       "albumdisambig or releasegroupdisambig or catalognum or label or str(year)";
+    # The %aunique keys above: asciified like the rendered folder name, so
+    # titles that differ only by an accent still disambiguate (#1463).
+    album_fields.ascii_albumartist = "__import__('unidecode').unidecode(albumartist)";
+    album_fields.ascii_album = "__import__('unidecode').unidecode(album)";
     musicbrainz = {
       host = "musicbrainz.org";
       https = true;
