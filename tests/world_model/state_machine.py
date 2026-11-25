@@ -49,6 +49,7 @@ from lib.quality_evidence import (
 )
 from tests.beets_world import (
     HISTORICAL_PASSENGER_PATH_TEMPLATE,
+    HISTORICAL_RAW_KEY_PATH_TEMPLATE,
     BeetsWorldRelease,
 )
 from tests.dispatch_helpers import claim_next_import_job
@@ -279,6 +280,77 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
                 "folder_shared",
                 violation_codes,
                 "the world model did not detect the historical Passenger "
+                "folder collision",
+            )
+
+    @staticmethod
+    def _add_tristeza_pressings(world: LifecycleWorld) -> int:
+        """Recreate the accent-only sibling shape from the live incident (#1463).
+
+        The older pressing is in Beets with no pipeline request; the requested
+        sibling's title differs only by an accent that asciify_paths folds.
+        """
+
+        world.beets.import_release(BeetsWorldRelease(
+            release_id="7debce01-07b1-4a30-ab4d-54032a6e88cd",
+            artist="Tristeza",
+            album="En nuestro desafío",
+            year=2006,
+            codec="mp3",
+            label="Better Looking Records",
+            catalognum="BLR025",
+        ))
+        return world.add_release(BeetsWorldRelease(
+            release_id="8ccde3a6-a762-43e1-b4b1-f1afc20d475b",
+            artist="Tristeza",
+            album="En nuestro desafio",
+            year=2006,
+            codec="mp3",
+            label="Better Looking Records",
+            catalognum="BLR025",
+        ))
+
+    def test_accent_only_sibling_gets_its_own_folder(self) -> None:
+        assert TEST_DSN is not None
+        with LifecycleWorld(TEST_DSN, repository_root()) as world:
+            request_id = self._add_tristeza_pressings(world)
+
+            world.import_request(request_id)
+
+            world.assert_invariants()
+            albums = world.beets.snapshots()
+            self.assertEqual(len(albums), 2)
+            self.assertEqual(len({album.album_path for album in albums}), 2)
+            for album in albums:
+                self.assertFalse(
+                    any(".1." in os.path.basename(path) for path in album.item_paths),
+                    album.item_paths,
+                )
+
+    def test_raw_key_template_poison_is_caught(self) -> None:
+        """The lifecycle invariant must kill the pre-#1463 raw-key policy."""
+
+        assert TEST_DSN is not None
+        with LifecycleWorld(TEST_DSN, repository_root()) as world:
+            beets_config["paths"]["default"].set(
+                HISTORICAL_RAW_KEY_PATH_TEMPLATE
+            )
+            violation_codes: set[str] = set()
+            try:
+                request_id = self._add_tristeza_pressings(world)
+                world.import_request(request_id)
+                violation_codes = {
+                    violation.code for violation in world.violations()
+                }
+            finally:
+                beets_config["paths"]["default"].set(
+                    world.beets.consumer.default_path_template
+                )
+
+            self.assertIn(
+                "folder_shared",
+                violation_codes,
+                "the world model did not detect the Tristeza accent-only "
                 "folder collision",
             )
 

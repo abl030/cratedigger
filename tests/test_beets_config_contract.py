@@ -24,6 +24,7 @@ from lib.beets_config_contract import (
 from tests.fakes.beets_contract import (
     BASELINE_PLUGINS,
     RUNTIME_AUTHORITIES,
+    SAFE_ALBUM_FIELDS,
     SAFE_COMP_PATH,
     SAFE_DEFAULT_PATH,
     SAFE_SINGLETON_PATH,
@@ -377,7 +378,16 @@ class TestBeetsConfigContract(unittest.TestCase):
                 }},
                 "paths_keys_unsupported",
             ),
-            ("unsafe path field", {"album_fields": {"path_disambig": "label"}}, "path_disambig_unsafe"),
+            (
+                "unsafe path field",
+                {"album_fields": {**SAFE_ALBUM_FIELDS, "path_disambig": "label"}},
+                "path_disambig_unsafe",
+            ),
+            (
+                "raw-value ascii album key",
+                {"album_fields": {**SAFE_ALBUM_FIELDS, "ascii_album": "album"}},
+                "ascii_album_unsafe",
+            ),
             ("unsafe file mode", {"permissions": {"file": "0644", "dir": "02775"}}, "permissions_file_unsafe"),
             ("unsafe dir mode", {"permissions": {"file": "0664", "dir": "0755"}}, "permissions_dir_unsafe"),
             (

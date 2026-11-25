@@ -23,16 +23,22 @@ from lib.beets_config_contract import (
 from lib.config import read_runtime_config_strict
 
 SAFE_DEFAULT_PATH = (
-    "$albumartist/$year - $album%aunique{albumartist album,path_disambig}/"
-    "$track $title"
+    "$albumartist/$year - $album"
+    "%aunique{ascii_albumartist ascii_album,path_disambig}/$track $title"
 )
 SAFE_COMP_PATH = (
-    "Compilations/$album%aunique{albumartist album,path_disambig}/$track $title"
+    "Compilations/$album"
+    "%aunique{ascii_albumartist ascii_album,path_disambig}/$track $title"
 )
 SAFE_SINGLETON_PATH = "Non-Album/$artist/$title"
 SAFE_PATH_DISAMBIG = (
     "albumdisambig or releasegroupdisambig or catalognum or label or str(year)"
 )
+SAFE_ALBUM_FIELDS = {
+    "path_disambig": SAFE_PATH_DISAMBIG,
+    "ascii_albumartist": "__import__('unidecode').unidecode(albumartist)",
+    "ascii_album": "__import__('unidecode').unidecode(album)",
+}
 
 #: The valid baseline plugin list every fixture world starts from: every
 #: plugin the contract requires, plus the optional ones the tests exercise.
@@ -471,7 +477,7 @@ class BeetsContractWorld:
                 },
             },
             "paths": {"default": SAFE_DEFAULT_PATH, "comp": SAFE_COMP_PATH},
-            "album_fields": {"path_disambig": SAFE_PATH_DISAMBIG},
+            "album_fields": dict(SAFE_ALBUM_FIELDS),
             "permissions": {"file": "0664", "dir": "02775"},
             "musicbrainz": {"host": "musicbrainz.org", "https": True},
             "convert": {"auto": False, "auto_keep": False},

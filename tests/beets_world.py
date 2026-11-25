@@ -21,6 +21,7 @@ from beets import plugins as beets_plugins
 from beets.util import MoveOperation
 from mediafile import MediaFile
 
+from lib.beets_config_contract import SAFE_COMP_PATH
 from lib.release_identity import detect_release_source
 from lib.world_invariants import LibraryAlbumSnapshot
 
@@ -31,6 +32,14 @@ HISTORICAL_PASSENGER_PATH_TEMPLATE = (
     "$albumartist/$year - $album%aunique{albumartist album,"
     "albumtype year label catalognum albumdisambig releasegroupdisambig "
     "short_mbid}/$track $title"
+)
+
+# Path policy before #1463: raw-value %aunique keys. Two pressings whose
+# titles differ only by an accent never share those keys, so neither gets a
+# bracket and asciify_paths folds both into one folder (Tristeza, 2026-11-25).
+HISTORICAL_RAW_KEY_PATH_TEMPLATE = (
+    "$albumartist/$year - $album%aunique{albumartist album,path_disambig}/"
+    "$track $title"
 )
 
 
@@ -207,10 +216,7 @@ def build_subprocess_beets_config(
         "paths": {
             "default": consumer.default_path_template,
             "singleton": "Non-Album/$artist/$title",
-            "comp": (
-                "Compilations/$album%aunique{albumartist album,path_disambig}/"
-                "$track $title"
-            ),
+            "comp": SAFE_COMP_PATH,
         },
         "album_fields": dict(consumer.album_fields),
         "musicbrainz": {
@@ -295,9 +301,12 @@ class BeetsWorld:
             beets_config["album_fields"][name].set(expression)
         beets_plugins.load_plugins()
         getters = beets_plugins.album_field_getters()
-        if "path_disambig" not in getters:
+        missing = sorted(
+            name for name, _ in self.consumer.album_fields if name not in getters
+        )
+        if missing:
             raise RuntimeError(
-                "real Beets inline plugin did not load consumer path_disambig; "
+                f"real Beets inline plugin did not load consumer {missing}; "
                 "run the world model in a fresh interpreter"
             )
 

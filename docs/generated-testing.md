@@ -390,7 +390,7 @@ nix-shell --run "scripts/world_model_burst.sh --print-config"
 
 The wrapper delegates to `scripts/run_world_model_burst.py`. The coordinator
 discovers exact unittest IDs in a fresh interpreter, fails closed unless the
-production census is exactly 19 deterministic pins plus five generated targets,
+production census is exactly 21 deterministic pins plus five generated targets,
 batches those pins exactly once, and partitions each generated property's
 configured example budget across independent entropy shards. At the default
 30-job/25-example profile, the dominant state machine gets 25 one-example

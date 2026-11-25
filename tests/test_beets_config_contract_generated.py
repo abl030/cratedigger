@@ -27,6 +27,7 @@ from lib.beets_config_contract import (
 from tests.fakes.beets_contract import (
     BASELINE_PLUGINS,
     RUNTIME_AUTHORITIES,
+    SAFE_ALBUM_FIELDS,
     SAFE_COMP_PATH,
     SAFE_DEFAULT_PATH,
     SAFE_SINGLETON_PATH,
@@ -72,11 +73,23 @@ _SETTING_MUTANTS: tuple[tuple[str, dict[str, object], str], ...] = (
         "comp": SAFE_COMP_PATH,
     }}, "singleton_path_unsafe"),
     ("comp-path", {"paths": {
-        "default": "$albumartist/$year - $album%aunique{albumartist album,path_disambig}/$track $title",
+        "default": SAFE_DEFAULT_PATH,
         "comp": "$album",
     }}, "comp_path_unsafe"),
-    ("field", {"album_fields": {"path_disambig": "label"}},
+    # #1463: raw-value %aunique keys cannot see accent-only siblings that
+    # asciify_paths folds into one folder.
+    ("raw-aunique-keys", {"paths": {
+        "default": "$albumartist/$year - $album%aunique{albumartist album,path_disambig}/$track $title",
+        "comp": SAFE_COMP_PATH,
+    }}, "default_path_unsafe"),
+    ("field", {"album_fields": {**SAFE_ALBUM_FIELDS, "path_disambig": "label"}},
      "path_disambig_unsafe"),
+    ("ascii-album-field", {"album_fields": {**SAFE_ALBUM_FIELDS, "ascii_album": "album"}},
+     "ascii_album_unsafe"),
+    ("ascii-albumartist-field-missing", {"album_fields": {
+        name: expr for name, expr in SAFE_ALBUM_FIELDS.items()
+        if name != "ascii_albumartist"
+    }}, "ascii_albumartist_unsafe"),
     ("file-mode", {"permissions": {"file": "0644", "dir": "02775"}},
      "permissions_file_unsafe"),
     ("dir-mode", {"permissions": {"file": "0664", "dir": "0755"}},

@@ -28,17 +28,31 @@ from lib.config import CratediggerConfig
 
 BeetsRole = Literal["main", "importer", "preview", "web"]
 
+# ``%aunique`` finds an album's siblings with an exact-equality query on its
+# key fields, but ``asciify_paths`` folds the rendered folder name. Keying on
+# the raw ``albumartist album`` let two pressings whose titles differ only by
+# an accent or a typographic quote (``desafío``/``desafio``) miss each other,
+# render no bracket, and asciify into one shared folder (issue #1463). The
+# keys are therefore the asciified values themselves, so two albums that
+# could render the same folder are always in one ``%aunique`` set.
 SAFE_DEFAULT_PATH = (
-    "$albumartist/$year - $album%aunique{albumartist album,path_disambig}/"
-    "$track $title"
+    "$albumartist/$year - $album"
+    "%aunique{ascii_albumartist ascii_album,path_disambig}/$track $title"
 )
 SAFE_COMP_PATH = (
-    "Compilations/$album%aunique{albumartist album,path_disambig}/$track $title"
+    "Compilations/$album"
+    "%aunique{ascii_albumartist ascii_album,path_disambig}/$track $title"
 )
 SAFE_SINGLETON_PATH = "Non-Album/$artist/$title"
 SAFE_PATH_DISAMBIG = (
     "albumdisambig or releasegroupdisambig or catalognum or label or str(year)"
 )
+#: Inline album fields the ``%aunique`` keys read. Beets' ``asciify_paths``
+#: transliterates with ``unidecode``, so the keys do too.
+SAFE_ASCII_ALBUM_FIELDS: dict[str, str] = {
+    "ascii_albumartist": "__import__('unidecode').unidecode(albumartist)",
+    "ascii_album": "__import__('unidecode').unidecode(album)",
+}
 SAFE_DUPLICATE_KEYS = frozenset(("mb_albumid", "discogs_albumid"))
 
 # Plugins whose absence is a hard startup failure for every role.
@@ -560,6 +574,13 @@ def _plugin_contract(plugins: frozenset[str]) -> BeetsPluginContract:
     )
 
 
+def _optional_str(active: IncludeLazyConfig, section: str, key: str) -> str | None:
+    try:
+        return active[section][key].as_str()
+    except confuse.NotFoundError:
+        return None
+
+
 def _optional_bool(active: IncludeLazyConfig, section: str, key: str) -> bool:
     try:
         return active[section][key].get(bool)
@@ -995,6 +1016,17 @@ def check_beets_config(
             hard.append(_finding("comp_path_unsafe", "effective compilation album path is not admitted"))
         if path_disambig != SAFE_PATH_DISAMBIG:
             hard.append(_finding("path_disambig_unsafe", "effective path_disambig expression is not admitted"))
+        ascii_fields = tuple(
+            _optional_str(active, "album_fields", name)
+            for name in SAFE_ASCII_ALBUM_FIELDS
+        )
+        for (name, expected), actual in zip(
+            SAFE_ASCII_ALBUM_FIELDS.items(), ascii_fields, strict=True,
+        ):
+            if actual != expected:
+                hard.append(_finding(
+                    f"{name}_unsafe", f"effective {name} expression is not admitted",
+                ))
 
         if active["permissions"]["file"].as_str() != "0664":
             hard.append(_finding("permissions_file_unsafe", "effective permissions.file must be 0664"))
@@ -1061,7 +1093,9 @@ def check_beets_config(
         fingerprint_values = {
             "import": {key: active["import"][key].get(bool) for key in ("autotag", "move", "write")},
             "duplicate_keys": tuple(duplicate_keys),
-            "paths": (default_path, singleton_path, comp_path, path_disambig),
+            "paths": (
+                default_path, singleton_path, comp_path, path_disambig, *ascii_fields,
+            ),
             "permissions": (
                 active["permissions"]["file"].as_str(),
                 active["permissions"]["dir"].as_str(),

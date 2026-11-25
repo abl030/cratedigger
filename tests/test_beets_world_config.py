@@ -27,7 +27,7 @@ class TestConsumerBeetsWorldConfig(unittest.TestCase):
         consumer = extract_consumer_beets_world_config(repo_root)
 
         self.assertIn(
-            "%aunique{albumartist album,path_disambig}",
+            "%aunique{ascii_albumartist ascii_album,path_disambig}",
             consumer.default_path_template,
         )
         self.assertEqual(
@@ -37,6 +37,10 @@ class TestConsumerBeetsWorldConfig(unittest.TestCase):
                     "albumdisambig or releasegroupdisambig or catalognum "
                     "or label or str(year)"
                 ),
+                "ascii_albumartist": (
+                    "__import__('unidecode').unidecode(albumartist)"
+                ),
+                "ascii_album": "__import__('unidecode').unidecode(album)",
             },
         )
         self.assertEqual(
