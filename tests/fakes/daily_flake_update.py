@@ -156,6 +156,18 @@ def main():
             fail(f"unexpected fake command: {command}")
 
         state["stage_started"].append(stage)
+        if state.get("write_bundles") and stage in ("suite", "shuffled-suite"):
+            # The real suite leaves its evidence bundle under
+            # $XDG_RUNTIME_DIR (scripts/run_test_suite.py); issue #1461's
+            # preservation step looks for exactly that shape.
+            bundle = Path(os.environ["XDG_RUNTIME_DIR"]).joinpath(
+                f"cratedigger-checks.fake-{stage}-{os.getpid()}"
+            )
+            bundle.mkdir()
+            bundle.joinpath("python.log").write_text(
+                f"{stage} traceback\n", encoding="utf-8"
+            )
+            state["bundles"].append(str(bundle))
         save()
         if state.get("hold_stage") == stage:
             time.sleep(float(state.get("hold_seconds", 0.25)))
@@ -285,6 +297,10 @@ class FakeDailyFlakeUpdateCommands:
                 "lock_after_update": None,
                 "lock_at_commit": None,
                 "stage_started": [],
+                # Opt-in: the suite stages write a fake evidence bundle into
+                # the caller's real $XDG_RUNTIME_DIR, which the test removes.
+                "write_bundles": False,
+                "bundles": [],
                 "hold_stage": None,
                 "hold_seconds": 0.25,
             }

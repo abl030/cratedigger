@@ -771,6 +771,13 @@ class CdShapeAndProviderBoundaryTest(unittest.TestCase):
         self.assertLess(elapsed, 1.3)
 
     def test_provider_requests_use_two_spawned_processes(self) -> None:
+        # Issue #1461: both bounds are hang guards, never a speed assertion.
+        # Each lane's wall starts before its spawn-context child is even
+        # started, and that child must boot an interpreter and import this
+        # module to unpickle `_provider_pid_fetch`. On a crowded nightly gate
+        # the old 3-second wall lapsed first, a lane came back `None`, and the
+        # PID set had one member. The fetch returns at once, so a wide bound
+        # costs nothing on a healthy run.
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             payloads = _provider_payloads(
@@ -779,9 +786,12 @@ class CdShapeAndProviderBoundaryTest(unittest.TestCase):
                     "AccurateRip": ("https://example.test/ar", root / "ar"),
                     "CTDB": ("https://example.test/ctdb", root / "ctdb"),
                 },
-                deadline=time.monotonic() + 5,
-                provider_wall_seconds=3,
+                deadline=time.monotonic() + 120,
+                provider_wall_seconds=120,
             )
+
+        self.assertEqual(set(payloads), {"AccurateRip", "CTDB"})
+        self.assertNotIn(None, payloads.values(), payloads)
 
         worker_pids = {
             int(payload.decode("ascii"))

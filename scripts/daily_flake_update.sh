@@ -115,6 +115,46 @@ fi
 declare -a stage_names=()
 declare -a stage_statuses=()
 
+# Issue #1461: every suite stage writes its evidence bundle (each phase's
+# complete log, tracebacks included) under $XDG_RUNTIME_DIR, which on the
+# deployed unit is its RuntimeDirectory, and systemd deletes that the moment
+# the unit stops. The journal keeps only the failing test IDs, so a red night
+# that did not reproduce left nothing to diagnose. On any candidate failure
+# the bundles this run created are copied under the persistent state
+# directory, newest $preserved_bundle_runs runs kept.
+preserved_bundle_root="$state_dir/failed-check-bundles"
+preserved_bundle_runs=14
+bundle_marker="$work_root/stages-started"
+: > "$bundle_marker"
+
+preserve_check_bundles() {
+    local runtime="${XDG_RUNTIME_DIR:-}" destination bundle i
+    local -a bundles=() runs=()
+    if [[ -z "$runtime" || ! -d "$runtime" ]]; then
+        return 0
+    fi
+    while IFS= read -r -d '' bundle; do
+        bundles+=("$bundle")
+    done < <(
+        find "$runtime" -mindepth 1 -maxdepth 1 -type d \
+            -name 'cratedigger-checks.*' -newer "$bundle_marker" -print0
+    )
+    if ((${#bundles[@]} == 0)); then
+        return 0
+    fi
+    destination="$preserved_bundle_root/$(date -u +%Y%m%dT%H%M%SZ)"
+    mkdir -p -- "$destination" || return 1
+    cp -a -- "${bundles[@]}" "$destination/" || return 1
+    echo "daily unstable gate: check bundles preserved in $destination"
+    mapfile -t runs < <(
+        find "$preserved_bundle_root" -mindepth 1 -maxdepth 1 -type d \
+            -printf '%f\n' | sort
+    )
+    for ((i = 0; i < ${#runs[@]} - preserved_bundle_runs; i++)); do
+        rm -rf -- "${preserved_bundle_root:?}/${runs[$i]}"
+    done
+}
+
 run_stage() {
     local phase="$1"
     local name="$2"
@@ -181,6 +221,9 @@ for ((i = 0; i < ${#stage_names[@]}; i++)); do
 done
 
 if [[ "$candidate_failed" -ne 0 ]]; then
+    if ! preserve_check_bundles; then
+        echo "daily unstable gate: could not preserve check bundles" >&2
+    fi
     echo "daily unstable gate: candidate failed; flake.lock was not committed" >&2
     exit 1
 fi
