@@ -33,8 +33,10 @@ BeetsRole = Literal["main", "importer", "preview", "web"]
 # the raw ``albumartist album`` let two pressings whose titles differ only by
 # an accent or a typographic quote (``desafío``/``desafio``) miss each other,
 # render no bracket, and asciify into one shared folder (issue #1463). The
-# keys are therefore the asciified values themselves, so two albums that
-# could render the same folder are always in one ``%aunique`` set.
+# keys are therefore the asciified values themselves, so albums whose names
+# differ only by what asciify folds are always in one ``%aunique`` set. Not
+# covered: Beets ``replace`` substitutions, truncation, and same-titled
+# compilations with different album artists (follow-up #1465).
 SAFE_DEFAULT_PATH = (
     "$albumartist/$year - $album"
     "%aunique{ascii_albumartist ascii_album,path_disambig}/$track $title"
