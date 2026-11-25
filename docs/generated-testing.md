@@ -36,7 +36,12 @@ contract, and full-repository Pyright canary are deliberately excluded from
 this stable candidate and run only in the independent tip job. Independent
 test stages all run so one notification contains the whole day's result. A
 completely green candidate commits and pushes only `flake.lock`; a red
-candidate pushes nothing. Scheduling, state paths, and notification belong to
+candidate pushes nothing. A red candidate also copies the run's suite evidence
+bundles (each phase's complete log) from `$XDG_RUNTIME_DIR`, which systemd
+deletes when the unit stops, to
+`$CRATEDIGGER_AUTOMATION_STATE_DIR/failed-check-bundles/<UTC timestamp>/`,
+keeping the newest 14 runs. A red night that does not reproduce still leaves
+its tracebacks there. Scheduling, state paths, and notification belong to
 the downstream nixosconfig service.
 
 `scripts/daily_beets_tip_update.sh` is a separate serialized checks-only

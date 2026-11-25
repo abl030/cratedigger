@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -313,6 +314,68 @@ class TestDailyFlakeUpdateScript(FakeRunnerCase):
         self.assertEqual(state["push_count"], 0)
         self.assertIn("FAIL world-model burst", proc.stdout)
         self.assertIn("PASS mirror-harness smoke", proc.stdout)
+
+    def _write_bundles(self) -> Path:
+        """Have the suite stages leave fake bundles; return the keep root."""
+        self.fake.update_state(write_bundles=True)
+
+        def remove_bundles() -> None:
+            for bundle in self.fake.state["bundles"]:
+                shutil.rmtree(bundle, ignore_errors=True)
+
+        self.addCleanup(remove_bundles)
+        return self.fake.automation_state / "failed-check-bundles"
+
+    def test_failed_gate_preserves_this_runs_check_bundles(self) -> None:
+        """Issue #1461: a suite's evidence bundle lives in the unit's
+        RuntimeDirectory, which systemd deletes on stop. A red night has to
+        keep it, or the only record is the failing test IDs."""
+        keep_root = self._write_bundles()
+        self.fake.update_state(fault="world")
+
+        proc = self.fake.run(SCRIPT)
+        state = self.fake.state
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(len(state["bundles"]), 2)
+        (run_dir,) = keep_root.iterdir()
+        self.assertIn(
+            f"check bundles preserved in {run_dir}", proc.stdout
+        )
+        self.assertEqual(
+            sorted(path.name for path in run_dir.iterdir()),
+            sorted(Path(bundle).name for bundle in state["bundles"]),
+        )
+        for bundle in state["bundles"]:
+            name = Path(bundle).name
+            self.assertEqual(
+                run_dir.joinpath(name, "python.log").read_text("utf-8"),
+                Path(bundle).joinpath("python.log").read_text("utf-8"),
+            )
+
+    def test_green_gate_preserves_nothing(self) -> None:
+        keep_root = self._write_bundles()
+
+        proc = self.fake.run(SCRIPT)
+
+        self.assertEqual(proc.returncode, 0, gate_run_diagnosis(proc))
+        self.assertEqual(len(self.fake.state["bundles"]), 2)
+        self.assertFalse(keep_root.exists())
+
+    def test_preserved_bundles_keep_the_newest_fourteen_runs(self) -> None:
+        keep_root = self._write_bundles()
+        old_runs = [f"20260101T0000{second:02d}Z" for second in range(14)]
+        for name in old_runs:
+            keep_root.joinpath(name).mkdir(parents=True)
+        self.fake.update_state(fault="suite")
+
+        proc = self.fake.run(SCRIPT)
+
+        self.assertNotEqual(proc.returncode, 0)
+        kept = sorted(path.name for path in keep_root.iterdir())
+        self.assertEqual(len(kept), 14)
+        self.assertNotIn(old_runs[0], kept)
+        self.assertEqual(kept[:13], old_runs[1:])
 
     def test_inherited_shuffle_seed_never_reaches_the_fixed_order_stage(
         self,
