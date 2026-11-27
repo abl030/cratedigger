@@ -13,6 +13,7 @@ from lib.accusation_flags import (
 )
 from lib.json_narrow import json_dict
 from lib.pipeline_db._shared import CURRENT_EVIDENCE_PREFIX
+from lib.track_length_shape import TrackLengthSlot
 from web.classify import (
     ClassifiedEntry,
     LogEntry,
@@ -151,13 +152,18 @@ class DownloadHistoryViewRow(msgspec.Struct, frozen=True):
     stage2_if_stage1_deferred_verdict: str | None = None
     request_source: str | None = None
     youtube_metadata: dict[str, object] | None = None
-    # Issue #1178 (post-correction, "surface-not-reject"): mirrors
-    # ClassifiedEntry.track_length_warning. msgspec.convert(strict=True)
+    # Issue #1178 (post-correction, "surface-not-reject") and #1445 item 1:
+    # mirror ClassifiedEntry's track_length_* fields. msgspec.convert(strict=True)
     # silently drops any ClassifiedEntry field this Struct does not also
     # declare, so a new render-time field must be added HERE too, not just
     # on ClassifiedEntry — the detail-view history panel is a second reader
     # of the same classification, not a passthrough of it.
     track_length_warning: str | None = None
+    track_length_shape: str | None = None
+    track_length_label: str | None = None
+    track_length_badge_class: str | None = None
+    track_length_slots: list[TrackLengthSlot] = msgspec.field(
+        default_factory=list[TrackLengthSlot])
 
     def to_dict(self) -> dict[str, object]:
         return msgspec.to_builtins(self)

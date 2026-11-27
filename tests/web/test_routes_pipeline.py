@@ -320,16 +320,18 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
                 mappings=[
                     TrackMapping(
                         item=HarnessItem(
-                            path="02 The Outside.flac", length=237.7),
+                            path="16 The Outside.flac", length=237.7),
                         track=HarnessTrackInfo(
-                            title="The Outside", length=237.0),
+                            title="The Outside", length=237.0,
+                            medium=1, medium_index=16, medium_total=17),
                     ),
                     TrackMapping(
                         item=HarnessItem(
                             path="00 - Hidden Track.flac",
                             length=237.633167),
                         track=HarnessTrackInfo(
-                            title="Lost Weekend", length=15.0),
+                            title="Lost Weekend", length=15.0,
+                            medium=1, medium_index=17, medium_total=17),
                     ),
                 ],
             ),
@@ -339,12 +341,35 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
 
         self.assertEqual(status, 200)
         item = next(row for row in data["log"] if row["id"] == log_id)
+        # Issue #1445 item 1: the last track of the disc runs long, so the
+        # card names the shape (a hidden track kept in the same file) and
+        # renders it calmer than a shape that needs a look.
         self.assertEqual(
             item["track_length_warning"],
-            "Track length contradicts the matched release: "
-            "'00 - Hidden Track.flac' is 237.6s where the release "
-            "declares 15.0s for 'Lost Weekend'",
+            "Last track runs 3:58 but the release lists 0:15. Usually a "
+            "hidden track kept in the same file. Probably fine.",
         )
+        self.assertEqual(item["track_length_shape"], "hidden_track_in_file")
+        self.assertEqual(item["track_length_label"], "hidden track?")
+        self.assertEqual(item["track_length_badge_class"], "badge-muted")
+        expected_slots = [{
+            "medium": 1, "medium_index": 17, "title": "Lost Weekend",
+            "file_name": "00 - Hidden Track.flac",
+            "file_seconds": 237.633167, "listed_seconds": 15.0,
+            "summary": 'Track 17 "Lost Weekend" runs 3:58, release lists 0:15',
+        }]
+        self.assertEqual(item["track_length_slots"], expected_slots)
+
+        # The detail view's history panel is a second reader of the same
+        # classification through a strict typed mirror.
+        detail_status, detail = self._get("/api/pipeline/900")
+        self.assertEqual(detail_status, 200)
+        history_item = next(
+            row for row in detail["history"] if row["id"] == log_id)
+        for key in ("track_length_warning", "track_length_shape",
+                    "track_length_label", "track_length_badge_class"):
+            self.assertEqual(history_item[key], item[key], key)
+        self.assertEqual(history_item["track_length_slots"], expected_slots)
 
     def test_track_length_warning_skips_a_pair_with_no_declared_length(self):
         """A CD pregap hidden track carries no declared MB length (0.0) —
@@ -393,7 +418,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
     def test_track_length_warning_absent_at_exactly_the_bound(self):
         """The comparison is strictly-greater-than: a deviation exactly AT
         the bound still clears (no warning)."""
-        from web.classify import TRACK_LENGTH_WARNING_BOUND_SECONDS
+        from lib.track_length_shape import TRACK_LENGTH_WARNING_BOUND_SECONDS
 
         self.db.seed_request(make_request_row(id=905, status="imported"))
         log_id = self.db.log_download(
@@ -582,10 +607,10 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         item = next(row for row in data["log"] if row["id"] == log_id)
         self.assertEqual(
             item["track_length_warning"],
-            "Track length contradicts the matched release: "
-            "'00 - Hidden Track.flac' is 237.6s where the release "
-            "declares 15.0s for 'Lost Weekend'",
+            '"Lost Weekend" runs 3:58 but the release lists 0:15. Could be '
+            "a different version, or extra audio in the same file.",
         )
+        self.assertEqual(item["track_length_badge_class"], "badge-warn")
 
     def test_track_length_warning_still_fires_when_component_count_key_is_absent(
         self,
@@ -650,10 +675,10 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         item = next(row for row in data["log"] if row["id"] == log_id)
         self.assertEqual(
             item["track_length_warning"],
-            "Track length contradicts the matched release: "
-            "'00 - Hidden Track.flac' is 237.6s where the release "
-            "declares 15.0s for 'Lost Weekend'",
+            '"Lost Weekend" runs 3:58 but the release lists 0:15. Could be '
+            "a different version, or extra audio in the same file.",
         )
+        self.assertEqual(item["track_length_badge_class"], "badge-warn")
 
     def test_have_analysis_error_copy_respects_operator_stop(self):
         classified = build_recents_download_log_rows([{

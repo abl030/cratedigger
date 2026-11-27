@@ -117,8 +117,11 @@ export function renderRecentsItems(items, matchRates = null) {
       // Issue #1178 (post-correction, "surface-not-reject"): a render-time
       // fact, never a pipeline verdict — the server has already decided
       // this import stands; the chip only asks the operator to look.
+      // Issue #1445 item 1: the chip names the shape of the disagreement
+      // (server-owned label and badge class; calmer for shapes whose
+      // lengths say the audio is all there), the hover is the sentence.
       const trackLengthWarningChip = item.track_length_warning
-        ? `<span class="badge badge-warn" title="${esc(item.track_length_warning)}">track length</span>`
+        ? `<span class="badge ${esc(item.track_length_badge_class)}" title="${esc(item.track_length_warning)}">${esc(item.track_length_label)}</span>`
         : '';
       const triageLabel = triageSummary && !String(badge).startsWith('Triaged')
         ? `<span class="recents-triage-label" title="${esc(triageDetail)}">${esc(triageLabelText(triageSummary))}</span>`
