@@ -22,3 +22,4 @@
 - [Mutant restore git-checkout trap](feedback_mutant_restore_git_checkout_trap.md) — restoring a mutant via git checkout wipes uncommitted edits in the same file; restore by inverse edit
 - [Ride Ruff defaults](feedback_ride_ruff_defaults.md) — keep Ruff's wide default set; upstream lint drift = fix the code, never loosen ruff.toml
 - [Short plain answers](feedback_short_plain_answers.md) — design write-ups: one item at a time, ELI5, verdict per item; 800 words got "too many words"
+- [Cleanup sweep is a filter](project_cleanup_sweep_is_a_filter.md) — global Cleanup leaves only possible imports; kept_would_import is the point; allowlist gates only the auto lane
