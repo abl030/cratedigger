@@ -403,11 +403,33 @@
   .sp-advance-form-error { color: #d88; font-size: 0.78em; flex-basis: 100%; padding: 2px 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .p-tracks { margin-top: 8px; }
   /* Issue #1445 item 3: held upgrade — sentence and per-track table. */
-  .held-upgrade-table-wrap { overflow-x: auto; }
+  .held-upgrade-table-wrap { overflow-x: auto; max-width: 100%; }
+  .held-upgrades { border: 1px solid #6b5a1e; border-radius: 6px; background: #1d1a10; padding: 10px 12px; margin: 10px 0 18px; }
+  .held-upgrades-title { color: #ec6; font-size: 1.05em; font-weight: 600; }
+  .held-upgrades-intro { color: #aaa; font-size: 0.9em; margin: 4px 0 8px; line-height: 1.4; }
+  .held-upgrade-album { margin-top: 10px; }
+  .held-upgrade-album-title { color: #ddd; font-size: 1em; margin-bottom: 4px; }
+  .held-upgrade-artist { color: #888; font-size: 0.9em; margin-left: 6px; }
+  .held-upgrade-card { border: 1px solid #333; border-left: 3px solid #a86f20; border-radius: 4px; background: #1a1a1a; padding: 8px 10px; margin: 6px 0; }
+  .held-upgrade-meta { color: #888; font-size: 0.85em; }
+  .held-upgrade-sentence { color: #ec6; margin: 4px 0 6px; line-height: 1.4; }
+  .held-upgrade-last-try { color: #d88; font-size: 0.9em; margin: 0 0 6px; }
+  .held-upgrade-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .held-upgrade-actions .p-btn { white-space: normal; }
+  .held-upgrade-actions .p-btn.held-upgrade-use { border-color: #6d6; color: #6d6; }
+  .held-upgrade-actions .p-btn.held-upgrade-keep { border-color: #9bf; color: #9bf; }
+  .held-upgrade-actions .p-btn.held-upgrade-armed { background: #3a3a1a; border-color: #ec6; color: #ec6; }
+  .held-upgrade-help { color: #888; font-size: 0.82em; margin-top: 6px; line-height: 1.4; }
   .held-upgrade-table { border-collapse: collapse; font-size: 0.9em; }
   .held-upgrade-table th { color: #889; font-weight: normal; text-align: left; padding: 2px 10px 2px 0; white-space: nowrap; }
   .held-upgrade-table td { color: #aaa; padding: 2px 10px 2px 0; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .held-upgrade-table td:nth-child(2) { white-space: normal; min-width: 7em; }
+  /* Narrow screens: headers wrap so every length column fits. */
+  @media (max-width: 600px) {
+    .held-upgrade-table th { white-space: normal; padding-right: 6px; }
+    .held-upgrade-table td { padding-right: 6px; }
+    .held-upgrade-table td:nth-child(2) { min-width: 5.5em; }
+  }
   .held-upgrade-table tr.held-upgrade-differs td { color: #ec6; background: #3a3a1a; }
   .p-history { margin-top: 8px; }
   .p-tracks > summary,

@@ -7,8 +7,10 @@ import {
   actionableDeleteEntries,
   bulkTriageWrongMatches,
   claimTriageFollow,
+  cancelHeldUpgradeChoice,
   cleanupSummaryToast,
   convergeRequestBody,
+  convergeToast,
   convergeWrongMatches,
   deleteAllButtonLabel,
   deleteWrongMatch,
@@ -20,6 +22,7 @@ import {
   fmtLen,
   formatEntryEvidence,
   invalidateWrongMatches,
+  keepCurrentCopy,
   isConvergeGreen,
   isVideoMedia,
   loadWrongMatches,
@@ -31,6 +34,8 @@ import {
   reloadWrongMatchExplorer,
   removeWrongMatchEntry,
   renderEntry,
+  renderHeldUpgradeCard,
+  renderHeldUpgrades,
   renderLatestImport,
   renderQualityBadges,
   renderTrackComparison,
@@ -41,6 +46,7 @@ import {
   stopWrongMatchTriage,
   toggleWrongMatchEntry,
   triageButtonPresentation,
+  useHeldUpgradeCopy,
 } from '../web/js/wrong-matches.js';
 import { closeSearchPlanDetail } from '../web/js/search_plan.js';
 import { state } from '../web/js/state.js';
@@ -434,6 +440,8 @@ t.section('convergeWrongMatches() posts selected threshold and removes row in pl
           deleted: 1,
           skipped: [],
           group_empty: true,
+          ordinary_group_empty: true,
+          held_upgrades: 0,
         }),
       };
     }
@@ -2896,6 +2904,200 @@ t.section('loadWrongMatches() consumes a pending scroll restore even on the cach
     'the cached _loaded short-circuit still consumes the pending restore');
   t.equal(scrollCalls[0], 88, 'restores the exact stashed scroll position on the cached path');
   globals.restore();
+}
+
+// --- Issue #1445 item 3: the Held upgrades section -----------------------
+
+function heldCard(overrides = {}) {
+  return {
+    download_log_id: 4269,
+    held_download_log_id: 4269,
+    request_id: 1649,
+    artist: 'The Fairways',
+    album: 'Is Everything All Right?',
+    soulseek_username: 'natetheneet',
+    held_at: '2026-10-26T02:10:00+00:00',
+    last_attempt_at: null,
+    last_attempt_failure: null,
+    import_job: null,
+    path_unavailable: false,
+    format: 'flac',
+    sentence: 'Kept your current copy. On the new copy track 2 runs 3:26.',
+    rows: [
+      { track: '1', title: 'A Song for Jenni', release: '3:47', current: '3:47', new: '3:47', differs: false },
+      { track: '2', title: 'Secretive <Girl>', release: '2:07', current: '2:07', new: '3:26', differs: true },
+    ],
+    ...overrides,
+  };
+}
+
+function heldData(cards) {
+  const data = wrongMatchesData();
+  data.held_upgrades = cards;
+  return data;
+}
+
+t.section('renderWrongMatches() hides the Held upgrades section when nothing is held');
+{
+  installStorage();
+  stubIdleTriageFetch();
+  const dom = installDom();
+  renderWrongMatches(heldData([]), dom.wrongMatches);
+  t.excludes(dom.wrongMatches.innerHTML, 'Held upgrades', 'no section at all');
+  t.excludes(dom.wrongMatches.innerHTML, 'held upgrade', 'summary does not mention held upgrades');
+  t.equal(renderHeldUpgrades([]), '', 'empty list renders nothing');
+  await flushMicrotasks();
+}
+
+t.section('renderWrongMatches() puts held copies above the ordinary groups, grouped by album');
+{
+  installStorage();
+  stubIdleTriageFetch();
+  const dom = installDom();
+  renderWrongMatches(heldData([
+    heldCard(),
+    heldCard({ download_log_id: 4300, held_download_log_id: 4300, soulseek_username: 'peer2' }),
+    heldCard({ download_log_id: 77, held_download_log_id: 77, request_id: 9, artist: 'Other', album: 'Album B' }),
+  ]), dom.wrongMatches);
+  const html = dom.wrongMatches.innerHTML;
+  t.contains(html, 'Held upgrades (3)', 'section title counts every held copy');
+  t.ok(html.indexOf('wm-held-upgrades') < html.indexOf('wm-release-42'), 'section sits above the ordinary groups');
+  t.equal(countOccurrences(html, 'id="wm-held-album-1649"'), 1, 'one album heading for two copies of one album');
+  t.equal(countOccurrences(html, 'class="held-upgrade-card"'), 3, 'one card per held copy');
+  t.contains(html, '3 held upgrades', 'the tab summary counts held copies');
+  t.contains(html, '>Use new copy<', 'approve button label');
+  t.contains(html, '>Keep current copy<', 'discard button label');
+  t.contains(html, 'replaces your current copy with this one', 'says what Use new copy does');
+  t.contains(html, 'that peer stays skipped for this album', 'says what Keep current copy does');
+  t.contains(html, 'New copy from natetheneet', 'names the peer');
+  t.contains(html, '<tr class="held-upgrade-differs">', 'tripped track highlighted');
+  t.ok(metadataHtmlIsEscaped(html, 'Secretive <Girl>'), 'track titles are escaped');
+  await flushMicrotasks();
+}
+
+t.section('renderHeldUpgradeCard() says the last try failed and disables choices while busy');
+{
+  const html = renderHeldUpgradeCard(heldCard({
+    download_log_id: 4400,
+    last_attempt_failure: 'The last try to use the new copy failed: Import folder has extra audio',
+    last_attempt_at: '2026-10-27T02:10:00+00:00',
+  }));
+  t.contains(html, 'The last try to use the new copy failed: Import folder has extra audio', 'failure shown truthfully');
+  t.contains(html, 'keepCurrentCopy(4269, 4400, this)', 'discard deletes the newest visible row of the folder');
+  t.contains(html, 'useHeldUpgradeCopy(4269, 4400, this)', 'approve force-imports the held row');
+  const busy = renderHeldUpgradeCard(heldCard({ import_job: { id: 9, status: 'running' } }));
+  t.equal(countOccurrences(busy, 'disabled'), 2, 'both choices disabled while a job runs');
+  t.contains(busy, 'Using the new copy is running.', 'job state shown');
+}
+
+t.section('useHeldUpgradeCopy() asks once, then force-imports the held row and refreshes');
+{
+  installStorage();
+  const dom = installDom();
+  const use = element({ id: 'wm-held-use-4269', textContent: 'Use new copy', classList: { toggle() {} } });
+  const keep = element({ id: 'wm-held-keep-4269', textContent: 'Keep current copy', classList: { toggle() {} } });
+  const cancel = element({ id: 'wm-held-cancel-4269', hidden: true });
+  dom.elements['wm-held-use-4269'] = use;
+  dom.elements['wm-held-keep-4269'] = keep;
+  dom.elements['wm-held-cancel-4269'] = cancel;
+  const calls = [];
+  stubGlobals({ fetch: async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === '/api/pipeline/force-import') {
+      return { ok: true, status: 200, json: async () => ({ status: 'queued', artist: 'The Fairways', album: 'Is Everything All Right?', job_id: 5 }) };
+    }
+    if (String(url).startsWith('/api/import-jobs/')) {
+      return { ok: true, json: async () => ({ job: { status: 'completed', message: 'Imported' } }) };
+    }
+    if (url === '/api/wrong-matches') {
+      return { ok: true, json: async () => ({ groups: [], held_upgrades: [] }) };
+    }
+    if (url === '/api/wrong-matches/triage/status') {
+      return { ok: true, json: async () => ({ state: 'idle' }) };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  } });
+  await useHeldUpgradeCopy(4269, 4269, use);
+  t.equal(calls.length, 0, 'first click only asks');
+  t.equal(use.textContent, 'Yes, replace my current copy', 'asks in plain words');
+  t.equal(cancel.hidden, false, 'a way back is offered');
+  t.equal(keep.disabled, true, 'the other choice waits');
+  await useHeldUpgradeCopy(4269, 4269, use);
+  t.equal(calls[0].url, '/api/pipeline/force-import', 'second click uses the existing force import');
+  t.deepEqual(JSON.parse(calls[0].options.body), { download_log_id: 4269 }, 'for the held row');
+  t.ok(calls.some(call => call.url === '/api/wrong-matches'), 'refreshes so the card leaves');
+  await flushMicrotasks();
+}
+
+t.section('cancelHeldUpgradeChoice() backs out of an armed choice');
+{
+  installStorage();
+  const dom = installDom();
+  const keep = element({ id: 'wm-held-keep-4269', textContent: 'Keep current copy', classList: { toggle() {} } });
+  const use = element({ id: 'wm-held-use-4269', textContent: 'Use new copy', classList: { toggle() {} } });
+  const cancel = element({ id: 'wm-held-cancel-4269', hidden: true });
+  dom.elements['wm-held-keep-4269'] = keep;
+  dom.elements['wm-held-use-4269'] = use;
+  dom.elements['wm-held-cancel-4269'] = cancel;
+  stubGlobals({ fetch: async (url) => { throw new Error(`unexpected fetch: ${url}`); } });
+  await keepCurrentCopy(4269, 4400, keep);
+  t.equal(keep.textContent, 'Yes, delete the new copy', 'armed');
+  cancelHeldUpgradeChoice(4269);
+  t.equal(keep.textContent, 'Keep current copy', 'back to the plain label');
+  t.equal(use.disabled, false, 'the other choice is available again');
+  t.equal(cancel.hidden, true, 'cancel hides again');
+}
+
+t.section('keepCurrentCopy() asks once, then deletes the folder and drops the card');
+{
+  installStorage();
+  stubIdleTriageFetch();
+  const dom = installDom();
+  renderWrongMatches(heldData([heldCard({ download_log_id: 4400 })]), dom.wrongMatches);
+  const keep = element({ id: 'wm-held-keep-4269', textContent: 'Keep current copy', classList: { toggle() {} } });
+  dom.elements['wm-held-keep-4269'] = keep;
+  const calls = [];
+  stubGlobals({ fetch: async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === '/api/wrong-matches/delete') {
+      return { ok: true, json: async () => ({ status: 'ok', success: true, deleted_path: '/wm/x' }) };
+    }
+    if (url === '/api/wrong-matches/triage/status') {
+      return { ok: true, json: async () => ({ state: 'idle' }) };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  } });
+  await keepCurrentCopy(4269, 4400, keep);
+  t.equal(calls.length, 0, 'first click only asks');
+  await keepCurrentCopy(4269, 4400, keep);
+  t.equal(calls[0].url, '/api/wrong-matches/delete', 'uses the existing wrong-match delete');
+  t.deepEqual(JSON.parse(calls[0].options.body), { download_log_id: 4400 }, 'for the newest row of the folder');
+  t.excludes(dom.wrongMatches.innerHTML, 'Held upgrades', 'the card and its section are gone');
+  t.contains(dom.toast.textContent, 'Kept your current copy', 'plain confirmation');
+  await flushMicrotasks();
+}
+
+t.section('keepCurrentCopy() keeps the card and restores the button when the delete fails');
+{
+  installStorage();
+  const dom = installDom();
+  const keep = element({ id: 'wm-held-keep-4269', textContent: 'Keep current copy', classList: { toggle() {} } });
+  dom.elements['wm-held-keep-4269'] = keep;
+  stubGlobals({ fetch: async () => ({ ok: false, json: async () => ({ status: 'error', error: 'locked' }) }) });
+  await keepCurrentCopy(4269, 4400, keep);
+  await keepCurrentCopy(4269, 4400, keep);
+  t.equal(keep.disabled, false, 'button usable again');
+  t.equal(keep.textContent, 'Keep current copy', 'label restored');
+  t.contains(dom.toast.textContent, 'locked', 'failure surfaced');
+}
+
+t.section('convergeToast() reports held copies apart from ordinary skips');
+{
+  t.equal(
+    convergeToast({ queued: 1, deleted: 0, held_upgrades: 1, skipped: [{ download_log_id: 3, reason: 'held_upgrade' }] }),
+    'Queued 1 candidate, left 1 held upgrade for you to decide',
+    'held copy named, not counted as skipped',
+  );
 }
 
 t.done();
