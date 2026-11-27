@@ -104,6 +104,7 @@ from lib.quality.installed_copy_guard import (
     InstalledTrackFile,
     InstalledTrackLength,
     compare_installed_copy,
+    compare_with_declared_program,
 )
 from lib.quality_evidence import EvidenceBuildResult, audit_v0_probe_from_metric
 from lib.terminal_outcomes import PendingImportTerminalOutcome
@@ -708,6 +709,42 @@ def _upgrade_guard_comparison(
             len(installed),
         )
     return comparison
+
+
+def _declared_program_comparison(
+    request: DispatchRequest,
+    preamble: _DispatchPreamble,
+    installed_tracks_loader: Callable[
+        ..., tuple[InstalledTrackLength, ...] | None
+    ],
+) -> InstalledCopyComparison | None:
+    """Is this candidate measurably short of the release's own listing?
+
+    Issue #1471 gap 2, for an installed copy the operator marked incomplete.
+    ``None`` when this lane is not guarded (force, local import, YouTube
+    rescue: the operator chose those imports), and ``None`` when nothing is
+    installed: a hold keeps a copy, and with no copy (Bad Rip removes it
+    but leaves the mark) a short candidate still beats an empty slot.
+
+    The release listing alone decides whether the candidate is short; the
+    installed copy is read only once it is, which both settles that a copy
+    exists and gives the operator all three lengths side by side.
+    """
+    candidate = request.upgrade_guard_candidate
+    if candidate is None:
+        return None
+    comparison = compare_with_declared_program(candidate, None)
+    if not comparison.holds:
+        return comparison
+    installed = installed_tracks_loader(
+        beets_library_db_path=preamble.beets_library_db_path,
+        beets_library_root=preamble.beets_library_root,
+        mb_release_id=request.mb_release_id,
+        label=request.label,
+    )
+    if installed is None:
+        return None
+    return compare_with_declared_program(candidate, installed)
 
 
 class _DownloadLogEntryReader(Protocol):
@@ -1427,23 +1464,33 @@ def _run_evidence_gate(
     # Issue #1445 item 3: the upgrade guard. One code path, two steps, the
     # same decision function both times: decide WITHOUT the guard's fact
     # first, and only when that decision would import — on the guarded
-    # automation lane, with no operator incomplete mark (which turns the
-    # guard off anyway) — read and measure the installed copy, then decide
-    # again with the fact. A candidate the decision rejects anyway never
-    # opens an installed file.
+    # automation lane — compare, then decide again with the fact. A
+    # candidate the decision rejects anyway never opens an installed file.
+    #
+    # Without an operator incomplete mark the yardstick is the installed
+    # copy (#1445). With one, the mark turns that comparison off and the
+    # release's declared program is the yardstick instead (#1471 gap 2).
     upgrade_comparison: InstalledCopyComparison | None = None
     if (
         _import_allowed_by_evidence_pipeline(evidence_decision)
         and request.upgrade_guard_candidate is not None
-        and not facts.installed_marked_incomplete
     ):
-        upgrade_comparison = _upgrade_guard_comparison(
-            request, preamble, installed_tracks_loader,
-        )
-        if upgrade_comparison is not None and upgrade_comparison.holds:
-            facts = msgspec.structs.replace(
+        if facts.installed_marked_incomplete:
+            upgrade_comparison = _declared_program_comparison(
+                request, preamble, installed_tracks_loader,
+            )
+            held_facts = msgspec.structs.replace(
+                facts, candidate_short_of_declared_program=True,
+            )
+        else:
+            upgrade_comparison = _upgrade_guard_comparison(
+                request, preamble, installed_tracks_loader,
+            )
+            held_facts = msgspec.structs.replace(
                 facts, installed_track_lengths_disagree=True,
             )
+        if upgrade_comparison is not None and upgrade_comparison.holds:
+            facts = held_facts
             evidence_decision = full_pipeline_decision_from_evidence(
                 evidence_gate.candidate,
                 evidence_gate.current,

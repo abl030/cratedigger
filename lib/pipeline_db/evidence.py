@@ -307,6 +307,10 @@ class _EvidenceMixin(_PipelineDBBase):
                 "container": file.container,
                 "codec": file.codec,
                 "decode_ok": file.decode_ok,
+                "audio_sha256_hex": (
+                    file.audio_sha256.hex()
+                    if file.audio_sha256 is not None else None
+                ),
             }
             for ordinal, file in enumerate(evidence.files)
         ]
@@ -708,7 +712,8 @@ class _EvidenceMixin(_PipelineDBBase):
                 RETURNING id, %s::boolean AS preserve_existing_audio_validation
             ),
             preserved_file_rows AS MATERIALIZED (
-                SELECT files.relative_path, files.decode_ok
+                SELECT files.relative_path, files.decode_ok,
+                       files.audio_sha256
                 FROM album_quality_evidence_files files
                 JOIN upserted ON upserted.id = files.evidence_id
             ),
@@ -733,12 +738,13 @@ class _EvidenceMixin(_PipelineDBBase):
                     extension TEXT,
                     container TEXT,
                     codec TEXT,
-                    decode_ok BOOLEAN
+                    decode_ok BOOLEAN,
+                    audio_sha256_hex TEXT
                 )
             )
             INSERT INTO album_quality_evidence_files (
                 evidence_id, ordinal, relative_path, size_bytes, mtime_ns,
-                extension, container, codec, decode_ok
+                extension, container, codec, decode_ok, audio_sha256
             )
             SELECT upserted.id, file_rows.ordinal, file_rows.relative_path,
                    file_rows.size_bytes, file_rows.mtime_ns,
@@ -751,7 +757,15 @@ class _EvidenceMixin(_PipelineDBBase):
                            TRUE
                        )
                        ELSE COALESCE(file_rows.decode_ok, TRUE)
-                   END
+                   END,
+                   -- Issue #1471: a fresh measurement's hash wins; a
+                   -- rewrite that carries none (a writer that never hashed
+                   -- this file) keeps the one already recorded at this
+                   -- content address rather than erasing it.
+                   COALESCE(
+                       decode(file_rows.audio_sha256_hex, 'hex'),
+                       preserved_file_rows.audio_sha256
+                   )
             FROM upserted
             CROSS JOIN delete_complete
             CROSS JOIN file_rows

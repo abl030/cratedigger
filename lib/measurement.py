@@ -374,6 +374,12 @@ class PreimportMeasurement(msgspec.Struct, frozen=True):
     audio_error: str | None = None
     matched_bad_hash_id: int | None = None
     matched_bad_track_path: str | None = None
+    # Issue #1471: SHA-256 of each candidate file's audio as staged (before
+    # any conversion), keyed by path relative to the measured folder. Empty
+    # when the bad-hash port was not supplied (read-only classify lane).
+    source_audio_hashes: dict[str, bytes] = msgspec.field(
+        default_factory=dict[str, bytes],
+    )
     download_spectral: SpectralMeasurement | None = None
     existing_spectral: SpectralMeasurement | None = None
     existing_min_bitrate: int | None = None
@@ -694,17 +700,19 @@ def _iter_audio_files(path: str) -> list[Path]:
     return out
 
 
-def _check_bad_audio_hashes(
+def hash_source_audio_files(
     paths: list[Path],
-    db: BadHashGateDB,
-) -> _BadHashMatch | None:
-    """Return the first matched bad-hash row, or None.
+    root: str,
+) -> dict[str, bytes]:
+    """Hash every supported candidate file, keyed by path relative to ``root``.
 
-    Hashing or DB-lookup failures on a single track are non-fatal: the bad-hash
-    gate is a *defense*, not a *requirement*, so a hashing error on one file
-    must not block the entire validation pipeline. Each failure is logged at
-    WARNING and skipped; the loop continues to the next track.
+    Issue #1471 gap 1. These are the PRE-conversion bytes: the same digests
+    the bad-hash gate looks up, kept so a later Bad Rip on the imported copy
+    can record hashes in the format the peer actually shares (a FLAC rip
+    imported as Opus is otherwise unmatchable). A hashing failure on one
+    track is non-fatal: that track is simply absent from the result.
     """
+    out: dict[str, bytes] = {}
     for p in paths:
         ext = p.suffix.lstrip(".").lower()
         if not ext or ext not in _BAD_HASH_SUPPORTED_EXTS:
@@ -717,6 +725,35 @@ def _check_bad_audio_hashes(
         except AudioHashError:
             logger.warning(
                 "bad-hash gate: failed to hash %s, skipping", p, exc_info=True)
+            continue
+        out[os.path.relpath(p, root)] = digest
+    return out
+
+
+def _check_bad_audio_hashes(
+    paths: list[Path],
+    db: BadHashGateDB,
+    *,
+    digests: dict[str, bytes] | None = None,
+    root: str = "/",
+) -> _BadHashMatch | None:
+    """Return the first matched bad-hash row, or None.
+
+    Hashing or DB-lookup failures on a single track are non-fatal: the bad-hash
+    gate is a *defense*, not a *requirement*, so a hashing error on one file
+    must not block the entire validation pipeline. Each failure is logged at
+    WARNING and skipped; the loop continues to the next track.
+
+    ``digests`` (keyed relative to ``root``) reuses the hashes the caller
+    already computed with :func:`hash_source_audio_files`, so each file is
+    decoded once per measurement.
+    """
+    if digests is None:
+        digests = hash_source_audio_files(paths, root)
+    for p in paths:
+        ext = p.suffix.lstrip(".").lower()
+        digest = digests.get(os.path.relpath(p, root))
+        if digest is None:
             continue
         try:
             row = db.lookup_bad_audio_hash(digest, ext)
@@ -912,7 +949,15 @@ def measure_preimport_state(
     # match than run sox).
     matched_bad_hash_id: int | None = None
     matched_bad_track_path: str | None = None
+    # Issue #1471: every producer of persisted candidate evidence supplies
+    # the gate port, and hashes every supported file whether or not the
+    # table has rows. The digests ride the evidence file rows so a later Bad
+    # Rip records the format the peer shares, not the converted library copy.
+    source_audio_hashes: dict[str, bytes] = {}
     if bad_hash_db is not None:
+        source_audio_hashes = hash_source_audio_files(
+            audio_files_for_count, path,
+        )
         try:
             any_bad = bad_hash_db.has_any_bad_audio_hashes()
         except Exception:
@@ -921,7 +966,12 @@ def measure_preimport_state(
                 exc_info=True)
             any_bad = False
         if any_bad:
-            match = _check_bad_audio_hashes(audio_files_for_count, bad_hash_db)
+            match = _check_bad_audio_hashes(
+                audio_files_for_count,
+                bad_hash_db,
+                digests=source_audio_hashes,
+                root=path,
+            )
             if match is not None:
                 matched_bad_hash_id = match.bad_hash_id
                 matched_bad_track_path = match.track_path
@@ -1163,6 +1213,7 @@ def measure_preimport_state(
         audio_error=audio_error,
         matched_bad_hash_id=matched_bad_hash_id,
         matched_bad_track_path=matched_bad_track_path,
+        source_audio_hashes=source_audio_hashes,
         download_spectral=download_spectral,
         existing_spectral=existing_spectral,
         existing_min_bitrate=existing_min_bitrate,

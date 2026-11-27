@@ -33,6 +33,22 @@ from tests.fakes._shared import _utcnow
 from tests.fakes.pipeline_db._base import _FakePipelineDBBase
 
 
+def _without_audio_hashes(
+    evidence: AlbumQualityEvidence | None,
+) -> AlbumQualityEvidence | None:
+    """Mirror the real loads: ``audio_sha256`` is write-side only (#1471)."""
+    if evidence is None:
+        return None
+    return copy.deepcopy(msgspec.structs.replace(
+        evidence,
+        files=[
+            msgspec.structs.replace(file, audio_sha256=None)
+            if file.audio_sha256 is not None else file
+            for file in evidence.files
+        ],
+    ))
+
+
 class _FakeEvidenceMixin(_FakePipelineDBBase):
     """Content-addressed ``album_quality_evidence`` rows."""
 
@@ -251,6 +267,26 @@ class _FakeEvidenceMixin(_FakePipelineDBBase):
                     for file in evidence.files
                 ],
             )
+        if existing is not None:
+            # Issue #1471: mirror the SQL COALESCE — a fresh hash wins, a
+            # rewrite carrying none keeps the stored one for the same path.
+            existing_hash_by_path = {
+                file.relative_path: file.audio_sha256
+                for file in existing.files
+            }
+            evidence = msgspec.structs.replace(
+                evidence,
+                files=[
+                    file if file.audio_sha256 is not None
+                    else msgspec.structs.replace(
+                        file,
+                        audio_sha256=existing_hash_by_path.get(
+                            file.relative_path,
+                        ),
+                    )
+                    for file in evidence.files
+                ],
+            )
         if existing is not None and existing.id is not None:
             evidence_id = existing.id
         else:
@@ -267,7 +303,7 @@ class _FakeEvidenceMixin(_FakePipelineDBBase):
         if evidence_id is None:
             return None
         evidence = self._evidence_by_id.get(int(evidence_id))
-        return copy.deepcopy(evidence) if evidence is not None else None
+        return _without_audio_hashes(evidence)
 
     def find_album_quality_evidence(
         self,
@@ -278,7 +314,7 @@ class _FakeEvidenceMixin(_FakePipelineDBBase):
         evidence = self.album_quality_evidence.get(
             (mb_release_id, snapshot_fingerprint)
         )
-        return copy.deepcopy(evidence) if evidence is not None else None
+        return _without_audio_hashes(evidence)
 
     def claim_current_v0_research_attempt(
         self,

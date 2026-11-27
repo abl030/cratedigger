@@ -1191,6 +1191,11 @@ until a human settles it).
   mark can never churn the next complete candidate. Rejections,
   preserve-imported outcomes, and `preflight_existing` (which keeps the
   EXISTING import with nothing installed) leave the mark untouched.
+- **Short candidates are held, not admitted** (issue #1471 gap 2). On the
+  automation lane a covered candidate measurably short of the release's
+  declared track lengths becomes `upgrade_held` instead of replacing the
+  marked copy; see "Upgrade guard" below. Force import of the held row is
+  the operator's approval and is never held.
 - **Preview surfaces show the ordinary verdict.** The web import-preview
   lane deliberately carries no mark threading: an operator previewing a
   marked request's row sees the unmarked comparison, while the lanes that
@@ -1242,7 +1247,27 @@ clamps track-length error at 30s, so the match distance never noticed.
   into `upgrade_held` (`upgrade_guard = "hold"`, `imported = False`,
   `final_status = "wanted"`, keep searching; the overridden quality verdict
   stays in `stage2_import` as audit). The flat twin never sees the fact.
-  The operator's incomplete mark alone turns the guard off.
+  The operator's incomplete mark turns this comparison off and switches
+  the yardstick to the release listing (next bullet).
+- **Under the incomplete mark** (issue #1471 gap 2,
+  `compare_with_declared_program`). Beets' coverage proof says every
+  release track has a file, never that a file is as long as the release
+  lists, so a second rip missing the same hidden track used to replace the
+  marked copy and clear the mark. With the mark set, a track trips when
+  the candidate runs more than 30s SHORT of its declared length (longer
+  never trips: an unlisted hidden track kept in the file is fine; Discogs
+  composites and tracks with no declared length are skipped). When it
+  trips the dispatch core sets
+  `AlbumQualityEvidenceDecisionFacts.candidate_short_of_declared_program`
+  and decides again; the decider holds exactly as above, so the candidate
+  lands in Held upgrades for the operator rather than being rejected by
+  the lock. The installed copy is measured only after the listing already
+  holds, for the operator's table, and never decides. The stored
+  comparison carries `basis = "declared_program"` (older holds decode as
+  `installed_copy`), which picks the sentence ("Kept your current copy,
+  which you marked incomplete. The new copy is short too: …") and the
+  denylist reason. A declared length counts whether or not a disc ID backs
+  it: the outcome is a hold, so a wrong listing costs one operator click.
 - **Scope.** Only the automation import job (the one caller of
   `_handle_valid_result` holding an execution-owner proof). Force import is
   the operator's approval path and is never guarded; local import and

@@ -270,6 +270,16 @@ class AlbumQualityEvidenceFile(
     # this Struct shape are non-corrupt by default — the decision function
     # only rejects when at least one file's ``decode_ok`` is False.
     decode_ok: bool = True
+    # Issue #1471: SHA-256 of this file's audio content as measured
+    # (``lib.audio_hash.hash_audio_content``), on candidate evidence only:
+    # the staged bytes BEFORE conversion. A later Bad Rip of the imported
+    # copy records these, so the same rip is rejected in the format peers
+    # actually share. Not part of the snapshot fingerprint and never a
+    # decision input: it is write-side only. Evidence loads leave it
+    # ``None``; the one reader is
+    # ``PipelineDB.get_recent_import_source_audio_hashes``. ``None`` on a
+    # write = not hashed (unsupported format, or hashing failed).
+    audio_sha256: bytes | None = None
 
     def validation_errors(self) -> list[str]:
         errors: list[str] = []
@@ -283,6 +293,10 @@ class AlbumQualityEvidenceFile(
             errors.append(f"{self.relative_path}: extension is required")
         if not self.container:
             errors.append(f"{self.relative_path}: container is required")
+        if self.audio_sha256 is not None and len(self.audio_sha256) != 32:
+            errors.append(
+                f"{self.relative_path}: audio_sha256 must be 32 bytes"
+            )
         return errors
 
 

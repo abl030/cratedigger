@@ -2954,6 +2954,17 @@ class TestQualityReplayShowsTheMark(unittest.TestCase):
         self.assertIn("beets-whole attempt", out)
         self.assertIn("#1241 mark disregards", out)
 
+    def test_marked_replay_over_an_installed_copy_shows_the_short_hold(self):
+        """Issue #1471 gap 2: under the mark the importer holds a short
+        candidate when a copy is installed; the replay shows that too."""
+        db = self._seed()
+        out = self._replay(db, marked=True, installed=True)
+        self.assertIn("#1471 hold under the mark", out)
+        self.assertIn("REJECT, denylist, keep searching (final: wanted)", out)
+        self.assertNotIn(
+            "#1471 hold under the mark",
+            self._replay(db, marked=True, installed=False))
+
     def test_unmarked_replay_prints_no_second_decision(self):
         db = self._seed()
         out = self._replay(db, marked=False)
