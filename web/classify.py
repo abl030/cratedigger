@@ -32,6 +32,7 @@ from lib.failure_presentation import (
     present_failure,
     transfer_detail_unreadable,
 )
+from lib.held_upgrade_view import HeldUpgradeView, held_upgrade_view
 from lib.import_evidence import HaveAnalysisFailure
 from lib.import_queue import ImportJob
 from lib.json_narrow import is_list_like, is_str_object_dict, json_list
@@ -383,6 +384,11 @@ class ClassifiedEntry(msgspec.Struct):
     track_length_badge_class: str | None = None
     track_length_slots: list[TrackLengthSlot] = msgspec.field(
         default_factory=list[TrackLengthSlot])
+    # Issue #1445 item 3: an automatic upgrade the guard held. The sentence
+    # and per-track table come from the comparison stored on the row
+    # (``lib.held_upgrade_view``, shared with Wrong Matches and
+    # ``pipeline-cli show``); ``None`` on every other row.
+    held_upgrade: HeldUpgradeView | None = None
 
 
 class ImportJobDisplay(msgspec.Struct, frozen=True):
@@ -652,6 +658,10 @@ def _classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
         ),
         track_length_slots=(
             list(length_shape.slots) if length_shape is not None else []),
+        held_upgrade=(
+            held_upgrade_view(entry.validation_result)
+            if entry.outcome == "rejected" else None
+        ),
         bad_extensions=bad_extensions,
         wrong_match_triage_action=triage["action"],
         wrong_match_triage_summary=triage["summary"],
@@ -1420,6 +1430,17 @@ def _classify(
         return _Classification(
             "Environment failure", "badge-warn", "#a86f20", verdict,
         )
+
+    # --- Upgrade held (issue #1445 item 3) ---
+    # The guard kept the installed copy; the new one waits in Wrong
+    # Matches for the operator. Not a red rejection: nothing is wrong with
+    # the library, and the operator has a choice to make.
+    if entry.outcome == "rejected":
+        held = held_upgrade_view(entry.validation_result)
+        if held is not None:
+            return _Classification(
+                "Upgrade held", "badge-warn", "#a86f20", held.sentence,
+            )
 
     # --- Verified-lossless proof lock (non-punitive decline) ---
     # The archival copy is proof-verified and the request stays imported;

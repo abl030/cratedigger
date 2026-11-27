@@ -133,6 +133,27 @@ export function spectralStripCell(grade, floor, admissible, withheld = undefined
  * @param {string} value - already-escaped candidate value (HTML)
  * @param {string|null} wasValue - already-escaped existing value (HTML), or null
  */
+/**
+ * Issue #1445 item 3: the held-upgrade sentence and its per-track table.
+ * Every string is server-owned (lengths already m:ss); the tracks that
+ * tripped the guard carry `held-upgrade-differs`.
+ * @param {{sentence?: string, rows?: Array<{track: string, title: string, release: string, current: string, new: string, differs: boolean}>}} held
+ * @returns {string}
+ */
+export function renderHeldUpgradeDetail(held) {
+  const rows = Array.isArray(held?.rows) ? held.rows : [];
+  const body = rows.map(row => `
+      <tr class="${row.differs ? 'held-upgrade-differs' : ''}">
+        <td>${esc(row.track)}</td><td>${esc(row.title)}</td>
+        <td>${esc(row.release)}</td><td>${esc(row.current)}</td><td>${esc(row.new)}</td>
+      </tr>`).join('');
+  return `<div class="held-upgrade-sentence">${esc(held?.sentence || '')}</div>
+    <div class="held-upgrade-table-wrap"><table class="held-upgrade-table">
+      <thead><tr><th>Track</th><th></th><th>Release lists</th><th>Current copy</th><th>New copy</th></tr></thead>
+      <tbody>${body}</tbody>
+    </table></div>`;
+}
+
 export function withWas(value, wasValue) {
   if (wasValue === null || wasValue === undefined) return value;
   return `${value} <span class="p-hist-was">(was ${wasValue})</span>`;
@@ -762,6 +783,14 @@ export function renderDownloadHistoryItem(h) {
       'Track length',
       `<span style="color:${calm ? '#aaa' : '#ec6'};">${esc(h.track_length_warning)}</span>${slotLines}`,
     ]);
+  }
+
+  // Issue #1445 item 3: a held upgrade. The server owns the sentence and
+  // the m:ss table (lib/held_upgrade_view.py, shared with Wrong Matches
+  // and `pipeline-cli show`); the tracks that tripped the guard are
+  // highlighted.
+  if (h.held_upgrade) {
+    rows.push(['Upgrade held', renderHeldUpgradeDetail(h.held_upgrade)]);
   }
 
   // Triage is the operator-action audit — it stays visible. The

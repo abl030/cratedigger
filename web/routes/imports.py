@@ -70,7 +70,7 @@ from web.wrong_match_file_service import (
     build_wrong_match_explorer,
     resolve_wrong_match_stream_file,
 )
-from web.wrong_match_queue_view import build_wrong_match_groups
+from web.wrong_match_queue_view import build_held_upgrades, build_wrong_match_groups
 
 
 def _threshold_milli(value: object) -> int:
@@ -100,12 +100,18 @@ def get_wrong_matches(h: RouteHandler, params: dict[str, list[str]]) -> None:
         params.get("include_replaced", ["false"])[0].lower() == "true"
     )
     rt = runtime()
-    h._json({"groups": build_wrong_match_groups(
-        db=rt.db(),
-        check_beets_library_detail=rt.check_beets_library_detail,
-        compute_library_rank=compute_library_rank,
-        include_replaced=include_replaced,
-    )})
+    h._json({
+        "groups": build_wrong_match_groups(
+            db=rt.db(),
+            check_beets_library_detail=rt.check_beets_library_detail,
+            compute_library_rank=compute_library_rank,
+            include_replaced=include_replaced,
+        ),
+        # Issue #1445 item 3: held upgrades, out of the ordinary groups.
+        "held_upgrades": build_held_upgrades(
+            db=rt.db(), include_replaced=include_replaced,
+        ),
+    })
 
 
 def _download_log_id_from_params(params: dict[str, list[str]]) -> int:

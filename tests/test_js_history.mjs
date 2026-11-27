@@ -2030,4 +2030,33 @@ t.section('renderEvidenceStrip() neutralizes an audit-only grade chip');
     'the HAVE side never paints an audit-only codec as a transcode');
 }
 
+t.section('renderDownloadHistoryItem() shows a held upgrade with its track table (issue #1445 item 3)');
+{
+  const sentence = 'Kept your current copy. On the new copy track 2 runs 3:26 and '
+    + 'track 5 runs 3:18. Your current copy and the release both say 2:07 and '
+    + '4:20, so the new copy is the odd one out.';
+  const html = renderDownloadHistoryFixture({
+    outcome: 'rejected',
+    soulseek_username: 'natetheneet',
+    created_at: '2026-10-26T10:25:15+00:00',
+    badge: 'Upgrade held',
+    badge_class: 'badge-warn',
+    verdict: sentence,
+    held_upgrade: {
+      sentence,
+      rows: [
+        { track: '1', title: 'A Song for Jenni', release: '3:47', current: '3:47', new: '3:47', differs: false },
+        { track: '2', title: 'Secretive <Girl>', release: '2:07', current: '2:07', new: '3:26', differs: true },
+      ],
+    },
+  });
+  t.contains(html, '<span class="p-hist-label">Upgrade held</span>',
+    'held-upgrade row label rendered');
+  t.contains(html, esc(sentence), 'the server sentence is shown');
+  t.contains(html, '<tr class="held-upgrade-differs">', 'the tripped track is highlighted');
+  t.contains(html, '<th>Release lists</th><th>Current copy</th><th>New copy</th>',
+    'the three length columns are labelled in plain words');
+  t.excludes(html, '<Girl>', 'titles are escaped');
+}
+
 t.done();

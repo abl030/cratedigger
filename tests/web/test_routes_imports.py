@@ -2429,6 +2429,31 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.mock_manual_cleanup.assert_called_once_with(self.db, 102, require_visible=True)
         self.mock_cleanup.assert_not_called()
 
+    def test_get_wrong_matches_returns_held_upgrades_separately(self):
+        """Issue #1445 item 3: the API carries held upgrades as their own
+        list; the ordinary groups never contain them."""
+        import json
+
+        from tests.test_held_upgrade_view import fairways_validation_result
+
+        hold = json.loads(fairways_validation_result())["upgrade_hold"]
+        held_id = self._seed_wrong_match(
+            request_id=42, failed_path="/fi/held", distance=0.02,
+            mb_release_id="mb-42", scenario="upgrade_held",
+            validation_overrides={"upgrade_hold": hold})
+
+        status, data = self._get("/api/wrong-matches")
+
+        self.assertEqual(status, 200)
+        self.assertNotIn(
+            held_id,
+            [entry["download_log_id"]
+             for group in data["groups"] for entry in group["entries"]])
+        self.assertEqual(
+            [card["download_log_id"] for card in data["held_upgrades"]],
+            [held_id])
+        self.assertIn("odd one out", data["held_upgrades"][0]["sentence"])
+
     def test_converge_never_approves_or_discards_a_held_upgrade(self):
         """Issue #1445 item 3: a held upgrade has a green distance, so
         converge would otherwise force-import it and Beets would replace

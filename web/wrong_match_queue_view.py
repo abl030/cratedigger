@@ -17,7 +17,10 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Protocol
 
+import msgspec
+
 from lib.accusation_flags import evidence_column_accusation_flags
+from lib.held_upgrade_view import held_upgrade_view
 from lib.import_queue import ForceImportPayload, ImportJob, YoutubeImportPayload
 from lib.pipeline_db._shared import (
     CANDIDATE_EVIDENCE_PREFIX,
@@ -30,6 +33,7 @@ from lib.pipeline_db.rows import (
 from lib.quality import _is_explicit_label
 from lib.util import observe_failed_path
 from lib.validation_envelope import decode_validation_envelope
+from lib.wrong_match_policy import is_upgrade_held_scenario
 from lib.wrong_matches import wrong_match_row_is_visible
 from web.classify import average_quality_label
 from web.wrong_match_file_service import (
@@ -286,6 +290,11 @@ def build_wrong_match_groups(
         ):
             continue
         vr = decode_validation_envelope(row.get("validation_result"))
+        if is_upgrade_held_scenario(vr.scenario):
+            # Issue #1445 item 3: a held upgrade is projected on its own by
+            # ``build_held_upgrades``, never inside an ordinary group where
+            # converge and delete-all act on the whole request.
+            continue
         failed_path = vr.failed_path or ""
         observation = observe_failed_path(failed_path)
         resolved_path = observation.path
@@ -432,3 +441,52 @@ def build_wrong_match_groups(
         entries_list.sort(key=_entry_sort_key)
 
     return [groups[rid] for rid in order]
+
+
+def build_held_upgrades(
+    *,
+    db: WrongMatchQueueDB,
+    include_replaced: bool = False,
+) -> list[dict[str, object]]:
+    """Held upgrades waiting for the operator, newest first (issue #1445).
+
+    One card per visible ``upgrade_held`` row whose folder is still there
+    (or could not be read, flagged ``path_unavailable`` exactly like an
+    ordinary entry). The sentence and the m:ss track table come from the
+    comparison stored on the row through ``lib.held_upgrade_view`` — the
+    same projection Recents and ``pipeline-cli show`` render. Approve is
+    the existing force import of ``download_log_id``; discard is the
+    existing single wrong-match delete.
+    """
+    cards: list[dict[str, object]] = []
+    for row in db.get_wrong_matches():
+        if not wrong_match_row_is_visible(row, include_replaced=include_replaced):
+            continue
+        view = held_upgrade_view(row.get("validation_result"))
+        if view is None:
+            continue
+        vr = decode_validation_envelope(row.get("validation_result"))
+        observation = observe_failed_path(vr.failed_path or "")
+        if not observation.present and not observation.indeterminate:
+            continue
+        evidence_format = row.get("evidence_storage_format")
+        evidence_avg = row.get("evidence_avg_bitrate")
+        cards.append({
+            "download_log_id": row["download_log_id"],
+            "request_id": row["request_id"],
+            "artist": row["artist_name"],
+            "album": row["album_title"],
+            "mb_release_id": row.get("mb_release_id"),
+            "failed_path": observation.path or vr.failed_path,
+            "path_unavailable": observation.indeterminate,
+            "format": (
+                evidence_format if isinstance(evidence_format, str) else None
+            ),
+            "avg_bitrate": (
+                evidence_avg if isinstance(evidence_avg, int) else None
+            ),
+            "sentence": view.sentence,
+            "rows": msgspec.to_builtins(view.rows),
+        })
+    cards.sort(key=lambda card: -int(str(card["download_log_id"])))
+    return cards

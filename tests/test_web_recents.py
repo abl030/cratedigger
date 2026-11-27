@@ -906,6 +906,33 @@ class TestClassifyBadge(unittest.TestCase):
             "declined (no denylist); acquisition is complete",
         )
 
+    def test_held_upgrade_renders_its_own_badge_sentence_and_table(self):
+        """Issue #1445 item 3: the Recents card for a held upgrade says so
+        in plain words, from the stored comparison, never as a red
+        rejection or a raw scenario token."""
+        from tests.test_held_upgrade_view import fairways_validation_result
+
+        result = _classified(
+            outcome="rejected",
+            beets_scenario="upgrade_held",
+            validation_result=fairways_validation_result(),
+        )
+        self.assertEqual(result["badge"], "Upgrade held")
+        self.assertEqual(result["badge_class"], "badge-warn")
+        verdict = _text(result, "verdict")
+        self.assertTrue(verdict.startswith("Kept your current copy."))
+        self.assertNotIn("upgrade_held", verdict)
+        held = result["held_upgrade"]
+        assert isinstance(held, dict)
+        rows = held["rows"]
+        assert isinstance(rows, list)
+        self.assertEqual(
+            [row["track"] for row in rows if row["differs"]], ["2", "5"])
+        self.assertIn("Kept your current copy.", _text(result, "summary"))
+
+    def test_ordinary_rows_carry_no_held_upgrade(self):
+        self.assertIsNone(_classified()["held_upgrade"])
+
     def test_reject_verdicts_use_one_short_grammar_per_decision_class(self):
         cases = {
             "quality_downgrade": (

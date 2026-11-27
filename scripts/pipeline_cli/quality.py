@@ -448,6 +448,26 @@ def _print_live_candidate_replay(
             q_override=q_override,
             gate_unavailable_reason=gate_unavailable_reason,
         )
+    elif result.get("imported") and current is not None:
+        # Issue #1445 item 3: the replay cannot re-measure track lengths
+        # (that fact is computed from Beets only at import time), so it
+        # passes the guard's default above. When the replay would replace
+        # an installed copy, also show what the upgrade guard does to it.
+        import msgspec
+
+        guarded_result = full_pipeline_decision_from_evidence(
+            candidate, current,
+            facts=msgspec.structs.replace(
+                facts, installed_track_lengths_disagree=True),
+            cfg=rank_cfg,
+        )
+        _print_decision_outcome(
+            "Same candidate, if its track lengths disagree with the "
+            "installed copy (#1445 upgrade guard)",
+            guarded_result,
+            q_override=q_override,
+            gate_unavailable_reason=gate_unavailable_reason,
+        )
     _print_proof_gate_verdict("IN", candidate)
     if current is not None:
         _print_proof_gate_verdict("HAVE", current)
