@@ -27,7 +27,12 @@ The last two are the reads behind the on-demand "Check other pressings"
 check (`lib/other_pressing_check.py`, issue #1445), through
 `lib/mb_api.get_release_with_discids` and
 `browse_release_group_with_discids`. They are uncached, take an explicit
-per-request timeout, and read at most 150 releases of a group.
+per-request timeout that also bounds the wait for a mirror slot, decode
+strictly (an error object in a 200 is a failure, not an empty release),
+and read at most 150 releases of a group, counting a release once even
+when browse lists it on two pages. A track's `length` is often null while
+its `recording.length` is set; the check falls back to the recording's
+length exactly as Beets does.
 
 ## Notes
 

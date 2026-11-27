@@ -709,17 +709,26 @@ not on anyone's list.
   lines of any History row that has a track-length shape, and on each Held
   upgrades card (for the new copy). Clicking runs the read-only check in
   `lib/other_pressing_check.py` through `GET /api/other-pressings/<id>`; it
-  never runs at render time and writes nothing. The answer appears inline:
-  whether another pressing in the release group lists a length for every
-  track that every file matches within 2s (and where that pressing's titles
-  differ, or that the listings differ only in length and may describe the
-  same audio), whether the release's listed lengths come from a real disc
-  ID's table of contents and the files agree with it (a few seconds off is
-  said separately, as gap handling), or were typed in by hand, and links to
-  the matching pressings and the release on MusicBrainz. A Discogs release
-  gets "not available"; an unreachable or slow mirror (30s budget) gets one
-  plain sentence. `web/js/other_pressings.js` owns the control; every
-  sentence is server-owned.
+  never runs at render time and writes nothing. The answer appears inline
+  and claims no more than the lengths show. It first says whether the files
+  fit the release's own listing (every track within 2s; a listed length
+  falls back to the recording's, as Beets does). If they do, other
+  pressings the files also fit are reported as indistinguishable by length,
+  never as a match. Only when the files do not fit the release is a sibling
+  they do fit reported as a matching pressing, with where its titles differ
+  (punctuation and case are not differences; combining marks are) or that
+  the listings differ only in length. Disc IDs are judged twice: the
+  release's listed lengths against every attached table of contents (a
+  disc vouches for the listing only when it matches it), and the files
+  against every attached disc (the listing's disc, a different attached
+  disc, or none; 2 to 5s off is said as "a few seconds off", more as "does
+  not match"). With no disc ID it says only that there is no disc to check
+  against: a digital, vinyl or other non-CD medium cannot carry one, and a
+  multi-disc release is described disc by disc. Links go to the matching
+  pressings and the release on MusicBrainz. A Discogs release gets "not
+  available"; an unreachable or slow mirror (30s budget, a busy mirror slot
+  included) gets one plain sentence. `web/js/other_pressings.js` owns the
+  control; every sentence is server-owned.
 - **Wrong Matches unavailable sources** — a candidate whose folder the server
   could not READ (permissions, I/O — never a folder proven gone) stays in the
   list with a `source unavailable` badge, an amber card, both Force Import and

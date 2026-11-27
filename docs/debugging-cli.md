@@ -292,16 +292,19 @@ inside socket authorization, never credentials.
 - `pipeline-cli audit world` — Read-only PipelineDB, Beets, evidence, and disk coherence audit.
 - `pipeline-cli ban-source` — Remove a server-resolved bad rip and requeue its request when appropriate.
 - `pipeline-cli other-pressings <download_log_id> [--json]` — Read-only
-  check (issue #1445) of one attempt against the other releases in its
-  MusicBrainz release group, through `GET /api/other-pressings/<id>` and
-  `lib/other_pressing_check.py`. Prints plain sentences: which pressings
-  list a length for every track that every file matches within 2s, where
-  their titles differ from the matched release, and whether the release's
-  listed lengths come from a real disc (a disc ID's table of contents) the
-  files agree with, or were typed in by hand. `--json` prints the typed
-  result. Exit 0 for any answer (including "not available for Discogs
-  releases"), 2 for an unknown row, 5 when MusicBrainz could not be asked;
-  the service gives the mirror 30s in total, the command waits 60s.
+  check (issue #1445) of one attempt against its own release's listing,
+  the other releases in its MusicBrainz release group, and the release's
+  disc IDs, through `GET /api/other-pressings/<id>` and
+  `lib/other_pressing_check.py`. Prints the same plain sentences as the web
+  UI (see `docs/webui-primer.md` § "Check other pressings"); `--json`
+  prints the typed result. Exit 0 for any answer (including "not available
+  for Discogs releases"), 2 for an unknown row, 5 when MusicBrainz could
+  not be asked. Exit 5 is the repository's one transient code and is also
+  what any relayed command returns when the web API itself is down, so the
+  two are told apart on stderr: `{"error": "api_unavailable", ...}` means
+  the web API could not be reached, `{"error": "musicbrainz_unavailable",
+  ...}` means the API answered but MusicBrainz could not be asked. The
+  service gives the mirror 30s in total, the command waits 60s.
 - `pipeline-cli beets-distance` — Measure a rejected download against an exact
   release. A folder that could not be observed or read reports
   `folder_unavailable` (exit 5), never `folder_missing`/`no_audio`. When only
