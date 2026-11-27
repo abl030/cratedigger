@@ -2,6 +2,7 @@
 import { API, toast } from './state.js';
 import { awstDateTime, esc, externalReleaseUrl, sourceLabel, wrongMatchExplorerFailureCopy } from './util.js';
 import { renderHeldUpgradeTable } from './history.js';
+import { renderOtherPressingsControl } from './other_pressings.js';
 import { renderReplaceButton } from './release_actions.js';
 import { consumePendingScrollRestore } from './search_plan.js';
 import {
@@ -1240,6 +1241,7 @@ export function renderHeldUpgradeCard(card) {
           onclick="event.stopPropagation(); window.cancelHeldUpgradeChoice(${heldId})">Cancel</button>
       </div>
       ${jobLine}
+      ${renderOtherPressingsControl(heldId)}
       <div class="held-upgrade-help" id="wm-held-help-${heldId}">Use new copy: replaces your current copy with this one. Keep current copy: deletes this new copy, and that peer stays skipped for this album.</div>
     </div>`;
 }
