@@ -25,7 +25,7 @@ The installed wrapper has two independent authority shapes:
   `merge-rekey`, `sync-file-tags`, `library-census-refresh`, `resolve-rg`,
   `wrong-match-delete`, `wrong-match-delete-group`,
   `wrong-match-triage`, `wrong-match-triage-cancel`, `replace`,
-  `force-import`, `import-local`, `beets-distance`,
+  `force-import`, `import-local`, `beets-distance`, `other-pressings`,
   `import-preview --download-log-id`, and `triage quarantine` connect to
   `/run/cratedigger-web/web.sock`. The caller must be a
   member of `services.cratedigger.web.accessGroup` (default
@@ -165,7 +165,7 @@ remains after a purge failure.
 `merge-rekey`, `sync-file-tags`, `library-census-refresh`, `resolve-rg`,
 `wrong-match-delete`, `wrong-match-delete-group`,
 `wrong-match-triage`, `wrong-match-triage-cancel`, `replace`,
-`force-import`, `import-local`, `beets-distance`, and
+`force-import`, `import-local`, `beets-distance`, `other-pressings`, and
 `import-preview --download-log-id` call the canonical web route over the
 module-owned Unix socket.
 The installed Nix wrapper selects that socket while constructing the parser:
@@ -188,7 +188,7 @@ hatch. The installed wrapper does not expose `--api-base`.
 Valid JSON route responses, including 5xx responses, are relayed on stdout —
 except for the commands that kept their own text/`--json` presentation
 (`wrong-match-delete`, `wrong-match-delete-group`, `wrong-match-triage`,
-`replace`, `force-import`, `import-local`, `beets-distance`, `import-preview`), which render
+`replace`, `force-import`, `import-local`, `beets-distance`, `other-pressings`, `import-preview`), which render
 the route's payload exactly as they did when they executed in-process.
 Any 2xx exits 0; 404 exits 2; 400/422 exits 3; 409 exits 4; other statuses
 exit 5. Per-command overrides preserve exit codes those commands already had:
@@ -291,6 +291,17 @@ inside socket authorization, never credentials.
   audit scope" below.
 - `pipeline-cli audit world` — Read-only PipelineDB, Beets, evidence, and disk coherence audit.
 - `pipeline-cli ban-source` — Remove a server-resolved bad rip and requeue its request when appropriate.
+- `pipeline-cli other-pressings <download_log_id> [--json]` — Read-only
+  check (issue #1445) of one attempt against the other releases in its
+  MusicBrainz release group, through `GET /api/other-pressings/<id>` and
+  `lib/other_pressing_check.py`. Prints plain sentences: which pressings
+  list a length for every track that every file matches within 2s, where
+  their titles differ from the matched release, and whether the release's
+  listed lengths come from a real disc (a disc ID's table of contents) the
+  files agree with, or were typed in by hand. `--json` prints the typed
+  result. Exit 0 for any answer (including "not available for Discogs
+  releases"), 2 for an unknown row, 5 when MusicBrainz could not be asked;
+  the service gives the mirror 30s in total, the command waits 60s.
 - `pipeline-cli beets-distance` — Measure a rejected download against an exact
   release. A folder that could not be observed or read reports
   `folder_unavailable` (exit 5), never `folder_missing`/`no_audio`. When only

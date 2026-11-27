@@ -160,6 +160,7 @@ not on anyone's list.
 | `/api/pipeline/force-import` | POST | Queue force-import for a rejected download `{"download_log_id": N}`; returns `202` + job id |
 | `/api/youtube-album` | POST | Resolve an MB/Discogs release or group to the cache-writing YouTube Music matrix; body `{"identifier": "...", "refresh": false}` |
 | `/api/wrong-matches` | GET | Group rejected downloads by release for triage; held upgrades come back separately as `held_upgrades` (issue #1445) |
+| `/api/other-pressings/<download_log_id>` | GET | Read-only, on-demand check of one attempt against the other releases in its MusicBrainz release group and the release's disc IDs (issue #1445); 200 answer, 404 unknown row, 503 mirror unreachable; `pipeline-cli other-pressings` relays it |
 | `/api/wrong-matches/explorer` | GET | List files for one wrong-match candidate, including extracted tags and audio-preview URLs |
 | `/api/wrong-matches/audio` | GET | Stream an individual wrong-match audio file with byte-range support |
 | `/api/wrong-matches/converge` | POST | Queue every wrong-match candidate within a release's loosen threshold and delete the rest; never touches a held upgrade (`held_upgrades` count, `ordinary_group_empty`) |
@@ -704,6 +705,21 @@ not on anyone's list.
   scrolls inside its own box and the buttons wrap at phone width. Recents and
   History show the attempt with an "Upgrade held" badge, the sentence in
   amber, and the same table.
+- **Check other pressings** (issue #1445) — a button beside the track-length
+  lines of any History row that has a track-length shape, and on each Held
+  upgrades card (for the new copy). Clicking runs the read-only check in
+  `lib/other_pressing_check.py` through `GET /api/other-pressings/<id>`; it
+  never runs at render time and writes nothing. The answer appears inline:
+  whether another pressing in the release group lists a length for every
+  track that every file matches within 2s (and where that pressing's titles
+  differ, or that the listings differ only in length and may describe the
+  same audio), whether the release's listed lengths come from a real disc
+  ID's table of contents and the files agree with it (a few seconds off is
+  said separately, as gap handling), or were typed in by hand, and links to
+  the matching pressings and the release on MusicBrainz. A Discogs release
+  gets "not available"; an unreachable or slow mirror (30s budget) gets one
+  plain sentence. `web/js/other_pressings.js` owns the control; every
+  sentence is server-owned.
 - **Wrong Matches unavailable sources** — a candidate whose folder the server
   could not READ (permissions, I/O — never a folder proven gone) stays in the
   list with a `source unavailable` badge, an amber card, both Force Import and
