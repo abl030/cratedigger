@@ -2354,3 +2354,61 @@ class TestBitrateReductionRoundsLikeTheCandidateSide(unittest.TestCase):
                 beets_side = kbps_from_bps(true_kbps * 1000)
                 self.assertEqual(frame_side, beets_side)
                 self.assertEqual(frame_side, true_kbps)
+
+
+class TestInstalledTrackLengths(unittest.TestCase):
+    """Issue #1445 item 3: the upgrade guard's installed-side read."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmpdir, "lib.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript("""
+            CREATE TABLE albums (
+                id INTEGER PRIMARY KEY, mb_albumid TEXT,
+                discogs_albumid INTEGER);
+            CREATE TABLE items (
+                id INTEGER PRIMARY KEY, album_id INTEGER, path BLOB,
+                title TEXT, track INTEGER, disc INTEGER, length REAL,
+                format TEXT, bitrate INTEGER, samplerate INTEGER,
+                bitdepth INTEGER, mb_releasetrackid TEXT, mb_trackid TEXT);
+            INSERT INTO albums VALUES
+                (1, '4c6f4a7b-c093-4006-a50e-3d6dfbdd2645', NULL),
+                (2, NULL, 555);
+            INSERT INTO items VALUES
+                (10, 1, CAST('/lib/a/01.mp3' AS BLOB), 'One', 1, 1, 227.4,
+                 'MP3', 320000, 44100, 16, 'rt-1', 'rec-shared'),
+                (11, 1, CAST('/lib/a/02.mp3' AS BLOB), 'Two', 2, 1, 126.8,
+                 'MP3', 320000, 44100, 16, 'rt-2', 'rec-shared'),
+                (20, 2, CAST('/lib/b/01.mp3' AS BLOB), 'A', 1, 1, 100.0,
+                 'MP3', 320000, 44100, 16, '', '555-A1');
+        """)
+        conn.commit()
+        conn.close()
+
+    def test_musicbrainz_keys_on_release_track_id(self) -> None:
+        from lib.release_identity import ReleaseIdentity
+
+        with BeetsDB(self.db_path) as db:
+            tracks = db.installed_track_lengths(ReleaseIdentity(
+                "musicbrainz", "4c6f4a7b-c093-4006-a50e-3d6dfbdd2645"))
+        assert tracks is not None
+        self.assertEqual(
+            [(t.key, t.installed_seconds) for t in tracks],
+            [("rt-1", 227.4), ("rt-2", 126.8)])
+
+    def test_discogs_keys_on_synthetic_track_id(self) -> None:
+        from lib.release_identity import ReleaseIdentity
+
+        with BeetsDB(self.db_path) as db:
+            tracks = db.installed_track_lengths(
+                ReleaseIdentity("discogs", "555"))
+        assert tracks is not None
+        self.assertEqual([t.key for t in tracks], ["555-A1"])
+
+    def test_not_installed_is_none(self) -> None:
+        from lib.release_identity import ReleaseIdentity
+
+        with BeetsDB(self.db_path) as db:
+            self.assertIsNone(db.installed_track_lengths(ReleaseIdentity(
+                "musicbrainz", "00000000-0000-0000-0000-000000000000")))

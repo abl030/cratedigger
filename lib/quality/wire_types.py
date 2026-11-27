@@ -9,6 +9,8 @@ from typing import Self
 
 import msgspec
 
+from lib.quality.installed_copy_guard import InstalledCopyComparison
+
 # ---------------------------------------------------------------------------
 # Harness wire-boundary types — msgspec.Struct with strict `str` validation.
 #
@@ -300,6 +302,12 @@ class ValidationResult(msgspec.Struct):
     # persisted so it stays visible through existing ``validation_result``
     # audit surfaces even on a ``strong_match``.
     incomplete_composite_paths: list[str] = []
+    # Upgrade guard (issue #1445 item 3): populated exactly when
+    # ``scenario == "upgrade_held"`` — the per-track comparison of the held
+    # candidate with the installed copy it would have replaced. Every
+    # surface (Recents, Wrong Matches, pipeline-cli) renders the hold from
+    # this stored evidence, never from a fresh measurement.
+    upgrade_hold: InstalledCopyComparison | None = None
 
     def to_json(self) -> str:
         """Serialize to JSON string via msgspec.json.encode."""

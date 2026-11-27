@@ -32,6 +32,18 @@ from __future__ import annotations
 
 WRONG_MATCH_QUARANTINE_DIR = "wrong_matches"
 
+#: Issue #1445 item 3: an automatic upgrade held because the candidate's
+#: track lengths disagree with the installed copy it would have replaced.
+#: Visible in Wrong Matches (in its own "Held upgrades" section) and never
+#: delete-eligible: approving or discarding a held copy is the operator's
+#: call. Converge, delete-group and the cleanup reducer all skip it.
+UPGRADE_HELD_SCENARIO = "upgrade_held"
+
+
+def is_upgrade_held_scenario(scenario: str | None) -> bool:
+    """Whether a persisted rejection scenario is a held upgrade."""
+    return scenario == UPGRADE_HELD_SCENARIO
+
 
 PREIMPORT_FACT_REJECTION_SCENARIOS: frozenset[str] = frozenset({
     "audio_corrupt",

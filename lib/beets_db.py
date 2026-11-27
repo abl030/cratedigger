@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from lib.config import CratediggerConfig
     from lib.library_completeness import LibraryAlbum
     from lib.quality import QualityRankConfig
+    from lib.quality.installed_copy_guard import InstalledTrackLength
 
 
 @dataclass(frozen=True)
@@ -528,6 +529,47 @@ class BeetsDB:
         """
 
         return self.resolve_current_releases([identity])[identity]
+
+    def installed_track_lengths(
+        self,
+        identity: ReleaseIdentity,
+    ) -> "tuple[InstalledTrackLength, ...] | None":
+        """The installed copy's track lengths keyed by release-track identity.
+
+        Issue #1445 item 3 (the upgrade guard). ``None`` when the exact
+        release is not uniquely installed: no installed copy means nothing
+        an import could destroy. The key spelling mirrors
+        :meth:`list_library_completeness_albums`: a Discogs item carries
+        its synthetic ``<release>-<position>`` identity in ``mb_trackid``;
+        a MusicBrainz item is keyed by ``mb_releasetrackid`` (its
+        ``mb_trackid`` is a recording id, which can repeat on a release).
+        Never keyed by ``track``/``disc``, whose meaning depends on
+        ``per_disc_numbering``.
+        """
+        from lib.quality.installed_copy_guard import InstalledTrackLength
+
+        current = self.resolve_current_release(identity)
+        if not isinstance(current, CurrentBeetsUnique):
+            return None
+        rows = self._conn.execute(
+            "SELECT mb_releasetrackid, mb_trackid, length FROM items "
+            "WHERE album_id = ? ORDER BY id",
+            (current.album_id,),
+        ).fetchall()
+        tracks: list[InstalledTrackLength] = []
+        for raw_release_track, raw_recording, raw_length in rows:
+            raw_key = (
+                raw_recording if identity.source == "discogs"
+                else raw_release_track
+            )
+            tracks.append(InstalledTrackLength(
+                key=str(raw_key).strip() if raw_key is not None else "",
+                installed_seconds=(
+                    float(raw_length)
+                    if isinstance(raw_length, (int, float)) else 0.0
+                ),
+            ))
+        return tuple(tracks)
 
     def resolve_current_releases(
         self,

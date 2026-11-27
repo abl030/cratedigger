@@ -37,6 +37,7 @@ from lib.dispatch.helpers import (
 )
 from lib.dispatch.outcome_actions import (
     _do_mark_done,
+    _hold_upgrade_from_evidence_decision,
     _record_have_analysis_error,
     _record_rejection_and_maybe_requeue,
     _reject_import_from_evidence_decision,
@@ -93,6 +94,12 @@ from lib.quality import (
     override_bitrate_from_current_evidence,
     resolve_rejection_search_override,
     stage2_counterfactual_from_decision,
+)
+from lib.quality.decisions import DECISION_UPGRADE_HELD
+from lib.quality.installed_copy_guard import (
+    InstalledCopyComparison,
+    InstalledTrackLength,
+    compare_installed_copy,
 )
 from lib.quality_evidence import EvidenceBuildResult, audit_v0_probe_from_metric
 from lib.terminal_outcomes import PendingImportTerminalOutcome
@@ -561,6 +568,71 @@ def _snapshot_current_album_directories(
         beets_library_db_path, library_root=beets_library_root,
     ) as beets_db:
         return beets_db.get_current_album_directories(mb_release_id)
+
+
+def _load_installed_track_lengths(
+    *,
+    beets_library_db_path: str,
+    beets_library_root: str,
+    mb_release_id: str,
+) -> tuple[InstalledTrackLength, ...] | None:
+    """Read the installed copy's track lengths for the upgrade guard.
+
+    Issue #1445 item 3. ``None`` = the exact release is not uniquely
+    installed, so an import replaces nothing. Read errors propagate: the
+    dispatch ``exception`` path audits them and requeues, rather than
+    letting an unreadable library wave a replacement through.
+    """
+    from lib.beets_db import BeetsDB, release_identity_for_lookup
+
+    identity = release_identity_for_lookup(mb_release_id)
+    if identity is None:
+        return None
+    with BeetsDB(
+        beets_library_db_path, library_root=beets_library_root,
+    ) as beets_db:
+        return beets_db.installed_track_lengths(identity)
+
+
+def _upgrade_guard_comparison(
+    request: DispatchRequest,
+    preamble: _DispatchPreamble,
+    installed_tracks_loader: Callable[
+        ..., tuple[InstalledTrackLength, ...] | None
+    ],
+) -> InstalledCopyComparison | None:
+    """Compare this candidate with the installed copy it would replace.
+
+    ``None`` when this lane is not guarded (``upgrade_guard_candidate`` is
+    unset: force, local import, YouTube rescue) or there is no installed
+    copy. A run that could key no track at all fails open and says so in
+    one journal line, so a silent no-op is findable.
+    """
+    if request.upgrade_guard_candidate is None:
+        return None
+    installed = installed_tracks_loader(
+        beets_library_db_path=preamble.beets_library_db_path,
+        beets_library_root=preamble.beets_library_root,
+        mb_release_id=request.mb_release_id,
+    )
+    if installed is None:
+        return None
+    comparison = compare_installed_copy(
+        request.upgrade_guard_candidate, installed,
+    )
+    if comparison.compared_count == 0:
+        logger.warning(
+            "UPGRADE GUARD COMPARED NOTHING: %s (request %s, release %s) — "
+            "%d candidate track(s), %d installed track(s), none keyed by "
+            "release-track identity on both sides; the guard fails open "
+            "for this attempt",
+            request.label,
+            request.request_id,
+            request.mb_release_id,
+            len(request.upgrade_guard_candidate),
+            len(installed),
+        )
+    return comparison
 
 
 class _DownloadLogEntryReader(Protocol):
@@ -1091,6 +1163,10 @@ def _run_evidence_gate(
     current_evidence_loader: (
         Callable[..., CurrentEvidenceActionResult | None] | None
     ),
+    installed_tracks_loader: Callable[
+        ..., tuple[InstalledTrackLength, ...] | None
+    ] = _load_installed_track_lengths,
+    cancellation_token: CancellationToken | None = None,
 ) -> _EvidenceStage:
     """Load, reauthorize, and decide on action-time quality evidence.
 
@@ -1255,6 +1331,11 @@ def _run_evidence_gate(
     # helper below, which honours caller lifecycle authority:
     # automation self-heals; force imports preserve operator
     # status.
+    # Issue #1445 item 3: the upgrade guard's fact. Computed only for the
+    # automation lane; the decider below is what turns it into a hold.
+    upgrade_comparison = _upgrade_guard_comparison(
+        request, preamble, installed_tracks_loader,
+    )
     facts = AlbumQualityEvidenceDecisionFacts(
         verified_lossless_target=request.verified_lossless_target or None,
         target_format=request.target_format,
@@ -1265,6 +1346,9 @@ def _run_evidence_gate(
             db.request_marked_incomplete(request.request_id)
         ),
         candidate_covers_declared_program=attempt_program_covered,
+        installed_track_lengths_disagree=(
+            upgrade_comparison is not None and upgrade_comparison.holds
+        ),
     )
     evidence_decision = full_pipeline_decision_from_evidence(
         evidence_gate.candidate,
@@ -1274,6 +1358,25 @@ def _run_evidence_gate(
     )
     if not _import_allowed_by_evidence_pipeline(evidence_decision):
         decision = evidence_decision_name(evidence_decision)
+        if decision == DECISION_UPGRADE_HELD:
+            if upgrade_comparison is None:
+                raise RuntimeError(
+                    "upgrade_held decided without a stored comparison"
+                )
+            attempt_result.merge(_evidence_reject_import_result(
+                decision=decision,
+                candidate=evidence_gate.candidate,
+                current=evidence_gate.current,
+                evidence_decision=evidence_decision,
+                existing_v0_probe=existing_v0_probe,
+            ))
+            return _EvidenceStage(outcome=_hold_upgrade_from_evidence_decision(
+                request,
+                db,
+                attempt_result=attempt_result,
+                comparison=upgrade_comparison,
+                cancellation_token=cancellation_token,
+            ))
         detail = (
             evidence_gate.candidate.audio_error
             if (
@@ -1896,6 +1999,9 @@ def dispatch_import_core(
         Callable[..., tuple[DeleteNotification, ...]] | None
     ) = None,
     cancellation_token: CancellationToken | None = None,
+    installed_tracks_loader: Callable[
+        ..., tuple[InstalledTrackLength, ...] | None
+    ] = _load_installed_track_lengths,
 ) -> DispatchOutcome:
     """Core import dispatch — one typed ``DispatchRequest`` + a narrow DB port.
 
@@ -2040,6 +2146,8 @@ def dispatch_import_core(
                 active_execution_lease=active_execution_lease,
                 evidence_gate_fn=evidence_gate_fn,
                 current_evidence_loader=current_evidence_loader,
+                installed_tracks_loader=installed_tracks_loader,
+                cancellation_token=cancellation_token,
             )
             # Recorded before the two launch-authority refusals below: both
             # return with the sidecar already on disk, and this function's

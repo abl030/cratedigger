@@ -48,6 +48,7 @@ if TYPE_CHECKING:
         SpectralDetail,
         V0ProbeEvidence,
     )
+    from lib.quality.installed_copy_guard import CandidateTrackLength
     from lib.terminal_outcomes import (
         ImportTerminalOutcome,
         PendingImportTerminalOutcome,
@@ -91,6 +92,8 @@ DISPATCH_CODE_PROCESSING_LOCKED = "processing_locked"
 # Consumers may react to this outcome, but must not re-run a parallel import
 # decision to prove it again.
 DISPATCH_CODE_QUALITY_PIPELINE_REJECTED = "quality_pipeline_rejected"
+#: Issue #1445 item 3: the upgrade guard kept the installed copy.
+DISPATCH_CODE_UPGRADE_HELD = "upgrade_held"
 DISPATCH_CODE_IMPORT_MANIFEST_REJECTED = "import_manifest_rejected"
 
 # Scenarios whose ``path`` is the user's source data (``failed_imports/…``),
@@ -449,6 +452,15 @@ class DispatchRequest:
     # --- #898 ownership / fencing -----------------------------------
     execution_lease: ExecutionLeaseSnapshot | None = None
     owner_session_identity: OwnerSessionIdentity | None = None
+
+    # --- #1445 item 3: upgrade guard --------------------------------
+    #: The selected beets candidate's tracks, for comparing against the
+    #: installed copy this import would replace. ``None`` means this lane is
+    #: not guarded: only the automation lane sets it
+    #: (``lib/download_validation.py::_handle_valid_result`` when it holds
+    #: an execution-owner proof). Force import (the operator's approval
+    #: path), local import and YouTube rescue never do.
+    upgrade_guard_candidate: tuple[CandidateTrackLength, ...] | None = None
 
 
 class DispatchCoreFn(Protocol):

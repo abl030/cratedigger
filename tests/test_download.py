@@ -3618,6 +3618,109 @@ class TestHandleValidResultMissingMbid(unittest.TestCase):
         self.assertEqual(db.download_logs[0].beets_distance, 0.0)
 
 
+class TestHandleValidResultUpgradeGuardCandidate(unittest.TestCase):
+    """Issue #1445 item 3: only the automation lane carries the guard input.
+
+    ``_handle_valid_result`` serves the automation import job AND the
+    operator's YouTube rescue; only the automation lane holds an
+    execution-owner proof, so only it hands dispatch the candidate tracks.
+    """
+
+    def _run(self, *, owner_proof: object | None, release_id: str):
+        from lib.download_validation import _handle_valid_result
+        from lib.quality import ValidationResult
+        from lib.quality.wire_types import (
+            CandidateSummary,
+            HarnessItem,
+            HarnessTrackInfo,
+            TrackMapping,
+        )
+        from lib.staged_album import StagedAlbum
+
+        album = make_grab_list_entry(
+            files=[make_download_file()],
+            mb_release_id=release_id,
+            db_source="request",
+            db_request_id=42,
+        )
+        mapping = [
+            TrackMapping(
+                item=HarnessItem(path="/x/02.flac", length=205.9),
+                track=HarnessTrackInfo(
+                    title="Secretive Girl", medium=1, medium_index=2,
+                    length=126.8, release_track_id="rt-2",
+                    track_id=f"{release_id}-A2",
+                ),
+            ),
+        ]
+        bv_result = ValidationResult(
+            valid=True, distance=0.05, scenario="strong_match",
+            candidates=[
+                CandidateSummary(
+                    mbid="other", distance=0.3, data_source="MusicBrainz",
+                    mapping=[], extra_items=[], extra_tracks=[]),
+                CandidateSummary(
+                    mbid=release_id, distance=0.05, data_source="MusicBrainz",
+                    mapping=mapping, extra_items=[], extra_tracks=[],
+                    is_target=True),
+            ],
+        )
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        cfg = MagicMock()
+        cfg.beets_distance_threshold = 0.15
+        ctx = make_ctx_with_fake_db(db, cfg=cfg)
+        from lib.dispatch import DispatchOutcome, DispatchRequest
+
+        captured: list[DispatchRequest] = []
+
+        def capture(
+            request: DispatchRequest, *_args: object, **_kwargs: object,
+        ) -> DispatchOutcome:
+            captured.append(request)
+            return DispatchOutcome(success=True, message="captured")
+
+        with tempfile.TemporaryDirectory() as tmpdir, \
+             patch("lib.download_validation.log_validation_result"):
+            import_dir = os.path.join(tmpdir, "album")
+            os.makedirs(import_dir)
+            _handle_valid_result(
+                album, bv_result,
+                StagedAlbum(current_path=import_dir, request_id=42),
+                ctx,
+                dispatch_fn=capture,
+                owner_proof=owner_proof,  # type: ignore[arg-type]
+            )
+        self.assertEqual(len(captured), 1)
+        return captured[0].upgrade_guard_candidate
+
+    def test_automation_lane_carries_the_selected_candidate_tracks(self):
+        tracks = self._run(
+            owner_proof=MagicMock(),
+            release_id="4c6f4a7b-c093-4006-a50e-3d6dfbdd2645",
+        )
+        assert tracks is not None
+        (track,) = tracks
+        self.assertEqual(track.key, "rt-2")
+        self.assertEqual(track.medium_index, 2)
+        self.assertEqual(track.title, "Secretive Girl")
+        self.assertEqual(track.declared_seconds, 126.8)
+        self.assertEqual(track.candidate_seconds, 205.9)
+
+    def test_discogs_request_keys_on_the_synthetic_track_id(self):
+        tracks = self._run(owner_proof=MagicMock(), release_id="555")
+        assert tracks is not None
+        (track,) = tracks
+        self.assertEqual(track.key, "555-A2")
+
+    def test_ownerless_lane_is_never_guarded(self):
+        # YouTube rescue reaches this seam with no execution-owner proof.
+        self.assertIsNone(self._run(
+            owner_proof=None,
+            release_id="4c6f4a7b-c093-4006-a50e-3d6dfbdd2645",
+        ))
+
+
 class TestEventPathMaterialization(unittest.TestCase):
     """Issue #146 phase 3: the event-stream local_path is the ONLY source
     of file locations. An unstamped file (with no already-moved evidence)
