@@ -178,6 +178,38 @@ function basisUsesClampedValue(basis, side) {
 }
 
 /**
+ * The number a spectral grade chip may print beside its grade, in kbps.
+ *
+ * `spectral_bitrate` is the legacy bucket from `estimate_bitrate_from_cliff`;
+ * the comparator classes the same cliff through a ladder with different
+ * edges. When the basis decided on a spectral-clamped value for this side,
+ * the legacy bucket can contradict the verdict (issue #1466: chip ~96k
+ * beside a verdict that used 128). On such a side the chip prints the
+ * decider's value only when it sits below the side's raw metric (then it
+ * is the spectral class); otherwise the class was not binding and no
+ * number is printed.
+ * @param {Object} h - download history row
+ * @param {Object|null} basis - comparison_basis dict from the API
+ * @param {'new'|'existing'} side
+ * @returns {number|null}
+ */
+export function spectralChipKbps(h, basis, side) {
+  const legacy = side === 'new' ? h.spectral_bitrate : h.existing_spectral_bitrate;
+  if (!basisUsesClampedValue(basis, side)) return legacy || null;
+  const value = side === 'new' ? basis.new_value_kbps : basis.existing_value_kbps;
+  const metric = side === 'new' ? basis.new_metric : basis.existing_metric;
+  // A target contract is policy, not a spectral class: keep the measurement.
+  if (metric === 'contract') return legacy || null;
+  const raw = side === 'new'
+    ? { avg: h.source_avg_bitrate, median: h.source_median_bitrate,
+      min: h.source_min_bitrate ?? h.actual_min_bitrate }[metric]
+    : { avg: h.existing_avg_bitrate, median: h.existing_median_bitrate,
+      min: h.existing_min_bitrate }[metric];
+  if (value == null || raw == null) return null;
+  return Number(value) < Number(raw) ? Number(value) : null;
+}
+
+/**
  * Value phrase for one side of a persisted comparison basis: "avg 288k",
  * or "~250k" when the basis classified spectral-clamped values (a clamped
  * number is min(metric, spectral floor) — labelling it with the metric
@@ -368,16 +400,15 @@ function buildEvidenceCardModel(h) {
     }
   }
   if (h.spectral_grade) {
-    // With a basis, a clamped candidate value already carries the floor —
-    // repeating "~250k" in the grade chip would double it up. The
-    // candidate side is the one the chip sits beside, so that is the side
-    // asked about here.
+    // A clamped candidate value already printed in the metric cell carries
+    // the floor — repeating "~250k" in the grade chip would double it up.
+    const chipKbps = spectralChipKbps(h, basis, 'new');
     const basisAlreadyHasFloor = Boolean(
       basisUsesClampedValue(basis, 'new')
-      && Number(basis.new_value_kbps) === Number(h.spectral_bitrate),
+      && inCells.metric === basisValuePhrase(basis, 'new'),
     );
-    const floor = (h.spectral_bitrate && !basisAlreadyHasFloor)
-      ? `~${esc(h.spectral_bitrate)}k ` : '';
+    const floor = (chipKbps && !basisAlreadyHasFloor)
+      ? `~${esc(chipKbps)}k ` : '';
     // An audit-only codec's cliff is native encoder rolloff, never an
     // accusation (issue #829 PR4).
     inCells.spectral = spectralStripCell(
@@ -420,7 +451,12 @@ function buildEvidenceCardModel(h) {
     );
   }
   if (h.existing_spectral_grade) {
-    const floor = h.existing_spectral_bitrate ? `~${esc(h.existing_spectral_bitrate)}k ` : '';
+    const chipKbps = spectralChipKbps(h, basis, 'existing');
+    const basisAlreadyHasFloor = Boolean(
+      basisUsesClampedValue(basis, 'existing')
+      && haveCells.metric === basisValuePhrase(basis, 'existing'),
+    );
+    const floor = (chipKbps && !basisAlreadyHasFloor) ? `~${esc(chipKbps)}k ` : '';
     haveCells.spectral = spectralStripCell(
       h.existing_spectral_grade, floor,
       h.existing_spectral_accusation_admissible,
@@ -627,7 +663,7 @@ export function renderDownloadHistoryItem(h) {
       ? `<span class="${qualityToneClass('poor')}" title="${esc(h.spectral_error)}">analysis failed</span>`
       : h.spectral_grade
       ? spectralChip(
-        h.spectral_grade, h.spectral_bitrate,
+        h.spectral_grade, spectralChipKbps(h, h.comparison_basis || null, 'new'),
         h.spectral_accusation_admissible, h.spectral_accusation_withheld)
       : cdRipProof && h.spectral_attempted === false
         ? 'not needed — CD bit match'
@@ -637,7 +673,7 @@ export function renderDownloadHistoryItem(h) {
       : h.existing_spectral_grade
       ? spectralChip(
         h.existing_spectral_grade,
-        h.existing_spectral_bitrate,
+        spectralChipKbps(h, h.comparison_basis || null, 'existing'),
         h.existing_spectral_accusation_admissible,
         h.existing_spectral_accusation_withheld)
       : h.existing_spectral_bitrate

@@ -4,7 +4,9 @@ Pure decisions only. PR2a stated the semantics; **PR2b wires them into the
 decider** — ``interpret_measurement`` + ``decision_class_kbps`` are the two
 entry points every decision seam uses, and no seam may read a raw
 ``spectral_bitrate_kbps`` for a decision again. Operator-facing display is
-still unwired (PR4).
+wired only through the persisted comparison basis: a Recents spectral chip
+on a spectral-clamped side prints the basis class, not the legacy bucket
+(issue #1466).
 
 Why this module exists
 ----------------------
