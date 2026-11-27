@@ -251,6 +251,103 @@ class TestUpgradeGuardDispatch(unittest.TestCase):
         self.assertFalse(world.beets_launched())
 
 
+class TestInstalledLengthsAreMeasuredFromFiles(unittest.TestCase):
+    """The production installed-side loader, end to end on real audio.
+
+    WHY this exists: Beets' ``items.length`` is NOT the installed file's
+    length — it holds the release's declared value. On doc2, Kurt Vile
+    "So Outta Reach" item 195486 "02 It's Alright.opus" stores 289.9s (the
+    MusicBrainz value) while the file reads 336.3s. A guard reading that
+    column would compare the candidate with the release and the "new copy
+    is closer to the release" exemption could never fire. Do not
+    "simplify" the loader back to the column.
+    """
+
+    _FIXTURES = os.path.join(
+        os.path.dirname(__file__), "fixtures", "audio_hash")
+
+    def setUp(self) -> None:
+        import shutil
+        import sqlite3
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.library = os.path.join(self.tmp.name, "library")
+        album = os.path.join(self.library, "Kurt Vile", "So Outta Reach")
+        os.makedirs(album)
+        self.mp3 = os.path.join(album, "01 Track.mp3")
+        self.ogg = os.path.join(album, "02 It's Alright.ogg")
+        shutil.copy(os.path.join(self._FIXTURES, "sine_440.mp3"), self.mp3)
+        shutil.copy(os.path.join(self._FIXTURES, "sine_440.ogg"), self.ogg)
+        self.missing = os.path.join(album, "03 Gone.mp3")
+        self.db_path = os.path.join(self.tmp.name, "library.db")
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript("""
+            CREATE TABLE albums (
+                id INTEGER PRIMARY KEY, mb_albumid TEXT,
+                discogs_albumid INTEGER);
+            CREATE TABLE items (
+                id INTEGER PRIMARY KEY, album_id INTEGER, path BLOB,
+                title TEXT, track INTEGER, disc INTEGER, length REAL,
+                format TEXT, bitrate INTEGER, samplerate INTEGER,
+                bitdepth INTEGER, mb_releasetrackid TEXT, mb_trackid TEXT);
+        """)
+        conn.execute("INSERT INTO albums VALUES (1, ?, NULL)", (_RELEASE,))
+        for item_id, path, declared, key in (
+            (10, self.mp3, 227.4, "rt-1"),
+            (11, self.ogg, 289.9, "rt-2"),
+            (12, self.missing, 196.9, "rt-3"),
+        ):
+            conn.execute(
+                "INSERT INTO items VALUES "
+                "(?, 1, ?, 'x', 1, 1, ?, 'MP3', 0, 0, 0, ?, '')",
+                (item_id, path.encode(), declared, key),
+            )
+        conn.commit()
+        conn.close()
+
+    def test_lengths_come_from_the_files_not_the_beets_column(self) -> None:
+        from lib.dispatch.core import _load_installed_track_lengths
+
+        with self.assertLogs("cratedigger", level=logging.WARNING) as logs:
+            tracks = _load_installed_track_lengths(
+                beets_library_db_path=self.db_path,
+                beets_library_root=self.library,
+                mb_release_id=_RELEASE,
+                label="Kurt Vile - So Outta Reach",
+            )
+        assert tracks is not None
+        by_key = {t.key: t.installed_seconds for t in tracks}
+        # Header-level mediafile reads of the real fixtures — the same
+        # reader the beets harness uses for the candidate's item.length.
+        self.assertAlmostEqual(by_key["rt-1"], 0.5486, places=3)
+        self.assertAlmostEqual(by_key["rt-2"], 0.5, places=3)
+        self.assertNotIn(289.9, by_key.values())
+        # A missing file is skipped (0.0), with one line naming it.
+        self.assertEqual(by_key["rt-3"], 0.0)
+        self.assertEqual(
+            sum("cannot measure installed file" in line for line in logs.output),
+            1)
+
+    def test_comparison_records_that_lengths_were_measured(self) -> None:
+        comparison = compare_installed_copy(*fairways())
+        self.assertEqual(
+            comparison.installed_lengths_source, "measured_from_files")
+
+    def test_non_positive_measurement_is_skipped_with_a_log_line(self) -> None:
+        from lib.dispatch.core import _measure_installed_track_lengths
+        from lib.quality.installed_copy_guard import InstalledTrackFile
+
+        with self.assertLogs("cratedigger", level=logging.WARNING) as logs:
+            tracks = _measure_installed_track_lengths(
+                [InstalledTrackFile(key="k", path="/x.mp3")],
+                measure_fn=lambda _path: float("nan"),
+                label="x",
+            )
+        self.assertEqual(tracks[0].installed_seconds, 0.0)
+        self.assertEqual(len(logs.output), 1)
+
+
 class TestHoldLeavesSearchStateLikeAnOrdinaryReject(unittest.TestCase):
     """Correction 2: a hold may not narrow, widen or reset the search.
 

@@ -11,6 +11,7 @@ post-commit plan. The post-import search-policy appliers live in
 from __future__ import annotations
 
 import logging
+import math
 import os
 import subprocess as sp
 from collections.abc import Callable, Sequence
@@ -98,6 +99,7 @@ from lib.quality import (
 from lib.quality.decisions import DECISION_UPGRADE_HELD
 from lib.quality.installed_copy_guard import (
     InstalledCopyComparison,
+    InstalledTrackFile,
     InstalledTrackLength,
     compare_installed_copy,
 )
@@ -570,20 +572,68 @@ def _snapshot_current_album_directories(
         return beets_db.get_current_album_directories(mb_release_id)
 
 
+def _measure_installed_track_lengths(
+    files: Sequence[InstalledTrackFile],
+    *,
+    measure_fn: Callable[[str], float],
+    label: str,
+) -> tuple[InstalledTrackLength, ...]:
+    """Measure each installed file; an unusable one becomes length 0.0.
+
+    The comparison skips a non-positive length, so a missing, unreadable,
+    or non-finite/non-positive file drops out of the guard for that track
+    — with one journal line naming it — rather than failing the import.
+    """
+    measured: list[InstalledTrackLength] = []
+    for track in files:
+        seconds = 0.0
+        try:
+            seconds = measure_fn(track.path)
+        except Exception as exc:  # noqa: BLE001 - one unreadable file only skips its track
+            logger.warning(
+                "UPGRADE GUARD: cannot measure installed file %s for %s "
+                "(%s: %s); that track is skipped",
+                track.path, label, type(exc).__name__, exc,
+            )
+        else:
+            if not math.isfinite(seconds) or seconds <= 0:
+                logger.warning(
+                    "UPGRADE GUARD: installed file %s for %s measured %r "
+                    "seconds; that track is skipped",
+                    track.path, label, seconds,
+                )
+                seconds = 0.0
+        measured.append(InstalledTrackLength(
+            key=track.key, installed_seconds=seconds,
+        ))
+    return tuple(measured)
+
+
 def _load_installed_track_lengths(
     *,
     beets_library_db_path: str,
     beets_library_root: str,
     mb_release_id: str,
+    label: str = "",
+    measure_fn: Callable[[str], float] | None = None,
 ) -> tuple[InstalledTrackLength, ...] | None:
-    """Read the installed copy's track lengths for the upgrade guard.
+    """MEASURE the installed copy's track lengths for the upgrade guard.
 
-    Issue #1445 item 3. ``None`` = the exact release is not uniquely
-    installed, so an import replaces nothing. Read errors propagate: the
-    dispatch ``exception`` path audits them and requeues, rather than
-    letting an unreadable library wave a replacement through.
+    Issue #1445 item 3. Beets supplies identity and paths only; every
+    length is read from the installed file itself (header-level, the same
+    ``mediafile`` reader that produced the candidate's ``item.length``),
+    here, under the RELEASE lock the caller holds. Beets' ``items.length``
+    must NOT be used: it holds the release's declared length, not the
+    file's (Kurt Vile "So Outta Reach", item 195486: DB 289.9s, file
+    336.3s) — see ``BeetsDB.installed_track_files``.
+
+    ``None`` = the exact release is not uniquely installed, so an import
+    replaces nothing. A Beets read error propagates: the dispatch
+    ``exception`` path audits it and requeues, rather than letting an
+    unreadable library wave a replacement through.
     """
     from lib.beets_db import BeetsDB, release_identity_for_lookup
+    from lib.media_readiness import mediafile_length_seconds
 
     identity = release_identity_for_lookup(mb_release_id)
     if identity is None:
@@ -591,7 +641,14 @@ def _load_installed_track_lengths(
     with BeetsDB(
         beets_library_db_path, library_root=beets_library_root,
     ) as beets_db:
-        return beets_db.installed_track_lengths(identity)
+        files = beets_db.installed_track_files(identity)
+    if files is None:
+        return None
+    return _measure_installed_track_lengths(
+        files,
+        measure_fn=measure_fn or mediafile_length_seconds,
+        label=label or mb_release_id,
+    )
 
 
 def _upgrade_guard_comparison(
@@ -614,6 +671,7 @@ def _upgrade_guard_comparison(
         beets_library_db_path=preamble.beets_library_db_path,
         beets_library_root=preamble.beets_library_root,
         mb_release_id=request.mb_release_id,
+        label=request.label,
     )
     if installed is None:
         return None

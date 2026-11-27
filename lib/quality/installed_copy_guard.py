@@ -56,8 +56,19 @@ class CandidateTrackLength(msgspec.Struct, frozen=True, kw_only=True):
     component_count: int = 1
 
 
+class InstalledTrackFile(msgspec.Struct, frozen=True, kw_only=True):
+    """One installed Beets item: its release-track key and its file path."""
+
+    key: str
+    path: str
+
+
 class InstalledTrackLength(msgspec.Struct, frozen=True, kw_only=True):
-    """One item of the installed Beets album, by release-track identity."""
+    """One installed item's length MEASURED from its audio file.
+
+    Never Beets' ``items.length``: that column holds the release's declared
+    length, not the file's (see ``BeetsDB.installed_track_files``).
+    """
 
     key: str
     installed_seconds: float
@@ -76,6 +87,12 @@ class TrackLengthComparisonRow(msgspec.Struct, frozen=True, kw_only=True):
     tripped: bool
 
 
+#: How the installed side's lengths were obtained. Always measured from the
+#: installed audio files at decision time, never read from Beets' database
+#: (whose ``items.length`` is the release's declared length).
+INSTALLED_LENGTHS_MEASURED_FROM_FILES: Final = "measured_from_files"
+
+
 class InstalledCopyComparison(msgspec.Struct, frozen=True, kw_only=True):
     """The stored per-track evidence behind an upgrade hold."""
 
@@ -83,6 +100,7 @@ class InstalledCopyComparison(msgspec.Struct, frozen=True, kw_only=True):
     rows: tuple[TrackLengthComparisonRow, ...]
     compared_count: int
     holds: bool
+    installed_lengths_source: str = INSTALLED_LENGTHS_MEASURED_FROM_FILES
 
 
 def _usable(seconds: float | None) -> float | None:

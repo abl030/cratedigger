@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from lib.config import CratediggerConfig
     from lib.library_completeness import LibraryAlbum
     from lib.quality import QualityRankConfig
-    from lib.quality.installed_copy_guard import InstalledTrackLength
+    from lib.quality.installed_copy_guard import InstalledTrackFile
 
 
 @dataclass(frozen=True)
@@ -530,44 +530,55 @@ class BeetsDB:
 
         return self.resolve_current_releases([identity])[identity]
 
-    def installed_track_lengths(
+    def installed_track_files(
         self,
         identity: ReleaseIdentity,
-    ) -> "tuple[InstalledTrackLength, ...] | None":
-        """The installed copy's track lengths keyed by release-track identity.
+    ) -> "tuple[InstalledTrackFile, ...] | None":
+        """The installed copy's audio files keyed by release-track identity.
 
-        Issue #1445 item 3 (the upgrade guard). ``None`` when the exact
-        release is not uniquely installed: no installed copy means nothing
-        an import could destroy. The key spelling mirrors
-        :meth:`list_library_completeness_albums`: a Discogs item carries
-        its synthetic ``<release>-<position>`` identity in ``mb_trackid``;
-        a MusicBrainz item is keyed by ``mb_releasetrackid`` (its
-        ``mb_trackid`` is a recording id, which can repeat on a release).
-        Never keyed by ``track``/``disc``, whose meaning depends on
-        ``per_disc_numbering``.
+        Issue #1445 item 3 (the upgrade guard). Identity and paths ONLY:
+        the caller measures each file. ``items.length`` is deliberately not
+        read — it is NOT a measurement of the installed file. Beets stores
+        the matched release's declared track length there at import
+        (verified on doc2: Kurt Vile "So Outta Reach", item 195486 "02 It's
+        Alright.opus" holds 289.9s, the MusicBrainz value, while the file
+        itself reads 336.3s; Booka Shade "Movements" track 14 holds 378s,
+        the file reads 263.36s). Comparing a candidate against it would
+        compare against the release, never the installed audio.
+
+        ``None`` when the exact release is not uniquely installed: no
+        installed copy means nothing an import could destroy. The key
+        spelling mirrors :meth:`list_library_completeness_albums`: a Discogs
+        item carries its synthetic ``<release>-<position>`` identity in
+        ``mb_trackid``; a MusicBrainz item is keyed by ``mb_releasetrackid``
+        (its ``mb_trackid`` is a recording id, which can repeat on a
+        release). Never keyed by ``track``/``disc``, whose meaning depends
+        on ``per_disc_numbering``. Paths are the resolver's own absolute,
+        containment-checked item paths.
         """
-        from lib.quality.installed_copy_guard import InstalledTrackLength
+        from lib.quality.installed_copy_guard import InstalledTrackFile
 
         current = self.resolve_current_release(identity)
         if not isinstance(current, CurrentBeetsUnique):
             return None
+        paths_by_item_id = {item.id: item.path for item in current.items}
         rows = self._conn.execute(
-            "SELECT mb_releasetrackid, mb_trackid, length FROM items "
+            "SELECT id, mb_releasetrackid, mb_trackid FROM items "
             "WHERE album_id = ? ORDER BY id",
             (current.album_id,),
         ).fetchall()
-        tracks: list[InstalledTrackLength] = []
-        for raw_release_track, raw_recording, raw_length in rows:
+        tracks: list[InstalledTrackFile] = []
+        for raw_id, raw_release_track, raw_recording in rows:
+            path = paths_by_item_id.get(int(raw_id))
+            if path is None:
+                continue
             raw_key = (
                 raw_recording if identity.source == "discogs"
                 else raw_release_track
             )
-            tracks.append(InstalledTrackLength(
+            tracks.append(InstalledTrackFile(
                 key=str(raw_key).strip() if raw_key is not None else "",
-                installed_seconds=(
-                    float(raw_length)
-                    if isinstance(raw_length, (int, float)) else 0.0
-                ),
+                path=path,
             ))
         return tuple(tracks)
 
