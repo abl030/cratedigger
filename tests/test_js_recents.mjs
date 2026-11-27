@@ -495,11 +495,10 @@ t.section('renderRecentsItems() shows bad-extension postflight warning chip');
     'bad extension filename appears in hover detail');
 }
 
-t.section('renderRecentsItems() shows the track-length warning chip (issue #1178)');
+t.section('renderRecentsItems() shows the named track-length chip (issues #1178, #1445)');
 {
-  const warning = "Track length contradicts the matched release: "
-    + "'00 - Hidden Track.flac' is 237.6s where the release declares "
-    + "15.0s for 'Lost Weekend'";
+  const warning = 'Last track runs 3:58 but the release lists 0:15. Usually a '
+    + 'hidden track kept in the same file. Probably fine.';
   const html = renderRecentsFixture([{
     id: 40061,
     request_id: 8954,
@@ -511,19 +510,46 @@ t.section('renderRecentsItems() shows the track-length warning chip (issue #1178
     border_color: '#1a4a2a',
     summary: 'FLAC · lwl',
     track_length_warning: warning,
+    track_length_shape: 'hidden_track_in_file',
+    track_length_label: 'hidden track?',
+    track_length_badge_class: 'badge-muted',
+    track_length_slots: [],
   }]);
-  t.contains(html, 'track length', 'track-length warning chip rendered');
-  t.contains(html, esc(warning),
-    'the full derived sentence appears in the chip hover detail');
-  // The chip is a WARNING, not a proof badge — badge-verified is the
-  // green "positive proof" class this same module uses for CD-rip proof;
-  // an accusing-looking amber chip must never render with the green
-  // class, and this asserts the exact class attribute, not merely that
-  // 'badge-warn' appears SOMEWHERE (disambig/bad-ext chips share it too).
+  // Exact class attribute, label and hover: the chip shows the short
+  // server-owned label in the server-owned (calm) class, never the old
+  // generic text, and the full sentence is the hover.
   t.contains(
     html,
-    `class="badge badge-warn" title="${esc(warning)}">track length<`,
-    'the chip renders with the badge-warn class, not badge-verified',
+    `class="badge badge-muted" title="${esc(warning)}">hidden track?<`,
+    'the chip renders the shape label in its server-owned badge class',
+  );
+  t.excludes(html, '>track length<', 'the generic chip text is gone');
+}
+
+t.section('renderRecentsItems() renders a needs-a-look track-length shape amber');
+{
+  const warning = "Tracks 2, 3 and 5 have each other's lengths. "
+    + 'The titles are probably on the wrong songs.';
+  const html = renderRecentsFixture([{
+    id: 24179,
+    request_id: 6092,
+    created_at: '2026-08-15T10:25:15+00:00',
+    album_title: 'So Outta Reach',
+    artist_name: 'Kurt Vile',
+    badge: 'Imported',
+    badge_class: 'badge-new',
+    border_color: '#1a4a2a',
+    summary: 'FLAC · peer',
+    track_length_warning: warning,
+    track_length_shape: 'tracks_in_wrong_slots',
+    track_length_label: 'wrong order?',
+    track_length_badge_class: 'badge-warn',
+    track_length_slots: [],
+  }]);
+  t.contains(
+    html,
+    `class="badge badge-warn" title="${esc(warning)}">wrong order?<`,
+    'a shape that needs a look keeps the amber warn class',
   );
 }
 
@@ -541,8 +567,9 @@ t.section('renderRecentsItems() omits the track-length warning chip when the fie
     summary: 'FLAC · lwl',
     track_length_warning: null,
   }]);
-  t.excludes(html, 'track length',
-    'no track-length chip rendered when the field is null');
+  t.excludes(html, 'track_length', 'no track-length field leaks');
+  t.excludes(html, 'badge-muted',
+    'no calm track-length chip rendered when the field is null');
 }
 
 t.section('renderRecentsItems() uses the main badge and server-composed summary for deleted triage');

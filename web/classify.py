@@ -9,7 +9,7 @@ No I/O, no database — fully unit-testable.
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
-from typing import Any, Final, Self
+from typing import Any, Self
 
 import msgspec
 
@@ -44,6 +44,12 @@ from lib.quality import (
     proof_tier_statement,
     proof_verdict_from_facts,
     verified_lossless_generation_label,
+)
+from lib.track_length_shape import (
+    LengthPair,
+    TrackLengthShape,
+    TrackLengthSlot,
+    classify_track_length_shape,
 )
 from lib.validation_envelope import decode_validation_envelope
 
@@ -353,19 +359,30 @@ class ClassifiedEntry(msgspec.Struct):
     # on every row predating the field.
     stage2_if_stage1_deferred: str | None = None
     stage2_if_stage1_deferred_verdict: str | None = None
-    # Issue #1178 (post-correction, "surface-not-reject"): the worst
-    # per-track length deviation on the SELECTED candidate's mapping,
-    # rendered at read time from the already-persisted
-    # ``validation_result`` JSONB when it exceeds
-    # ``TRACK_LENGTH_WARNING_BOUND_SECONDS``. Purely a surfacing fact —
-    # nothing about the pipeline changed to produce it, and nothing acts
-    # on it. ``None`` on every rejected/force/manual row, on any imported
-    # row whose mapping never exceeds the bound, and (#1196 item 3) on any
-    # pair whose track is a coalesced Discogs composite
-    # (``discogs_indexed_component_count > 1``, #1183) — that acceptance
-    # is deliberately unbounded above, so an overshoot there is not a
-    # mismatch.
+    # Issue #1178 (post-correction, "surface-not-reject") and #1445 item 1:
+    # the named shape of the SELECTED candidate's track-length
+    # disagreement, rendered at read time from the already-persisted
+    # ``validation_result`` JSONB when some pair is off by more than
+    # ``TRACK_LENGTH_WARNING_BOUND_SECONDS`` (lib/track_length_shape.py).
+    # Purely a surfacing fact — nothing about the pipeline changed to
+    # produce it, and nothing acts on it. All five are empty on every
+    # rejected/force/manual row, on any imported row whose mapping never
+    # exceeds the bound, and (#1196 item 3) on any pair whose track is a
+    # coalesced Discogs composite (``discogs_indexed_component_count > 1``,
+    # #1183) — that acceptance is deliberately unbounded above, so an
+    # overshoot there is not a mismatch.
+    #
+    # ``track_length_warning`` is the full plain sentence,
+    # ``track_length_shape`` the shape name, ``track_length_label`` the
+    # short chip text, ``track_length_badge_class`` calmer
+    # (``badge-muted``) for shapes whose lengths say the audio is all there,
+    # and ``track_length_slots`` the tracks the shape is about.
     track_length_warning: str | None = None
+    track_length_shape: str | None = None
+    track_length_label: str | None = None
+    track_length_badge_class: str | None = None
+    track_length_slots: list[TrackLengthSlot] = msgspec.field(
+        default_factory=list[TrackLengthSlot])
 
 
 class ImportJobDisplay(msgspec.Struct, frozen=True):
@@ -537,6 +554,7 @@ def _classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
     bad_extensions = _extract_bad_extensions(entry)
     basis = _entry_comparison_basis(entry)
     counterfactual = _extract_stage1_deferred_counterfactual(entry)
+    length_shape = _track_length_warning(entry)
     spectral = _extract_attempt_spectral(entry)
     # The HAVE grade beside this flag is the attempt's own snapshot of the
     # installed album (``ImportResult.current_measurement``), so the codec
@@ -621,7 +639,19 @@ def _classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
         disambiguation_detail=disambig_detail,
         stage2_if_stage1_deferred=counterfactual[0],
         stage2_if_stage1_deferred_verdict=counterfactual[1],
-        track_length_warning=_track_length_warning(entry),
+        track_length_warning=(
+            length_shape.sentence if length_shape is not None else None),
+        track_length_shape=(
+            length_shape.kind.value if length_shape is not None else None),
+        track_length_label=(
+            length_shape.label if length_shape is not None else None),
+        track_length_badge_class=(
+            None if length_shape is None
+            else "badge-muted" if length_shape.probably_harmless
+            else "badge-warn"
+        ),
+        track_length_slots=(
+            list(length_shape.slots) if length_shape is not None else []),
         bad_extensions=bad_extensions,
         wrong_match_triage_action=triage["action"],
         wrong_match_triage_summary=triage["summary"],
@@ -1257,31 +1287,10 @@ def _target_extra_track_count(entry: LogEntry) -> int | None:
     return None
 
 
-#: Render-time warning threshold — NOT a pipeline gate. Issue #1178's first
-#: attempt used this exact magnitude as a validation-time REJECT, and
-#: independent review found the design could not separate the defect from
-#: the legitimate hidden-track/appended-medley population: of the historical
-#: cohort whose worst per-track deviation exceeds 60s, 85% is a single
-#: offending pair (usually the last track) on an otherwise-correct rip —
-#: Damien Rice "Eskimo" deviates 653s, well ABOVE #1178's own 222.6s case,
-#: and is a correct rip. Every reject also permanently denylisted
-#: contributing peers, so a reject gate at this bound would have serially
-#: banned peers offering CORRECT rips of exactly the long-tail records this
-#: system exists to rescue.
-#:
-#: This constant instead gates a render-time WARNING on an ALREADY-IMPORTED
-#: card: nothing is denylisted, no scenario is renamed, no folder moves —
-#: the worst-deviation pair is surfaced for the operator to judge (Replace /
-#: Bad Rip / leave as-is), never decided by the pipeline. Because the
-#: derivation runs at render time over already-persisted evidence, it is
-#: retroactive: the full historical cohort becomes visible, not just future
-#: imports.
-TRACK_LENGTH_WARNING_BOUND_SECONDS: Final[float] = 60.0
-
-
-def _track_length_warning(entry: LogEntry) -> str | None:
-    """Worst per-track length deviation on the matched candidate, when it
-    exceeds :data:`TRACK_LENGTH_WARNING_BOUND_SECONDS`.
+def _track_length_warning(entry: LogEntry) -> TrackLengthShape | None:
+    """The named shape of the matched candidate's track-length
+    disagreement (issue #1445 item 1), when some pair is off by more than
+    :data:`lib.track_length_shape.TRACK_LENGTH_WARNING_BOUND_SECONDS`.
 
     Only ever considered for ``entry.outcome == "success"`` — a rejected
     candidate's mismatch is a different surface's concern (the folder is
@@ -1295,22 +1304,20 @@ def _track_length_warning(entry: LogEntry) -> str | None:
     Reads the ``validation_result`` candidate mapping the way
     ``lib/beets.py::apply_candidate_scenario`` persists it on an accepted
     ``strong_match`` (issue #1059's single candidate→scenario site) —
-    nothing new is measured, nothing is written back. A pair missing
-    either length (a CD pregap hidden track most commonly — MusicBrainz
-    frequently declares no length for it) is skipped: there is no
-    positive declared length to compare against.
+    nothing new is measured, nothing is written back. The pure classifier
+    skips a pair missing either length (a CD pregap hidden track most
+    commonly — MusicBrainz frequently declares no length for it) and
+    (issue #1196 item 3) a coalesced Discogs composite
+    (``discogs_indexed_component_count > 1``, #1183), whose acceptance is
+    deliberately unbounded above. A missing count key (every historical
+    row predating the field) means 1, matching the harness's own
+    ``HarnessTrackInfo.discogs_indexed_component_count`` default.
 
     Issue #1178: download_log 40061 selected a mapping pairing a 237.6s
     local file against MB track 17's declared 15.0s at beets distance
     0.1441 — legitimate by beets' own 30s track-length distance clamp,
-    invisible anywhere else in the pipeline.
-
-    Issue #1196 item 3: a pair whose track carries
-    ``discogs_indexed_component_count > 1`` (a coalesced Discogs
-    composite, #1183) is skipped regardless of its deviation — that
-    acceptance is deliberately unbounded above, so a legitimate composite
-    overshooting its declared summed program is not a mismatch. A missing
-    key (every historical row predating the field) means 1.
+    invisible anywhere else in the pipeline. It now reads as a hidden
+    track kept in the last file.
     """
     if entry.outcome != "success":
         return None
@@ -1318,17 +1325,13 @@ def _track_length_warning(entry: LogEntry) -> str | None:
         envelope = decode_validation_envelope(entry.validation_result)
     except (msgspec.ValidationError, json.JSONDecodeError):
         return None
-    worst_deviation = 0.0
-    worst_item_path: str | None = None
-    worst_item_length = 0.0
-    worst_track_length = 0.0
-    worst_track_title: str | None = None
     for candidate in envelope.candidates:
         # Only the SELECTED candidate — a non-target sibling's mapping (a
         # different pressing beets also considered and rejected) says
         # nothing about the release this row actually matched.
         if candidate.get("is_target") is not True:
             continue
+        pairs: list[LengthPair] = []
         for pair in json_list(candidate.get("mapping")):
             if not is_str_object_dict(pair):
                 continue
@@ -1336,42 +1339,25 @@ def _track_length_warning(entry: LogEntry) -> str | None:
             track = pair.get("track")
             if not is_str_object_dict(item) or not is_str_object_dict(track):
                 continue
-            # #1196 item 3: #1183's composite acceptance
-            # (lib/beets_candidate_coverage.py) is deliberately unbounded
-            # above — a coalesced Discogs composite file legitimately
-            # overshoots its declared summed program by any margin. A
-            # missing key (every row predating the field) means 1, i.e.
-            # not a composite, matching the harness's own
-            # ``HarnessTrackInfo.discogs_indexed_component_count`` default.
             component_count = _as_int(
                 track.get("discogs_indexed_component_count"))
-            if component_count is not None and component_count > 1:
-                continue
-            item_length = _as_float(item.get("length"))
-            track_length = _as_float(track.get("length"))
-            if item_length is None or track_length is None:
-                continue
-            if item_length <= 0 or track_length <= 0:
-                continue
-            deviation = abs(item_length - track_length)
-            if deviation <= worst_deviation:
-                continue
-            worst_deviation = deviation
-            worst_item_path = _as_str(item.get("path"))
-            worst_item_length = item_length
-            worst_track_length = track_length
-            worst_track_title = _as_str(track.get("title"))
+            pairs.append(LengthPair(
+                medium=_as_int(track.get("medium")),
+                medium_index=_as_int(track.get("medium_index")),
+                # The harness serializes ``medium_total`` on every track;
+                # verified live, every success row's target mapping
+                # carries it.
+                medium_track_count=_as_int(track.get("medium_total")),
+                file_seconds=_as_float(item.get("length")) or 0.0,
+                listed_seconds=_as_float(track.get("length")) or 0.0,
+                title=_as_str(track.get("title")) or "",
+                file_name=_as_str(item.get("path")) or "",
+                component_count=(
+                    1 if component_count is None else component_count),
+            ))
         # Exactly one candidate ever carries ``is_target``.
-        break
-    if worst_deviation <= TRACK_LENGTH_WARNING_BOUND_SECONDS:
-        return None
-    item_desc = f"'{worst_item_path}'" if worst_item_path else "a local file"
-    slot_desc = f" for '{worst_track_title}'" if worst_track_title else ""
-    return (
-        "Track length contradicts the matched release: "
-        f"{item_desc} is {worst_item_length:.1f}s where the release "
-        f"declares {worst_track_length:.1f}s{slot_desc}"
-    )
+        return classify_track_length_shape(pairs)
+    return None
 
 
 def _recorded_import_error(entry: LogEntry) -> str | None:

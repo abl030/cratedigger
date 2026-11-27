@@ -77,11 +77,52 @@ t.section('renderDownloadHistoryItem() omits empty triage rows');
   t.excludes(html, 'Stages', 'no stages label without audit');
 }
 
-t.section('renderDownloadHistoryItem() shows the track-length warning row (issue #1178)');
+t.section('renderDownloadHistoryItem() shows the named track-length row with its tracks (issues #1178, #1445)');
 {
-  const warning = "Track length contradicts the matched release: "
-    + "'00 - Hidden Track.flac' is 237.6s where the release declares "
-    + "15.0s for 'Lost Weekend'";
+  const warning = '2 of 10 tracks are a different length from the release '
+    + '(track 2 runs 3:26, listed 2:07). Could be a different edition or the '
+    + 'wrong audio.';
+  const html = renderDownloadHistoryFixture({
+    outcome: 'success',
+    soulseek_username: 'peer',
+    created_at: '2026-08-15T10:25:15+00:00',
+    downloaded_label: 'FLAC',
+    verdict: 'FLAC',
+    track_length_warning: warning,
+    track_length_shape: 'several_tracks_differ',
+    track_length_label: 'several differ',
+    track_length_badge_class: 'badge-warn',
+    track_length_slots: [
+      {
+        medium: 1, medium_index: 2, title: 'Secretive Girl',
+        file_name: '02 Secretive Girl.flac', file_seconds: 205.9,
+        listed_seconds: 126.8,
+        summary: 'Track 2 "Secretive Girl" runs 3:26, release lists 2:07',
+      },
+      {
+        medium: 1, medium_index: 5, title: 'Postcard <Picture> Perfect',
+        file_name: '05.flac', file_seconds: 198.3, listed_seconds: 259.9,
+        summary: 'Track 5 "Postcard <Picture> Perfect" runs 3:18, release lists 4:20',
+      },
+    ],
+  });
+
+  t.contains(html, '<span class="p-hist-label">Track length</span>',
+    'track-length row label rendered');
+  t.contains(html, `color:#ec6;">${esc(warning)}</span>`,
+    'a needs-a-look shape uses the amber warning styling with the full sentence');
+  t.contains(html, esc('Track 2 "Secretive Girl" runs 3:26, release lists 2:07'),
+    'first track line rendered');
+  t.contains(html, esc('Track 5 "Postcard <Picture> Perfect" runs 3:18, release lists 4:20'),
+    'second track line rendered, escaped');
+  t.excludes(html, '<Picture>', 'track titles are escaped');
+  t.contains(html, 'title="02 Secretive Girl.flac"', 'file name is the hover');
+}
+
+t.section('renderDownloadHistoryItem() renders a probably-harmless shape muted');
+{
+  const warning = 'Last track runs 3:58 but the release lists 0:15. Usually a '
+    + 'hidden track kept in the same file. Probably fine.';
   const html = renderDownloadHistoryFixture({
     outcome: 'success',
     soulseek_username: 'lwl',
@@ -89,13 +130,13 @@ t.section('renderDownloadHistoryItem() shows the track-length warning row (issue
     downloaded_label: 'FLAC',
     verdict: 'FLAC',
     track_length_warning: warning,
+    track_length_shape: 'hidden_track_in_file',
+    track_length_label: 'hidden track?',
+    track_length_badge_class: 'badge-muted',
+    track_length_slots: [],
   });
-
-  t.contains(html, '<span class="p-hist-label">Track length</span>',
-    'track-length row label rendered');
-  t.contains(html, `color:#ec6;">${esc(warning)}</span>`,
-    'track-length row uses the same amber warning styling as Bad '
-    + 'extension/Triage, with the full sentence as the value');
+  t.contains(html, `color:#aaa;">${esc(warning)}</span>`,
+    'a probably-harmless shape renders in the muted colour, not amber');
 }
 
 t.section('renderDownloadHistoryItem() omits the track-length row when the field is null');

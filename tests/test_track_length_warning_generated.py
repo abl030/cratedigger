@@ -77,12 +77,9 @@ from lib.quality import (
     TrackMapping,
     ValidationResult,
 )
+from lib.track_length_shape import TRACK_LENGTH_WARNING_BOUND_SECONDS
 from tests.helpers import make_candidate_summary
-from web.classify import (
-    TRACK_LENGTH_WARNING_BOUND_SECONDS,
-    LogEntry,
-    _classify_log_entry,
-)
+from web.classify import LogEntry, _classify_log_entry
 
 ROLE_UNDER = "under"
 ROLE_OVER = "over"

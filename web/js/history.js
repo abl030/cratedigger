@@ -749,10 +749,18 @@ export function renderDownloadHistoryItem(h) {
   // Issue #1178 (post-correction, "surface-not-reject"): the render-time
   // fact, surfaced on the detail view too — the compact card's chip tooltip
   // is not the only place the operator can read it from.
+  // Issue #1445 item 1: the sentence names the shape; the tracks it is
+  // about follow, one per line. Shapes whose lengths say the audio is all
+  // there render in the muted colour instead of amber.
   if (h.track_length_warning) {
+    const calm = h.track_length_badge_class === 'badge-muted';
+    const slots = Array.isArray(h.track_length_slots) ? h.track_length_slots : [];
+    const slotLines = slots.map(slot =>
+      `<div style="color:#888;" title="${esc(slot.file_name || '')}">${esc(slot.summary)}</div>`,
+    ).join('');
     rows.push([
       'Track length',
-      `<span style="color:#ec6;">${esc(h.track_length_warning)}</span>`,
+      `<span style="color:${calm ? '#aaa' : '#ec6'};">${esc(h.track_length_warning)}</span>${slotLines}`,
     ]);
   }
 

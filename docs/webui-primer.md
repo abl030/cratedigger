@@ -659,17 +659,33 @@ not on anyone's list.
   denylisted contributing peers offering correct rips. Because the
   derivation is render-time, it is retroactive — every accepted import in
   the corpus is re-evaluated on the next page load, not just future ones.
-  The sentence names the contradicted release track slot by title when the
-  producer has one (`"... declares 15.0s for 'Lost Weekend'"`). Surfaced as
-  a `ClassifiedEntry.track_length_warning` field (nullable string; both the
-  Recents-log route and the pipeline-detail history route carry it — the
-  latter via its own `DownloadHistoryViewRow` Struct, a SEPARATE reader of
-  the same classification that must declare every field it forwards) and
-  rendered in two places: `web/js/recents.js` as a `badge-warn` "track
-  length" chip next to the main badge (full sentence in the hover title),
-  and `web/js/history.js`'s detail grid as a labelled "Track length" row
-  (same amber styling as "Bad extension"/"Triage") so the sentence is
-  visible without hovering.
+  Issue #1445 item 1 replaced the single worst-pair sentence with a named
+  SHAPE, classified by the pure `lib/track_length_shape.py` (no web
+  imports, reusable by later census/guard work). The bound and tolerances
+  live there: a pair is "off" above 60s, two lengths within 2s are the same
+  audio. Rules, first match wins:
+  `tracks_in_wrong_slots` (every track more than 10s off has another
+  track's listed length, one-to-one — Kurt Vile, download_log 24179),
+  `tracks_split_differently` (adjacent tracks on one disc add up to the
+  listed total, or one off track plus an in-bound neighbour that absorbs it
+  — Genesis 15039, Chumbawamba 35012), then one off track by position and
+  direction (`single_track_disc`, `hidden_track_in_file` for a long last
+  track, `end_of_last_track_missing` for a short one, `one_track_longer`,
+  `one_track_shorter`), else `several_tracks_differ`. Each shape carries a
+  short chip label (`hidden track?`, `wrong order?`, ...), a plain sentence
+  with m:ss times, and the tracks it is about. Shapes whose lengths say the
+  audio is all there (split differently, hidden track, one-track disc) render
+  calmer (`badge-muted`) than the ones that need a look (`badge-warn`).
+  Surfaced as `ClassifiedEntry.track_length_warning` (the sentence),
+  `track_length_shape`, `track_length_label`, `track_length_badge_class` and
+  `track_length_slots`; both the Recents-log route and the pipeline-detail
+  history route carry them — the latter via its own
+  `DownloadHistoryViewRow` Struct, a SEPARATE reader of the same
+  classification that must declare every field it forwards. Rendered in two
+  places: `web/js/recents.js` as a chip next to the main badge (label as
+  text, sentence in the hover title), and `web/js/history.js`'s detail grid
+  as a labelled "Track length" row with the sentence and one line per
+  track, so the explanation is visible without hovering.
 - **Wrong Matches unavailable sources** — a candidate whose folder the server
   could not READ (permissions, I/O — never a folder proven gone) stays in the
   list with a `source unavailable` badge, an amber card, both Force Import and
