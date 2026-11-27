@@ -58,7 +58,11 @@ class TestOtherPressingsRoute(_FakeDbWebServerCase):
              "release_title": "Hang By, Hang By"})
         sentences = data["sentences"]
         assert isinstance(sentences, list)
-        self.assertTrue(str(sentences[0]).startswith(
+        self.assertEqual(
+            sentences[0],
+            "This copy does not fit this release's own listing on tracks "
+            "9, 12 and 13.")
+        self.assertTrue(str(sentences[1]).startswith(
             "This copy matches 2 other pressings"))
 
     def test_unknown_row_is_404(self) -> None:

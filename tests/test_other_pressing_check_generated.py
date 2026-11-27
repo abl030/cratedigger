@@ -1,27 +1,36 @@
-"""Generated property for the other-pressing check (issue #1445).
+"""Generated properties for the other-pressing check (issue #1445).
 
-Drives the real ``lib.other_pressing_check.check_other_pressings`` over a
-fake download_log row and a fake mirror that serves PLANTED worlds.
+Drive the real ``lib.other_pressing_check.check_other_pressings`` over a
+fake download_log row and a fake mirror that serves PLANTED worlds, paging
+the release group 25 at a time exactly as MusicBrainz does.
 
-Worlds are planted, never recomputed as an oracle: each sibling release is
-built to play one role and remembers it, each renamed title is planted at a
-known position, and each disc track is planted to agree or disagree with
-its file. The checker reads expectations from those plantings, never from
-re-running the 2s comparison on the floats.
+Worlds are planted, never recomputed as an oracle: every listed length,
+file length and disc table of contents is a whole number of half seconds
+(exact in binary, so a gap of exactly 2.0s is a real, reachable world), and
+each part of the world remembers the role it was built to play.
 
-- target: one or two discs; every file within 0.9s of its listing;
-  optionally a disc ID on each disc whose table of contents (whole
-  sectors, 75 per second) is planted per track to agree with the file
-  within 1s or to miss it by 3 to 200s;
-- siblings, each with a role: ``match`` (every listing within 1s of its
-  file, a planted subset of titles renamed), ``off`` (one listing 2.5 to
-  200s from its file), ``missing`` (one listing absent), ``count`` (one
-  track more or fewer).
+**Pressings world.** A one- or two-disc target whose files either fit its
+own listing (every gap within 2.0s, exactly 2.0 included) or miss it on one
+track by 2.5 to 30s; the target's listed length sometimes lives only on the
+recording. Up to 35 siblings, so the group spans two pages, each planted as
+``same`` (the target's listing), ``fits`` (the files within 2.0s, some
+titles renamed), ``off`` (one track 2.5 to 30s from its file), ``missing``
+(one track with no length anywhere) or ``count`` (one track more or
+fewer), sometimes split over two media, and sometimes listed again on a
+later page.
 
-Invariant: the matching pressings are exactly the planted ``match``
-siblings, each with exactly its planted renamed positions; every disc
-track's agreement is the planted one; and the first sentence says
-"no other pressing" exactly when nothing matches.
+**Disc world.** A one-disc target whose files fit its listing within 1s or
+miss it on one track by 10 to 30s, with up to three disc IDs each planted
+to fit the listing, fit the files, or fit neither (one track 40s out), or a
+digital medium that cannot carry one.
+
+Invariants: a copy that fits its own listing is never said to match
+another pressing, and every sibling the files fit is then reported as
+indistinguishable; otherwise the matches are exactly the planted ``fits``
+siblings with exactly their renamed positions; a release listed twice is
+counted once; the listing and the files are each judged against every
+attached disc exactly as planted; and no sentence claims the listed
+lengths were typed in by hand.
 """
 
 from __future__ import annotations
@@ -35,154 +44,209 @@ from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers suite/fuzz
 from lib.mb_api import MBDiscRelease, MBDiscReleasePage
-from lib.other_pressing_check import PressingCheck, check_other_pressings
+from lib.other_pressing_check import (
+    FilesAgainstDisc,
+    MediumDiscStatus,
+    PressingCheck,
+    check_other_pressings,
+)
 
-ROLE_MATCH = "match"
+ROLE_SAME = "same"
+ROLE_FITS = "fits"
 ROLE_OFF = "off"
 ROLE_MISSING = "missing"
 ROLE_COUNT = "count"
 
+DISC_LISTING = "listing"
+DISC_FILES = "files"
+DISC_NEITHER = "neither"
+
 _TARGET_ID = "00000000-0000-0000-0000-00000000aaaa"
 _GROUP_ID = "00000000-0000-0000-0000-00000000bbbb"
-_NO_MATCH_SENTENCE = "No other pressing in this release group matches."
+_FITS_OWN = "This copy fits this release's own listing on every track."
+_DOES_NOT_FIT = "This copy does not fit this release's own listing"
 
-
-class PlantedWorld(NamedTuple):
-    log_row: dict[str, object]
-    target: dict[str, object]
-    siblings: list[dict[str, object]]
-    #: sibling id -> renamed (medium, position) pairs, for planted matches.
-    expected_matches: dict[str, list[tuple[int, int]]]
-    #: (medium, position) -> planted agreement, for tracks with a disc.
-    expected_disc: dict[tuple[int, int], bool]
+#: Half-second steps: a gap of exactly 2.0 is representable and drawn.
+_within_two = st.integers(min_value=-4, max_value=4).map(lambda n: n * 0.5)
+_off_by = st.integers(min_value=5, max_value=60).map(lambda n: n * 0.5)
+_sign = st.sampled_from([-1.0, 1.0])
 
 
 def _sibling_id(n: int) -> str:
-    return f"00000000-0000-0000-0000-{n:012d}"
+    return f"00000000-0000-0000-0001-{n:012d}"
 
 
-@st.composite
-def planted_worlds(draw: st.DrawFn) -> PlantedWorld:
-    sizes = draw(st.lists(
-        st.integers(min_value=1, max_value=6), min_size=1, max_size=2))
-    positions = [
-        (medium, index)
-        for medium, size in enumerate(sizes, 1)
-        for index in range(1, size + 1)
-    ]
-    listed_ms = {
-        key: draw(st.integers(min_value=30_000, max_value=600_000))
-        for key in positions
-    }
-    files = {
-        key: listed_ms[key] / 1000 + draw(st.floats(
-            min_value=-0.9, max_value=0.9, allow_nan=False))
-        for key in positions
-    }
-    titles = {key: f"Song {key[0]}-{key[1]}" for key in positions}
+class PressingsWorld(NamedTuple):
+    row: dict[str, object]
+    group: list[dict[str, object]]
+    fits_own: bool
+    #: ids planted ``fits``, with their renamed (medium, position) pairs.
+    fits: dict[str, list[tuple[int, int]]]
+    #: ids planted ``same``.
+    same: set[str]
 
-    # Target media, each optionally with a planted disc table of contents.
-    expected_disc: dict[tuple[int, int], bool] = {}
-    media: list[dict[str, object]] = []
-    for medium, size in enumerate(sizes, 1):
-        discs: list[dict[str, object]] = []
-        if draw(st.booleans()):
-            offsets: list[int] = []
-            cursor = 150
-            for index in range(1, size + 1):
-                key = (medium, index)
-                agrees = draw(st.booleans())
-                if agrees:
-                    delta = draw(st.floats(min_value=-1.0, max_value=1.0))
-                else:
-                    delta = draw(st.floats(min_value=3.0, max_value=200.0)) \
-                        * draw(st.sampled_from([-1.0, 1.0]))
-                disc_seconds = max(1.0, files[key] + delta)
-                if not agrees and abs(disc_seconds - files[key]) <= 2.5:
-                    disc_seconds = files[key] + 3.0
-                offsets.append(cursor)
-                cursor += round(disc_seconds * 75)
-                expected_disc[key] = agrees
-            discs.append({
-                "id": f"disc{medium}", "offset-count": size,
-                "sectors": cursor, "offsets": offsets,
-            })
-        media.append({
-            "position": medium, "format": "CD", "discs": discs,
-            "tracks": [
-                {"position": index, "title": titles[(medium, index)],
-                 "length": listed_ms[(medium, index)]}
-                for index in range(1, size + 1)
-            ],
-        })
-    target = {
-        "id": _TARGET_ID, "title": "Album", "country": "GB",
-        "date": "2004", "media": media,
-        "release-group": {"id": _GROUP_ID, "title": "Album"},
-    }
 
-    roles = draw(st.lists(
-        st.sampled_from([ROLE_MATCH, ROLE_OFF, ROLE_MISSING, ROLE_COUNT]),
-        max_size=5))
-    siblings: list[dict[str, object]] = []
-    expected: dict[str, list[tuple[int, int]]] = {}
-    for n, role in enumerate(roles, 1):
-        sibling_id = _sibling_id(n)
-        lengths: list[int | None] = [
-            round((files[key] + draw(st.floats(min_value=-1.0, max_value=1.0)))
-                  * 1000)
-            for key in positions
-        ]
-        names = [titles[key] for key in positions]
-        renamed: list[tuple[int, int]] = []
-        if role == ROLE_MATCH:
-            for at, key in enumerate(positions):
-                if draw(st.booleans()):
-                    names[at] = f"Other title {at}"
-                    renamed.append(key)
-            expected[sibling_id] = renamed
-        elif role == ROLE_OFF:
-            at = draw(st.integers(min_value=0, max_value=len(positions) - 1))
-            gap = draw(st.floats(min_value=2.5, max_value=200.0))
-            sign = draw(st.sampled_from([-1.0, 1.0]))
-            if sign < 0 and files[positions[at]] - gap < 1.0:
-                sign = 1.0
-            lengths[at] = round((files[positions[at]] + sign * gap) * 1000)
-        elif role == ROLE_MISSING:
-            at = draw(st.integers(min_value=0, max_value=len(positions) - 1))
-            lengths[at] = None
-        else:
-            if draw(st.booleans()) and len(lengths) > 1:
-                lengths = lengths[:-1]
-                names = names[:-1]
-            else:
-                lengths = [*lengths, 200_000]
-                names = [*names, "Bonus"]
-        siblings.append({
-            "id": sibling_id, "title": "Album", "country": "US",
-            "date": "2005", "media": [{
-                "position": 1, "format": "CD", "discs": [],
-                "tracks": [
-                    {"position": i, "title": name, "length": length}
-                    for i, (name, length) in enumerate(
-                        zip(names, lengths, strict=True), 1)
-                ],
-            }],
-        })
+class DiscWorld(NamedTuple):
+    row: dict[str, object]
+    group: list[dict[str, object]]
+    fits_own: bool
+    digital: bool
+    kinds: list[str]
 
-    log_row: dict[str, object] = {
+
+def _row(files: dict[tuple[int, int], float]) -> dict[str, object]:
+    return {
         "id": 1, "outcome": "success",
         "validation_result": {"candidates": [{
             "album_id": _TARGET_ID, "is_target": True,
             "extra_items": [], "extra_tracks": [],
             "mapping": [
-                {"item": {"length": files[key]},
-                 "track": {"medium": key[0], "medium_index": key[1]}}
-                for key in positions
+                {"item": {"length": seconds},
+                 "track": {"medium": medium, "medium_index": position}}
+                for (medium, position), seconds in files.items()
             ],
         }]},
     }
-    return PlantedWorld(log_row, target, siblings, expected, expected_disc)
+
+
+def _track(
+    position: int, title: str, ms: int | None, *, on_recording: bool = False,
+) -> dict[str, object]:
+    if on_recording:
+        return {"position": position, "title": title, "length": None,
+                "recording": {"length": ms}}
+    return {"position": position, "title": title, "length": ms,
+            "recording": {"length": None}}
+
+
+@st.composite
+def pressings_worlds(draw: st.DrawFn) -> PressingsWorld:
+    sizes = draw(st.lists(
+        st.integers(min_value=1, max_value=4), min_size=1, max_size=2))
+    keys = [(m, p) for m, size in enumerate(sizes, 1) for p in range(1, size + 1)]
+    listed = {key: draw(st.integers(min_value=120, max_value=800)) * 0.5
+              for key in keys}
+    fits_own = draw(st.booleans())
+    files = {key: listed[key] + draw(_within_two) for key in keys}
+    if not fits_own:
+        off_key = draw(st.sampled_from(keys))
+        files[off_key] = listed[off_key] + draw(_sign) * draw(_off_by)
+    titles = {key: f"Song {key[0]}-{key[1]}" for key in keys}
+    target = {
+        "id": _TARGET_ID, "title": "Album", "country": "GB", "date": "2004",
+        "release-group": {"id": _GROUP_ID, "title": "Album"},
+        "media": [
+            {"position": m, "format": "CD", "discs": [], "tracks": [
+                _track(p, titles[(m, p)], round(listed[(m, p)] * 1000),
+                       on_recording=draw(st.booleans()))
+                for p in range(1, size + 1)]}
+            for m, size in enumerate(sizes, 1)
+        ],
+    }
+
+    roles = draw(st.lists(
+        st.sampled_from([ROLE_SAME, ROLE_FITS, ROLE_OFF, ROLE_MISSING,
+                         ROLE_COUNT]),
+        max_size=35))
+    group: list[dict[str, object]] = [target]
+    fits: dict[str, list[tuple[int, int]]] = {}
+    same: set[str] = set()
+    for n, role in enumerate(roles, 1):
+        sibling_id = _sibling_id(n)
+        names = [titles[key] for key in keys]
+        if role == ROLE_SAME:
+            lengths: list[float | None] = [listed[key] for key in keys]
+            same.add(sibling_id)
+        else:
+            lengths = [files[key] + draw(_within_two) for key in keys]
+        renamed: list[tuple[int, int]] = []
+        if role == ROLE_FITS:
+            for at, key in enumerate(keys):
+                if draw(st.booleans()):
+                    names[at] = f"Other {at}"
+                    renamed.append(key)
+            fits[sibling_id] = renamed
+        elif role == ROLE_OFF:
+            at = draw(st.integers(min_value=0, max_value=len(keys) - 1))
+            lengths[at] = files[keys[at]] + draw(_sign) * draw(_off_by)
+        elif role == ROLE_MISSING:
+            at = draw(st.integers(min_value=0, max_value=len(keys) - 1))
+            lengths[at] = None
+        elif role == ROLE_COUNT:
+            if len(lengths) > 1 and draw(st.booleans()):
+                lengths, names = lengths[:-1], names[:-1]
+            else:
+                lengths, names = [*lengths, 200.0], [*names, "Bonus"]
+        tracks = [
+            _track(i, name,
+                   None if length is None else round(length * 1000))
+            for i, (name, length) in enumerate(zip(names, lengths, strict=True), 1)
+        ]
+        split = (
+            draw(st.integers(min_value=1, max_value=len(tracks) - 1))
+            if len(tracks) > 1 and draw(st.booleans()) else len(tracks))
+        media = [{"position": 1, "format": "CD", "discs": [],
+                  "tracks": tracks[:split]}]
+        if split < len(tracks):
+            media.append({"position": 2, "format": "CD", "discs": [],
+                          "tracks": [
+                              {**t, "position": i}
+                              for i, t in enumerate(tracks[split:], 1)]})
+        group.append({"id": sibling_id, "title": "Album", "country": "US",
+                      "date": "2005", "media": media})
+    if len(group) > 1 and draw(st.booleans()):
+        group.append(draw(st.sampled_from(group[1:])))
+    return PressingsWorld(_row(files), group, fits_own, fits, same)
+
+
+def _toc(seconds: list[float], disc_id: str) -> dict[str, object]:
+    offsets: list[int] = []
+    cursor = 150
+    for length in seconds:
+        offsets.append(cursor)
+        cursor += round(length * 75)
+    return {"id": disc_id, "offset-count": len(seconds), "sectors": cursor,
+            "offsets": offsets}
+
+
+@st.composite
+def disc_worlds(draw: st.DrawFn) -> DiscWorld:
+    size = draw(st.integers(min_value=1, max_value=4))
+    keys = [(1, p) for p in range(1, size + 1)]
+    listed = {key: draw(st.integers(min_value=120, max_value=800)) * 0.5
+              for key in keys}
+    fits_own = draw(st.booleans())
+    one_or_less = st.integers(min_value=-2, max_value=2).map(lambda n: n * 0.5)
+    files = {key: listed[key] + draw(one_or_less) for key in keys}
+    if not fits_own:
+        off_key = draw(st.sampled_from(keys))
+        files[off_key] = listed[off_key] + draw(_sign) * draw(
+            st.integers(min_value=20, max_value=60).map(lambda n: n * 0.5))
+    digital = draw(st.booleans()) and draw(st.booleans())
+    kinds = [] if digital else draw(st.lists(
+        st.sampled_from([DISC_LISTING, DISC_FILES, DISC_NEITHER]),
+        max_size=3))
+    discs: list[dict[str, object]] = []
+    for n, kind in enumerate(kinds, 1):
+        half = st.integers(min_value=-1, max_value=1).map(lambda m: m * 0.5)
+        if kind == DISC_LISTING:
+            seconds = [listed[key] + draw(half) for key in keys]
+        elif kind == DISC_FILES:
+            seconds = [files[key] + draw(half) for key in keys]
+        else:
+            seconds = [listed[key] for key in keys]
+            seconds[0] += 40.0
+        discs.append(_toc(seconds, f"disc-{n}"))
+    target = {
+        "id": _TARGET_ID, "title": "Album", "country": "GB", "date": "2004",
+        "release-group": {"id": _GROUP_ID, "title": "Album"},
+        "media": [{
+            "position": 1, "format": "Digital Media" if digital else "CD",
+            "discs": discs,
+            "tracks": [_track(p, f"Song {p}", round(listed[(1, p)] * 1000))
+                       for _, p in keys]}],
+    }
+    return DiscWorld(_row(files), [target], fits_own, digital, kinds)
 
 
 class _Log:
@@ -194,136 +258,238 @@ class _Log:
 
 
 class _Mirror:
-    def __init__(self, world: PlantedWorld) -> None:
-        self.world = world
+    def __init__(self, group: list[dict[str, object]]) -> None:
+        self.group = group
 
     def release(self, release_id: str, *, timeout: float) -> MBDiscRelease:
-        return msgspec.convert(self.world.target, type=MBDiscRelease)
+        return msgspec.convert(self.group[0], type=MBDiscRelease)
 
     def release_group_page(
         self, release_group_id: str, *, offset: int, limit: int,
         timeout: float,
     ) -> MBDiscReleasePage:
-        releases = [self.world.target, *self.world.siblings][offset:offset + limit]
         return msgspec.convert(
-            {"release-count": 1 + len(self.world.siblings),
-             "releases": releases},
+            {"release-count": len(self.group),
+             "releases": self.group[offset:offset + limit]},
             type=MBDiscReleasePage)
 
 
-def run(world: PlantedWorld) -> PressingCheck:
+def run(row: dict[str, object], group: list[dict[str, object]]) -> PressingCheck:
     return check_other_pressings(
-        1, pdb=_Log(world.log_row), mirror=_Mirror(world), clock=lambda: 0.0)
+        1, pdb=_Log(row), mirror=_Mirror(group), clock=lambda: 0.0)
 
 
-def assert_check_matches_planted(
-    world: PlantedWorld, result: PressingCheck,
+def assert_pressings_match_planted(
+    world: PressingsWorld, result: PressingCheck,
 ) -> None:
-    found = {
-        match.release_id: [
-            (d.medium, d.position) for d in match.title_differences]
-        for match in result.matching_pressings
-    }
-    if set(found) != set(world.expected_matches):
+    reported = [m.release_id for m in result.matching_pressings] + [
+        m.release_id for m in result.same_listing_pressings]
+    if len(reported) != len(set(reported)):
+        raise AssertionError(f"a release was reported twice: {sorted(reported)}")
+    if result.fits_own_listing is not world.fits_own:
         raise AssertionError(
-            f"matched pressings {sorted(found)} but planted "
-            f"{sorted(world.expected_matches)}")
-    for release_id, renamed in world.expected_matches.items():
-        if found[release_id] != renamed:
+            f"fits own listing {result.fits_own_listing} but planted "
+            f"{world.fits_own}")
+    matched = {
+        m.release_id: [(d.medium, d.position) for d in m.title_differences]
+        for m in result.matching_pressings}
+    same = {m.release_id for m in result.same_listing_pressings}
+    if world.fits_own:
+        if matched:
             raise AssertionError(
-                f"title differences for {release_id} were {found[release_id]} "
-                f"but planted {renamed}")
+                f"a copy fitting its own listing was said to match {sorted(matched)}")
+        expected_same = world.same | set(world.fits)
+        if same != expected_same:
+            raise AssertionError(
+                f"indistinguishable pressings {sorted(same)} but planted "
+                f"{sorted(expected_same)}")
+    else:
+        if set(matched) != set(world.fits):
+            raise AssertionError(
+                f"matched pressings {sorted(matched)} but planted "
+                f"{sorted(world.fits)}")
+        for release_id, renamed in world.fits.items():
+            if matched[release_id] != renamed:
+                raise AssertionError(
+                    f"title differences for {release_id} were "
+                    f"{matched[release_id]} but planted {renamed}")
+        if same:
+            raise AssertionError(
+                f"indistinguishable pressings {sorted(same)} reported for a "
+                "copy that does not fit its own listing")
+    lead = result.sentences[0] if result.sentences else ""
+    expected_lead = _FITS_OWN if world.fits_own else _DOES_NOT_FIT
+    if not lead.startswith(expected_lead):
+        raise AssertionError(f"lead sentence {lead!r} for fits_own={world.fits_own}")
+    if world.fits_own and any(
+            s.startswith("This copy matches") for s in result.sentences):
+        raise AssertionError("a 'matches' sentence for a copy fitting its own listing")
+
+
+def assert_discs_match_planted(world: DiscWorld, result: PressingCheck) -> None:
     lengths = result.target_lengths
-    disc = {} if lengths is None else {
-        (row.medium, row.position): row.agrees for row in lengths.tracks}
-    if disc != world.expected_disc:
+    if lengths is None:
+        raise AssertionError("no target lengths")
+    (medium,) = lengths.media
+    if world.digital:
+        expected_status = MediumDiscStatus.NO_DISC_FORMAT
+    elif not world.kinds:
+        expected_status = MediumDiscStatus.NO_DISC_ID
+    else:
+        expected_status = MediumDiscStatus.CHECKED
+    if medium.status is not expected_status:
+        raise AssertionError(f"disc status {medium.status} but planted {expected_status}")
+    listing_fits = DISC_LISTING in world.kinds or (
+        world.fits_own and DISC_FILES in world.kinds)
+    if (medium.listing_disc_id is not None) != listing_fits:
         raise AssertionError(
-            f"disc agreement {disc} but planted {world.expected_disc}")
-    says_none = bool(result.sentences) and result.sentences[0] == _NO_MATCH_SENTENCE
-    if says_none != (not world.expected_matches):
+            f"listing disc {medium.listing_disc_id} but planted "
+            f"listing_fits={listing_fits}")
+    if not world.kinds:
+        expected_against = None
+    elif world.fits_own and (DISC_LISTING in world.kinds or DISC_FILES in world.kinds):
+        expected_against = FilesAgainstDisc.LISTING_DISC
+    elif DISC_FILES in world.kinds:
+        expected_against = FilesAgainstDisc.OTHER_DISC
+    else:
+        expected_against = FilesAgainstDisc.NO_DISC
+    if medium.files_against_disc is not expected_against:
         raise AssertionError(
-            f"lead sentence {result.sentences[:1]} does not fit "
-            f"{len(world.expected_matches)} planted matches")
+            f"files against disc {medium.files_against_disc} but planted "
+            f"{expected_against}")
+    if any("typed in by hand" in s for s in result.sentences):
+        raise AssertionError("a sentence claims the lengths were typed in by hand")
 
 
 class TestOtherPressingCheckGenerated(unittest.TestCase):
-    @given(world=planted_worlds())
-    def test_check_matches_planted_world(self, world: PlantedWorld) -> None:
-        assert_check_matches_planted(world, run(world))
+    @given(world=pressings_worlds())
+    def test_pressings_match_planted_world(self, world: PressingsWorld) -> None:
+        assert_pressings_match_planted(world, run(world.row, world.group))
+
+    @given(world=disc_worlds())
+    def test_discs_match_planted_world(self, world: DiscWorld) -> None:
+        assert_discs_match_planted(world, run(world.row, world.group))
 
 
-def _small_world() -> PlantedWorld:
-    """One disc of two tracks, a disc ID agreeing on both, one planted
-    matching sibling with track 2 renamed."""
-    files = {(1, 1): 100.0, (1, 2): 200.0}
+def _fits_own_world() -> PressingsWorld:
+    """Two tracks the files fit exactly; one sibling planted ``same``."""
     target = {
         "id": _TARGET_ID, "title": "A", "country": "GB", "date": "2004",
         "release-group": {"id": _GROUP_ID, "title": "A"},
-        "media": [{
-            "position": 1, "format": "CD",
-            "discs": [{"id": "d", "offset-count": 2, "sectors": 150 + 22500,
-                       "offsets": [150, 150 + 7500]}],
-            "tracks": [
-                {"position": 1, "title": "One", "length": 100_000},
-                {"position": 2, "title": "Two", "length": 200_000},
-            ],
-        }],
-    }
-    sibling = {
-        "id": _sibling_id(1), "title": "A", "country": "US", "date": "2005",
         "media": [{"position": 1, "format": "CD", "discs": [], "tracks": [
-            {"position": 1, "title": "One", "length": 100_400},
-            {"position": 2, "title": "Deux", "length": 199_700},
-        ]}],
+            _track(1, "One", 100_000), _track(2, "Two", 200_000)]}],
     }
-    row: dict[str, object] = {"id": 1, "validation_result": {"candidates": [{
-        "album_id": _TARGET_ID, "is_target": True,
-        "mapping": [
-            {"item": {"length": seconds},
-             "track": {"medium": key[0], "medium_index": key[1]}}
-            for key, seconds in files.items()
-        ],
-    }]}}
-    return PlantedWorld(
-        row, target, [sibling], {_sibling_id(1): [(1, 2)]},
-        {(1, 1): True, (1, 2): True})
+    sibling = {"id": _sibling_id(1), "title": "A", "country": "US",
+               "date": "2005", "media": [{"position": 1, "format": "CD",
+                                          "discs": [], "tracks": [
+                   _track(1, "One", 100_000), _track(2, "Two", 200_000)]}]}
+    return PressingsWorld(
+        _row({(1, 1): 100.0, (1, 2): 200.0}), [target, sibling], True, {},
+        {_sibling_id(1)})
+
+
+def _disc_world() -> DiscWorld:
+    """One track, one disc planted to fit the listing, files fit too."""
+    target = {
+        "id": _TARGET_ID, "title": "A", "country": "GB", "date": "2004",
+        "release-group": {"id": _GROUP_ID, "title": "A"},
+        "media": [{"position": 1, "format": "CD",
+                   "discs": [_toc([100.0], "d")],
+                   "tracks": [_track(1, "One", 100_000)]}],
+    }
+    return DiscWorld(_row({(1, 1): 100.0}), [target], True, False, [DISC_LISTING])
 
 
 class TestCheckerTripsOnViolations(unittest.TestCase):
-    """Known-bad self-tests, one per clause. Each feeds the real result of
-    the small world against a planting altered in one respect only."""
+    """Known-bad self-tests, one per clause: the real result of a small
+    world against a planting changed in one respect only, or a result
+    changed in one field only."""
 
     def setUp(self) -> None:
-        self.world = _small_world()
-        self.result = run(self.world)
+        self.pw = _fits_own_world()
+        self.pr = run(self.pw.row, self.pw.group)
+        self.dw = _disc_world()
+        self.dr = run(self.dw.row, self.dw.group)
 
-    def test_the_small_world_passes(self) -> None:
-        assert_check_matches_planted(self.world, self.result)
+    def test_the_small_worlds_pass(self) -> None:
+        assert_pressings_match_planted(self.pw, self.pr)
+        assert_discs_match_planted(self.dw, self.dr)
+
+    def test_clause_reported_twice_trips(self) -> None:
+        twice = self.pr.same_listing_pressings * 2
+        wrong = msgspec.structs.replace(self.pr, same_listing_pressings=twice)
+        with self.assertRaisesRegex(AssertionError, "reported twice"):
+            assert_pressings_match_planted(self.pw, wrong)
+
+    def test_clause_fits_own_trips(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "fits own listing"):
+            assert_pressings_match_planted(
+                self.pw._replace(fits_own=False), self.pr)
+
+    def test_clause_said_to_match_while_fitting_own_trips(self) -> None:
+        wrong = msgspec.structs.replace(
+            self.pr, matching_pressings=self.pr.same_listing_pressings,
+            same_listing_pressings=[])
+        with self.assertRaisesRegex(AssertionError, "was said to match"):
+            assert_pressings_match_planted(self.pw, wrong)
+
+    def test_clause_indistinguishable_set_trips(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "indistinguishable pressings"):
+            assert_pressings_match_planted(self.pw._replace(same=set()), self.pr)
 
     def test_clause_matched_set_trips(self) -> None:
+        world = self.pw._replace(fits_own=False, fits={"x": []}, same=set())
+        wrong = msgspec.structs.replace(
+            self.pr, fits_own_listing=False, same_listing_pressings=[])
         with self.assertRaisesRegex(AssertionError, "matched pressings"):
-            assert_check_matches_planted(
-                self.world._replace(expected_matches={}), self.result)
+            assert_pressings_match_planted(world, wrong)
 
     def test_clause_title_differences_trips(self) -> None:
+        match = self.pr.same_listing_pressings[0]
+        world = self.pw._replace(
+            fits_own=False, fits={match.release_id: [(1, 1)]}, same=set())
+        wrong = msgspec.structs.replace(
+            self.pr, fits_own_listing=False, matching_pressings=[match],
+            same_listing_pressings=[])
         with self.assertRaisesRegex(AssertionError, "title differences"):
-            assert_check_matches_planted(
-                self.world._replace(
-                    expected_matches={_sibling_id(1): [(1, 1)]}),
-                self.result)
+            assert_pressings_match_planted(world, wrong)
 
-    def test_clause_disc_agreement_trips(self) -> None:
-        with self.assertRaisesRegex(AssertionError, "disc agreement"):
-            assert_check_matches_planted(
-                self.world._replace(
-                    expected_disc={(1, 1): True, (1, 2): False}),
-                self.result)
+    def test_clause_indistinguishable_when_not_fitting_trips(self) -> None:
+        world = self.pw._replace(fits_own=False, same=set())
+        wrong = msgspec.structs.replace(self.pr, fits_own_listing=False)
+        with self.assertRaisesRegex(AssertionError, "does not fit its own"):
+            assert_pressings_match_planted(world, wrong)
 
     def test_clause_lead_sentence_trips(self) -> None:
-        wrong = msgspec.structs.replace(
-            self.result, sentences=[_NO_MATCH_SENTENCE])
+        wrong = msgspec.structs.replace(self.pr, sentences=["Something else."])
         with self.assertRaisesRegex(AssertionError, "lead sentence"):
-            assert_check_matches_planted(self.world, wrong)
+            assert_pressings_match_planted(self.pw, wrong)
+
+    def test_clause_matches_sentence_trips(self) -> None:
+        wrong = msgspec.structs.replace(
+            self.pr, sentences=[_FITS_OWN, "This copy matches another pressing."])
+        with self.assertRaisesRegex(AssertionError, "a 'matches' sentence"):
+            assert_pressings_match_planted(self.pw, wrong)
+
+    def test_clause_disc_status_trips(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "disc status"):
+            assert_discs_match_planted(self.dw._replace(kinds=[]), self.dr)
+
+    def test_clause_listing_disc_trips(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "listing disc"):
+            assert_discs_match_planted(
+                self.dw._replace(kinds=[DISC_NEITHER]), self.dr)
+
+    def test_clause_files_against_disc_trips(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "files against disc"):
+            assert_discs_match_planted(
+                self.dw._replace(fits_own=False), self.dr)
+
+    def test_clause_typed_by_hand_trips(self) -> None:
+        wrong = msgspec.structs.replace(
+            self.dr, sentences=["The listed lengths were typed in by hand."])
+        with self.assertRaisesRegex(AssertionError, "typed in by hand"):
+            assert_discs_match_planted(self.dw, wrong)
 
 
 if __name__ == "__main__":

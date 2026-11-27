@@ -4,17 +4,21 @@ An ON-DEMAND, read-only check the operator runs for one download_log row.
 It loads the selected candidate's mapping (the file length mapped to each
 release track) and the target release id, asks the MusicBrainz mirror for
 the target release and every other release in its release group, and
-answers two questions in plain sentences:
+answers in plain sentences, claiming no more than the lengths show:
 
-- **Matching pressings.** Which sibling releases list a length for every
-  track that every file matches within 2s, and where their track titles
-  differ from the target's. A match proves the lengths fit that pressing's
-  listing, nothing more: when the titles are the same on both, the two
-  listings may describe the same audio differently.
-- **How far to trust the listed lengths.** A disc ID on the target carries
-  the physical table of contents, so per-track lengths come from a real
-  disc and the files can be checked against them. Without one, the listed
-  lengths were entered by hand.
+- **This release's own listing first.** When every file is within 2s of
+  the target's listed length, the copy fits its own release; any other
+  pressing the files also fit is reported as indistinguishable by length,
+  never as a finding.
+- **Other pressings.** Only when the files do NOT fit the target's listing
+  is a sibling whose listing they do fit reported as a match, with the
+  positions where its titles differ.
+- **Disc IDs.** A disc ID carries a physical table of contents. The
+  target's LISTED lengths are compared with each attached disc, and so are
+  the FILES, separately: the listing may match a disc or not, and the copy
+  may match the disc the listing matches, a different attached disc, or
+  none. No disc ID means only that there is nothing to check against; a
+  digital or vinyl medium can never have one.
 
 Nothing here writes anything, feeds a pipeline decision, or runs at render
 time. One code path serves ``GET /api/other-pressings/<id>`` and
@@ -45,7 +49,7 @@ from lib.mb_api import (
     MBDiscReleasePage,
     MBDiscTrack,
 )
-from lib.release_identity import detect_release_source
+from lib.release_identity import detect_release_source, normalize_release_id
 from lib.track_length_shape import SAME_AUDIO_TOLERANCE_SECONDS
 from lib.validation_envelope import decode_validation_envelope
 
@@ -57,17 +61,20 @@ RELEASE_GROUP_PAGE_SIZE: Final[int] = 25
 #: The whole check gives up after this long, so a slow mirror cannot hang
 #: the request.
 TOTAL_BUDGET_SECONDS: Final[float] = 30.0
-#: One HTTP attempt never waits longer than this. The client retries a
-#: dropped connection once, so each request gets at most half of what is
-#: left of the budget.
+#: One wait never exceeds this. A request may wait for a mirror slot, make
+#: one attempt and retry a dropped connection once, so each gets at most a
+#: third of what is left of the budget.
 PER_REQUEST_TIMEOUT_SECONDS: Final[float] = 10.0
 #: CD frames per second in a disc table of contents.
 _SECTORS_PER_SECOND: Final[float] = 75.0
+#: Above the 2s tolerance and up to this, a track is "a few seconds off";
+#: beyond it, it does not match.
+_FEW_SECONDS: Final[float] = 5.0
 
 #: Everything a mirror read can raise: connection and timeout failures
-#: (``OSError``, which covers ``URLError``), a broken HTTP exchange, and an
-#: undecodable or wrongly shaped body (``ValueError``, which covers
-#: ``json.JSONDecodeError`` and ``msgspec.ValidationError``).
+#: (``OSError``, which covers ``URLError`` and a busy mirror slot), a broken
+#: HTTP exchange, and an undecodable or wrongly shaped body (``ValueError``,
+#: which covers ``json.JSONDecodeError`` and ``msgspec.ValidationError``).
 _MIRROR_ERRORS = (OSError, HTTPException, ValueError)
 
 
@@ -111,6 +118,26 @@ class PressingCheckOutcome(StrEnum):
     MIRROR_UNAVAILABLE = "mirror_unavailable"
 
 
+class MediumDiscStatus(StrEnum):
+    #: The medium's format cannot carry a disc ID (digital, vinyl, DVD...).
+    NO_DISC_FORMAT = "no_disc_format"
+    #: It could, but none is attached.
+    NO_DISC_ID = "no_disc_id"
+    #: One is attached but its table of contents does not fit the tracks.
+    DISC_ID_UNUSABLE = "disc_id_unusable"
+    #: At least one attached table of contents was compared.
+    CHECKED = "checked"
+
+
+class FilesAgainstDisc(StrEnum):
+    #: The files fit a disc the listing also fits.
+    LISTING_DISC = "listing_disc"
+    #: The files fit an attached disc the listing does not fit.
+    OTHER_DISC = "other_disc"
+    #: The files fit no attached disc.
+    NO_DISC = "no_disc"
+
+
 class TitleDifference(msgspec.Struct, frozen=True, kw_only=True):
     """One position where the other pressing names the track differently.
 
@@ -139,27 +166,45 @@ class MatchingPressing(msgspec.Struct, frozen=True, kw_only=True):
 
 
 class DiscTrack(msgspec.Struct, frozen=True, kw_only=True):
-    """One target track measured off a disc table of contents."""
+    """One track of one attached disc, against the listing and the file."""
 
-    medium: int
     position: int
     title: str
     disc_seconds: float
-    #: ``None`` when no file is mapped to this track.
+    listed_seconds: float | None
     file_seconds: float | None
-    #: ``None`` when there is no file to compare.
-    agrees: bool | None
+    #: ``None`` when the release lists no length for this track.
+    listing_agrees: bool | None
+    #: ``None`` when no file is mapped to this track.
+    file_agrees: bool | None
+
+
+class DiscCheck(msgspec.Struct, frozen=True, kw_only=True):
+    disc_id: str
+    #: Every track has a listed length within 2s of this disc.
+    listing_agrees: bool
+    #: Every mapped file is within 2s of this disc; ``None`` with no files.
+    files_agree: bool | None
+    tracks: list[DiscTrack]
+
+
+class MediumLengths(msgspec.Struct, frozen=True, kw_only=True):
+    medium: int
+    format: str | None
+    status: MediumDiscStatus
+    #: Every usable attached disc ID, compared.
+    discs: list[DiscCheck]
+    #: The disc the listing fits, if any.
+    listing_disc_id: str | None
+    #: The disc the files fit, if any.
+    files_disc_id: str | None
+    #: ``None`` when no disc was usable or no file is mapped to this medium.
+    files_against_disc: FilesAgainstDisc | None
 
 
 class TargetLengths(msgspec.Struct, frozen=True, kw_only=True):
     has_disc_id: bool
-    #: Disc IDs whose table of contents was used, one per covered medium.
-    disc_ids: list[str]
-    media_with_disc: list[int]
-    media_without_disc: list[int]
-    tracks: list[DiscTrack]
-    #: ``None`` when no disc table of contents could be compared.
-    files_agree: bool | None
+    media: list[MediumLengths]
 
 
 class PressingCheck(msgspec.Struct, frozen=True, kw_only=True):
@@ -171,12 +216,20 @@ class PressingCheck(msgspec.Struct, frozen=True, kw_only=True):
     release_group_id: str | None = None
     #: False when the files do not line up one-to-one with the release.
     compared_with_pressings: bool = False
+    #: Every file within 2s of the target's own listed length. ``None`` when
+    #: not compared or the target lists no length for some track.
+    fits_own_listing: bool | None = None
+    #: Other pressings the files fit where they do NOT fit the target.
     matching_pressings: list[MatchingPressing] = msgspec.field(
+        default_factory=list[MatchingPressing])
+    #: Other pressings the files fit as well as the target's own listing:
+    #: track lengths cannot tell them apart.
+    same_listing_pressings: list[MatchingPressing] = msgspec.field(
         default_factory=list[MatchingPressing])
     target_lengths: TargetLengths | None = None
     #: Releases in the group as MusicBrainz counts them.
     releases_in_group: int = 0
-    #: Other releases actually read (the target itself excluded).
+    #: Other distinct releases actually read (the target itself excluded).
     releases_checked: int = 0
     capped: bool = False
     #: Short technical reason on a mirror failure, for logs and --json.
@@ -218,8 +271,8 @@ def _selected_attempt(row: Mapping[str, object]) -> _Attempt | None:
     for candidate in envelope.candidates:
         if candidate.get("is_target") is not True:
             continue
-        release_id = candidate.get("album_id")
-        if not isinstance(release_id, str) or not release_id:
+        release_id = normalize_release_id(candidate.get("album_id"))
+        if not release_id:
             return None
         files: dict[tuple[int, int], float] = {}
         clean = (
@@ -249,7 +302,12 @@ def _selected_attempt(row: Mapping[str, object]) -> _Attempt | None:
 
 # --- comparing --------------------------------------------------------------
 
-def _listed_seconds(milliseconds: int | None) -> float | None:
+def _listed_seconds(track: MBDiscTrack) -> float | None:
+    """The track's listed length, falling back to its recording's length
+    exactly as Beets does when the track carries none."""
+    milliseconds = track.length
+    if (milliseconds is None or milliseconds <= 0) and track.recording:
+        milliseconds = track.recording.length
     if milliseconds is None or milliseconds <= 0:
         return None
     return milliseconds / 1000.0
@@ -264,11 +322,15 @@ def _running_order(release: MBDiscRelease) -> list[tuple[int, int, MBDiscTrack]]
 
 
 def _normalize_title(title: str) -> str:
-    """Letters and digits only, case-folded: 'Drip, Drip, Drip' and 'Drip
-    Drip Drip', or '...and' and '… And', are the same title. Only a change
-    of words is a title difference worth telling the operator about."""
+    """Letters, digits and their combining marks, case-folded: 'Drip, Drip,
+    Drip' and 'Drip Drip Drip', or '...and' and '… And', are the same
+    title, while 'कि' and 'का' (which differ only in a vowel mark) are not.
+    A title with no letters at all ('?', '!') is compared as written."""
     folded = unicodedata.normalize("NFKC", title).casefold()
-    return "".join(char for char in folded if char.isalnum())
+    kept = "".join(
+        char for char in folded
+        if char.isalnum() or unicodedata.category(char).startswith("M"))
+    return kept or folded.strip()
 
 
 _COUNTRY_NAMES: Final[dict[str, str]] = {
@@ -314,23 +376,35 @@ def _url(release_id: str) -> str:
     return f"{PUBLIC_MB_ORIGIN}/release/{release_id}"
 
 
+def _fit(
+    file_lengths: Sequence[float], listed: Sequence[float | None],
+) -> float | None:
+    """The largest file-to-listing gap when every track has a listing and
+    every gap is within tolerance, else ``None``."""
+    if len(listed) != len(file_lengths):
+        return None
+    worst = 0.0
+    for file_seconds, listed_seconds in zip(file_lengths, listed, strict=True):
+        if listed_seconds is None:
+            return None
+        gap = abs(file_seconds - listed_seconds)
+        if gap > SAME_AUDIO_TOLERANCE_SECONDS:
+            return None
+        worst = max(worst, gap)
+    return worst
+
+
 def _match(
     target_order: Sequence[tuple[int, int, MBDiscTrack]],
     file_lengths: Sequence[float],
     sibling: MBDiscRelease,
 ) -> MatchingPressing | None:
     sibling_order = _running_order(sibling)
-    if len(sibling_order) != len(file_lengths):
+    worst = _fit(
+        file_lengths,
+        [_listed_seconds(track) for _, _, track in sibling_order])
+    if worst is None:
         return None
-    listed = [_listed_seconds(track.length) for _, _, track in sibling_order]
-    worst = 0.0
-    for file_seconds, sibling_seconds in zip(file_lengths, listed, strict=True):
-        if sibling_seconds is None:
-            return None
-        gap = abs(file_seconds - sibling_seconds)
-        if gap > SAME_AUDIO_TOLERANCE_SECONDS:
-            return None
-        worst = max(worst, gap)
     differences = [
         TitleDifference(
             medium=medium, position=position,
@@ -374,64 +448,92 @@ def _disc_lengths(disc: MBDisc, track_count: int) -> list[float] | None:
     return lengths
 
 
-def _target_lengths(
-    target: MBDiscRelease, files: Mapping[tuple[int, int], float],
-) -> TargetLengths:
-    disc_ids: list[str] = []
-    with_disc: list[int] = []
-    without_disc: list[int] = []
+def _can_carry_disc_id(fmt: str | None) -> bool:
+    """MusicBrainz disc IDs exist only for CD media (CD, HDCD, Enhanced CD,
+    SHM-CD, hybrid SACD...). An unknown format might be one."""
+    return fmt is None or "CD" in fmt
+
+
+def _within(a: float | None, b: float) -> bool | None:
+    return None if a is None else abs(a - b) <= SAME_AUDIO_TOLERANCE_SECONDS
+
+
+def _disc_check(
+    medium: MBDiscMedium, disc: MBDisc, lengths: Sequence[float],
+    files: Mapping[tuple[int, int], float],
+) -> DiscCheck:
     rows: list[DiscTrack] = []
-    for medium in sorted(target.media, key=lambda m: m.position):
-        chosen = _best_disc(medium, files)
-        if chosen is None:
-            without_disc.append(medium.position)
-            continue
-        disc, lengths = chosen
-        disc_ids.append(disc.id)
-        with_disc.append(medium.position)
-        for index, (track, disc_seconds) in enumerate(
-            zip(medium.tracks, lengths, strict=True), 1,
-        ):
-            position = track.position or index
-            file_seconds = files.get((medium.position, position))
-            rows.append(DiscTrack(
-                medium=medium.position, position=position, title=track.title,
-                disc_seconds=disc_seconds, file_seconds=file_seconds,
-                agrees=(
-                    None if file_seconds is None
-                    else abs(file_seconds - disc_seconds)
-                    <= SAME_AUDIO_TOLERANCE_SECONDS
-                ),
-            ))
-    compared = [row.agrees for row in rows if row.agrees is not None]
-    return TargetLengths(
-        has_disc_id=any(medium.discs for medium in target.media),
-        disc_ids=disc_ids, media_with_disc=with_disc,
-        media_without_disc=without_disc, tracks=rows,
+    for index, (track, disc_seconds) in enumerate(
+        zip(medium.tracks, lengths, strict=True), 1,
+    ):
+        position = track.position or index
+        listed = _listed_seconds(track)
+        file_seconds = files.get((medium.position, position))
+        rows.append(DiscTrack(
+            position=position, title=track.title, disc_seconds=disc_seconds,
+            listed_seconds=listed, file_seconds=file_seconds,
+            listing_agrees=_within(listed, disc_seconds),
+            file_agrees=_within(file_seconds, disc_seconds),
+        ))
+    compared = [row.file_agrees for row in rows if row.file_agrees is not None]
+    return DiscCheck(
+        disc_id=disc.id,
+        listing_agrees=all(row.listing_agrees is True for row in rows),
         files_agree=all(compared) if compared else None,
+        tracks=rows,
     )
 
 
-def _best_disc(
+def _medium_lengths(
     medium: MBDiscMedium, files: Mapping[tuple[int, int], float],
-) -> tuple[MBDisc, list[float]] | None:
-    """The disc ID on this medium whose table of contents is closest to
-    the files (a medium can carry several pressings' disc IDs)."""
-    best: tuple[float, MBDisc, list[float]] | None = None
-    for disc in medium.discs:
-        lengths = _disc_lengths(disc, len(medium.tracks))
-        if lengths is None:
-            continue
-        gaps = [
-            abs(files[(medium.position, track.position or index)] - seconds)
-            for index, (track, seconds) in enumerate(
-                zip(medium.tracks, lengths, strict=True), 1)
-            if (medium.position, track.position or index) in files
-        ]
-        score = max(gaps, default=0.0)
-        if best is None or score < best[0]:
-            best = (score, disc, lengths)
-    return None if best is None else (best[1], best[2])
+) -> MediumLengths:
+    checks = [
+        _disc_check(medium, disc, lengths, files)
+        for disc in medium.discs
+        if (lengths := _disc_lengths(disc, len(medium.tracks))) is not None
+    ]
+    if not checks:
+        status = (
+            MediumDiscStatus.DISC_ID_UNUSABLE if medium.discs
+            else MediumDiscStatus.NO_DISC_ID if _can_carry_disc_id(medium.format)
+            else MediumDiscStatus.NO_DISC_FORMAT
+        )
+        return MediumLengths(
+            medium=medium.position, format=medium.format, status=status,
+            discs=[], listing_disc_id=None, files_disc_id=None,
+            files_against_disc=None)
+    listing_discs = [check for check in checks if check.listing_agrees]
+    both = [check for check in listing_discs if check.files_agree]
+    files_only = [check for check in checks if check.files_agree]
+    if all(check.files_agree is None for check in checks):
+        against: FilesAgainstDisc | None = None
+        files_disc: DiscCheck | None = None
+    elif both:
+        against, files_disc = FilesAgainstDisc.LISTING_DISC, both[0]
+    elif files_only:
+        against, files_disc = FilesAgainstDisc.OTHER_DISC, files_only[0]
+    else:
+        against, files_disc = FilesAgainstDisc.NO_DISC, None
+    listing_disc = both[0] if both else (listing_discs[0] if listing_discs else None)
+    return MediumLengths(
+        medium=medium.position, format=medium.format,
+        status=MediumDiscStatus.CHECKED, discs=checks,
+        listing_disc_id=listing_disc.disc_id if listing_disc else None,
+        files_disc_id=files_disc.disc_id if files_disc else None,
+        files_against_disc=against,
+    )
+
+
+def _target_lengths(
+    target: MBDiscRelease, files: Mapping[tuple[int, int], float],
+) -> TargetLengths:
+    return TargetLengths(
+        has_disc_id=any(medium.discs for medium in target.media),
+        media=[
+            _medium_lengths(medium, files)
+            for medium in sorted(target.media, key=lambda m: m.position)
+        ],
+    )
 
 
 # --- sentences --------------------------------------------------------------
@@ -450,14 +552,27 @@ def _quoted(titles: Sequence[str]) -> str:
 _SHOWN_DIFFERENCES: Final[int] = 3
 #: Pressings named in a list before "and N more".
 _SHOWN_PRESSINGS: Final[int] = 4
-#: Above this, a file is not the disc's track at all; at or below it (and
-#: above the 2s tolerance) the difference is the size gap handling makes.
-_FEW_SECONDS: Final[float] = 10.0
 _COUNT_WORDS: Final[dict[int, str]] = {2: "Both", 3: "All three", 4: "All four"}
 _HEDGE = (
     "This may be the same audio described differently (for example where a "
     "hidden track is counted), not necessarily a different disc."
 )
+
+
+def _numbers(positions: Sequence[int]) -> str:
+    noun = "tracks" if len(positions) > 1 else "track"
+    return f"{noun} {_join([str(p) for p in positions])}"
+
+
+def _positions(keys: Sequence[tuple[int, int]], *, multi_disc: bool) -> str:
+    """'tracks 2 and 5', or per disc on a multi-disc release."""
+    if not multi_disc:
+        return _numbers([position for _, position in keys])
+    parts: list[str] = []
+    for medium in sorted({medium for medium, _ in keys}):
+        numbers = [position for m, position in keys if m == medium]
+        parts.append(f"{_numbers(numbers)} on disc {medium}")
+    return _join(parts)
 
 
 def _pressing_list(descriptions: Sequence[str]) -> str:
@@ -501,7 +616,19 @@ def _singular(clause: str) -> str:
     return clause
 
 
-def _pressing_sentences(
+def _same_listing_sentence(same: Sequence[MatchingPressing]) -> str:
+    if not same:
+        return "No other pressing in this release group has the same listing."
+    if len(same) == 1:
+        return (
+            "1 other pressing has the same listing, so track lengths cannot "
+            "tell them apart.")
+    return (
+        f"{len(same)} other pressings have the same listing, so track "
+        "lengths cannot tell them apart.")
+
+
+def _match_sentences(
     matches: Sequence[MatchingPressing], track_count: int,
 ) -> list[str]:
     if not matches:
@@ -555,71 +682,150 @@ def _pressing_sentences(
     return sentences
 
 
-def _track_list(rows: Sequence[DiscTrack], *, multi_disc: bool) -> str:
-    if not multi_disc:
-        numbers = [str(row.position) for row in rows]
-        noun = "tracks" if len(numbers) > 1 else "track"
-        return f"{noun} {_join(numbers)}"
-    parts: list[str] = []
-    for medium in sorted({row.medium for row in rows}):
-        numbers = [str(row.position) for row in rows if row.medium == medium]
-        noun = "tracks" if len(numbers) > 1 else "track"
-        parts.append(f"{noun} {_join(numbers)} on disc {medium}")
-    return _join(parts)
+_FORMAT_PHRASES: Final[dict[str, str]] = {
+    "Digital Media": "a digital release",
+    "Vinyl": "a vinyl record", '12" Vinyl': "a vinyl record",
+    '7" Vinyl': "a vinyl record", '10" Vinyl': "a vinyl record",
+    "Cassette": "a cassette",
+}
 
 
-def _lengths_sentence(lengths: TargetLengths, *, multi_disc: bool) -> str:
-    if not lengths.media_with_disc:
-        if lengths.has_disc_id:
-            return (
-                "This release has a disc ID, but its track layout does not "
-                "fit the listing, so the listed lengths cannot be checked "
-                "against it. They may have been typed in by hand."
-            )
-        return "The listed lengths were typed in by hand and may be wrong."
-    if lengths.media_without_disc:
-        discs = _join([str(m) for m in lengths.media_with_disc])
-        noun = "discs" if len(lengths.media_with_disc) > 1 else "disc"
-        source = (
-            f"The listed lengths for {noun} {discs} come from a real disc, "
-            "so they can be trusted; the others were typed in by hand and "
-            "may be wrong."
-        )
-    else:
-        source = (
-            "The listed lengths come from a real disc, so they can be "
-            "trusted."
-        )
-    if lengths.files_agree is None:
-        return source
-    if lengths.files_agree:
-        return f"{source} This copy matches that disc on every track."
-    off = [row for row in lengths.tracks if row.agrees is False]
-    far = [row for row in off if _disc_gap(row) > _FEW_SECONDS]
-    near = [row for row in off if _disc_gap(row) <= _FEW_SECONDS]
-    gaps_note = (
-        ", which can come from how the gaps between tracks were ripped")
+def _format_phrase(fmt: str | None) -> str:
+    if fmt is None:
+        return "a release of unknown format"
+    return _FORMAT_PHRASES.get(fmt, f"a {fmt}")
+
+
+def _disc_reference(medium: MediumLengths) -> tuple[str, DiscCheck]:
+    """The disc the files are measured against when they fit none, and how
+    to name it: the listing's disc, the only disc, or the closest one."""
+    if medium.listing_disc_id is not None:
+        disc = next(d for d in medium.discs if d.disc_id == medium.listing_disc_id)
+        return "that disc", disc
+
+    def worst(check: DiscCheck) -> float:
+        return max(
+            (abs(row.file_seconds - row.disc_seconds) for row in check.tracks
+             if row.file_seconds is not None),
+            default=0.0)
+
+    closest = min(medium.discs, key=worst)
+    if len(medium.discs) == 1:
+        return "the attached disc", closest
+    return f"the closest of the {len(medium.discs)} attached discs", closest
+
+
+def _files_sentence(medium: MediumLengths) -> str | None:
+    against = medium.files_against_disc
+    count = len(medium.discs)
+    if against is None:
+        return None
+    if against is FilesAgainstDisc.LISTING_DISC:
+        return "This copy matches that disc on every track."
+    if against is FilesAgainstDisc.OTHER_DISC:
+        if medium.listing_disc_id is not None:
+            return "This copy matches a different attached disc than the listing does."
+        if count == 1:
+            return "This copy matches the attached disc on every track."
+        return f"This copy matches one of the {count} attached discs on every track."
+    name, disc = _disc_reference(medium)
+    off = [
+        row for row in disc.tracks
+        if row.file_agrees is False and row.file_seconds is not None]
+    far = [r.position for r in off
+           if abs((r.file_seconds or 0.0) - r.disc_seconds) > _FEW_SECONDS]
+    near = [r.position for r in off
+            if abs((r.file_seconds or 0.0) - r.disc_seconds) <= _FEW_SECONDS]
     if far and near:
         return (
-            f"{source} This copy does not match that disc on "
-            f"{_track_list(far, multi_disc=multi_disc)}, and is a few seconds "
-            f"off on {_track_list(near, multi_disc=multi_disc)}."
-        )
+            f"This copy does not match {name} on {_numbers(far)}, and is a "
+            f"few seconds off on {_numbers(near)}.")
     if far:
+        return f"This copy does not match {name} on {_numbers(far)}."
+    return f"This copy is a few seconds off {name} on {_numbers(near)}."
+
+
+def _listing_sentence(medium: MediumLengths, *, subject: str | None) -> str:
+    """``subject`` is ``None`` for a one-disc release, else 'Disc 2'."""
+    count = len(medium.discs)
+    whose = "the listed lengths" if subject is None else f"{subject}'s listed lengths"
+    if medium.listing_disc_id is not None:
+        where = "this release" if subject is None else "it"
+        if count == 1:
+            return f"{whose.capitalize()} match the disc ID attached to {where}."
         return (
-            f"{source} This copy does not match that disc on "
-            f"{_track_list(far, multi_disc=multi_disc)}."
-        )
-    return (
-        f"{source} This copy is a few seconds off that disc on "
-        f"{_track_list(near, multi_disc=multi_disc)}{gaps_note}."
+            f"{whose.capitalize()} match one of the {count} disc IDs attached "
+            f"to {where}.")
+    attached = (
+        ("A disc ID is attached" if count == 1
+         else f"{count} disc IDs are attached")
+        if subject is None else
+        (f"{subject} has a disc ID attached" if count == 1
+         else f"{subject} has {count} disc IDs attached")
     )
+    listed = "the listed lengths" if subject is None else "its listed lengths"
+    if count > 1:
+        return (
+            f"{attached}, but {listed} do not match any of them, so the "
+            "listing may be wrong.")
+    rows = medium.discs[0].tracks
+    off = [row.position for row in rows if row.listing_agrees is False]
+    missing = [row.position for row in rows if row.listing_agrees is None]
+    if off and missing:
+        return (
+            f"{attached}, but {listed} do not match it on {_numbers(off)} and "
+            f"give no length for {_numbers(missing)}, so the listing may be "
+            "wrong.")
+    if missing:
+        return (
+            f"{attached}, but the listing gives no length for "
+            f"{_numbers(missing)}, so it cannot be checked in full against "
+            "the disc.")
+    return (
+        f"{attached}, but {listed} do not match it on {_numbers(off)}, so the "
+        "listing may be wrong.")
 
 
-def _disc_gap(row: DiscTrack) -> float:
-    if row.file_seconds is None:
-        return 0.0
-    return abs(row.file_seconds - row.disc_seconds)
+def _medium_sentences(medium: MediumLengths, *, subject: str | None) -> list[str]:
+    if medium.status is MediumDiscStatus.NO_DISC_FORMAT:
+        if subject is None:
+            return [
+                (f"This is {_format_phrase(medium.format)}, so there is no disc "
+                "to check the listed lengths against.")]
+        return [
+            (f"{subject} is {_format_phrase(medium.format)}, so there is no "
+            "disc to check its listed lengths against.")]
+    if medium.status is MediumDiscStatus.NO_DISC_ID:
+        where = "this release" if subject is None else subject.lower()
+        listed = "the listed lengths" if subject is None else "its listed lengths"
+        return [
+            (f"No disc ID is attached to {where}, so there is no disc to check "
+            f"{listed} against.")]
+    if medium.status is MediumDiscStatus.DISC_ID_UNUSABLE:
+        if subject is None:
+            return [
+                ("A disc ID is attached, but its track layout does not fit "
+                "this release's tracks, so it cannot be used to check the "
+                "listed lengths.")]
+        return [
+            (f"{subject} has a disc ID attached, but its track layout does not "
+            "fit that disc's tracks, so it cannot be used to check the listed "
+            "lengths.")]
+    sentences = [_listing_sentence(medium, subject=subject)]
+    files = _files_sentence(medium)
+    if files is not None:
+        sentences.append(files)
+    return sentences
+
+
+def _lengths_sentences(lengths: TargetLengths) -> list[str]:
+    if len(lengths.media) == 1:
+        return _medium_sentences(lengths.media[0], subject=None)
+    sentences: list[str] = []
+    for medium in lengths.media:
+        sentences.extend(
+            _medium_sentences(medium, subject=f"Disc {medium.medium}"))
+    return sentences
 
 
 def _cap_sentence(read: int, in_group: int) -> str:
@@ -644,6 +850,45 @@ _SENTENCE_UNREACHABLE = (
 _SENTENCE_NOT_ALIGNED = (
     "Not every file lines up with a track on this release, so other "
     "pressings could not be compared.")
+_SENTENCE_FITS_OWN = "This copy fits this release's own listing on every track."
+
+
+def _own_listing_gaps(
+    target_order: Sequence[tuple[int, int, MBDiscTrack]],
+    file_lengths: Sequence[float],
+) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
+    """(tracks whose file is more than 2s off the listing, tracks the
+    release lists no length for)."""
+    off: list[tuple[int, int]] = []
+    unlisted: list[tuple[int, int]] = []
+    for (medium, position, track), file_seconds in zip(
+        target_order, file_lengths, strict=True,
+    ):
+        listed = _listed_seconds(track)
+        if listed is None:
+            unlisted.append((medium, position))
+        elif abs(file_seconds - listed) > SAME_AUDIO_TOLERANCE_SECONDS:
+            off.append((medium, position))
+    return off, unlisted
+
+
+def _own_listing_sentences(
+    off: Sequence[tuple[int, int]], unlisted: Sequence[tuple[int, int]],
+    *, multi_disc: bool,
+) -> list[str]:
+    if not off and not unlisted:
+        return [_SENTENCE_FITS_OWN]
+    sentences: list[str] = []
+    if off:
+        sentences.append(
+            "This copy does not fit this release's own listing on "
+            f"{_positions(off, multi_disc=multi_disc)}.")
+    if unlisted:
+        sentences.append(
+            "This release lists no length for "
+            f"{_positions(unlisted, multi_disc=multi_disc)}, so this copy "
+            "cannot be checked against it in full.")
+    return sentences
 
 
 def check_other_pressings(
@@ -686,7 +931,7 @@ def check_other_pressings(
         remaining = deadline - clock()
         if remaining <= 0:
             raise _OutOfTime
-        return min(PER_REQUEST_TIMEOUT_SECONDS, remaining / 2)
+        return min(PER_REQUEST_TIMEOUT_SECONDS, remaining / 3)
 
     base = PressingCheck(
         outcome=PressingCheckOutcome.CHECKED,
@@ -706,9 +951,13 @@ def check_other_pressings(
         return _unavailable(base, error)
     except (_OutOfTime, *_MIRROR_ERRORS) as error:
         return _unavailable(base, error)
+    if not target.id or not target.media:
+        return _unavailable(base, ValueError("empty release in the reply"))
 
     group_id = target.release_group.id if target.release_group else ""
+    not_siblings = {attempt.release_id, normalize_release_id(target.id)}
     siblings: list[MBDiscRelease] = []
+    seen: set[str] = set()
     in_group = 0
     read = 0
     if group_id:
@@ -722,9 +971,14 @@ def check_other_pressings(
                 if not page.releases:
                     break
                 read += len(page.releases)
-                siblings.extend(
-                    release for release in page.releases
-                    if release.id != target.id)
+                for release in page.releases:
+                    # Browse can list one release on two pages.
+                    key = normalize_release_id(release.id)
+                    if not key or key in seen:
+                        continue
+                    seen.add(key)
+                    if key not in not_siblings:
+                        siblings.append(release)
                 offset += len(page.releases)
                 if offset >= in_group:
                     break
@@ -740,26 +994,41 @@ def check_other_pressings(
         (medium, position) in attempt.files
         for medium, position, _ in target_order)
     matches: list[MatchingPressing] = []
+    same_listing: list[MatchingPressing] = []
+    fits_own: bool | None = None
     sentences: list[str] = []
     if aligned:
         file_lengths = [
             attempt.files[(medium, position)]
             for medium, position, _ in target_order]
-        matches = [
+        fitting = [
             match for sibling in siblings
             if (match := _match(target_order, file_lengths, sibling))
             is not None
         ]
-        sentences.extend(_pressing_sentences(matches, len(file_lengths)))
+        off, unlisted = _own_listing_gaps(target_order, file_lengths)
+        fits_own = True if not off and not unlisted else (
+            False if off else None)
+        sentences.extend(
+            _own_listing_sentences(off, unlisted, multi_disc=multi_disc))
+        if fits_own:
+            # The copy fits its own release: a sibling the files also fit
+            # is indistinguishable by length, never a finding.
+            same_listing = fitting
+            sentences.append(_same_listing_sentence(same_listing))
+        else:
+            matches = fitting
+            sentences.extend(_match_sentences(matches, len(file_lengths)))
     else:
         sentences.append(_SENTENCE_NOT_ALIGNED)
-    sentences.append(_lengths_sentence(lengths, multi_disc=multi_disc))
+    sentences.extend(_lengths_sentences(lengths))
     capped = in_group > read
     if capped:
         sentences.append(_cap_sentence(read, in_group))
     return msgspec.structs.replace(
         base, release_group_id=group_id or None,
-        compared_with_pressings=aligned, matching_pressings=matches,
+        compared_with_pressings=aligned, fits_own_listing=fits_own,
+        matching_pressings=matches, same_listing_pressings=same_listing,
         target_lengths=lengths, releases_in_group=in_group,
         releases_checked=len(siblings), capped=capped, sentences=sentences,
     )
@@ -773,4 +1042,3 @@ def _unavailable(base: PressingCheck, error: BaseException) -> PressingCheck:
     return msgspec.structs.replace(
         base, outcome=PressingCheckOutcome.MIRROR_UNAVAILABLE,
         sentences=[_SENTENCE_UNREACHABLE], detail=detail)
-

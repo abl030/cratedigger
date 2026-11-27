@@ -135,7 +135,14 @@ def _quote_mb_identifier(identifier: str) -> str:
 _DEFAULT_TIMEOUT_SECONDS = 15.0
 
 
-def _get(url: str, *, timeout: float = _DEFAULT_TIMEOUT_SECONDS) -> Any:
+class MirrorSlotTimeout(TimeoutError):
+    """No per-mirror request slot came free within the caller's budget."""
+
+
+def _get(
+    url: str, *, timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+    slot_timeout: float | None = None,
+) -> Any:
     """Fetch and JSON-decode one MB API URL.
 
     Returns ``Any`` — this is the raw external-JSON boundary. Callers that
@@ -144,6 +151,11 @@ def _get(url: str, *, timeout: float = _DEFAULT_TIMEOUT_SECONDS) -> Any:
     below; ``get_release_raw`` is the one deliberate exception (see its
     docstring) that keeps the untouched ``dict[str, object]`` for consumers
     reading fields wider than any narrow Struct this module declares.
+
+    ``slot_timeout`` bounds the wait for a per-mirror request slot; a caller
+    that owns a total time budget passes it and gets
+    :class:`MirrorSlotTimeout` when the slots stay busy. ``None`` (every
+    other caller) waits for a slot as before.
     """
     def request_once() -> object:
         # Pace each HTTP attempt, including the retry. A retry is still a
@@ -159,12 +171,23 @@ def _get(url: str, *, timeout: float = _DEFAULT_TIMEOUT_SECONDS) -> Any:
 
     # One slot spans a retry too.  Releasing it between attempts would let a
     # transient mirror failure briefly exceed the promised per-mirror cap.
-    with _mirror_semaphore(url):
+    def request_with_retry() -> object:
         try:
             return request_once()
         except urllib.error.URLError:
             # Retry once — MB mirror may have closed a keep-alive connection
             return request_once()
+
+    semaphore = _mirror_semaphore(url)
+    if slot_timeout is None:
+        with semaphore:
+            return request_with_retry()
+    if not semaphore.acquire(timeout=max(0.0, slot_timeout)):
+        raise MirrorSlotTimeout(f"no mirror slot within {slot_timeout:.1f}s")
+    try:
+        return request_with_retry()
+    finally:
+        semaphore.release()
 
 
 def _fetch_browse_pages[MBPage, MBItem](
@@ -979,11 +1002,18 @@ class MBDisc(msgspec.Struct, rename="kebab", frozen=True):
     offsets: list[int] = msgspec.field(default_factory=list[int])
 
 
+class MBDiscRecording(msgspec.Struct, rename="kebab", frozen=True):
+    length: int | None = None
+
+
 class MBDiscTrack(msgspec.Struct, rename="kebab", frozen=True):
     position: int | None = None
     title: str = ""
     #: Milliseconds; MusicBrainz sends null when nobody entered one.
     length: int | None = None
+    #: The recording's own length, which Beets falls back to when the
+    #: track carries none.
+    recording: MBDiscRecording | None = None
 
 
 class MBDiscMedium(msgspec.Struct, rename="kebab", frozen=True):
@@ -1000,19 +1030,24 @@ class MBDiscReleaseGroupRef(msgspec.Struct, rename="kebab", frozen=True):
 
 class MBDiscRelease(msgspec.Struct, rename="kebab", frozen=True):
     """A release with its tracks and disc IDs
-    (``inc=recordings+media+discids``)."""
-    id: str = ""
+    (``inc=recordings+media+discids``).
+
+    ``id`` and ``media`` are required: a 200 whose body is an error object
+    (``{"error": ...}``) must fail to decode, never pass as an empty
+    release."""
+    id: str
+    media: list[MBDiscMedium]
     title: str = ""
     country: str | None = None
     date: str | None = None
-    media: list[MBDiscMedium] = msgspec.field(default_factory=list[MBDiscMedium])
     #: Present on a direct lookup with ``release-groups`` in ``inc``.
     release_group: MBDiscReleaseGroupRef | None = None
 
 
 class MBDiscReleasePage(msgspec.Struct, rename="kebab", frozen=True):
-    releases: list[MBDiscRelease] = msgspec.field(default_factory=list[MBDiscRelease])
-    release_count: int = 0
+    """One browse page; both fields required for the same reason."""
+    releases: list[MBDiscRelease]
+    release_count: int
 
 
 def get_release_with_discids(
@@ -1022,7 +1057,7 @@ def get_release_with_discids(
     raw = _get(
         f"{MB_API_BASE}/release/{_quote_mb_identifier(release_mbid)}"
         "?inc=recordings+media+discids+release-groups&fmt=json",
-        timeout=timeout,
+        timeout=timeout, slot_timeout=timeout,
     )
     return msgspec.convert(raw, type=MBDiscRelease)
 
@@ -1035,7 +1070,7 @@ def browse_release_group_with_discids(
         f"{MB_API_BASE}/release?release-group={_quote_mb_identifier(rg_mbid)}"
         f"&inc=recordings+media+discids&limit={int(limit)}"
         f"&offset={int(offset)}&fmt=json",
-        timeout=timeout,
+        timeout=timeout, slot_timeout=timeout,
     )
     return msgspec.convert(raw, type=MBDiscReleasePage)
 

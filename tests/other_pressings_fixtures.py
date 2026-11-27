@@ -30,9 +30,13 @@ FAIRWAYS = 42692
 DEER_TICK = 12368
 BOB = 22324
 
+class RecordingJSON(TypedDict):
+    length: int | None
+
+
 TrackJSON = TypedDict("TrackJSON", {
     "position": int | None, "number": str | None, "title": str,
-    "length": int | None,
+    "length": int | None, "recording": NotRequired[RecordingJSON],
 })
 DiscJSON = TypedDict("DiscJSON", {
     "id": str, "offset-count": int, "sectors": int, "offsets": list[int],
@@ -136,8 +140,11 @@ def mirror_get(fixture: FixtureJSON) -> Callable[..., object]:
     """A stand-in for ``lib.mb_api._get`` that answers from the capture."""
     target = fixture["target"]
 
-    def get(url: str, *, timeout: float = 15.0) -> object:
+    def get(
+        url: str, *, timeout: float = 15.0, slot_timeout: float | None = None,
+    ) -> object:
         assert timeout > 0
+        assert slot_timeout is None or slot_timeout > 0
         parsed = urllib.parse.urlsplit(url)
         query = urllib.parse.parse_qs(parsed.query)
         if parsed.path.endswith("/release") and "release-group" in query:
