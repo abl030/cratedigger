@@ -342,9 +342,16 @@ def _print_live_candidate_replay(
     q_override: str | None,
     gate_unavailable_reason: str | None,
     marked_incomplete: bool = False,
+    installed_copy_present: bool | None = None,
 ) -> None:
     """Replay the request's actual last-candidate evidence through the real
     decider (issue #813 tooling tier).
+
+    ``installed_copy_present`` (issue #1445 item 3) is whether Beets holds
+    the exact release uniquely — the condition under which the importer's
+    upgrade guard runs. ``None`` means it could not be determined. Linked
+    current evidence is NOT that condition: it can outlive the album or be
+    absent for an installed one.
 
     Every synthetic scenario above is a canned grade/bitrate combo — none
     reproduce the exact live candidate a real download produced, so live
@@ -448,11 +455,16 @@ def _print_live_candidate_replay(
             q_override=q_override,
             gate_unavailable_reason=gate_unavailable_reason,
         )
-    elif result.get("imported") and current is not None:
+    elif result.get("imported") and installed_copy_present is None:
+        print("      upgrade guard: could not tell whether Beets holds this "
+              "release, so its effect is not shown")
+    elif result.get("imported") and installed_copy_present:
         # Issue #1445 item 3: the replay cannot re-measure track lengths
-        # (that fact is computed from Beets only at import time), so it
-        # passes the guard's default above. When the replay would replace
-        # an installed copy, also show what the upgrade guard does to it.
+        # (the importer measures the installed files at import time), so it
+        # passes the guard's default above. When the replay would import
+        # over an installed copy — the documented condition, read from
+        # Beets, not from linked current evidence — also show what the
+        # upgrade guard does to it.
         import msgspec
 
         guarded_result = full_pipeline_decision_from_evidence(
@@ -826,7 +838,31 @@ def cmd_quality(db: _QualityCommandDB, args: argparse.Namespace) -> None:
         q_override=q_override,
         gate_unavailable_reason=gate_unavailable_reason,
         marked_incomplete=marked_incomplete,
+        installed_copy_present=_installed_copy_present(req.get("mb_release_id")),
     )
+
+
+def _installed_copy_present(mb_release_id: object | None) -> bool | None:
+    """Whether Beets uniquely holds the exact release (issue #1445 item 3).
+
+    The same resolution the importer's upgrade guard reads. ``None`` when
+    the runtime Beets library cannot be opened from this host.
+    """
+    from lib.beets_db import (
+        CurrentBeetsUnique,
+        open_beets_db,
+        release_identity_for_lookup,
+    )
+
+    identity = release_identity_for_lookup(mb_release_id)
+    if identity is None:
+        return False
+    try:
+        with open_beets_db() as beets:
+            current = beets.resolve_current_release(identity)
+    except Exception:  # noqa: BLE001 - a read-only diagnostic degrades to "unknown"
+        return None
+    return isinstance(current, CurrentBeetsUnique)
 
 
 def cmd_repair_spectral(

@@ -2926,7 +2926,10 @@ class TestQualityReplayShowsTheMark(unittest.TestCase):
         db.set_download_log_candidate_evidence(log_id, persisted.id)
         return db
 
-    def _replay(self, db: FakePipelineDB, *, marked: bool) -> str:
+    def _replay(
+        self, db: FakePipelineDB, *, marked: bool,
+        installed: bool | None = None,
+    ) -> str:
         from lib.quality import QualityRankConfig
         from scripts.pipeline_cli.quality import _print_live_candidate_replay
 
@@ -2941,6 +2944,7 @@ class TestQualityReplayShowsTheMark(unittest.TestCase):
                 q_override=None,
                 gate_unavailable_reason=None,
                 marked_incomplete=marked,
+                installed_copy_present=installed,
             )
         return "\n".join(str(call) for call in mock_print.call_args_list)
 
@@ -2984,10 +2988,18 @@ class TestQualityReplayShowsTheMark(unittest.TestCase):
         assert persisted is not None and persisted.id is not None
         db.set_request_current_evidence(1, persisted.id)
 
-        out = self._replay(db, marked=False)
+        out = self._replay(db, marked=False, installed=True)
 
         self.assertIn("#1445 upgrade guard", out)
         self.assertIn("REJECT, denylist, keep searching (final: wanted)", out)
+
+        # Linked current evidence without the album in Beets: nothing for
+        # the guard to protect, so no guarded line.
+        self.assertNotIn(
+            "#1445 upgrade guard", self._replay(db, marked=False, installed=False))
+        self.assertIn(
+            "could not tell whether Beets holds this release",
+            self._replay(db, marked=False, installed=None))
 
 
 class TestCmdSetIntent(unittest.TestCase):
