@@ -115,6 +115,8 @@ class PressingCheckOutcome(StrEnum):
     NO_MATCHED_RELEASE = "no_matched_release"
     DISCOGS_RELEASE = "discogs_release"
     RELEASE_NOT_FOUND = "release_not_found"
+    #: MusicBrainz has the release but it lists no tracks.
+    RELEASE_HAS_NO_TRACKS = "release_has_no_tracks"
     MIRROR_UNAVAILABLE = "mirror_unavailable"
 
 
@@ -226,6 +228,11 @@ class PressingCheck(msgspec.Struct, frozen=True, kw_only=True):
     #: track lengths cannot tell them apart.
     same_listing_pressings: list[MatchingPressing] = msgspec.field(
         default_factory=list[MatchingPressing])
+    #: Other pressings that leave some or all track lengths blank and fit
+    #: the files only through their recordings' lengths, which every
+    #: release using those recordings shares: not comparable.
+    recording_only_pressings: list[MatchingPressing] = msgspec.field(
+        default_factory=list[MatchingPressing])
     target_lengths: TargetLengths | None = None
     #: Releases in the group as MusicBrainz counts them.
     releases_in_group: int = 0
@@ -302,9 +309,17 @@ def _selected_attempt(row: Mapping[str, object]) -> _Attempt | None:
 
 # --- comparing --------------------------------------------------------------
 
+def _own_seconds(track: MBDiscTrack) -> float | None:
+    """The length this release itself gives the track, if any."""
+    if track.length is None or track.length <= 0:
+        return None
+    return track.length / 1000.0
+
+
 def _listed_seconds(track: MBDiscTrack) -> float | None:
     """The track's listed length, falling back to its recording's length
-    exactly as Beets does when the track carries none."""
+    exactly as Beets does when the track carries none. Used only for the
+    TARGET's own listing; a sibling is compared on its own lengths."""
     milliseconds = track.length
     if (milliseconds is None or milliseconds <= 0) and track.recording:
         milliseconds = track.recording.length
@@ -316,6 +331,10 @@ def _listed_seconds(track: MBDiscTrack) -> float | None:
 def _running_order(release: MBDiscRelease) -> list[tuple[int, int, MBDiscTrack]]:
     order: list[tuple[int, int, MBDiscTrack]] = []
     for medium in sorted(release.media, key=lambda m: m.position):
+        if medium.pregap is not None:
+            # Beets counts a pregap hidden track as track 0 of its disc.
+            order.append((medium.position, medium.pregap.position or 0,
+                          medium.pregap))
         for index, track in enumerate(medium.tracks, 1):
             order.append((medium.position, track.position or index, track))
     return order
@@ -394,15 +413,29 @@ def _fit(
     return worst
 
 
+class _SiblingFit(StrEnum):
+    #: Every track has its own length and the files fit them.
+    OWN = "own"
+    #: Some own lengths are blank; the files fit only through the
+    #: recordings' lengths.
+    RECORDING_ONLY = "recording_only"
+
+
 def _match(
     target_order: Sequence[tuple[int, int, MBDiscTrack]],
     file_lengths: Sequence[float],
     sibling: MBDiscRelease,
-) -> MatchingPressing | None:
+) -> tuple[_SiblingFit, MatchingPressing] | None:
     sibling_order = _running_order(sibling)
-    worst = _fit(
-        file_lengths,
-        [_listed_seconds(track) for _, _, track in sibling_order])
+    own = [_own_seconds(track) for _, _, track in sibling_order]
+    if all(seconds is not None for seconds in own):
+        kind = _SiblingFit.OWN
+        worst = _fit(file_lengths, own)
+    else:
+        kind = _SiblingFit.RECORDING_ONLY
+        worst = _fit(
+            file_lengths,
+            [_listed_seconds(track) for _, _, track in sibling_order])
     if worst is None:
         return None
     differences = [
@@ -416,7 +449,7 @@ def _match(
         if _normalize_title(target_track.title)
         != _normalize_title(sibling_track.title)
     ]
-    return MatchingPressing(
+    return kind, MatchingPressing(
         release_id=sibling.id, url=_url(sibling.id), title=sibling.title,
         country=sibling.country, date=sibling.date,
         formats=_formats(sibling),
@@ -448,10 +481,17 @@ def _disc_lengths(disc: MBDisc, track_count: int) -> list[float] | None:
     return lengths
 
 
-def _can_carry_disc_id(fmt: str | None) -> bool:
-    """MusicBrainz disc IDs exist only for CD media (CD, HDCD, Enhanced CD,
-    SHM-CD, hybrid SACD...). An unknown format might be one."""
-    return fmt is None or "CD" in fmt
+#: Media that can never carry a MusicBrainz disc ID, and how to name them.
+#: Any other format (a CD of any kind, a DualDisc's CD side, SACD, "Other",
+#: an unknown one) gets the neutral "no disc ID is attached" sentence.
+_NO_DISC_FORMATS: Final[dict[str, str]] = {
+    "Digital Media": "a digital release",
+    "Vinyl": "a vinyl record", '12" Vinyl': "a vinyl record",
+    '7" Vinyl': "a vinyl record", '10" Vinyl': "a vinyl record",
+    "Cassette": "a cassette",
+    "DVD": "a DVD", "DVD-Video": "a DVD-Video", "DVD-Audio": "a DVD-Audio",
+    "Blu-ray": "a Blu-ray", "VHS": "a VHS tape",
+}
 
 
 def _within(a: float | None, b: float) -> bool | None:
@@ -495,8 +535,9 @@ def _medium_lengths(
     if not checks:
         status = (
             MediumDiscStatus.DISC_ID_UNUSABLE if medium.discs
-            else MediumDiscStatus.NO_DISC_ID if _can_carry_disc_id(medium.format)
             else MediumDiscStatus.NO_DISC_FORMAT
+            if medium.format in _NO_DISC_FORMATS
+            else MediumDiscStatus.NO_DISC_ID
         )
         return MediumLengths(
             medium=medium.position, format=medium.format, status=status,
@@ -618,14 +659,26 @@ def _singular(clause: str) -> str:
 
 def _same_listing_sentence(same: Sequence[MatchingPressing]) -> str:
     if not same:
-        return "No other pressing in this release group has the same listing."
+        return (
+            "No other pressing in this release group has the same listing "
+            "within two seconds.")
     if len(same) == 1:
         return (
-            "1 other pressing has the same listing, so track lengths cannot "
-            "tell them apart.")
+            "1 other pressing has the same listing within two seconds, so "
+            "track lengths cannot tell them apart.")
     return (
-        f"{len(same)} other pressings have the same listing, so track "
-        "lengths cannot tell them apart.")
+        f"{len(same)} other pressings have the same listing within two "
+        "seconds, so track lengths cannot tell them apart.")
+
+
+def _recording_only_sentence(blank: Sequence[MatchingPressing]) -> str:
+    if len(blank) == 1:
+        return (
+            "1 other pressing leaves some or all of its track lengths blank, "
+            "so it cannot be compared.")
+    return (
+        f"{len(blank)} other pressings leave some or all of their track "
+        "lengths blank, so they cannot be compared.")
 
 
 def _match_sentences(
@@ -682,18 +735,8 @@ def _match_sentences(
     return sentences
 
 
-_FORMAT_PHRASES: Final[dict[str, str]] = {
-    "Digital Media": "a digital release",
-    "Vinyl": "a vinyl record", '12" Vinyl': "a vinyl record",
-    '7" Vinyl': "a vinyl record", '10" Vinyl': "a vinyl record",
-    "Cassette": "a cassette",
-}
-
-
 def _format_phrase(fmt: str | None) -> str:
-    if fmt is None:
-        return "a release of unknown format"
-    return _FORMAT_PHRASES.get(fmt, f"a {fmt}")
+    return _NO_DISC_FORMATS.get(fmt or "", "a release with no disc")
 
 
 def _disc_reference(medium: MediumLengths) -> tuple[str, DiscCheck]:
@@ -765,6 +808,19 @@ def _listing_sentence(medium: MediumLengths, *, subject: str | None) -> str:
     )
     listed = "the listed lengths" if subject is None else "its listed lengths"
     if count > 1:
+        # A blank listed length is unknown, not a mismatch: while some disc
+        # contradicts no listed length, the listing cannot be called wrong.
+        if any(
+            all(row.listing_agrees is not False for row in disc.tracks)
+            for disc in medium.discs
+        ):
+            missing = [
+                row.position for row in medium.discs[0].tracks
+                if row.listing_agrees is None]
+            return (
+                f"{attached}, but the listing gives no length for "
+                f"{_numbers(missing)}, so it cannot be checked in full against "
+                "them.")
         return (
             f"{attached}, but {listed} do not match any of them, so the "
             "listing may be wrong.")
@@ -851,38 +907,78 @@ _SENTENCE_NOT_ALIGNED = (
     "Not every file lines up with a track on this release, so other "
     "pressings could not be compared.")
 _SENTENCE_FITS_OWN = "This copy fits this release's own listing on every track."
+_SENTENCE_NO_TRACKS = (
+    "This release lists no tracks on MusicBrainz, so there is nothing to "
+    "compare.")
+
+
+class _OwnListing(msgspec.Struct, frozen=True, kw_only=True):
+    #: Files more than 2s off the listing.
+    off: list[tuple[int, int]]
+    #: Tracks with no length at all, not even on the recording.
+    unlisted: list[tuple[int, int]]
+    #: Tracks whose listed length is the recording's, not the release's.
+    from_recording: list[tuple[int, int]]
+    #: Every target track, in running order.
+    keys: list[tuple[int, int]]
 
 
 def _own_listing_gaps(
     target_order: Sequence[tuple[int, int, MBDiscTrack]],
     file_lengths: Sequence[float],
-) -> tuple[list[tuple[int, int]], list[tuple[int, int]]]:
-    """(tracks whose file is more than 2s off the listing, tracks the
-    release lists no length for)."""
+) -> _OwnListing:
     off: list[tuple[int, int]] = []
     unlisted: list[tuple[int, int]] = []
+    from_recording: list[tuple[int, int]] = []
     for (medium, position, track), file_seconds in zip(
         target_order, file_lengths, strict=True,
     ):
         listed = _listed_seconds(track)
         if listed is None:
             unlisted.append((medium, position))
-        elif abs(file_seconds - listed) > SAME_AUDIO_TOLERANCE_SECONDS:
+            continue
+        if _own_seconds(track) is None:
+            from_recording.append((medium, position))
+        if abs(file_seconds - listed) > SAME_AUDIO_TOLERANCE_SECONDS:
             off.append((medium, position))
-    return off, unlisted
+    return _OwnListing(
+        off=off, unlisted=unlisted, from_recording=from_recording,
+        keys=[(medium, position) for medium, position, _ in target_order])
+
+
+def _recording_clause(own: _OwnListing, *, multi_disc: bool) -> str:
+    """'; for every track except track 9 the release gives no length of
+    its own, so the recording's length was used'."""
+    recorded = own.from_recording
+    if len(recorded) == len(own.keys):
+        where = "every track"
+    elif len(recorded) * 2 > len(own.keys):
+        others = [key for key in own.keys if key not in set(recorded)]
+        where = f"every track except {_positions(others, multi_disc=multi_disc)}"
+    else:
+        where = _positions(recorded, multi_disc=multi_disc)
+    return (
+        f"; for {where} the release gives no length of its own, so the "
+        "recording's length was used")
 
 
 def _own_listing_sentences(
-    off: Sequence[tuple[int, int]], unlisted: Sequence[tuple[int, int]],
-    *, multi_disc: bool,
+    own: _OwnListing, *, multi_disc: bool,
 ) -> list[str]:
+    off, unlisted = own.off, own.unlisted
+    clause = (
+        _recording_clause(own, multi_disc=multi_disc)
+        if own.from_recording else "")
+    listing = "listing" if own.from_recording else "own listing"
     if not off and not unlisted:
-        return [_SENTENCE_FITS_OWN]
+        if not clause:
+            return [_SENTENCE_FITS_OWN]
+        return [f"This copy fits this release's {listing} on every track{clause}."]
     sentences: list[str] = []
     if off:
         sentences.append(
-            "This copy does not fit this release's own listing on "
-            f"{_positions(off, multi_disc=multi_disc)}.")
+            f"This copy does not fit this release's {listing} on "
+            f"{_positions(off, multi_disc=multi_disc)}{clause}.")
     if unlisted:
         sentences.append(
             "This release lists no length for "
@@ -951,8 +1047,12 @@ def check_other_pressings(
         return _unavailable(base, error)
     except (_OutOfTime, *_MIRROR_ERRORS) as error:
         return _unavailable(base, error)
-    if not target.id or not target.media:
+    if not target.id:
         return _unavailable(base, ValueError("empty release in the reply"))
+    if not _running_order(target):
+        return msgspec.structs.replace(
+            base, outcome=PressingCheckOutcome.RELEASE_HAS_NO_TRACKS,
+            sentences=[_SENTENCE_NO_TRACKS])
 
     group_id = target.release_group.id if target.release_group else ""
     not_siblings = {attempt.release_id, normalize_release_id(target.id)}
@@ -995,22 +1095,27 @@ def check_other_pressings(
         for medium, position, _ in target_order)
     matches: list[MatchingPressing] = []
     same_listing: list[MatchingPressing] = []
+    recording_only: list[MatchingPressing] = []
     fits_own: bool | None = None
     sentences: list[str] = []
     if aligned:
         file_lengths = [
             attempt.files[(medium, position)]
             for medium, position, _ in target_order]
-        fitting = [
-            match for sibling in siblings
-            if (match := _match(target_order, file_lengths, sibling))
-            is not None
-        ]
-        off, unlisted = _own_listing_gaps(target_order, file_lengths)
-        fits_own = True if not off and not unlisted else (
-            False if off else None)
-        sentences.extend(
-            _own_listing_sentences(off, unlisted, multi_disc=multi_disc))
+        fitting: list[MatchingPressing] = []
+        for sibling in siblings:
+            found = _match(target_order, file_lengths, sibling)
+            if found is None:
+                continue
+            kind, pressing = found
+            if kind == _SiblingFit.OWN:
+                fitting.append(pressing)
+            else:
+                recording_only.append(pressing)
+        own = _own_listing_gaps(target_order, file_lengths)
+        fits_own = True if not own.off and not own.unlisted else (
+            False if own.off else None)
+        sentences.extend(_own_listing_sentences(own, multi_disc=multi_disc))
         if fits_own:
             # The copy fits its own release: a sibling the files also fit
             # is indistinguishable by length, never a finding.
@@ -1019,6 +1124,8 @@ def check_other_pressings(
         else:
             matches = fitting
             sentences.extend(_match_sentences(matches, len(file_lengths)))
+        if recording_only:
+            sentences.append(_recording_only_sentence(recording_only))
     else:
         sentences.append(_SENTENCE_NOT_ALIGNED)
     sentences.extend(_lengths_sentences(lengths))
@@ -1029,6 +1136,7 @@ def check_other_pressings(
         base, release_group_id=group_id or None,
         compared_with_pressings=aligned, fits_own_listing=fits_own,
         matching_pressings=matches, same_listing_pressings=same_listing,
+        recording_only_pressings=recording_only,
         target_lengths=lengths, releases_in_group=in_group,
         releases_checked=len(siblings), capped=capped, sentences=sentences,
     )

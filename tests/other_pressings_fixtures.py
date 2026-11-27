@@ -29,6 +29,12 @@ KURT_VILE = 24179
 FAIRWAYS = 42692
 DEER_TICK = 12368
 BOB = 22324
+#: Phoebe Bridgers 'Lost Weekend', digital target. download_log 40061 and
+#: 40221 are the same attempt (identical mapping and target), so one capture
+#: serves both.
+PHOEBE = 40061
+#: The CD of the same album, whose disc opens with a pregap hidden track.
+PHOEBE_PREGAP = 40054
 
 class RecordingJSON(TypedDict):
     length: int | None
@@ -44,6 +50,7 @@ DiscJSON = TypedDict("DiscJSON", {
 MediumJSON = TypedDict("MediumJSON", {
     "position": int, "format": str | None, "track-count": int,
     "discs": list[DiscJSON], "tracks": list[TrackJSON],
+    "pregap": NotRequired[TrackJSON],
 })
 GroupRefJSON = TypedDict("GroupRefJSON", {"id": str, "title": str})
 ReleaseJSON = TypedDict("ReleaseJSON", {

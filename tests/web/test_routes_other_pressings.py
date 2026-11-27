@@ -60,8 +60,9 @@ class TestOtherPressingsRoute(_FakeDbWebServerCase):
         assert isinstance(sentences, list)
         self.assertEqual(
             sentences[0],
-            "This copy does not fit this release's own listing on tracks "
-            "9, 12 and 13.")
+            "This copy does not fit this release's listing on tracks 9, 12 "
+            "and 13; for every track except track 9 the release gives no "
+            "length of its own, so the recording's length was used.")
         self.assertTrue(str(sentences[1]).startswith(
             "This copy matches 2 other pressings"))
 

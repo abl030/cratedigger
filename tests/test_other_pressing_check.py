@@ -42,6 +42,8 @@ from tests.other_pressings_fixtures import (
     DEER_TICK,
     FAIRWAYS,
     KURT_VILE,
+    PHOEBE,
+    PHOEBE_PREGAP,
     RAZORLIGHT,
     DiscJSON,
     FixtureJSON,
@@ -202,12 +204,13 @@ def _disc(disc_id: str, seconds: list[float]) -> DiscJSON:
 
 
 def _small_world(
-    *, listed: list[float], files: list[float], discs: list[DiscJSON],
+    *, listed: list[float | None], files: list[float], discs: list[DiscJSON],
     fmt: str = "CD",
 ) -> FixtureJSON:
     tracks: list[TrackJSON] = [
         {"position": n, "number": str(n), "title": f"Song {n}",
-         "length": round(seconds * 1000)}
+         "length": None if seconds is None else round(seconds * 1000),
+         "recording": {"length": None}}
         for n, seconds in enumerate(listed, 1)
     ]
     target: ReleaseJSON = {
@@ -222,7 +225,8 @@ def _small_world(
         {"item": {"path": f"{n:02d}.flac", "title": f"Song {n}", "track": n,
                   "disc": 1, "length": seconds},
          "track": {"title": f"Song {n}", "medium": 1, "medium_index": n,
-                   "medium_total": len(files), "length": listed[n - 1]}}
+                   "medium_total": len(files),
+                   "length": listed[n - 1] or 0.0}}
         for n, seconds in enumerate(files, 1)
     ]
     return {
@@ -262,8 +266,9 @@ class TestRealCaptures(unittest.TestCase):
              (1, 13, "Fall, Fall, Fall", "To the Sea")],
         )
         self.assertEqual(result.sentences, [
-            ("This copy does not fit this release's own listing on tracks "
-             "9, 12 and 13."),
+            ("This copy does not fit this release's listing on tracks 9, 12 "
+             "and 13; for every track except track 9 the release gives no "
+             "length of its own, so the recording's length was used."),
             ('This copy matches 2 other pressings: UK 12" Vinyl, 2004 and '
              "UK CD, 2004. All 13 tracks line up within two seconds on each."),
             ("Both have 'To the Sea' and 'Fall, Fall, Fall' where this "
@@ -463,8 +468,8 @@ class TestOwnListingFirst(unittest.TestCase):
         self.assertEqual(len(result.same_listing_pressings), 1)
         self.assertEqual(result.sentences, [
             "This copy fits this release's own listing on every track.",
-            ("1 other pressing has the same listing, so track lengths cannot "
-             "tell them apart."),
+            ("1 other pressing has the same listing within two seconds, so "
+             "track lengths cannot tell them apart."),
             "The listed lengths match the disc ID attached to this release.",
             "This copy matches that disc on every track.",
         ])
@@ -473,7 +478,8 @@ class TestOwnListingFirst(unittest.TestCase):
         """A held upgrade row (rejected) whose new copy fits the target:
         Razorlight capture, files set to the listing, both 2004 GB
         pressings given the target's listing. The capture's third GB CD
-        (151617f8) already lists the same lengths through its recordings."""
+        (151617f8) fits only through its recordings' lengths, so it is
+        reported as not comparable, never as the same listing."""
         fixture = _fixture(RAZORLIGHT)
         _set_files_to_listing(fixture)
         for release in _releases(fixture):
@@ -482,20 +488,123 @@ class TestOwnListingFirst(unittest.TestCase):
         row = _log_row(fixture, outcome="rejected")
         result, _ = _run(RAZORLIGHT, fixture=fixture, row=row)
         self.assertEqual(result.matching_pressings, [])
-        self.assertEqual(result.sentences[:2], [
-            "This copy fits this release's own listing on every track.",
-            ("3 other pressings have the same listing, so track lengths "
-             "cannot tell them apart."),
+        self.assertEqual(
+            [p.release_id[:8] for p in result.recording_only_pressings],
+            ["151617f8"])
+        self.assertEqual(result.sentences[:3], [
+            ("This copy fits this release's listing on every track; for "
+             "every track except track 9 the release gives no length of its "
+             "own, so the recording's length was used."),
+            ("2 other pressings have the same listing within two seconds, so "
+             "track lengths cannot tell them apart."),
+            ("1 other pressing leaves some or all of its track lengths blank, "
+             "so it cannot be compared."),
         ])
-        self.assertNotIn("matches", " ".join(result.sentences[:2]))
+        self.assertNotIn("matches", " ".join(result.sentences[:3]))
 
     def test_fits_own_with_no_other_pressing_alike(self) -> None:
         fixture = _small_world(listed=[200, 200], files=[201, 199], discs=[])
         result, _ = _run(1, fixture=fixture)
         self.assertEqual(result.sentences[:2], [
             "This copy fits this release's own listing on every track.",
-            "No other pressing in this release group has the same listing.",
+            ("No other pressing in this release group has the same listing "
+             "within two seconds."),
         ])
+
+
+class TestOwnLengthsOnly(unittest.TestCase):
+    """Verification item 1: a sibling counts only on its OWN track lengths."""
+
+    def test_reviewer_world_recording_only_sibling_is_not_a_match(
+        self,
+    ) -> None:
+        """Target lists 200s, files run 260s, and a 2026 vinyl sibling has
+        no track lengths of its own; its recording says 260s."""
+        fixture = _small_world(listed=[200], files=[260], discs=[])
+        sibling = copy.deepcopy(fixture["target"])
+        sibling["id"] = "00000000-0000-0000-0000-0000000000cc"
+        sibling["country"] = "XW"
+        sibling["date"] = "2026"
+        sibling["media"][0]["format"] = '12" Vinyl'
+        track = sibling["media"][0]["tracks"][0]
+        track["length"] = None
+        track["recording"] = {"length": 260_000}
+        group = [fixture["target"], sibling]
+        mirror = FixtureMirror(fixture, group=group, release_count=2)
+        result, _ = _run(1, fixture=fixture, mirror=mirror)
+        self.assertEqual(result.matching_pressings, [])
+        self.assertEqual(
+            [p.release_id for p in result.recording_only_pressings],
+            [sibling["id"]])
+        self.assertEqual(result.sentences[:3], [
+            "This copy does not fit this release's own listing on track 1.",
+            "No other pressing in this release group matches.",
+            ("1 other pressing leaves some or all of its track lengths blank, "
+             "so it cannot be compared."),
+        ])
+
+    def test_phoebe_bridgers_vinyls_cannot_be_compared(self) -> None:
+        """download_log 40061 and 40221 are the same attempt (one capture):
+        the two 17-track vinyls each leave a track length blank."""
+        fixture = _fixture(PHOEBE)
+        for log_id in (40061, 40221):
+            with self.subTest(log_id=log_id):
+                row = _log_row(fixture)
+                result, _ = _run(log_id, fixture=fixture, row=row)
+                self.assertEqual(result.matching_pressings, [])
+                self.assertEqual(
+                    sorted(p.release_id[:8]
+                           for p in result.recording_only_pressings),
+                    ["dc23ea78", "de713c33"])
+                self.assertEqual(result.sentences, [
+                    ("This copy does not fit this release's own listing on "
+                     "tracks 16 and 17."),
+                    "No other pressing in this release group matches.",
+                    ("2 other pressings leave some or all of their track "
+                     "lengths blank, so they cannot be compared."),
+                    ("This is a digital release, so there is no disc to check "
+                     "the listed lengths against."),
+                ])
+
+
+class TestPregap(unittest.TestCase):
+    """Verification item 4: Beets counts a pregap (hidden) track as track 0
+    of its disc; the check reads it the same way."""
+
+    def test_pregap_release_lines_up(self) -> None:
+        result, _ = _run(PHOEBE_PREGAP)
+        self.assertTrue(result.compared_with_pressings)
+        self.assertNotIn(
+            "Not every file lines up", " ".join(result.sentences))
+        self.assertEqual(
+            result.sentences[0],
+            "This copy fits this release's own listing on every track.")
+
+
+class TestEmptyAndFormats(unittest.TestCase):
+    """Verification items 3 and 4."""
+
+    def test_a_release_with_no_tracks_has_its_own_answer(self) -> None:
+        fixture = _small_world(listed=[200], files=[200], discs=[])
+        fixture["target"]["media"] = []
+        result, _ = _run(1, fixture=fixture)
+        self.assertEqual(
+            result.outcome, PressingCheckOutcome.RELEASE_HAS_NO_TRACKS)
+        self.assertEqual(result.sentences, [
+            ("This release lists no tracks on MusicBrainz, so there is "
+             "nothing to compare.")])
+
+    def test_dualdisc_and_unknown_formats_get_the_neutral_sentence(
+        self,
+    ) -> None:
+        for fmt in ("DualDisc", "Other", "SACD"):
+            with self.subTest(fmt=fmt):
+                fixture = _small_world(
+                    listed=[200], files=[200], discs=[], fmt=fmt)
+                result, _ = _run(1, fixture=fixture)
+                self.assertEqual(result.sentences[-1], (
+                    "No disc ID is attached to this release, so there is no "
+                    "disc to check the listed lengths against."))
 
 
 class TestDiscIds(unittest.TestCase):
@@ -545,6 +654,18 @@ class TestDiscIds(unittest.TestCase):
             ("This copy does not match the closest of the 2 attached discs on "
              "track 2, and is a few seconds off on track 1."),
         ])
+
+    def test_a_missing_listed_length_is_unknown_not_wrong(self) -> None:
+        """Verification item 2: listing 200 plus one missing length, two
+        disc IDs that agree with the listed track."""
+        fixture = _small_world(
+            listed=[200, None], files=[200, 300],
+            discs=[_disc("A", [200, 300]), _disc("B", [200, 250])])
+        result, _ = _run(1, fixture=fixture)
+        self.assertEqual(result.sentences[-2], (
+            "2 disc IDs are attached, but the listing gives no length for "
+            "track 2, so it cannot be checked in full against them."))
+        self.assertNotIn("may be wrong", " ".join(result.sentences))
 
     def test_vinyl_and_unknown_format_and_cd_without_disc_id(self) -> None:
         for fmt, expected in (

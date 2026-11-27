@@ -1021,6 +1021,8 @@ class MBDiscMedium(msgspec.Struct, rename="kebab", frozen=True):
     format: str | None = None
     discs: list[MBDisc] = msgspec.field(default_factory=list[MBDisc])
     tracks: list[MBDiscTrack] = msgspec.field(default_factory=list[MBDiscTrack])
+    #: A hidden track before track 1 (HTOA). Beets counts it as track 0.
+    pregap: MBDiscTrack | None = None
 
 
 class MBDiscReleaseGroupRef(msgspec.Struct, rename="kebab", frozen=True):
