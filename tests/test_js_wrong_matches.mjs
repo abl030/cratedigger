@@ -1902,6 +1902,12 @@ t.section('cleanupSummaryToast() reports kept, skipped, and delete failures');
   t.equal(body, 'Deleted 2 candidates, kept 4, skipped 5', 'summarizes cleanup outcomes');
 }
 
+t.section('cleanupSummaryToast() counts a held upgrade the reducer refused as kept (issue #1445)');
+{
+  const body = cleanupSummaryToast({ deleted: 0, skipped_held_upgrade: 2 });
+  t.equal(body, 'Deleted 0 candidates, kept 2, skipped 0', 'held upgrades are kept');
+}
+
 t.section('cleanupSummaryToast() includes verified-lossless deletes and current-evidence-failed skips');
 {
   const body = cleanupSummaryToast({

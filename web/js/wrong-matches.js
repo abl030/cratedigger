@@ -901,8 +901,10 @@ function convergeToast(data) {
 export function cleanupSummaryToast(data) {
   const deleted = Number(data?.deleted || 0)
     + Number(data?.deleted_verified_lossless_parent || 0);
+  // Issue #1445 item 3: a held upgrade the reducer refused is kept too.
   const kept = Number(data?.kept_would_import || 0)
-    + Number(data?.kept_uncertain || 0);
+    + Number(data?.kept_uncertain || 0)
+    + Number(data?.skipped_held_upgrade || 0);
   const skipped = Number(data?.skipped_candidate_evidence_missing || 0)
     + Number(data?.skipped_candidate_evidence_stale || 0)
     + Number(data?.skipped_current_evidence_missing || 0)

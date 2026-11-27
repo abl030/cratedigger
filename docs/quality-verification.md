@@ -1198,6 +1198,57 @@ until a human settles it).
   mark-aware diagnostic is `pipeline-cli quality <id>`, which prints the
   disregarded decision beside the ordinary one for marked requests.
 
+## Upgrade guard (issue #1445 item 3)
+
+An automatic upgrade is the one automatic action that destroys something:
+Beets removes the installed copy while it imports the candidate. Request
+1649 (The Fairways) lost a correct MP3 320 to a FLAC whose track 2 ran 3:26
+where the old copy and the disc both say 2:07 — a different song. Beets
+clamps track-length error at 30s, so the match distance never noticed.
+
+- **Rule** (`lib/quality/installed_copy_guard.py::compare_installed_copy`,
+  pure). For each release track present in both copies, compare the
+  candidate file's length with the installed file's. The guard trips when
+  some track differs by more than `UPGRADE_GUARD_TRACK_LENGTH_SECONDS`
+  (30s), unless the release declares a length for that track and the
+  candidate is strictly closer to it than the installed copy is (then the
+  installed copy is the odd one out and the upgrade proceeds). A track is
+  skipped when either length is missing/non-positive/non-finite, when it
+  is a Discogs composite (`discogs_indexed_component_count > 1`), or when
+  either copy lacks it.
+- **Keying.** By release-track identity, never position (`per_disc_
+  numbering` is not pinned): MusicBrainz `release_track_id` ↔ installed
+  `mb_releasetrackid`; Discogs synthetic `track_id` ↔ installed
+  `mb_trackid`. Blank or duplicated keys are never compared. A run that
+  keys nothing fails open and logs `UPGRADE GUARD COMPARED NOTHING`.
+- **Installed lengths are measured from the files**, under the RELEASE
+  lock, with the same `mediafile` reader that produced the candidate's
+  `item.length` (`lib/media_readiness.py::mediafile_length_seconds`,
+  header-level, no decode; one file open per installed track). Beets'
+  `items.length` is NOT used: it holds the release's declared length, not
+  the file's (Kurt Vile "So Outta Reach" item 195486: DB 289.9s, file
+  336.3s). An unmeasurable file skips its track with a log line. The stored
+  comparison records `installed_lengths_source = "measured_from_files"`.
+- **Decision.** The dispatch core computes the comparison and sets
+  `AlbumQualityEvidenceDecisionFacts.installed_track_lengths_disagree`;
+  `full_pipeline_decision_from_evidence` turns an import (only an import)
+  into `upgrade_held` (`upgrade_guard = "hold"`, `imported = False`,
+  `final_status = "wanted"`, keep searching; the overridden quality verdict
+  stays in `stage2_import` as audit). The flat twin never sees the fact.
+  The operator's incomplete mark alone turns the guard off.
+- **Scope.** Only the automation import job (the one caller of
+  `_handle_valid_result` holding an execution-owner proof). Force import is
+  the operator's approval path and is never guarded; local import and
+  YouTube rescue are operator-initiated and never guarded; the Wrong
+  Matches reducer passes the default.
+- **Routing.** See `docs/rejection-routing.md` (`upgrade_held` row): the
+  folder moves whole into `wrong_matches/`, the peer is denylisted for that
+  request with no cooldown strike, the request requeues exactly as an
+  ordinary rejected attempt (no search narrowing), and the operator
+  approves with force import or discards with the single wrong-match
+  delete. `pipeline-cli quality <id>` shows the guarded decision beside the
+  ordinary one when the replayed candidate would replace an installed copy.
+
 ## Comparison basis — the persisted decision explanation
 
 Every `compare_quality()` call returns a `QualityComparisonBasis`
