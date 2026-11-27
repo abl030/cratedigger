@@ -1771,7 +1771,7 @@ class TestGetTracksByMbReleaseId(unittest.TestCase):
         with BeetsDB(self.db_path) as db:
             tracks = db.get_tracks_by_mb_release_id("aaa-111")
         self.assertIsNotNone(tracks)
-        assert tracks is not None
+        assert isinstance(tracks, tuple)
         self.assertEqual(len(tracks), 2)
         self.assertEqual(tracks[0]["title"], "Track 1")
         self.assertEqual(tracks[0]["bitrate"], 320000)
@@ -2397,7 +2397,7 @@ class TestInstalledTrackFiles(unittest.TestCase):
         with BeetsDB(self.db_path) as db:
             tracks = db.installed_track_files(ReleaseIdentity(
                 "musicbrainz", "4c6f4a7b-c093-4006-a50e-3d6dfbdd2645"))
-        assert tracks is not None
+        assert isinstance(tracks, tuple)
         self.assertEqual(
             [(t.key, t.path) for t in tracks],
             [("rt-1", "/lib/a/01.opus"), ("rt-2", "/lib/a/02.opus")])
@@ -2411,7 +2411,7 @@ class TestInstalledTrackFiles(unittest.TestCase):
         with BeetsDB(self.db_path) as db:
             tracks = db.installed_track_files(
                 ReleaseIdentity("discogs", "555"))
-        assert tracks is not None
+        assert isinstance(tracks, tuple)
         self.assertEqual([t.key for t in tracks], ["555-A1"])
 
     def test_not_installed_is_none(self) -> None:

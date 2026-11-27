@@ -1765,6 +1765,11 @@ VALUE_PARITY_REGISTRY: dict[str, ValueParityEntry] = {
         exclusions=(
             ValueExclusion("download_log_id", _EXCL_SURROGATE_ID),
             ValueExclusion("request_id", _EXCL_SURROGATE_ID),
+            # Issue #1445 item 3: the folder's row timestamp and its held
+            # row's surrogate id / timestamp (NULL on non-held seeds).
+            ValueExclusion("created_at", _EXCL_WALL_CLOCK),
+            ValueExclusion("held_download_log_id", _EXCL_SURROGATE_ID),
+            ValueExclusion("held_created_at", _EXCL_WALL_CLOCK),
         ),
     ),
     "get_pipeline_dashboard_metrics": ValueParityEntry(

@@ -199,7 +199,7 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "same two closed slots, still read-only over album_requests"
         ),
     ),
-    ("lib/pipeline_db/download_log.py", "2d2cba8bbf4b379f"): (
+    ("lib/pipeline_db/download_log.py", "2bd86f69e67161c5"): (
         (
             "validation key is selected from a closed server-owned vocabulary "
             "(#867 intentionally added terminal/evidence projection and moved final "
@@ -214,7 +214,23 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "visible row, which the removal fixes; still read-only, no new caller "
             "input. Issue #1176 PR1's ``log_download`` ``source`` parameter and "
             "PR3's ``local_import`` Literal member above each shifted this line "
-            "only — fingerprint unchanged, confirming the SQL itself is untouched"
+            "only — fingerprint unchanged, confirming the SQL itself is untouched. "
+            "Issue #1445 item 3 CHANGED this statement "
+            "(2d2cba8bbf4b379f -> 2bd86f69e67161c5): it projects ``dl.created_at`` "
+            "and a read-only LEFT JOIN LATERAL ``held`` (the newest upgrade_held "
+            "row naming the same folder); the two new JSON keys and the scenario "
+            "literal come from the same closed server-owned vocabulary "
+            "(FAILED_PATH_KEY / SCENARIO_KEY / UPGRADE_HELD_SCENARIO); no caller "
+            "input reaches the SQL and album_requests is still only read"
+        ),
+    ),
+    ("lib/pipeline_db/download_log.py", "5742e20131f1ada9"): (
+        (
+            "issue #1445 item 3 get_held_upgrade_download_log_id: read-only "
+            "SELECT on download_log; JSON keys and the scenario literal come "
+            "from the closed server-owned vocabulary (FAILED_PATH_KEY / "
+            "SCENARIO_KEY / UPGRADE_HELD_SCENARIO); request id and failed path "
+            "are value placeholders"
         ),
     ),
     ("lib/pipeline_db/download_log.py", "e0154e89026dc8ef"): (
