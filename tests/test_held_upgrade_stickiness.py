@@ -70,6 +70,12 @@ class TestHeldUpgradeSurvivesAFailedForceImport(unittest.TestCase):
         vr = row["validation_result"]
         assert vr is not None
         self.assertEqual(vr["scenario"], "untracked_audio")
+        # Held status is keyed on the exact failed_path string: the force
+        # lane's failure row must name the folder exactly as the held row.
+        held_vr = row["held_validation_result"]
+        assert held_vr is not None
+        self.assertEqual(vr["failed_path"], held_vr["failed_path"])
+        self.assertEqual(vr["failed_path"], self.folder)
         self.assertEqual(row["held_download_log_id"], self.held_id)
 
     def test_delete_group_still_skips_the_folder(self) -> None:

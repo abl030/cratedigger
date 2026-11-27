@@ -269,10 +269,15 @@ def _hold_upgrade_from_evidence_decision(
     (``apply_cooldown=False``) — a hold is not the peer's fault, but the
     identical folder must not be fetched again next cycle.
 
-    No cancellation checkpoint runs after the move. A process crash
-    between the rename and the terminal commit still leaves the folder in
-    ``wrong_matches/`` with no row while startup recovery requeues the
-    request — the same window Lanes A and B already have.
+    This helper checks cancellation only before the move.
+    The importer's owner checkpoint (``checkpoint_automation_owner``,
+    ``lib/import_execution.py``) still runs before the terminal commit, so a
+    cancel, a lost lease or a crash after the move and before the commit
+    leaves the folder in ``wrong_matches/`` with no row and no denylist
+    entry, while startup recovery requeues the request — the same window
+    Lanes A and B have. Nothing is imported or deleted in that window; the
+    worst case is an orphan folder nobody sees and the same peer's copy
+    being fetched again.
     """
     from lib.import_execution import cancellation_hook, checkpoint
     from lib.import_manifest import move_failed_import_whole
@@ -288,9 +293,12 @@ def _hold_upgrade_from_evidence_decision(
     if dl_info.username:
         usernames.add(dl_info.username)
 
-    # Cancellation is honoured up to the move and never after it: once the
-    # folder has moved it runs straight to the terminal outcome, so a moved
-    # folder is never stranded without the row that names it.
+    # Cancellation is checked here before the move and not again in this
+    # helper. The importer's owner checkpoint still runs before the terminal
+    # commit, so a cancel or lost lease after the move can still leave the
+    # folder in wrong_matches/ with no row and no denylist entry (the Lane
+    # A/B window: nothing imported or deleted; worst case an orphan folder
+    # and the same peer fetched again). See the docstring.
     checkpoint(cancellation_token)
     failed_path = move_failed_import_whole(
         request.path,

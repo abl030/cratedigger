@@ -107,12 +107,16 @@ gate `PipelineDB.get_wrong_matches()` filters on:
    keeps the beets envelope but renames `scenario` to `upgrade_held` (so the
    row is NOT D8's invisible `strong_match`), sets `failed_path`, the
    operator sentence as `detail`, and the stored per-track comparison as
-   `upgrade_hold`. Cancellation is checked before the move and never after
-   it. The job-backed terminal outcome commits after the
+   `upgrade_hold`. The hold helper checks cancellation before the move and
+   not again, but the importer's owner checkpoint
+   (`lib/import_execution.py::checkpoint_automation_owner`) still runs before
+   the terminal commit: a cancel, a lost lease or a crash after the move and
+   before the commit leaves the folder in `wrong_matches/` with no row and no
+   denylist entry while startup recovery requeues the request. Nothing is
+   imported or deleted in that window; the worst case is an orphan folder
+   nobody sees and the same peer's copy being fetched again. The job-backed terminal outcome commits after the
    journaled processor cleanup finds the canonical source already gone
-   (a no-op). Crash window: between the rename and the terminal commit the
-   folder sits in `wrong_matches/` with no row and startup recovery
-   requeues the request — the same window Lanes A and B have.
+   (a no-op). That window is the same one Lanes A and B have.
 5. **The evidence-gate `audio_corrupt` reject, before D3** — historical only.
    Current code deletes instead (see the events table above); the read-side
    exclusion for the historical cohort remains in `wrong_match_row_is_visible`

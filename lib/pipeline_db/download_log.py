@@ -1050,6 +1050,11 @@ class _DownloadLogMixin(_PipelineDBBase):
             -- held upgrade stays held (with its stored comparison) even when
             -- a later attempt on it — a failed force import — wrote a newer
             -- row naming the same folder under another scenario.
+            -- Keyed on the EXACT failed_path string. That holds today
+            -- because the force lane writes its failure row with the held
+            -- row's own failed_path (the stored source path it was handed),
+            -- never a re-derived or normalized one; a writer that spelled
+            -- the same folder differently would break the stickiness.
             LEFT JOIN LATERAL (
                 SELECT h.id, h.validation_result, h.soulseek_username,
                        h.created_at
@@ -1088,6 +1093,12 @@ class _DownloadLogMixin(_PipelineDBBase):
         across later rows that name it (see ``get_wrong_matches``), until
         the operator deletes it or a force import of it succeeds — both
         clear ``failed_path`` from every row of the folder.
+
+        Limit: the folder is matched by the exact ``failed_path`` string.
+        That holds today because the force lane writes its failure row with
+        the held row's own ``failed_path`` string (the stored source path it
+        was handed); a writer that spelled the same folder differently
+        would not be recognised as the held folder.
         """
         cur = self._execute(f"""
             SELECT id FROM download_log
