@@ -666,16 +666,19 @@ not on anyone's list.
   audio. Rules, first match wins:
   `tracks_in_wrong_slots` (every track more than 10s off has another
   track's listed length, one-to-one — Kurt Vile, download_log 24179),
-  `tracks_split_differently` (adjacent tracks on one disc add up to the
-  listed total, or one off track plus an in-bound neighbour that absorbs it
-  — Genesis 15039, Chumbawamba 35012), then one off track by position and
-  direction (`single_track_disc`, `hidden_track_in_file` for a long last
-  track, `end_of_last_track_missing` for a short one, `one_track_longer`,
-  `one_track_shorter`), else `several_tracks_differ`. Each shape carries a
+  `tracks_split_differently` (adjacent tracks on one disc add up to about
+  the listed total, or one off track plus an in-bound neighbour that absorbs
+  it, each neighbour absorbing at most one track — Genesis 15039,
+  Chumbawamba 35012), then one off track by position and direction
+  (`single_track_disc` for the only track of one disc on a multi-disc
+  release, `hidden_track_in_file` for a long last track,
+  `end_of_last_track_missing` for a short one, `one_track_longer`,
+  `one_track_shorter`), else `several_tracks_differ` (counted against the
+  tracks that had both lengths). A non-finite length counts as unknown. Each shape carries a
   short chip label (`hidden track?`, `wrong order?`, ...), a plain sentence
   with m:ss times, and the tracks it is about. Shapes whose lengths say the
-  audio is all there (split differently, hidden track, one-track disc) render
-  calmer (`badge-muted`) than the ones that need a look (`badge-warn`).
+  audio is all there (split differently, hidden track, a one-track disc
+  running long) render calmer (`badge-muted`) than the ones that need a look (`badge-warn`).
   Surfaced as `ClassifiedEntry.track_length_warning` (the sentence),
   `track_length_shape`, `track_length_label`, `track_length_badge_class` and
   `track_length_slots`; both the Recents-log route and the pipeline-detail

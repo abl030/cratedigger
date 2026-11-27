@@ -96,7 +96,7 @@ class TestRealRows(unittest.TestCase):
         self.assertEqual(
             shape.sentence,
             "Tracks 2 and 3 on disc 1 are cut at a different point but add "
-            "up to the same total. Nothing is missing.",
+            "up to about the same total.",
         )
         self.assertTrue(shape.probably_harmless)
         self.assertEqual([slot.medium_index for slot in shape.slots], [2, 3])
@@ -108,21 +108,29 @@ class TestRealRows(unittest.TestCase):
         self.assertEqual([slot.medium_index for slot in shape.slots], [6, 7])
         self.assertIn("Tracks 6 and 7 are cut", shape.sentence)
 
-    def test_bob_interview_disc_is_single_track_disc(self) -> None:
+    def test_bob_interview_disc_shorter_is_single_track_disc_and_warns(
+        self,
+    ) -> None:
         shape = _shape(REAL[22324])
         self.assertEqual(shape.kind, TrackLengthShapeKind.SINGLE_TRACK_DISC)
         self.assertEqual(
             shape.sentence,
             "Disc 2 is a single track that runs 5:19 but the release lists "
-            "30:15. Usually a bonus or video disc in a different cut.",
+            "30:15. Some of the audio listed for that disc may be absent.",
         )
+        self.assertFalse(shape.probably_harmless)
 
     def test_slipknot_dvd_disc_is_single_track_disc_and_formats_hours(
         self,
     ) -> None:
         shape = _shape(REAL[14702])
         self.assertEqual(shape.kind, TrackLengthShapeKind.SINGLE_TRACK_DISC)
-        self.assertIn("runs 1:12:19 but the release lists 34:13", shape.sentence)
+        self.assertEqual(
+            shape.sentence,
+            "Disc 2 is a single track that runs 1:12:19 but the release "
+            "lists 34:13. Usually a bonus or video disc in a different cut.",
+        )
+        self.assertTrue(shape.probably_harmless)
 
     def test_phoebe_bridgers_last_track_longer_is_hidden_track(self) -> None:
         shape = _shape(REAL[40061])
@@ -143,8 +151,9 @@ class TestRealRows(unittest.TestCase):
         self.assertEqual(shape.label, "ending missing?")
         self.assertEqual(
             shape.sentence,
-            "Last track runs 3:13 but the release lists 15:05. The release "
-            "usually counts a hidden track here that this copy does not have.",
+            "Last track runs 3:13 but the release lists 15:05. Either the "
+            "release counts a hidden track here that this copy does not "
+            "have, or the file stops early.",
         )
         self.assertFalse(shape.probably_harmless)
 
@@ -299,6 +308,73 @@ class TestBoundaries(unittest.TestCase):
         self.assertEqual(
             shape.slots[0].summary,
             'Track 2 "Secretive Girl" runs 3:26, release lists 2:07',
+        )
+
+
+class TestReviewFindings(unittest.TestCase):
+    def test_a_neighbour_is_borrowed_at_most_once(self) -> None:
+        """Tracks 2 and 4 each balance against track 3, but track 3 can
+        only absorb one of them: tracks 2-4 run 62s over the listing, so
+        this is not a clean split."""
+        pairs = _album([(200.0, 200.0), (261.0, 200.0), (140.0, 200.0),
+                        (261.0, 200.0), (200.0, 200.0)])
+        shape = _shape(pairs)
+        self.assertEqual(
+            shape.kind, TrackLengthShapeKind.SEVERAL_TRACKS_DIFFER)
+        self.assertEqual([slot.medium_index for slot in shape.slots], [2, 4])
+
+    def test_non_finite_lengths_are_unusable(self) -> None:
+        for bad in (float("inf"), float("-inf"), float("nan")):
+            with self.subTest(bad=bad):
+                self.assertIsNone(classify_track_length_shape(
+                    _album([(100.0, 100.0), (bad, 100.0)])))
+                self.assertIsNone(classify_track_length_shape(
+                    _album([(100.0, 100.0), (100.0, bad)])))
+                shape = _shape(_album([
+                    (bad, 100.0), (100.0, 100.0), (300.0, 100.0),
+                    (100.0, 100.0)]))
+                self.assertEqual(
+                    shape.kind, TrackLengthShapeKind.ONE_TRACK_LONGER)
+                self.assertTrue(shape.sentence.startswith(
+                    "Track 3 runs 5:00 but the release lists 1:40."))
+
+    def test_one_track_release_is_not_a_single_track_disc(self) -> None:
+        longer = _shape(_album([(400.0, 200.0)]))
+        self.assertEqual(longer.kind, TrackLengthShapeKind.ONE_TRACK_LONGER)
+        self.assertTrue(longer.sentence.startswith(
+            "Track 1 runs 6:40 but the release lists 3:20."))
+        shorter = _shape(_album([(100.0, 200.0)]))
+        self.assertEqual(shorter.kind, TrackLengthShapeKind.ONE_TRACK_SHORTER)
+
+    def test_single_track_disc_longer_is_calm_shorter_warns(self) -> None:
+        first_disc = _album([(100.0, 100.0), (100.0, 100.0)], medium=1)
+        longer = _shape([*first_disc, *_album([(400.0, 200.0)], medium=2)])
+        self.assertEqual(longer.kind, TrackLengthShapeKind.SINGLE_TRACK_DISC)
+        self.assertTrue(longer.probably_harmless)
+        shorter = _shape([*first_disc, *_album([(100.0, 200.0)], medium=2)])
+        self.assertEqual(shorter.kind, TrackLengthShapeKind.SINGLE_TRACK_DISC)
+        self.assertFalse(shorter.probably_harmless)
+        self.assertEqual(
+            shorter.sentence,
+            "Disc 2 is a single track that runs 1:40 but the release lists "
+            "3:20. Some of the audio listed for that disc may be absent.",
+        )
+
+    def test_several_counts_only_compared_tracks(self) -> None:
+        pairs = _album([(300.0, 100.0), (100.0, 100.0), (50.0, 0.0),
+                        (100.0, 200.0), (100.0, 100.0), (0.0, 80.0)])
+        shape = _shape(pairs)
+        self.assertEqual(
+            shape.kind, TrackLengthShapeKind.SEVERAL_TRACKS_DIFFER)
+        self.assertTrue(shape.sentence.startswith(
+            "2 of 4 tracks are a different length from the release"))
+
+    def test_split_sentence_says_about_the_same_total(self) -> None:
+        shape = _shape(REAL[35012])
+        self.assertEqual(
+            shape.sentence,
+            "Tracks 6 and 7 are cut at a different point but add up to "
+            "about the same total.",
         )
 
 

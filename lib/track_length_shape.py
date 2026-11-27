@@ -14,6 +14,7 @@ for why a reject at this bound was tried and reverted.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from enum import StrEnum
 from typing import Final
@@ -61,14 +62,6 @@ class TrackLengthShapeKind(StrEnum):
     SEVERAL_TRACKS_DIFFER = "several_tracks_differ"
 
 
-#: Shapes whose lengths say the audio is all there, just arranged or
-#: counted differently from the release.
-_PROBABLY_HARMLESS: Final[frozenset[TrackLengthShapeKind]] = frozenset({
-    TrackLengthShapeKind.TRACKS_SPLIT_DIFFERENTLY,
-    TrackLengthShapeKind.SINGLE_TRACK_DISC,
-    TrackLengthShapeKind.HIDDEN_TRACK_IN_FILE,
-})
-
 _LABELS: Final[dict[TrackLengthShapeKind, str]] = {
     TrackLengthShapeKind.TRACKS_IN_WRONG_SLOTS: "wrong order?",
     TrackLengthShapeKind.TRACKS_SPLIT_DIFFERENTLY: "split differently",
@@ -86,8 +79,9 @@ class LengthPair(msgspec.Struct, frozen=True, kw_only=True):
 
     ``medium``/``medium_index`` place the release track; either may be
     unknown. ``medium_track_count`` is how many tracks the release lists on
-    that medium (not how many were mapped). A non-positive length means
-    "not known" and makes the pair unusable, as does a coalesced Discogs
+    that medium (not how many were mapped). A non-positive or non-finite
+    length means "not known" and makes the pair unusable, as does a
+    coalesced Discogs
     composite (``component_count > 1``, #1183), whose file legitimately
     overshoots its listed program by any margin.
     """
@@ -120,6 +114,9 @@ class TrackLengthShape(msgspec.Struct, frozen=True, kw_only=True):
     label: str
     #: The full plain-English explanation.
     sentence: str
+    #: The lengths say the audio is all there, just arranged or counted
+    #: differently from the release: a split, a long last track, or a long
+    #: one-track disc.
     probably_harmless: bool
     slots: tuple[TrackLengthSlot, ...]
 
@@ -137,6 +134,8 @@ def format_duration(seconds: float) -> str:
 def _usable(pair: LengthPair) -> bool:
     return (
         pair.component_count <= 1
+        and math.isfinite(pair.file_seconds)
+        and math.isfinite(pair.listed_seconds)
         and pair.file_seconds > 0
         and pair.listed_seconds > 0
     )
@@ -208,7 +207,12 @@ def _split_groups(
     A group is a maximal run of adjacent deviating tracks on one medium
     whose totals agree. A lone deviating track may instead borrow ONE
     adjacent in-bound neighbour that absorbs the difference (Chumbawamba,
-    download_log 35012).
+    download_log 35012). A neighbour absorbs at most one track: two lone
+    tracks balancing against the same neighbour are not a clean split.
+    Lone tracks are taken in disc order, left neighbour first; a left
+    neighbour can only be wanted by this track or the one two places
+    earlier, already served, so this greedy order never misses a valid
+    assignment.
     """
     if any(pair.medium_index is None for pair in deviating):
         return None
@@ -224,6 +228,7 @@ def _split_groups(
         else:
             runs.append([pair])
     deviating_ids = {id(pair) for pair in deviating}
+    borrowed: set[int] = set()
     groups: list[list[LengthPair]] = []
     for run in runs:
         if len(run) >= 2:
@@ -236,11 +241,16 @@ def _split_groups(
         explained: list[LengthPair] | None = None
         for neighbour_index in (index - 1, index + 1):
             neighbour = by_position.get((medium, neighbour_index))
-            if neighbour is None or id(neighbour) in deviating_ids:
+            if (
+                neighbour is None
+                or id(neighbour) in deviating_ids
+                or id(neighbour) in borrowed
+            ):
                 continue
             group = sorted([lone, neighbour], key=_position_key)
             if _sums_match(group):
                 explained = group
+                borrowed.add(id(neighbour))
                 break
         if explained is None:
             return None
@@ -323,12 +333,13 @@ def _shape(
     slots: Sequence[LengthPair],
     *,
     multi_disc: bool,
+    probably_harmless: bool = False,
 ) -> TrackLengthShape:
     return TrackLengthShape(
         kind=kind,
         label=_LABELS[kind],
         sentence=sentence,
-        probably_harmless=kind in _PROBABLY_HARMLESS,
+        probably_harmless=probably_harmless,
         slots=tuple(
             _slot(pair, multi_disc=multi_disc)
             for pair in sorted(slots, key=_position_key)
@@ -340,13 +351,19 @@ def _single_deviation(
     pair: LengthPair, *, multi_disc: bool,
 ) -> TrackLengthShape:
     longer = pair.file_seconds > pair.listed_seconds
-    if pair.medium_track_count == 1:
+    # A one-track disc only means something next to other discs; a
+    # one-track release is just one track that is longer or shorter.
+    if multi_disc and pair.medium_track_count == 1:
         disc = f"Disc {pair.medium}" if pair.medium is not None else "This disc"
         return _shape(
             TrackLengthShapeKind.SINGLE_TRACK_DISC,
             _runs_against(pair, subject=f"{disc} is a single track that")
-            + " Usually a bonus or video disc in a different cut.",
-            [pair], multi_disc=multi_disc,
+            + (
+                " Usually a bonus or video disc in a different cut."
+                if longer else
+                " Some of the audio listed for that disc may be absent."
+            ),
+            [pair], multi_disc=multi_disc, probably_harmless=longer,
         )
     if _is_last_on_multi_track_medium(pair):
         disc = (
@@ -360,13 +377,13 @@ def _single_deviation(
                 _runs_against(pair, subject=subject)
                 + " Usually a hidden track kept in the same file."
                 " Probably fine.",
-                [pair], multi_disc=multi_disc,
+                [pair], multi_disc=multi_disc, probably_harmless=True,
             )
         return _shape(
             TrackLengthShapeKind.END_OF_LAST_TRACK_MISSING,
             _runs_against(pair, subject=subject)
-            + " The release usually counts a hidden track here that this"
-            " copy does not have.",
+            + " Either the release counts a hidden track here that this"
+            " copy does not have, or the file stops early.",
             [pair], multi_disc=multi_disc,
         )
     subject = _capitalize(_ref(pair, multi_disc=multi_disc))
@@ -428,18 +445,18 @@ def classify_track_length_shape(
         if len(groups) == 1:
             sentence = (
                 f"{_capitalize(phrases[0])} are cut at a different point but"
-                " add up to the same total. Nothing is missing."
+                " add up to about the same total."
             )
         else:
             sentence = (
                 f"{_capitalize(', and '.join(phrases))}, are cut at"
-                " different points, but each group adds up to the same"
-                " total. Nothing is missing."
+                " different points, but each group adds up to about the"
+                " same total."
             )
         return _shape(
             TrackLengthShapeKind.TRACKS_SPLIT_DIFFERENTLY, sentence,
             [pair for group in groups for pair in group],
-            multi_disc=multi_disc,
+            multi_disc=multi_disc, probably_harmless=True,
         )
 
     if len(deviating) == 1:
@@ -448,7 +465,7 @@ def classify_track_length_shape(
     worst = max(deviating, key=_offset)
     return _shape(
         TrackLengthShapeKind.SEVERAL_TRACKS_DIFFER,
-        f"{len(deviating)} of {len(pairs)} tracks are a different length"
+        f"{len(deviating)} of {len(usable)} tracks are a different length"
         f" from the release ({_ref(worst, multi_disc=multi_disc)} runs"
         f" {format_duration(worst.file_seconds)}, listed"
         f" {format_duration(worst.listed_seconds)}). Could be a different"
