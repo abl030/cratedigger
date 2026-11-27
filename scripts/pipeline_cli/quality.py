@@ -455,6 +455,24 @@ def _print_live_candidate_replay(
             q_override=q_override,
             gate_unavailable_reason=gate_unavailable_reason,
         )
+        if marked_result.get("imported") and installed_copy_present:
+            # Issue #1471 gap 2: under the mark the importer holds a
+            # candidate measurably short of the release's listing (only
+            # when a copy is installed). The replay does not re-read the
+            # candidate's lengths, so show the conditional, as for #1445.
+            short_result = full_pipeline_decision_from_evidence(
+                candidate, current,
+                facts=msgspec.structs.replace(
+                    marked_facts, candidate_short_of_declared_program=True),
+                cfg=rank_cfg,
+            )
+            _print_decision_outcome(
+                "Same candidate, if its track lengths are short of the "
+                "release (#1471 hold under the mark)",
+                short_result,
+                q_override=q_override,
+                gate_unavailable_reason=gate_unavailable_reason,
+            )
     elif result.get("imported") and installed_copy_present is None:
         print("      upgrade guard: could not tell whether Beets holds this "
               "release, so its effect is not shown")

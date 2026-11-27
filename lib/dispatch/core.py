@@ -722,9 +722,13 @@ def _declared_program_comparison(
 
     Issue #1471 gap 2, for an installed copy the operator marked incomplete.
     ``None`` when this lane is not guarded (force, local import, YouTube
-    rescue: the operator chose those imports). The release listing decides
-    on its own; the installed copy is measured only once the candidate is
-    already held, so the operator sees all three lengths side by side.
+    rescue: the operator chose those imports), and ``None`` when nothing is
+    installed: a hold keeps a copy, and with no copy (Bad Rip removes it
+    but leaves the mark) a short candidate still beats an empty slot.
+
+    The release listing alone decides whether the candidate is short; the
+    installed copy is read only once it is, which both settles that a copy
+    exists and gives the operator all three lengths side by side.
     """
     candidate = request.upgrade_guard_candidate
     if candidate is None:
@@ -738,6 +742,8 @@ def _declared_program_comparison(
         mb_release_id=request.mb_release_id,
         label=request.label,
     )
+    if installed is None:
+        return None
     return compare_with_declared_program(candidate, installed)
 
 

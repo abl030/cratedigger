@@ -320,6 +320,18 @@ class TestUpgradeGuardDispatch(unittest.TestCase):
             [(42, "natetheneet", _SHORT_OF_RELEASE_REASON)])
         self.assertIsNotNone(world.db.request(42)["marked_incomplete_at"])
 
+    def test_marked_but_nothing_installed_imports_a_short_candidate(
+        self,
+    ) -> None:
+        """Bad Rip removes the copy and leaves the mark: with nothing to
+        keep, a short candidate fills the empty slot instead of being held
+        under a sentence about a copy that does not exist."""
+        world = self.world(
+            marked_incomplete=True, installed_loader=_not_installed,
+        )
+        self.assertTrue(world.beets_launched())
+        self.assertNotEqual(world.outcome.code, "upgrade_held")
+
     def test_no_installed_copy_imports(self) -> None:
         world = self.world(installed_loader=_not_installed)
         self.assertTrue(world.beets_launched())
