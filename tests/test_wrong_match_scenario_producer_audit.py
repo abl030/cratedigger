@@ -87,7 +87,8 @@ VISIBLE_NOT_DELETE_ELIGIBLE: frozenset[str] = frozenset({
     "incomplete_fileset",
     "unverifiable_source",
     # Issue #1445 item 3: an automatic upgrade the guard held. Kept, its
-    # peer banned for the request, shown in its own Held upgrades section;
+    # peer banned for the request, shown in the Held upgrades section at the
+    # top of the Wrong Matches tab (Use new copy / Keep current copy);
     # converge, delete-group and the reducer all skip it.
     "upgrade_held",
 })

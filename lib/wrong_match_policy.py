@@ -34,9 +34,12 @@ WRONG_MATCH_QUARANTINE_DIR = "wrong_matches"
 
 #: Issue #1445 item 3: an automatic upgrade held because the candidate's
 #: track lengths disagree with the installed copy it would have replaced.
-#: Visible in Wrong Matches (in its own "Held upgrades" section) and never
-#: delete-eligible: approving or discarding a held copy is the operator's
-#: call. Converge, delete-group and the cleanup reducer all skip it.
+#: Visible in Wrong Matches (in the "Held upgrades" section at the top of
+#: the tab) and never delete-eligible: "Use new copy" (force import) and
+#: "Keep current copy" (wrong-match delete) are the operator's call. Held
+#: status is sticky to the folder (``lib.wrong_matches.wrong_match_row_is_
+#: held``). Converge, delete-group and the cleanup reducer all skip it;
+#: Replace deletes it with the rest of the old request's rows.
 UPGRADE_HELD_SCENARIO = "upgrade_held"
 
 

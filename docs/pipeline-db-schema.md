@@ -712,6 +712,12 @@ Recents, Wrong Matches and `pipeline-cli show` render from it through
 `lib/held_upgrade_view.py`; nothing re-measures. On such a row `detail` is
 the operator sentence, `valid` is false, and `import_result.decision` is
 `upgrade_held`.
+Held status belongs to the FOLDER: `get_wrong_matches` joins the newest
+`upgrade_held` row naming the same `failed_path` (`held_download_log_id`,
+`held_validation_result`, `held_soulseek_username`, `held_created_at`), so a
+later row on that folder — a failed force import — keeps it held until the
+operator deletes it or a force import of it succeeds (both clear
+`failed_path` from every row of the folder).
 
 ```sql
 -- Held upgrades and the tracks that tripped the guard.

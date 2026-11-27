@@ -66,7 +66,7 @@ on anything spelled but unclassified.
 | `timeout` | `lib/dispatch/core.py:1465` (`import_one.py` subprocess timeout) | no | none — no folder move at all | no | n/a | per caller |
 | `exception` | `lib/dispatch/core.py:1494` (unhandled exception in dispatch) | no | none | no | n/a | per caller |
 | `quality_downgrade` / `transcode_downgrade` / `suspect_lossless_downgrade` / `suspect_lossless_probe_missing` / `lossless_source_locked` / `duplicate_remove_guard_failed` / `verified_lossless_locked` | `lib/dispatch/core.py::_describe_rejection` (post-beets-launch quality decisions) | decision-dependent (`decision_denylists`) | none — `_cleanup_staged_dir` (auto) or preserved (force, `mark_done=False`); never quarantined into Wrong Matches | no — the persisted `validation_result.scenario` stays `strong_match` (D8), and none of these ever get a `failed_path` regardless | n/a | per caller |
-| `upgrade_held` | `lib/dispatch/outcome_actions.py::_hold_upgrade_from_evidence_decision`, reached from `lib/dispatch/core.py::_run_evidence_gate` when `full_pipeline_decision_from_evidence` decides `upgrade_held` (issue #1445 item 3: an automatic upgrade whose track lengths disagree with the installed copy it would replace) | **yes, this request only, no cooldown strike** (`apply_cooldown=False` — a hold is not the peer's fault, but the same folder must not be fetched again) | `wrong_matches/` — **whole-folder move**, before Beets launches; nothing in the library is touched | yes — but in its own "Held upgrades" list (`web/wrong_match_queue_view.py::build_held_upgrades`), never inside an ordinary group | **no** — and the reducer refuses it early by scenario (`OUTCOME_SKIPPED_HELD_UPGRADE`), so the delete-all triage batch cannot reach it either; converge skips it (its green distance would otherwise force-import over the copy the guard kept); delete-group skips it and leaves it out of the remaining count | yes → `wanted`, search state exactly as any ordinary rejected attempt leaves it (no override narrowing) |
+| `upgrade_held` | `lib/dispatch/outcome_actions.py::_hold_upgrade_from_evidence_decision`, reached from `lib/dispatch/core.py::_run_evidence_gate` when `full_pipeline_decision_from_evidence` decides `upgrade_held` (issue #1445 item 3: an automatic upgrade whose track lengths disagree with the installed copy it would replace) | **yes, this request only, no cooldown strike** (`apply_cooldown=False` — a hold is not the peer's fault, but the same folder must not be fetched again) | `wrong_matches/` — **whole-folder move**, before Beets launches; nothing in the library is touched | yes — in the "Held upgrades" section at the top of the Wrong Matches tab (`web/wrong_match_queue_view.py::build_held_upgrades`, rendered by `web/js/wrong-matches.js::renderHeldUpgrades`), never inside an ordinary group. **Sticky to the folder:** `get_wrong_matches` projects the newest `upgrade_held` row naming each folder (`held_download_log_id`, `held_validation_result`), so a newer row on the folder — a failed force import — is recorded and shown truthfully ("the last try to use the new copy failed: …") while the folder stays held | **no** — the reducer refuses a held folder early (`get_held_upgrade_download_log_id` → `OUTCOME_SKIPPED_HELD_UPGRADE`), so the delete-all triage batch cannot reach it either; converge skips it (its green distance would otherwise force-import over the copy the guard kept) and counts it apart (`held_upgrades`; `group_empty` only when nothing at all is left, `ordinary_group_empty` drives the UI); delete-group skips it and leaves it out of the remaining count; **Replace deletes it** (`include_held=True`) | yes → `wanted`, search state exactly as any ordinary rejected attempt leaves it (no override narrowing) |
 | `abandoned_auto_import` | **HISTORICAL — no current writer.** Pre-#898 interrupted-request auto-import cleanup rows. Only reader: `lib/pipeline_db/misc.py:262` (a `WHERE … <> 'abandoned_auto_import'` exclusion, not a producer). Registered historical in `tests/test_wrong_match_scenario_producer_audit.py`. | — | — | — | — | — |
 
 Every folder/audio-integrity fact's denylist policy above and the general
@@ -107,7 +107,8 @@ gate `PipelineDB.get_wrong_matches()` filters on:
    keeps the beets envelope but renames `scenario` to `upgrade_held` (so the
    row is NOT D8's invisible `strong_match`), sets `failed_path`, the
    operator sentence as `detail`, and the stored per-track comparison as
-   `upgrade_hold`. The job-backed terminal outcome commits after the
+   `upgrade_hold`. Cancellation is checked before the move and never after
+   it. The job-backed terminal outcome commits after the
    journaled processor cleanup finds the canonical source already gone
    (a no-op). Crash window: between the rename and the terminal commit the
    folder sits in `wrong_matches/` with no row and startup recovery
@@ -247,17 +248,28 @@ behavior load-bearing rather than incidental:
 
 ### Approving or discarding a held upgrade (issue #1445 item 3)
 
-A held upgrade uses the two operator actions that already exist, on
-`pipeline-cli` and the web API alike:
+The Held upgrades section's two buttons are the two operator actions that
+already exist, on `pipeline-cli` and the web API alike (each asks once more
+inline before acting):
 
-- **Use new copy** = force import of the held row. Force never computes the
+- **Use new copy** = force import of the held row (`held_download_log_id`). Force never computes the
   upgrade-guard fact (it is the approval), so the quality decision runs as
   it would have and Beets replaces the installed copy. `upgrade_held` is in
   `CANDIDATE_PROGRAM_COVERED_SCENARIOS` (it was a `strong_match`), so a
   force import under the operator's incomplete mark sees the candidate as
   covered. Success consumes the Wrong Matches source exactly as D7 above.
-- **Keep current copy** = the single `wrong-match-delete` of that row
-  (operator authority; never routed through the reducer).
+- **Keep current copy** = the single `wrong-match-delete` of the folder's
+  newest visible row (`download_log_id`; the delete clears every row naming
+  the folder). Operator authority; never routed through the reducer. The
+  peer stays denylisted for the request.
+- **Until one of those happens the folder stays held**, with its stored
+  comparison, even after a failed force import wrote a newer row on it.
+- **Replace** removes held rows too: it already removes the installed album
+  and every other Wrong Matches row of the old request, so a held copy is
+  then an alternative to nothing. **Replace `--adopt`** moves and
+  force-imports only the one row the operator named; a held row is adopted
+  only when the operator names it, and every other held row of the old
+  request is deleted with the rest.
 
 ## Local-import outcomes (issue #1176 PR3)
 
@@ -409,8 +421,9 @@ least once) ever carries this block.
   decider runs instead of deleting. Everything below is otherwise as
   written.
 - **The reducer's own logic** is untouched by issue #1445; it only gains an
-  early refusal of `upgrade_held` rows (scenario-keyed, before any path or
-  evidence read), and writes no `wrong_match_triage` block onto them.
+  early refusal of held folders (keyed on the folder: any `upgrade_held` row
+  naming it, before any evidence read), and writes no `wrong_match_triage`
+  block onto them.
 - **Quality rejects** (the downgrade family, `spectral_reject`) — ban +
   delete-the-source stays exactly as it was: "library holds better" is the
   redundancy proof by definition, and neither of these ever reaches a

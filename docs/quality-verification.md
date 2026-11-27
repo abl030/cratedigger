@@ -1229,8 +1229,15 @@ clamps track-length error at 30s, so the match distance never noticed.
   the file's (Kurt Vile "So Outta Reach" item 195486: DB 289.9s, file
   336.3s). An unmeasurable file skips its track with a log line. The stored
   comparison records `installed_lengths_source = "measured_from_files"`.
-- **Decision.** The dispatch core computes the comparison and sets
-  `AlbumQualityEvidenceDecisionFacts.installed_track_lengths_disagree`;
+  When Beets does not resolve the release uniquely the guard compares
+  nothing and logs `UPGRADE GUARD SKIPPED`.
+- **Decision.** One code path, the one decision function twice: the
+  dispatch core decides without the guard's fact; only when that decision
+  imports (guarded lane, no operator mark) does it read and measure the
+  installed copy, and when the comparison holds it sets
+  `AlbumQualityEvidenceDecisionFacts.installed_track_lengths_disagree` and
+  decides again. A candidate the decision rejects anyway opens no installed
+  file.
   `full_pipeline_decision_from_evidence` turns an import (only an import)
   into `upgrade_held` (`upgrade_guard = "hold"`, `imported = False`,
   `final_status = "wanted"`, keep searching; the overridden quality verdict
@@ -1245,9 +1252,12 @@ clamps track-length error at 30s, so the match distance never noticed.
   folder moves whole into `wrong_matches/`, the peer is denylisted for that
   request with no cooldown strike, the request requeues exactly as an
   ordinary rejected attempt (no search narrowing), and the operator
-  approves with force import or discards with the single wrong-match
-  delete. `pipeline-cli quality <id>` shows the guarded decision beside the
-  ordinary one when the replayed candidate would replace an installed copy.
+  chooses in the Wrong Matches tab's Held upgrades section: "Use new copy"
+  (force import) or "Keep current copy" (the single wrong-match delete).
+  `pipeline-cli quality <id>` shows the guarded decision beside the
+  ordinary one when the replay imports and Beets uniquely holds the release
+  (asked of Beets, not inferred from linked current evidence, which can
+  outlive the album).
 
 ## Comparison basis — the persisted decision explanation
 

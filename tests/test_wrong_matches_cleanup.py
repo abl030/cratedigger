@@ -461,8 +461,9 @@ class TestWrongMatchDeleteService(unittest.TestCase):
     def test_delete_group_skips_a_held_upgrade(self):
         """Issue #1445 item 3: "delete all" on a request's ordinary wrong
         matches must not discard a held upgrade the operator has not looked
-        at; it has its own Keep current copy action. The held row is also
-        not an ordinary leftover, so the group still reads empty."""
+        at; it has its own "Keep current copy" button in the Held upgrades
+        section. The held row is also not an ordinary leftover, so the group
+        still reads empty."""
         from lib.wrong_match_delete_service import (
             delete_wrong_match,
             delete_wrong_match_group,
