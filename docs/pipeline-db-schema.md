@@ -218,6 +218,16 @@ Each active evidence row owns typed file-snapshot rows:
 - `size_bytes BIGINT`, `mtime_ns BIGINT`, `extension TEXT`,
   `container TEXT`, `codec TEXT` — file identity and container facts used to
   decide whether cached evidence is still valid.
+- `audio_sha256 BYTEA` (migration 089, issue #1471) — the bad-hash gate's
+  per-file content hash (`lib/audio_hash.py::hash_audio_content`) of the
+  staged candidate files, before any conversion. Write-side only: not part
+  of the snapshot fingerprint, never a decision input, and evidence loads
+  leave it unset. A rewrite that carries no hash keeps the stored one. Its
+  one reader is `get_recent_import_source_audio_hashes`, which Bad Rip uses
+  to ban the latest import in the format peers share (a FLAC rip imported
+  as Opus is otherwise unmatchable, since the gate keys on hash + format).
+  NULL for legacy rows, current-library evidence, unsupported formats
+  (wav/alac) and per-file hashing failures.
 
 Action provenance such as reused/recomputed/backfilled/fallback outcomes is not
 stored in these evidence tables; preview/import/cleanup result surfaces own

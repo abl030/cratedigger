@@ -3353,11 +3353,13 @@ class TestGeneratedParity(unittest.TestCase):
 # Issue #1445 item 3 — the upgrade guard. One invariant, one checker, one
 # known-bad self-test:
 #
-#   G1  The fact ``installed_track_lengths_disagree`` changes a decision
-#       exactly when the unguarded decision imports and the operator has not
-#       marked the installed copy incomplete; then the result is the
-#       unguarded dict with only the hold fields replaced. Every other world
-#       is byte-identical to the unguarded decision.
+#   G1  The guard's governing fact changes a decision exactly when the
+#       unguarded decision imports; then the result is the unguarded dict
+#       with only the hold fields replaced. Every other world is
+#       byte-identical to the unguarded decision. The governing fact is
+#       ``installed_track_lengths_disagree`` without the operator's
+#       incomplete mark and ``candidate_short_of_declared_program`` with it
+#       (issue #1471 gap 2); the other fact is inert.
 # ===========================================================================
 
 _HOLD_OVERRIDES: dict[str, object] = {
@@ -3375,6 +3377,7 @@ def upgrade_guard_violation(
     guarded: dict,
     fact: bool,
     marked: bool,
+    short: bool = False,
 ) -> str | None:
     """Checker G1. Returns a message on violation, else None.
 
@@ -3383,7 +3386,8 @@ def upgrade_guard_violation(
     decision's own denylist policy recomputes for ``upgrade_held``), and
     happens exactly when the unguarded decision imported.
     """
-    should_hold = fact and not marked and bool(unguarded.get("imported"))
+    governing = short if marked else fact
+    should_hold = governing and bool(unguarded.get("imported"))
     if not should_hold:
         if guarded != unguarded:
             return "the guard changed a world it must not touch"
@@ -3399,19 +3403,24 @@ def upgrade_guard_violation(
 class TestUpgradeGuardGenerated(unittest.TestCase):
     """G1 over the shared parity world language (issue #1445 item 3)."""
 
-    @given(world=parity_worlds(), fact=st.booleans())
-    def test_guard_holds_exactly_the_unmarked_imports(self, world, fact):
+    @given(world=parity_worlds(), fact=st.booleans(), short=st.booleans())
+    def test_guard_holds_exactly_the_governed_imports(
+        self, world, fact, short,
+    ):
         candidate, current, facts = _parity_evidence_inputs(world)
         unguarded = full_pipeline_decision_from_evidence(
             candidate, current, facts=facts)
         guarded = full_pipeline_decision_from_evidence(
             candidate, current,
             facts=msgspec.structs.replace(
-                facts, installed_track_lengths_disagree=fact),
+                facts,
+                installed_track_lengths_disagree=fact,
+                candidate_short_of_declared_program=short,
+            ),
         )
         violation = upgrade_guard_violation(
             unguarded=unguarded, guarded=guarded, fact=fact,
-            marked=world.installed_marked_incomplete,
+            marked=world.installed_marked_incomplete, short=short,
         )
         self.assertIsNone(violation, violation)
 
@@ -3440,9 +3449,20 @@ class TestUpgradeGuardGenerated(unittest.TestCase):
             unguarded=imported,
             guarded={**held, "stage2_import": None},
             fact=True, marked=False))
-        # The correct hold passes.
+        # Issue #1471 gap 2: a guard that ignores a short candidate under
+        # the mark, and one that holds a short candidate without it.
+        self.assertIsNotNone(upgrade_guard_violation(
+            unguarded=imported, guarded=imported,
+            fact=False, marked=True, short=True))
+        self.assertIsNotNone(upgrade_guard_violation(
+            unguarded=imported, guarded=held,
+            fact=False, marked=False, short=True))
+        # The correct holds pass.
         self.assertIsNone(upgrade_guard_violation(
             unguarded=imported, guarded=held, fact=True, marked=False))
+        self.assertIsNone(upgrade_guard_violation(
+            unguarded=imported, guarded=held,
+            fact=True, marked=True, short=True))
 
 
 # ===========================================================================

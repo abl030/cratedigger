@@ -92,6 +92,14 @@ class TrackLengthComparisonRow(msgspec.Struct, frozen=True, kw_only=True):
 #: (whose ``items.length`` is the release's declared length).
 INSTALLED_LENGTHS_MEASURED_FROM_FILES: Final = "measured_from_files"
 
+#: What a hold compared the candidate against. ``installed_copy`` is the
+#: issue #1445 guard (the new copy disagrees with the copy it would replace).
+#: ``declared_program`` is issue #1471 gap 2: the operator marked the
+#: installed copy incomplete, so the release's own listing is the yardstick
+#: and the new copy is held when it is measurably short of it.
+HOLD_BASIS_INSTALLED_COPY: Final = "installed_copy"
+HOLD_BASIS_DECLARED_PROGRAM: Final = "declared_program"
+
 
 class InstalledCopyComparison(msgspec.Struct, frozen=True, kw_only=True):
     """The stored per-track evidence behind an upgrade hold."""
@@ -101,6 +109,8 @@ class InstalledCopyComparison(msgspec.Struct, frozen=True, kw_only=True):
     compared_count: int
     holds: bool
     installed_lengths_source: str = INSTALLED_LENGTHS_MEASURED_FROM_FILES
+    # Defaulted so every hold stored before #1471 decodes as the guard it was.
+    basis: str = HOLD_BASIS_INSTALLED_COPY
 
 
 def _usable(seconds: float | None) -> float | None:
@@ -185,6 +195,72 @@ def compare_installed_copy(
         rows=tuple(rows),
         compared_count=sum(1 for row in rows if row.compared),
         holds=any(row.tripped for row in rows),
+    )
+
+
+def compare_with_declared_program(
+    candidate_tracks: Sequence[CandidateTrackLength],
+    installed_tracks: Sequence[InstalledTrackLength] | None,
+) -> InstalledCopyComparison:
+    """Is the candidate measurably short of the release's declared program?
+
+    Issue #1471 gap 2. Used only when the operator has marked the installed
+    copy incomplete: beets' ``strong_match`` proves every release track has
+    a file, never that a file is as long as the release lists, so a second
+    rip missing the same hidden track would otherwise replace the marked
+    copy and clear the mark. A track trips when the candidate runs more than
+    :data:`UPGRADE_GUARD_TRACK_LENGTH_SECONDS` SHORT of its declared length;
+    a longer file (an unlisted hidden track kept in it) never trips.
+
+    A track is compared when its declared and candidate lengths are both
+    positive and finite and it is not a coalesced Discogs composite. The
+    installed copy's measured lengths are shown when keyed, for the
+    operator, and never decide anything.
+    """
+    installed = tuple(installed_tracks or ())
+    installed_keys = _unique_keys([track.key for track in installed])
+    candidate_keys = _unique_keys([track.key for track in candidate_tracks])
+    installed_by_key = {
+        track.key: _usable(track.installed_seconds)
+        for track in installed
+        if track.key in installed_keys
+    }
+    rows: list[TrackLengthComparisonRow] = []
+    for track in candidate_tracks:
+        declared = _usable(track.declared_seconds)
+        candidate = _usable(track.candidate_seconds)
+        installed_seconds = (
+            installed_by_key.get(track.key)
+            if track.key in candidate_keys else None
+        )
+        compared = (
+            track.component_count <= 1
+            and declared is not None
+            and candidate is not None
+        )
+        tripped = (
+            compared
+            and declared is not None
+            and candidate is not None
+            and declared - candidate > UPGRADE_GUARD_TRACK_LENGTH_SECONDS
+        )
+        rows.append(TrackLengthComparisonRow(
+            medium=track.medium,
+            medium_index=track.medium_index,
+            title=track.title,
+            declared_seconds=declared,
+            installed_seconds=installed_seconds,
+            candidate_seconds=candidate,
+            compared=compared,
+            tripped=tripped,
+        ))
+    rows.sort(key=lambda row: (row.medium or 0, row.medium_index or 0))
+    return InstalledCopyComparison(
+        threshold_seconds=UPGRADE_GUARD_TRACK_LENGTH_SECONDS,
+        rows=tuple(rows),
+        compared_count=sum(1 for row in rows if row.compared),
+        holds=any(row.tripped for row in rows),
+        basis=HOLD_BASIS_DECLARED_PROGRAM,
     )
 
 
@@ -292,6 +368,30 @@ def _neither(
     )
 
 
+def _short_of_program(
+    rows: Sequence[TrackLengthComparisonRow],
+    *,
+    remaining: int,
+    multi_disc: bool,
+) -> str:
+    runs = _join([
+        f"{_ref(row, multi_disc=multi_disc)} runs "
+        f"{format_duration(row.candidate_seconds or 0.0)} where the release "
+        f"says {format_duration(row.declared_seconds or 0.0)}"
+        for row in rows
+    ])
+    sentences = [
+        "Kept your current copy, which you marked incomplete.",
+        f"The new copy is short too: {runs}.",
+    ]
+    if remaining:
+        sentences.append(
+            f"{remaining} more track{'s' if remaining > 1 else ''} "
+            f"{'are' if remaining > 1 else 'is'} short too."
+        )
+    return " ".join(sentences)
+
+
 def held_upgrade_sentence(comparison: InstalledCopyComparison) -> str:
     """Plain-English reason an upgrade was held, from the stored evidence.
 
@@ -308,6 +408,10 @@ def held_upgrade_sentence(comparison: InstalledCopyComparison) -> str:
         row.medium for row in comparison.rows if row.medium is not None
     }) > 1
     named = tripped[:_NAMED_TRACK_LIMIT]
+    if comparison.basis == HOLD_BASIS_DECLARED_PROGRAM:
+        return _short_of_program(
+            named, remaining=len(tripped) - len(named), multi_disc=multi_disc,
+        )
     sentences = ["Kept your current copy."]
     for variant, render in (
         ("odd_one_out", _odd_one_out),
