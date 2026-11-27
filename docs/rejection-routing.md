@@ -23,10 +23,22 @@ comment on the same issue.
 - **Cleanup-lane admission** — `rejection_scenario_is_delete_eligible`. May a
   kept, banned, visible folder be evaluated for deletion by
   `lib.wrong_match_cleanup_service.cleanup_wrong_match` (the reducer, D2/D9,
-  untouched by this issue)? An explicit four-item allowlist, not a fail-open
-  exclusion set (D6). Everything else — world failures with a reviewable
-  folder, every unknown/novel scenario string, and `None` — is never
-  delete-eligible; the reducer is never even consulted for them.
+  untouched by this issue) **automatically, straight after the rejection**?
+  An explicit four-item allowlist, not a fail-open exclusion set (D6).
+  Everything else — world failures with a reviewable folder, every
+  unknown/novel scenario string, and `None` — is never delete-eligible; the
+  automatic callers (`lib/download_rejection.py`, `scripts/importer.py`)
+  never consult the reducer for them.
+- **The operator's Cleanup sweep is not gated by that allowlist** (issue
+  #1468). `cleanup_all_wrong_matches` — the "Cleanup Wrong Matches" button,
+  `pipeline-cli wrong-match-triage`, behind `confirm_all_wrong_matches` —
+  runs the reducer on every visible row, whatever its scenario. Its purpose
+  is to delete the proven non-imports so that what remains is the list of
+  possible imports to review; a non-allowlisted row the reducer can prove
+  redundant (for example under a verified-lossless parent) belongs in that
+  deletion just as much as an allowlisted one. Rows the reducer cannot prove
+  redundant stay kept, banned, and visible. Pinned by
+  `test_operator_sweep_evaluates_rows_outside_the_delete_allowlist`.
 
 Deletion for a **kept, banned, visible** folder therefore only ever happens
 through two routes, neither of which is "entering the lane": the cleanup
@@ -387,24 +399,26 @@ producer_audit.py`'s registered producer files —
 producer: `lib.wrong_match_cleanup_service.cleanup_wrong_match` (the reducer),
 via `db.record_wrong_match_triage`. Nothing else writes it — not Lane A, not
 Lane B, not the force-import manifest guard, not force-import success/failure
-consumption. Because the reducer is only ever reached for the
+consumption. The automatic lane reaches the reducer only for the
 **cleanup-lane-admission allowlist** (`rejection_scenario_is_delete_eligible`
 — `extra_tracks` / `high_distance` / `mbid_not_found` / `no_choose_match`,
-D6), every OTHER worklist-visible scenario in the events table above —
+D6), so every OTHER worklist-visible scenario in the events table above —
 `unmapped_audio`, `untracked_audio`, `validation_error`, `request_missing_mbid`,
-`request_missing_request_id`, `incomplete_fileset`, `unverifiable_source`,
-`upgrade_held` — never gets a `wrong_match_triage` block, past or present. This was always
-true; issue #1077 widens which of those rows are worklist-visible in the
-first place (D1: kept implies visible), so the "visible with no triage chip"
-population is now larger than before, not new.
+`request_missing_request_id`, `incomplete_fileset`, `unverifiable_source` —
+carries a `wrong_match_triage` block only once the operator's Cleanup sweep
+has evaluated it (see "Cleanup-lane admission" above). `upgrade_held` never
+carries one: the reducer refuses a held folder before writing any audit.
+Issue #1077 widens which of those rows are worklist-visible in the first
+place (D1: kept implies visible), so the "visible with no triage chip"
+population is larger than before, not new.
 
 `web/js/recents.js` and `web/js/history.js` both render the
 `wrong_match_triage_*` fields conditionally (`if (h.wrong_match_triage_summary)
 { … }` in `history.js`; the equivalent guard in `recents.js`) — a row with no
 triage evidence simply shows no chip/detail, which is the CORRECT and
-expected rendering for the whole non-delete-eligible cohort, not a missing-data
-bug. Only a row the reducer actually evaluated (delete-eligible, evaluated at
-least once) ever carries this block.
+expected rendering for a row no sweep has evaluated yet, not a missing-data
+bug. Only a row the reducer actually evaluated (by the automatic lane or the
+operator's sweep) ever carries this block.
 
 ## What is deliberately unchanged
 

@@ -1396,11 +1396,14 @@ they clean up immediately as disposable processing state). **Cleanup-lane
 admission** (`rejection_scenario_is_delete_eligible`) is a separate, narrower
 explicit allowlist — exactly `extra_tracks`, `high_distance`,
 `mbid_not_found`, `no_choose_match` may reach the reducer
-(`lib.wrong_match_cleanup_service.cleanup_wrong_match`) at all. World
-failures with a reviewable folder (`unmapped_audio`, `untracked_audio`,
-`request_missing_mbid`, `request_missing_request_id`) are kept, banned, and
-shown, but the reducer never even looks at them — nor does any unknown or
-novel scenario string, nor `None`. Kept ⟺ its contributing peers are
+(`lib.wrong_match_cleanup_service.cleanup_wrong_match`) automatically after
+the rejection. World failures with a reviewable folder (`unmapped_audio`,
+`untracked_audio`, `request_missing_mbid`, `request_missing_request_id`) are
+kept, banned, and shown, and the automatic lane never sends them to the
+reducer — nor any unknown or novel scenario string, nor `None`. The
+operator's Cleanup sweep (`cleanup_all_wrong_matches`) is not gated by the
+allowlist: it evaluates every visible row so only possible imports remain
+(issue #1468; see `docs/rejection-routing.md`). Kept ⟺ its contributing peers are
 denylisted; kept ⟹ visible in the worklist. SQL, the test fake, and
 post-rejection cleanup all consume the neutral taxonomy in
 `lib/wrong_match_policy.py`; a new non-match rejection scenario must be
