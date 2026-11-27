@@ -1269,9 +1269,9 @@ def _finalize_denylist(result: dict[str, object]) -> dict[str, object]:
 
 
 def _apply_upgrade_guard(
-    result: dict[str, Any],
+    result: dict[str, object],
     facts: AlbumQualityEvidenceDecisionFacts,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Hold an import that would replace a disagreeing installed copy.
 
     Issue #1445 item 3. Only an import can destroy the installed copy, so

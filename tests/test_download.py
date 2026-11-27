@@ -3626,8 +3626,9 @@ class TestHandleValidResultUpgradeGuardCandidate(unittest.TestCase):
     execution-owner proof, so only it hands dispatch the candidate tracks.
     """
 
-    def _run(self, *, owner_proof: object | None, release_id: str):
+    def _run(self, *, owned: bool, release_id: str):
         from lib.download_validation import _handle_valid_result
+        from lib.import_execution import ExecutionOwnerProof
         from lib.quality import ValidationResult
         from lib.quality.wire_types import (
             CandidateSummary,
@@ -3689,14 +3690,20 @@ class TestHandleValidResultUpgradeGuardCandidate(unittest.TestCase):
                 StagedAlbum(current_path=import_dir, request_id=42),
                 ctx,
                 dispatch_fn=capture,
-                owner_proof=owner_proof,  # type: ignore[arg-type]
+                owner_proof=(
+                    ExecutionOwnerProof(
+                        execution_lease=MagicMock(),
+                        owner_session_identity=MagicMock(),
+                    )
+                    if owned else None
+                ),
             )
         self.assertEqual(len(captured), 1)
         return captured[0].upgrade_guard_candidate
 
     def test_automation_lane_carries_the_selected_candidate_tracks(self):
         tracks = self._run(
-            owner_proof=MagicMock(),
+            owned=True,
             release_id="4c6f4a7b-c093-4006-a50e-3d6dfbdd2645",
         )
         assert tracks is not None
@@ -3708,7 +3715,7 @@ class TestHandleValidResultUpgradeGuardCandidate(unittest.TestCase):
         self.assertEqual(track.candidate_seconds, 205.9)
 
     def test_discogs_request_keys_on_the_synthetic_track_id(self):
-        tracks = self._run(owner_proof=MagicMock(), release_id="555")
+        tracks = self._run(owned=True, release_id="555")
         assert tracks is not None
         (track,) = tracks
         self.assertEqual(track.key, "555-A2")
@@ -3716,7 +3723,7 @@ class TestHandleValidResultUpgradeGuardCandidate(unittest.TestCase):
     def test_ownerless_lane_is_never_guarded(self):
         # YouTube rescue reaches this seam with no execution-owner proof.
         self.assertIsNone(self._run(
-            owner_proof=None,
+            owned=False,
             release_id="4c6f4a7b-c093-4006-a50e-3d6dfbdd2645",
         ))
 

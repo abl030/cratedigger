@@ -162,8 +162,18 @@ class _World:
 
 
 class TestUpgradeGuardDispatch(unittest.TestCase):
-    def world(self, **kwargs: object) -> _World:
-        world = _World(**kwargs)  # type: ignore[arg-type]
+    def world(
+        self,
+        *,
+        force: bool = False,
+        installed_loader: InstalledLoader | None = None,
+        marked_incomplete: bool = False,
+    ) -> _World:
+        world = _World(
+            force=force,
+            installed_loader=installed_loader,
+            marked_incomplete=marked_incomplete,
+        )
         self.addCleanup(world.close)
         return world
 
