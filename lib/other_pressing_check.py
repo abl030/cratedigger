@@ -720,9 +720,9 @@ def _files_sentence(medium: MediumLengths) -> str | None:
     count = len(medium.discs)
     if against is None:
         return None
-    if against is FilesAgainstDisc.LISTING_DISC:
+    if against == FilesAgainstDisc.LISTING_DISC:
         return "This copy matches that disc on every track."
-    if against is FilesAgainstDisc.OTHER_DISC:
+    if against == FilesAgainstDisc.OTHER_DISC:
         if medium.listing_disc_id is not None:
             return "This copy matches a different attached disc than the listing does."
         if count == 1:
@@ -787,7 +787,7 @@ def _listing_sentence(medium: MediumLengths, *, subject: str | None) -> str:
 
 
 def _medium_sentences(medium: MediumLengths, *, subject: str | None) -> list[str]:
-    if medium.status is MediumDiscStatus.NO_DISC_FORMAT:
+    if medium.status == MediumDiscStatus.NO_DISC_FORMAT:
         if subject is None:
             return [
                 (f"This is {_format_phrase(medium.format)}, so there is no disc "
@@ -795,13 +795,13 @@ def _medium_sentences(medium: MediumLengths, *, subject: str | None) -> list[str
         return [
             (f"{subject} is {_format_phrase(medium.format)}, so there is no "
             "disc to check its listed lengths against.")]
-    if medium.status is MediumDiscStatus.NO_DISC_ID:
+    if medium.status == MediumDiscStatus.NO_DISC_ID:
         where = "this release" if subject is None else subject.lower()
         listed = "the listed lengths" if subject is None else "its listed lengths"
         return [
             (f"No disc ID is attached to {where}, so there is no disc to check "
             f"{listed} against.")]
-    if medium.status is MediumDiscStatus.DISC_ID_UNUSABLE:
+    if medium.status == MediumDiscStatus.DISC_ID_UNUSABLE:
         if subject is None:
             return [
                 ("A disc ID is attached, but its track layout does not fit "

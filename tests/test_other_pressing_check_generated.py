@@ -337,7 +337,7 @@ def assert_discs_match_planted(world: DiscWorld, result: PressingCheck) -> None:
         expected_status = MediumDiscStatus.NO_DISC_ID
     else:
         expected_status = MediumDiscStatus.CHECKED
-    if medium.status is not expected_status:
+    if medium.status != expected_status:
         raise AssertionError(f"disc status {medium.status} but planted {expected_status}")
     listing_fits = DISC_LISTING in world.kinds or (
         world.fits_own and DISC_FILES in world.kinds)
@@ -353,7 +353,7 @@ def assert_discs_match_planted(world: DiscWorld, result: PressingCheck) -> None:
         expected_against = FilesAgainstDisc.OTHER_DISC
     else:
         expected_against = FilesAgainstDisc.NO_DISC
-    if medium.files_against_disc is not expected_against:
+    if medium.files_against_disc != expected_against:
         raise AssertionError(
             f"files against disc {medium.files_against_disc} but planted "
             f"{expected_against}")
