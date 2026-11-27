@@ -718,6 +718,11 @@ ALLOWLIST: dict[str, str] = {
         "set[str] retained paths — scalar set, no row projection; "
         "measurement-failure and quarantine semantics are pinned by mirrored "
         "tests in test_fakes.py + test_pipeline_db.py",
+    "get_recent_import_source_audio_hashes":
+        "list[BadAudioHashInput] typed dataclasses — no row projection; "
+        "the fake mirrors the real query (tests/test_pipeline_db.py "
+        "TestRecentImportSourceAudioHashes pins the SQL, the ban test in "
+        "tests/test_destructive_authority.py drives the fake)",
     "get_recent_successful_uploader":
         "str | None username — scalar, no row projection",
     "get_request_current_evidence_id":

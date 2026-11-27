@@ -51,6 +51,11 @@ from tests.test_installed_copy_guard import fairways
 _RELEASE = "4c6f4a7b-c093-4006-a50e-3d6dfbdd2645"
 _FOLDER = "The Fairways - Is Everything All Right"
 
+_SHORT_OF_RELEASE_REASON = (
+    "upgrade held: track lengths short of the release "
+    "(installed copy marked incomplete)"
+)
+
 InstalledLoader = Callable[..., tuple[InstalledTrackLength, ...] | None]
 
 
@@ -312,9 +317,7 @@ class TestUpgradeGuardDispatch(unittest.TestCase):
             "Kept your current copy, which you marked incomplete."))
         self.assertEqual(
             [(e.request_id, e.username, e.reason) for e in world.db.denylist],
-            [(42, "natetheneet",
-              "upgrade held: track lengths short of the release "
-              "(installed copy marked incomplete)")])
+            [(42, "natetheneet", _SHORT_OF_RELEASE_REASON)])
         self.assertIsNotNone(world.db.request(42)["marked_incomplete_at"])
 
     def test_no_installed_copy_imports(self) -> None:
