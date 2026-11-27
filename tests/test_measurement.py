@@ -555,31 +555,21 @@ class TestIterAudioFiles(unittest.TestCase):
 
 
 class TestBadAudioHashGateFastPath(unittest.TestCase):
-    """``measure_preimport_state`` empty-table fast-path: when
-    ``has_any_bad_audio_hashes`` returns False, the gate must NOT hash
-    candidate tracks or call ``lookup_bad_audio_hash``.
+    """``measure_preimport_state`` with an empty ``bad_audio_hashes`` table.
 
-    Note (U3): the measurement helper still walks the filesystem to derive
-    ``folder_layout`` / ``audio_file_count`` for the new evidence facts. That
-    walk is cheap (no hashing) and is now part of every measurement. The
-    fast-path that this test protects is the *hash* path — verified by
-    asserting ``hash_audio_content`` and ``lookup_bad_audio_hash`` are not
-    called.
+    Issue #1471 changed what the fast path saves. Every supported file is
+    hashed regardless (the digests ride the candidate evidence so a later Bad
+    Rip can record the source format), but an empty table still skips every
+    ``lookup_bad_audio_hash`` round trip.
     """
 
-    def test_empty_table_skips_hashing_and_lookup(self):
+    def _measure(self, db: FakePipelineDB | None):
         from lib.config import CratediggerConfig
         from lib.measurement import measure_preimport_state
 
-        db = FakePipelineDB()
-        # empty bad_audio_hashes table → fast-path skip
         cfg = CratediggerConfig(audio_check_mode="off")
-
-        # Bypass spectral and existing-album lookups so we isolate the
-        # bad-hash gate's fast-path skip.
-        with patch("lib.measurement.hash_audio_content") as hashfn, \
-             patch("lib.measurement._needs_spectral_check", return_value=False):
-            measure_preimport_state(
+        with patch("lib.measurement._needs_spectral_check", return_value=False):
+            return measure_preimport_state(
                 path=str(FIXTURE_DIR),
                 mb_release_id="mbid-empty",
                 label="Empty Table",
@@ -590,13 +580,46 @@ class TestBadAudioHashGateFastPath(unittest.TestCase):
                 bad_hash_db=db,
             )
 
-        # ``has_any_bad_audio_hashes`` is the fast-path gate — it must be
-        # called once. ``lookup_bad_audio_hash`` and ``hash_audio_content``
-        # must NOT have been touched (the gate short-circuited because
-        # the table is empty).
+    def test_empty_table_hashes_every_file_but_skips_lookup(self):
+        from lib.audio_hash import hash_audio_content
+
+        db = FakePipelineDB()
+        m = self._measure(db)
+
         self.assertEqual(db.has_any_bad_audio_hashes_calls, 1)
         self.assertEqual(db.lookup_bad_audio_hash_calls, [])
+        self.assertEqual(
+            set(m.source_audio_hashes),
+            {"sine_440.flac", "sine_440.mp3", "sine_440.m4a", "sine_440.ogg"},
+        )
+        self.assertEqual(
+            m.source_audio_hashes["sine_440.flac"],
+            hash_audio_content(FIXTURE_DIR / "sine_440.flac", "flac"),
+        )
+
+    def test_populated_table_reuses_the_digests_for_lookup(self):
+        """Each file is decoded once: the lookups use the stored digests."""
+        from lib.pipeline_db import BadAudioHashInput
+
+        db = FakePipelineDB()
+        db.add_bad_audio_hashes(
+            request_id=1, reported_username=None, reason=None,
+            hashes=[BadAudioHashInput(b"\xff" * 32, "mp3")],
+        )
+        with patch(
+            "lib.measurement.hash_audio_content",
+            side_effect=lambda path, _fmt: bytes([len(path.name)]) * 32,
+        ) as hashfn:
+            m = self._measure(db)
+        self.assertEqual(hashfn.call_count, 4)
+        self.assertEqual(len(db.lookup_bad_audio_hash_calls), 4)
+        self.assertIsNone(m.matched_bad_hash_id)
+
+    def test_no_gate_port_hashes_nothing(self):
+        with patch("lib.measurement.hash_audio_content") as hashfn:
+            m = self._measure(None)
         hashfn.assert_not_called()
+        self.assertEqual(m.source_audio_hashes, {})
 
 
 class TestMeasurePreimportState(unittest.TestCase):
