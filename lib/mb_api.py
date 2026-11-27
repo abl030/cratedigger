@@ -130,7 +130,12 @@ def _quote_mb_identifier(identifier: str) -> str:
     return urllib.parse.quote(identifier, safe="")
 
 
-def _get(url: str) -> Any:
+#: Per-attempt socket timeout for ordinary lookups. A caller that owns a
+#: total time budget (the other-pressing check) passes a smaller one.
+_DEFAULT_TIMEOUT_SECONDS = 15.0
+
+
+def _get(url: str, *, timeout: float = _DEFAULT_TIMEOUT_SECONDS) -> Any:
     """Fetch and JSON-decode one MB API URL.
 
     Returns ``Any`` — this is the raw external-JSON boundary. Callers that
@@ -149,7 +154,7 @@ def _get(url: str) -> Any:
         req.add_header("Connection", "close")
         if _on_mirror_request is not None:
             _on_mirror_request()
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())
 
     # One slot spans a retry too.  Releasing it between attempts would let a
@@ -952,6 +957,87 @@ def get_release_group_releases(rg_mbid: str) -> dict[str, object]:
         }
 
     return _cache.memoize_meta(f"mb:release-group:{rg_mbid}:releases", _fetch)
+
+
+# ── Disc IDs and release-group pressings (issue #1445) ────────────────────
+#
+# The on-demand "matches another pressing" check (lib/other_pressing_check.py)
+# reads every release in the target's release group with its tracks and
+# disc IDs. Uncached on purpose: the operator runs it by hand and wants the
+# mirror's current answer, and the caller owns a total time budget, so each
+# fetch takes an explicit per-attempt timeout.
+
+
+class MBDisc(msgspec.Struct, rename="kebab", frozen=True):
+    """One disc ID attached to a medium: its CD table of contents.
+
+    ``offsets`` are absolute sector starts (75 sectors per second) of each
+    track; ``sectors`` is where the last track ends."""
+    id: str = ""
+    offset_count: int = 0
+    sectors: int = 0
+    offsets: list[int] = msgspec.field(default_factory=list[int])
+
+
+class MBDiscTrack(msgspec.Struct, rename="kebab", frozen=True):
+    position: int | None = None
+    title: str = ""
+    #: Milliseconds; MusicBrainz sends null when nobody entered one.
+    length: int | None = None
+
+
+class MBDiscMedium(msgspec.Struct, rename="kebab", frozen=True):
+    position: int = 1
+    format: str | None = None
+    discs: list[MBDisc] = msgspec.field(default_factory=list[MBDisc])
+    tracks: list[MBDiscTrack] = msgspec.field(default_factory=list[MBDiscTrack])
+
+
+class MBDiscReleaseGroupRef(msgspec.Struct, rename="kebab", frozen=True):
+    id: str = ""
+    title: str = ""
+
+
+class MBDiscRelease(msgspec.Struct, rename="kebab", frozen=True):
+    """A release with its tracks and disc IDs
+    (``inc=recordings+media+discids``)."""
+    id: str = ""
+    title: str = ""
+    country: str | None = None
+    date: str | None = None
+    media: list[MBDiscMedium] = msgspec.field(default_factory=list[MBDiscMedium])
+    #: Present on a direct lookup with ``release-groups`` in ``inc``.
+    release_group: MBDiscReleaseGroupRef | None = None
+
+
+class MBDiscReleasePage(msgspec.Struct, rename="kebab", frozen=True):
+    releases: list[MBDiscRelease] = msgspec.field(default_factory=list[MBDiscRelease])
+    release_count: int = 0
+
+
+def get_release_with_discids(
+    release_mbid: str, *, timeout: float,
+) -> MBDiscRelease:
+    """One release with tracks, disc IDs and its release group."""
+    raw = _get(
+        f"{MB_API_BASE}/release/{_quote_mb_identifier(release_mbid)}"
+        "?inc=recordings+media+discids+release-groups&fmt=json",
+        timeout=timeout,
+    )
+    return msgspec.convert(raw, type=MBDiscRelease)
+
+
+def browse_release_group_with_discids(
+    rg_mbid: str, *, offset: int, limit: int, timeout: float,
+) -> MBDiscReleasePage:
+    """One page of a release group's releases with tracks and disc IDs."""
+    raw = _get(
+        f"{MB_API_BASE}/release?release-group={_quote_mb_identifier(rg_mbid)}"
+        f"&inc=recordings+media+discids&limit={int(limit)}"
+        f"&offset={int(offset)}&fmt=json",
+        timeout=timeout,
+    )
+    return msgspec.convert(raw, type=MBDiscReleasePage)
 
 
 def _fetch_release_raw(
