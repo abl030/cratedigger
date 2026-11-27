@@ -40,6 +40,12 @@ DECISION_SUSPECT_LOSSLESS_DOWNGRADE = "suspect_lossless_downgrade"
 DECISION_SUSPECT_LOSSLESS_PROBE_MISSING = "suspect_lossless_probe_missing"
 DECISION_LOSSLESS_SOURCE_LOCKED = "lossless_source_locked"
 DECISION_VERIFIED_LOSSLESS_LOCKED = "verified_lossless_locked"
+#: Issue #1445 item 3: an automatic import that would have replaced an
+#: installed copy whose track lengths disagree with it. The candidate folder
+#: is kept in Wrong Matches for the operator; nothing is replaced.
+DECISION_UPGRADE_HELD = "upgrade_held"
+#: The decision dict's ``upgrade_guard`` value for a held import.
+UPGRADE_GUARD_HOLD = "hold"
 
 
 # ---------------------------------------------------------------------------

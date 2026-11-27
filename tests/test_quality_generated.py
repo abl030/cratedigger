@@ -3350,6 +3350,102 @@ class TestGeneratedParity(unittest.TestCase):
 
 
 # ===========================================================================
+# Issue #1445 item 3 — the upgrade guard. One invariant, one checker, one
+# known-bad self-test:
+#
+#   G1  The fact ``installed_track_lengths_disagree`` changes a decision
+#       exactly when the unguarded decision imports and the operator has not
+#       marked the installed copy incomplete; then the result is the
+#       unguarded dict with only the hold fields replaced. Every other world
+#       is byte-identical to the unguarded decision.
+# ===========================================================================
+
+_HOLD_OVERRIDES: dict[str, object] = {
+    "upgrade_guard": "hold",
+    "imported": False,
+    "final_status": "wanted",
+    "keep_searching": True,
+    "stage3_quality_gate": None,
+}
+
+
+def upgrade_guard_violation(
+    *,
+    unguarded: dict,
+    guarded: dict,
+    fact: bool,
+    marked: bool,
+) -> str | None:
+    """Checker G1. Returns a message on violation, else None.
+
+    The oracle restates the rule rather than asking the decider: a hold
+    replaces exactly the five hold fields (and the denylist bit, which the
+    decision's own denylist policy recomputes for ``upgrade_held``), and
+    happens exactly when the unguarded decision imported.
+    """
+    should_hold = fact and not marked and bool(unguarded.get("imported"))
+    if not should_hold:
+        if guarded != unguarded:
+            return "the guard changed a world it must not touch"
+        return None
+    expected = {**unguarded, **_HOLD_OVERRIDES, "denylisted": True}
+    if guarded != expected:
+        return "a held import differs from the import beyond the hold fields"
+    if evidence_decision_name(guarded) != "upgrade_held":
+        return "a held import is not named upgrade_held"
+    return None
+
+
+class TestUpgradeGuardGenerated(unittest.TestCase):
+    """G1 over the shared parity world language (issue #1445 item 3)."""
+
+    @given(world=parity_worlds(), fact=st.booleans())
+    def test_guard_holds_exactly_the_unmarked_imports(self, world, fact):
+        candidate, current, facts = _parity_evidence_inputs(world)
+        unguarded = full_pipeline_decision_from_evidence(
+            candidate, current, facts=facts)
+        guarded = full_pipeline_decision_from_evidence(
+            candidate, current,
+            facts=msgspec.structs.replace(
+                facts, installed_track_lengths_disagree=fact),
+        )
+        violation = upgrade_guard_violation(
+            unguarded=unguarded, guarded=guarded, fact=fact,
+            marked=world.installed_marked_incomplete,
+        )
+        self.assertIsNone(violation, violation)
+
+    def test_known_bad_inputs_qualify_the_checker(self):
+        imported = {
+            "imported": True, "final_status": "imported",
+            "keep_searching": False, "stage3_quality_gate": "accept",
+            "stage2_import": "import", "upgrade_guard": None,
+            "denylisted": False,
+        }
+        held = {**imported, **_HOLD_OVERRIDES, "denylisted": True}
+        rejected = {**imported, "imported": False, "stage2_import": "downgrade"}
+        # A guard that holds a non-import.
+        self.assertIsNotNone(upgrade_guard_violation(
+            unguarded=rejected,
+            guarded={**rejected, **_HOLD_OVERRIDES},
+            fact=True, marked=False))
+        # A guard that ignores the operator's incomplete mark.
+        self.assertIsNotNone(upgrade_guard_violation(
+            unguarded=imported, guarded=held, fact=True, marked=True))
+        # A guard that forgets to hold.
+        self.assertIsNotNone(upgrade_guard_violation(
+            unguarded=imported, guarded=imported, fact=True, marked=False))
+        # A hold that also rewrites the overridden quality verdict.
+        self.assertIsNotNone(upgrade_guard_violation(
+            unguarded=imported,
+            guarded={**held, "stage2_import": None},
+            fact=True, marked=False))
+        # The correct hold passes.
+        self.assertIsNone(upgrade_guard_violation(
+            unguarded=imported, guarded=held, fact=True, marked=False))
+
+
+# ===========================================================================
 # Evidence-side properties — reach the branches the simulator language
 # cannot express: the folder/audio-integrity early exits and the
 # fail-closed handling of incomplete evidence rows.

@@ -8,6 +8,7 @@ from lib.quality.decisions import (
     DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
     DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
     DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
+    DECISION_UPGRADE_HELD,
     DECISION_VERIFIED_LOSSLESS_LOCKED,
     post_import_search_action_if_known,
 )
@@ -98,6 +99,13 @@ def dispatch_action(decision: str) -> DispatchAction:
         # the staged dir. Automatic callers keep the album searchable for a
         # fully-lossless source. See ``has_mixed_lossless_and_lossy``.
         return DispatchAction(record_rejection=True, denylist=True, cleanup=True)
+    elif decision == DECISION_UPGRADE_HELD:
+        # Issue #1445 item 3: the candidate disagrees with the installed copy
+        # it would replace. Ban the source for THIS request (no cooldown
+        # strike — the caller writes apply_cooldown=False) and keep the
+        # folder: the hold helper moves it into Wrong Matches.
+        return DispatchAction(record_rejection=True, denylist=True,
+                              cleanup=False)
     elif decision == "duplicate_remove_guard_failed":
         return DispatchAction(record_rejection=True, denylist=True,
                               cleanup=False)

@@ -17,7 +17,9 @@ from lib.quality.compare import comparison_format_hint
 from lib.quality.decisions import (
     _LOSSLESS_EXTS,
     DECISION_LOSSLESS_SOURCE_LOCKED,
+    DECISION_UPGRADE_HELD,
     DECISION_VERIFIED_LOSSLESS_LOCKED,
+    UPGRADE_GUARD_HOLD,
     MeasuredImportDecisionInput,
     ProvisionalLosslessDecisionInput,
     ProvisionalLosslessDecisionResult,
@@ -1157,6 +1159,14 @@ class AlbumQualityEvidenceDecisionFacts(msgspec.Struct, frozen=True):
     post_conversion_is_cbr: bool | None = None
     installed_marked_incomplete: bool = False
     candidate_covers_declared_program: bool = False
+    # Issue #1445 item 3 — the upgrade guard. True when the candidate's
+    # track lengths disagree with the installed copy it would replace
+    # (``lib.quality.installed_copy_guard.compare_installed_copy``). Only
+    # the automation import lane ever computes it; force, local import,
+    # YouTube rescue and the Wrong Matches reducer pass the default. The
+    # decider turns an import into ``upgrade_held`` when it is set, unless
+    # the operator marked the installed copy incomplete.
+    installed_track_lengths_disagree: bool = False
 
 
 class QualityEvidenceActionPayload(msgspec.Struct, frozen=True):
@@ -1190,6 +1200,10 @@ def evidence_decision_name(
     ``preimport_empty_fileset`` dict keys, plus the existing stage-* keys.
     """
 
+    # Issue #1445 item 3: a held upgrade keeps its overridden quality
+    # verdict in ``stage2_import`` as audit, so the hold is read first.
+    if result.get("upgrade_guard") == UPGRADE_GUARD_HOLD:
+        return DECISION_UPGRADE_HELD
     # Folder/audio-integrity rejects fire *before* the quality stages run,
     # so check them first — if a four-fact reject is present, stage2/stage3
     # will be None and falling through to the quality default would lose
@@ -1249,8 +1263,38 @@ def _finalize_denylist(result: dict[str, object]) -> dict[str, object]:
     on ``result`` makes that whole bug class structurally impossible — a new
     branch cannot "forget" a step it never performs.
     """
+    result.setdefault("upgrade_guard", None)
     result["denylisted"] = resolve_pipeline_decision_denylist(result)
     return result
+
+
+def _apply_upgrade_guard(
+    result: dict[str, Any],
+    facts: AlbumQualityEvidenceDecisionFacts,
+) -> dict[str, Any]:
+    """Hold an import that would replace a disagreeing installed copy.
+
+    Issue #1445 item 3. Only an import can destroy the installed copy, so
+    only an import is held; every other outcome passes through untouched.
+    The operator's incomplete mark (#1241) turns the guard off on its own:
+    the operator has already said the installed copy is not worth keeping.
+    The overridden quality verdict stays in ``stage2_import`` as audit;
+    ``evidence_decision_name`` reads ``upgrade_guard`` first.
+    """
+    if (
+        not facts.installed_track_lengths_disagree
+        or facts.installed_marked_incomplete
+        or not result.get("imported")
+    ):
+        return result
+    return _finalize_denylist({
+        **result,
+        "upgrade_guard": UPGRADE_GUARD_HOLD,
+        "imported": False,
+        "final_status": "wanted",
+        "keep_searching": True,
+        "stage3_quality_gate": None,
+    })
 
 
 def comparison_basis_from_decision(
@@ -1369,6 +1413,9 @@ def classify_full_pipeline_decision(
     bad_hash/nested pair too.
     """
 
+    if decision.get("upgrade_guard") == UPGRADE_GUARD_HOLD:
+        # Never cleanup-eligible: a held upgrade is the operator's call.
+        return "uncertain", False, DECISION_UPGRADE_HELD
     if decision.get("preimport_audio") == "reject_corrupt":
         return "confident_reject", True, "audio_corrupt"
     # U11: bad-hash and empty-fileset early-exit rejects.
@@ -1647,6 +1694,9 @@ def full_pipeline_decision_from_evidence(
             "comparison_basis_if_stage1_deferred": dict | None,
             # AUDIT ONLY — issue #1241's disregard flag; see the flat twin.
             "installed_incomplete_disregarded": bool,
+            # Issue #1445 item 3: "hold" when the upgrade guard turned an
+            # import into ``upgrade_held``, else None.
+            "upgrade_guard": str | None,
         }
 
     Folder/audio-integrity facts are read directly off ``candidate`` as
@@ -1859,7 +1909,7 @@ def full_pipeline_decision_from_evidence(
         existing_spectral_grade = current_measurement.spectral_grade
         existing_spectral_bitrate = current_measurement.spectral_bitrate_kbps
 
-    return full_pipeline_decision(
+    return _apply_upgrade_guard(full_pipeline_decision(
         is_flac=supported_lossless_source,
         min_bitrate=_first_bitrate(
             candidate_measurement.min_bitrate_kbps,
@@ -1934,4 +1984,4 @@ def full_pipeline_decision_from_evidence(
         # the leg's input, so there is nothing to derive and nothing that
         # could derive it differently from the simulator twin.
         candidate_aac_lattice=candidate.aac_lattice,
-    )
+    ), facts)
