@@ -298,7 +298,8 @@ inside socket authorization, never credentials.
   `lib/other_pressing_check.py`. Prints the same plain sentences as the web
   UI (see `docs/webui-primer.md` § "Check other pressings"); `--json`
   prints the typed result. Exit 0 for any answer (including "not available
-  for Discogs releases"), 2 for an unknown row, 5 when MusicBrainz could
+  for Discogs releases" and a release MusicBrainz lists with no tracks), 2
+  for an unknown row, 5 when MusicBrainz could
   not be asked. Exit 5 is the repository's one transient code and is also
   what any relayed command returns when the web API itself is down, so the
   two are told apart on stderr: `{"error": "api_unavailable", ...}` means

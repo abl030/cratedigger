@@ -32,7 +32,10 @@ strictly (an error object in a 200 is a failure, not an empty release),
 and read at most 150 releases of a group, counting a release once even
 when browse lists it on two pages. A track's `length` is often null while
 its `recording.length` is set; the check falls back to the recording's
-length exactly as Beets does.
+length for the matched release's own listing exactly as Beets does, but
+never for another pressing, because every release using a recording shares
+its length. A medium's `pregap` (a hidden track before track 1) is counted
+as track 0, as Beets counts it.
 
 ## Notes
 
