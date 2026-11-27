@@ -1058,6 +1058,55 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         self.assertEqual(len(self.db.advisory_lock_calls), 1,
                          "verified-lossless short-circuit must acquire the WMCL advisory lock")
 
+    def test_operator_sweep_evaluates_rows_outside_the_delete_allowlist(
+        self,
+    ) -> None:
+        """Issue #1468: the delete-eligible allowlist gates only the
+        automatic post-rejection lane. The operator's Cleanup sweep exists
+        to leave just the possible imports, so it evaluates EVERY visible
+        row — an ``untracked_audio`` row under a verified-lossless parent
+        is a proven non-import and is deleted."""
+        from lib.wrong_match_policy import rejection_scenario_is_delete_eligible
+
+        self.assertFalse(rejection_scenario_is_delete_eligible("untracked_audio"))
+        source = _make_source(self.tmp, "untracked-audio-source")
+        log_id = self.db.log_download(
+            1,
+            outcome="rejected",
+            validation_result={
+                "scenario": "untracked_audio",
+                "failed_path": source,
+            },
+        )
+        self.db.set_download_log_candidate_evidence(
+            log_id,
+            _store_evidence(self.db, _evidence(source)),
+        )
+        current = msgspec.structs.replace(
+            _evidence(source, mb_release_id="mbid-1"),
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="measured",
+                source="library_audit",
+                classifier="verified_lossless",
+                detail="parent_lossless_proof",
+            ),
+        )
+        self._set_current_evidence_helper(
+            lambda *_a, **_kw: CurrentEvidenceActionResult(
+                evidence=current,
+                provenance=ActionEvidenceProvenance(current_status="loaded"),
+            )
+        )
+        summary = cleanup_all_wrong_matches(
+            self.db, confirm_all_wrong_matches=True, cfg=_cfg(),
+        )
+
+        self.assertEqual(
+            [(r.download_log_id, r.outcome) for r in summary.results],
+            [(log_id, OUTCOME_DELETED_VERIFIED_LOSSLESS_PARENT)],
+        )
+        self.assertFalse(os.path.exists(source))
+
     def test_replace_during_lossless_lock_cleanup_is_not_reported_success(self) -> None:
         class NarrowingRaceDB(FakePipelineDB):
             def __init__(self) -> None:

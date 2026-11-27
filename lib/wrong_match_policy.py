@@ -17,13 +17,16 @@ Two distinct questions live here, answered by two distinct predicates
   before that fix.
 - **Cleanup-lane admission** (``rejection_scenario_is_delete_eligible``):
   may a kept, banned, visible folder be evaluated for deletion by
-  ``lib.wrong_match_cleanup_service.cleanup_wrong_match``? This is an
+  ``lib.wrong_match_cleanup_service.cleanup_wrong_match`` automatically,
+  straight after the rejection? The operator's Cleanup sweep
+  (``cleanup_all_wrong_matches``) is NOT gated by it: it evaluates every
+  visible row so only possible imports remain (issue #1468). This is an
   explicit allowlist, not a fail-open exclusion set: only a genuine
   candidate/pressing-match judgement may enter that lane. World failures
   with a reviewable folder (``untracked_audio``, ``request_missing_mbid``,
   ``request_missing_request_id``), every unknown/novel scenario string, and
   ``None`` are NEVER delete-eligible — they stay kept, banned, and visible
-  until an operator acts, or until a different proof authorizes deletion
+  until an operator acts (including running the Cleanup sweep), or until a different proof authorizes deletion
   (force-import success consuming its own source, or proven audio
   corruption — neither of which routes through this lane).
 """
@@ -90,9 +93,10 @@ def rejection_scenario_is_delete_eligible(scenario: str | None) -> bool:
     cleanup lane (``lib.wrong_match_cleanup_service.cleanup_wrong_match``).
 
     Explicit allowlist: unknown/novel scenario strings and ``None`` default
-    to False (never delete-eligible), not True. A folder that fails this
-    check is never even looked at by the reducer; it stays kept, banned, and
-    visible until an operator acts or a different proof (force-import
+    to False (never delete-eligible), not True. The automatic callers never
+    send a folder that fails this check to the reducer; it stays kept,
+    banned, and visible until an operator acts (the Cleanup sweep evaluates
+    every visible row regardless — issue #1468) or a different proof (force-import
     success, proven corruption) authorizes its removal outside this lane.
     """
     return scenario in DELETE_ELIGIBLE_REJECTION_SCENARIOS
