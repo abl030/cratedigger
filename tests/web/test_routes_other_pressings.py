@@ -1,63 +1,25 @@
 """Contract for ``GET /api/other-pressings/<download_log_id>`` (issue #1445).
 
-Drives the real route and the real service over the fake pipeline DB; only
-the two MusicBrainz reads in ``lib.mb_api`` are replaced, by the real
-captured responses in ``tests/fixtures/other_pressings``.
+Drives the real route, the real service and the real ``lib.mb_api``
+client functions over the fake pipeline DB; only the HTTP leaf
+``lib.mb_api._get`` is replaced, answering from the real captured mirror
+responses in ``tests/fixtures/other_pressings``.
 """
 
 from __future__ import annotations
 
-import email.message
-import io
-import json
 import unittest
 import urllib.error
-from pathlib import Path
-from typing import Any
 from unittest.mock import patch
 
-import msgspec
-
-from lib.mb_api import MBDiscRelease, MBDiscReleasePage
 from tests.helpers import make_request_row
+from tests.other_pressings_fixtures import (
+    RAZORLIGHT,
+    load_fixture,
+    mirror_get,
+    validation_result,
+)
 from tests.web._harness import _FakeDbWebServerCase
-
-_FIXTURES = Path(__file__).parent.parent / "fixtures" / "other_pressings"
-
-
-def _fixture(log_id: int) -> dict[str, Any]:
-    return json.loads((_FIXTURES / f"{log_id}.json").read_text(encoding="utf-8"))
-
-
-def _validation_result(fixture: dict[str, Any]) -> dict[str, object]:
-    candidate = fixture["candidate"]
-    return {
-        "valid": True, "scenario": "strong_match",
-        "candidates": [{
-            "album_id": candidate["album_id"], "is_target": True,
-            "mapping": candidate["mapping"],
-            "extra_items": [], "extra_tracks": [],
-        }],
-    }
-
-
-class _Mirror:
-    def __init__(self, fixture: dict[str, Any]) -> None:
-        self.fixture = fixture
-
-    def release(self, release_id: str, *, timeout: float) -> MBDiscRelease:
-        assert timeout > 0
-        if release_id != self.fixture["target"]["id"]:
-            raise urllib.error.HTTPError(
-                "http://mirror", 404, "Not Found",
-                hdrs=email.message.Message(), fp=io.BytesIO())
-        return msgspec.convert(self.fixture["target"], type=MBDiscRelease)
-
-    def page(
-        self, rg_mbid: str, *, offset: int, limit: int, timeout: float,
-    ) -> MBDiscReleasePage:
-        pages = self.fixture["release_group_pages"]
-        return msgspec.convert(pages[offset // limit], type=MBDiscReleasePage)
 
 
 class TestOtherPressingsRoute(_FakeDbWebServerCase):
@@ -68,49 +30,45 @@ class TestOtherPressingsRoute(_FakeDbWebServerCase):
         "releases_checked", "capped", "detail",
     })
 
-    def _seed(self, log_id_fixture: int, request_id: int) -> int:
-        fixture = _fixture(log_id_fixture)
+    def _seed(self, request_id: int) -> int:
         self.db.seed_request(make_request_row(id=request_id, status="imported"))
         return self.db.log_download(
             request_id, outcome="success",
-            validation_result=_validation_result(fixture))
+            validation_result=validation_result(load_fixture(RAZORLIGHT)))
 
-    def _get_with_mirror(
-        self, path: str, fixture: dict[str, Any],
-    ) -> tuple[int, Any]:
-        mirror = _Mirror(fixture)
-        with patch("lib.mb_api.get_release_with_discids",
-                   side_effect=mirror.release), \
-                patch("lib.mb_api.browse_release_group_with_discids",
-                      side_effect=mirror.page):
+    def _get_with_mirror(self, path: str) -> tuple[int, dict[str, object]]:
+        with patch("lib.mb_api._get",
+                   side_effect=mirror_get(load_fixture(RAZORLIGHT))):
             return self._get(path)
 
     def test_razorlight_answer_is_200_with_every_field(self) -> None:
-        log_id = self._seed(28366, 960)
-        status, data = self._get_with_mirror(
-            f"/api/other-pressings/{log_id}", _fixture(28366))
+        log_id = self._seed(960)
+        status, data = self._get_with_mirror(f"/api/other-pressings/{log_id}")
         self.assertEqual(status, 200)
         self.assertEqual(self.REQUIRED_FIELDS - data.keys(), set())
         self.assertEqual(data["outcome"], "checked")
+        matches = data["matching_pressings"]
+        assert isinstance(matches, list)
         self.assertEqual(
-            [p["release_id"][:8] for p in data["matching_pressings"]],
+            [str(p["release_id"])[:8] for p in matches],
             ["07039d4c", "d63463aa"])
         self.assertEqual(
-            data["matching_pressings"][1]["title_differences"][0],
+            matches[1]["title_differences"][0],
             {"medium": 1, "position": 12, "pressing_title": "To the Sea",
              "release_title": "Hang By, Hang By"})
-        self.assertTrue(data["sentences"][0].startswith(
+        sentences = data["sentences"]
+        assert isinstance(sentences, list)
+        self.assertTrue(str(sentences[0]).startswith(
             "This copy matches 2 other pressings"))
 
     def test_unknown_row_is_404(self) -> None:
-        status, data = self._get_with_mirror(
-            "/api/other-pressings/987654", _fixture(28366))
+        status, data = self._get_with_mirror("/api/other-pressings/987654")
         self.assertEqual(status, 404)
         self.assertEqual(data["outcome"], "download_log_not_found")
 
     def test_mirror_failure_is_503_with_a_sentence(self) -> None:
-        log_id = self._seed(28366, 961)
-        with patch("lib.mb_api.get_release_with_discids",
+        log_id = self._seed(961)
+        with patch("lib.mb_api._get",
                    side_effect=urllib.error.URLError("refused")):
             status, data = self._get(f"/api/other-pressings/{log_id}")
         self.assertEqual(status, 503)

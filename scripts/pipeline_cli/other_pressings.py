@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 
+from lib.json_narrow import is_str_object_dict, json_list
 from scripts.pipeline_cli.api_mutations import (
     TIMEOUT_PRESSING_CHECK_SECONDS,
     _ApiMutation,
@@ -23,8 +24,8 @@ from scripts.pipeline_cli.api_mutations import (
 
 
 def _render_other_pressings(status: int, payload: dict[str, object]) -> None:
-    sentences = payload.get("sentences")
-    if not isinstance(sentences, list) or not sentences:
+    sentences = json_list(payload.get("sentences"))
+    if not sentences:
         render_api_error(status, payload)
         return
     for sentence in sentences:
@@ -32,12 +33,10 @@ def _render_other_pressings(status: int, payload: dict[str, object]) -> None:
     target_url = payload.get("target_url")
     if isinstance(target_url, str):
         print(f"  release: {target_url}")
-    matches = payload.get("matching_pressings")
-    if isinstance(matches, list):
-        for match in matches:
-            if isinstance(match, dict) and isinstance(match.get("url"), str):
-                print(f"  matching pressing: {match.get('description')} "
-                      f"{match['url']}")
+    for match in json_list(payload.get("matching_pressings")):
+        if is_str_object_dict(match) and isinstance(match.get("url"), str):
+            print(f"  matching pressing: {match.get('description')} "
+                  f"{match.get('url')}")
 
 
 def cmd_other_pressings(_db: object, args: argparse.Namespace) -> int:

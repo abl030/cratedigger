@@ -3,22 +3,20 @@
 Every MusicBrainz response here is a REAL capture from the mirror, trimmed
 to the fields the check reads (``tests/fixtures/other_pressings/<id>.json``,
 one file per download_log row, with that row's selected-candidate mapping
-from the pipeline DB). The fake mirror only serves those captures; it never
-invents a release. Worlds the captures cannot show (an over-cap group, a
-failing mirror, identical titles) are built by editing a capture, and each
-test says what it changed.
+from the pipeline DB; typed in ``tests/other_pressings_fixtures.py``). The
+fake mirror only serves those captures; it never invents a release. Worlds
+the captures cannot show (an over-cap group, a failing mirror, identical
+titles) are built by editing a capture, and each test says what it
+changed.
 """
 
 from __future__ import annotations
 
 import copy
-import email.message
 import io
 import json
 import unittest
 import urllib.error
-from pathlib import Path
-from typing import Any
 from unittest.mock import patch
 
 import msgspec
@@ -34,43 +32,38 @@ from lib.other_pressing_check import (
     PressingCheckOutcome,
     check_other_pressings,
 )
+from tests.other_pressings_fixtures import (
+    BOB,
+    DEER_TICK,
+    FAIRWAYS,
+    KURT_VILE,
+    RAZORLIGHT,
+    FixtureJSON,
+    PageJSON,
+    ReleaseJSON,
+    load_fixture,
+    not_found,
+    releases,
+    validation_result,
+)
 
-_FIXTURES = Path(__file__).parent / "fixtures" / "other_pressings"
 
-RAZORLIGHT = 28366
-KURT_VILE = 24179
-FAIRWAYS = 42692
-DEER_TICK = 12368
-BOB = 22324
+def _fixture(log_id: int) -> FixtureJSON:
+    return load_fixture(log_id)
 
 
-def _fixture(log_id: int) -> dict[str, Any]:
-    return json.loads((_FIXTURES / f"{log_id}.json").read_text(encoding="utf-8"))
+def _releases(fixture: FixtureJSON) -> list[ReleaseJSON]:
+    return releases(fixture)
 
 
-def _log_row(fixture: dict[str, Any], **candidate_overrides: object) -> dict[str, Any]:
+def _log_row(
+    fixture: FixtureJSON, *, album_id: str | None = None,
+) -> dict[str, object]:
     """The download_log row the DB returns, in the persisted wire shape."""
-    candidate = fixture["candidate"]
-    assert isinstance(candidate, dict)
-    stored = {
-        "album_id": candidate["album_id"],
-        "is_target": True,
-        "mapping": candidate["mapping"],
-        "extra_items": [{"path": f"extra-{n}.flac"} for n in range(candidate["extra_items"])],
-        "extra_tracks": [{"title": f"extra {n}"} for n in range(candidate["extra_tracks"])],
-    }
-    stored.update(candidate_overrides)
     return {
         "id": fixture["download_log_id"],
         "outcome": "success",
-        "validation_result": {
-            "valid": True, "scenario": "strong_match",
-            "candidates": [
-                {"album_id": "sibling-not-selected", "is_target": False,
-                 "mapping": []},
-                stored,
-            ],
-        },
+        "validation_result": validation_result(fixture, album_id=album_id),
     }
 
 
@@ -94,7 +87,7 @@ class FixtureMirror:
     """Serves the captured responses; records every call and its timeout."""
 
     def __init__(
-        self, fixture: dict[str, Any], *, clock: FakeClock | None = None,
+        self, fixture: FixtureJSON, *, clock: FakeClock | None = None,
         seconds_per_call: float = 0.0,
     ) -> None:
         self.target = fixture["target"]
@@ -114,11 +107,8 @@ class FixtureMirror:
         self._tick()
         if self.fail_with is not None:
             raise self.fail_with
-        assert isinstance(self.target, dict)
         if release_id != self.target["id"]:
-            raise urllib.error.HTTPError(
-                f"http://mirror/release/{release_id}", 404, "Not Found",
-                hdrs=email.message.Message(), fp=io.BytesIO())
+            raise not_found(f"http://mirror/release/{release_id}")
         return msgspec.convert(self.target, type=MBDiscRelease)
 
     def release_group_page(
@@ -130,16 +120,15 @@ class FixtureMirror:
         if self.fail_pages_with is not None:
             raise self.fail_pages_with
         assert limit == RELEASE_GROUP_PAGE_SIZE
-        assert isinstance(self.pages, list)
         index = offset // RELEASE_GROUP_PAGE_SIZE
-        page = self.pages[index] if index < len(self.pages) else {
+        page: PageJSON = self.pages[index] if index < len(self.pages) else {
             "release-count": self.pages[0]["release-count"], "releases": []}
         return msgspec.convert(page, type=MBDiscReleasePage)
 
 
 def _run(
-    log_id: int, *, fixture: dict[str, Any] | None = None,
-    row: dict[str, Any] | None = None,
+    log_id: int, *, fixture: FixtureJSON | None = None,
+    row: dict[str, object] | None = None,
     mirror: FixtureMirror | None = None, clock: FakeClock | None = None,
 ) -> tuple[PressingCheck, FixtureMirror]:
     fixture = fixture if fixture is not None else _fixture(log_id)
@@ -148,12 +137,6 @@ def _run(
     result = check_other_pressings(
         log_id, pdb=log, mirror=mirror, clock=clock or FakeClock())
     return result, mirror
-
-
-def _releases(fixture: dict[str, Any]) -> list[dict[str, Any]]:
-    pages = fixture["release_group_pages"]
-    assert isinstance(pages, list)
-    return [release for page in pages for release in page["releases"]]
 
 
 class TestRealCaptures(unittest.TestCase):

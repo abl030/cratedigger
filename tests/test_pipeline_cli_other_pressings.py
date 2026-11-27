@@ -1,7 +1,8 @@
 """``pipeline-cli other-pressings`` relays the one route (issue #1445).
 
-Runs the real command against the real route and service over the fake
-pipeline DB; the two MusicBrainz reads serve the Razorlight capture.
+Runs the real command against the real route, service and MusicBrainz
+client over the fake pipeline DB; only the HTTP leaf ``lib.mb_api._get`` is
+replaced, answering from the real Razorlight capture.
 """
 
 from __future__ import annotations
@@ -17,12 +18,13 @@ from unittest.mock import patch
 from scripts import pipeline_cli
 from scripts.pipeline_cli.api_mutations import TcpApiEndpoint
 from tests.helpers import make_request_row
-from tests.web._harness import _FakeDbWebServerCase
-from tests.web.test_routes_other_pressings import (
-    _fixture,
-    _Mirror,
-    _validation_result,
+from tests.other_pressings_fixtures import (
+    RAZORLIGHT,
+    load_fixture,
+    mirror_get,
+    validation_result,
 )
+from tests.web._harness import _FakeDbWebServerCase
 
 
 class TestCmdOtherPressings(_FakeDbWebServerCase):
@@ -30,19 +32,21 @@ class TestCmdOtherPressings(_FakeDbWebServerCase):
         self.db.seed_request(make_request_row(id=970, status="imported"))
         return self.db.log_download(
             970, outcome="success",
-            validation_result=_validation_result(_fixture(28366)))
+            validation_result=validation_result(load_fixture(RAZORLIGHT)))
 
-    def _run(self, log_id: int, *, json_out: bool = False) -> tuple[int, str]:
-        mirror = _Mirror(_fixture(28366))
+    def _run(
+        self, log_id: int, *, json_out: bool = False,
+        failure: BaseException | None = None,
+    ) -> tuple[int, str]:
         args = argparse.Namespace(
             download_log_id=log_id, json=json_out,
             api_endpoint=TcpApiEndpoint(self.base))
         out = io.StringIO()
-        with redirect_stdout(out), \
-                patch("lib.mb_api.get_release_with_discids",
-                      side_effect=mirror.release), \
-                patch("lib.mb_api.browse_release_group_with_discids",
-                      side_effect=mirror.page):
+        side_effect = (
+            failure if failure is not None
+            else mirror_get(load_fixture(RAZORLIGHT)))
+        with redirect_stdout(out), patch(
+                "lib.mb_api._get", side_effect=side_effect):
             rc = pipeline_cli.cmd_other_pressings(None, args)
         return rc, out.getvalue()
 
@@ -72,17 +76,10 @@ class TestCmdOtherPressings(_FakeDbWebServerCase):
         self.assertIn("This attempt could not be found.", out)
 
     def test_mirror_failure_exits_5_with_the_sentence(self) -> None:
-        log_id = self._seed()
-        args = argparse.Namespace(
-            download_log_id=log_id, json=False,
-            api_endpoint=TcpApiEndpoint(self.base))
-        out = io.StringIO()
-        with redirect_stdout(out), patch(
-                "lib.mb_api.get_release_with_discids",
-                side_effect=urllib.error.URLError("refused")):
-            rc = pipeline_cli.cmd_other_pressings(None, args)
+        rc, out = self._run(
+            self._seed(), failure=urllib.error.URLError("refused"))
         self.assertEqual(rc, 5)
-        self.assertIn("Could not reach MusicBrainz", out.getvalue())
+        self.assertIn("Could not reach MusicBrainz", out)
 
 
 if __name__ == "__main__":
