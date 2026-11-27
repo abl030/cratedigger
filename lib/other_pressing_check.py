@@ -264,11 +264,11 @@ def _running_order(release: MBDiscRelease) -> list[tuple[int, int, MBDiscTrack]]
 
 
 def _normalize_title(title: str) -> str:
+    """Letters and digits only, case-folded: 'Drip, Drip, Drip' and 'Drip
+    Drip Drip', or '...and' and '… And', are the same title. Only a change
+    of words is a title difference worth telling the operator about."""
     folded = unicodedata.normalize("NFKC", title).casefold()
-    for curly, plain in (("’", "'"), ("‘", "'"), ("“", '"'),
-                         ("”", '"'), ("‐", "-")):
-        folded = folded.replace(curly, plain)
-    return " ".join(folded.split())
+    return "".join(char for char in folded if char.isalnum())
 
 
 _COUNTRY_NAMES: Final[dict[str, str]] = {

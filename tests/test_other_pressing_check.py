@@ -307,6 +307,24 @@ class TestRealCaptures(unittest.TestCase):
              "disc."),
         ])
 
+    def test_punctuation_and_case_are_not_title_differences(self) -> None:
+        """Razorlight capture with the vinyl's titles set to the target's,
+        re-punctuated and re-cased the way real listings disagree
+        ('Drip, Drip, Drip' / 'Drip Drip Drip', '...and' / '… And')."""
+        fixture = _fixture(RAZORLIGHT)
+        target_titles = [
+            t["title"] for m in fixture["target"]["media"] for t in m["tracks"]]
+        for release in _releases(fixture):
+            if release["id"].startswith("07039d4c"):
+                for track, title in zip(
+                        release["media"][0]["tracks"], target_titles,
+                        strict=True):
+                    track["title"] = "… " + title.replace(",", "").upper()
+        result, _ = _run(RAZORLIGHT, fixture=fixture)
+        vinyl = result.matching_pressings[0]
+        self.assertEqual(vinyl.release_id[:8], "07039d4c")
+        self.assertEqual(vinyl.title_differences, [])
+
     def test_identical_descriptions_collapse(self) -> None:
         """Deer Tick capture with the US CD relabelled as the European CD."""
         fixture = _fixture(DEER_TICK)
