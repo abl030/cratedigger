@@ -12,7 +12,7 @@ import io
 import json
 import unittest
 import urllib.error
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
 from scripts import pipeline_cli
@@ -38,23 +38,32 @@ class TestCmdOtherPressings(_FakeDbWebServerCase):
         self, log_id: int, *, json_out: bool = False,
         failure: BaseException | None = None,
     ) -> tuple[int, str]:
+        rc, out, _ = self._run_with_stderr(
+            log_id, json_out=json_out, failure=failure)
+        return rc, out
+
+    def _run_with_stderr(
+        self, log_id: int, *, json_out: bool = False,
+        failure: BaseException | None = None,
+    ) -> tuple[int, str, str]:
         args = argparse.Namespace(
             download_log_id=log_id, json=json_out,
             api_endpoint=TcpApiEndpoint(self.base))
         out = io.StringIO()
+        err = io.StringIO()
         side_effect = (
             failure if failure is not None
             else mirror_get(load_fixture(RAZORLIGHT)))
-        with redirect_stdout(out), patch(
+        with redirect_stdout(out), redirect_stderr(err), patch(
                 "lib.mb_api._get", side_effect=side_effect):
             rc = pipeline_cli.cmd_other_pressings(None, args)
-        return rc, out.getvalue()
+        return rc, out.getvalue(), err.getvalue()
 
     def test_prints_the_sentences_and_links(self) -> None:
         rc, out = self._run(self._seed())
         self.assertEqual(rc, 0)
         lines = out.splitlines()
-        self.assertTrue(lines[0].startswith(
+        self.assertTrue(lines[1].startswith(
             "This copy matches 2 other pressings"))
         self.assertIn(
             "Both have 'To the Sea' and 'Fall, Fall, Fall' where this "
@@ -75,11 +84,26 @@ class TestCmdOtherPressings(_FakeDbWebServerCase):
         self.assertEqual(rc, 2)
         self.assertIn("This attempt could not be found.", out)
 
-    def test_mirror_failure_exits_5_with_the_sentence(self) -> None:
-        rc, out = self._run(
+    def test_mirror_failure_exits_5_and_names_musicbrainz_on_stderr(
+        self,
+    ) -> None:
+        rc, out, err = self._run_with_stderr(
             self._seed(), failure=urllib.error.URLError("refused"))
         self.assertEqual(rc, 5)
         self.assertIn("Could not reach MusicBrainz", out)
+        self.assertEqual(json.loads(err)["error"], "musicbrainz_unavailable")
+
+    def test_web_api_down_exits_5_and_names_the_api_on_stderr(self) -> None:
+        args = argparse.Namespace(
+            download_log_id=1, json=False,
+            api_endpoint=TcpApiEndpoint("http://127.0.0.1:9"))
+        out = io.StringIO()
+        err = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = pipeline_cli.cmd_other_pressings(None, args)
+        self.assertEqual(rc, 5)
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(json.loads(err.getvalue())["error"], "api_unavailable")
 
 
 if __name__ == "__main__":
