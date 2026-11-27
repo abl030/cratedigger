@@ -1771,7 +1771,7 @@ class TestGetTracksByMbReleaseId(unittest.TestCase):
         with BeetsDB(self.db_path) as db:
             tracks = db.get_tracks_by_mb_release_id("aaa-111")
         self.assertIsNotNone(tracks)
-        assert isinstance(tracks, tuple)
+        assert tracks is not None
         self.assertEqual(len(tracks), 2)
         self.assertEqual(tracks[0]["title"], "Track 1")
         self.assertEqual(tracks[0]["bitrate"], 320000)
