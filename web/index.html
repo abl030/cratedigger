@@ -403,11 +403,11 @@
   .sp-advance-form-error { color: #d88; font-size: 0.78em; flex-basis: 100%; padding: 2px 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .p-tracks { margin-top: 8px; }
   /* Issue #1445 item 3: held upgrade — sentence and per-track table. */
-  .held-upgrade-sentence { color: #ec6; margin-bottom: 6px; line-height: 1.4; }
   .held-upgrade-table-wrap { overflow-x: auto; }
   .held-upgrade-table { border-collapse: collapse; font-size: 0.9em; }
-  .held-upgrade-table th { color: #889; font-weight: normal; text-align: left; padding: 2px 10px 2px 0; }
-  .held-upgrade-table td { color: #aaa; padding: 2px 10px 2px 0; font-variant-numeric: tabular-nums; }
+  .held-upgrade-table th { color: #889; font-weight: normal; text-align: left; padding: 2px 10px 2px 0; white-space: nowrap; }
+  .held-upgrade-table td { color: #aaa; padding: 2px 10px 2px 0; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .held-upgrade-table td:nth-child(2) { white-space: normal; min-width: 7em; }
   .held-upgrade-table tr.held-upgrade-differs td { color: #ec6; background: #3a3a1a; }
   .p-history { margin-top: 8px; }
   .p-tracks > summary,
@@ -441,6 +441,7 @@
   .p-hist-was { color: #666; font-size: 0.9em; }
   .p-hist-verdict { color: #bbb; padding: 2px 0 0 8px; font-size: 0.95em; }
   .p-hist-verdict-reject { color: #d88; }
+  .p-hist-verdict-held { color: #ec6; }
   .p-hist-forensics { margin: 2px 0 0 8px; }
   .p-hist-forensics summary { cursor: pointer; user-select: none; color: #556; font-size: 0.9em; }
   .p-hist-forensics summary:hover, .p-hist-forensics[open] summary { color: #889; }

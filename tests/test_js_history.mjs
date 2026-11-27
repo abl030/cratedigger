@@ -2050,9 +2050,10 @@ t.section('renderDownloadHistoryItem() shows a held upgrade with its track table
       ],
     },
   });
-  t.contains(html, '<span class="p-hist-label">Upgrade held</span>',
-    'held-upgrade row label rendered');
-  t.contains(html, esc(sentence), 'the server sentence is shown');
+  t.contains(html, '<span class="p-hist-label">Track lengths</span>',
+    'held-upgrade table row label rendered');
+  t.contains(html, `<div class="p-hist-verdict p-hist-verdict-held">${esc(sentence)}</div>`,
+    'the server sentence is the verdict line, amber not red');
   t.contains(html, '<tr class="held-upgrade-differs">', 'the tripped track is highlighted');
   t.contains(html, '<th>Release lists</th><th>Current copy</th><th>New copy</th>',
     'the three length columns are labelled in plain words');
