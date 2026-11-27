@@ -19,6 +19,7 @@ _OUTCOME_STATUS: dict[PressingCheckOutcome, int] = {
     PressingCheckOutcome.NO_MATCHED_RELEASE: 200,
     PressingCheckOutcome.DISCOGS_RELEASE: 200,
     PressingCheckOutcome.RELEASE_NOT_FOUND: 200,
+    PressingCheckOutcome.RELEASE_HAS_NO_TRACKS: 200,
     PressingCheckOutcome.DOWNLOAD_LOG_NOT_FOUND: 404,
     PressingCheckOutcome.MIRROR_UNAVAILABLE: 503,
 }

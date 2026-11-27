@@ -82,6 +82,20 @@ class TestOtherPressingsRoute(_FakeDbWebServerCase):
             ("Could not reach MusicBrainz, so other pressings were not "
              "checked. Try again later.")])
 
+    def test_release_with_no_tracks_is_200_with_its_own_answer(self) -> None:
+        fixture = load_fixture(RAZORLIGHT)
+        fixture["target"]["media"] = []
+        log_id = self._seed(963)
+        with patch("lib.mb_api._get", side_effect=mirror_get(fixture)):
+            status, data = self._get(f"/api/other-pressings/{log_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["outcome"], "release_has_no_tracks")
+
+    def test_every_outcome_has_a_status(self) -> None:
+        from lib.other_pressing_check import PressingCheckOutcome
+        from web.routes.other_pressings import _OUTCOME_STATUS
+        self.assertEqual(set(_OUTCOME_STATUS), set(PressingCheckOutcome))
+
     def test_discogs_target_is_200_not_available(self) -> None:
         self.db.seed_request(make_request_row(id=962, status="imported"))
         log_id = self.db.log_download(
