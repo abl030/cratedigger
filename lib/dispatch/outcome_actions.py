@@ -269,8 +269,9 @@ def _hold_upgrade_from_evidence_decision(
     (``apply_cooldown=False``) — a hold is not the peer's fault, but the
     identical folder must not be fetched again next cycle.
 
-    Crash window: between the rename and the terminal commit the folder sits
-    in ``wrong_matches/`` with no row and startup recovery requeues the
+    No cancellation checkpoint runs after the move. A process crash
+    between the rename and the terminal commit still leaves the folder in
+    ``wrong_matches/`` with no row while startup recovery requeues the
     request — the same window Lanes A and B already have.
     """
     from lib.import_execution import cancellation_hook, checkpoint
@@ -287,13 +288,15 @@ def _hold_upgrade_from_evidence_decision(
     if dl_info.username:
         usernames.add(dl_info.username)
 
+    # Cancellation is honoured up to the move and never after it: once the
+    # folder has moved it runs straight to the terminal outcome, so a moved
+    # folder is never stranded without the row that names it.
     checkpoint(cancellation_token)
     failed_path = move_failed_import_whole(
         request.path,
         scenario="upgrade_held",
         before_mutation=cancellation_hook(cancellation_token),
     )
-    checkpoint(cancellation_token)
 
     held = (
         ValidationResult.from_json(dl_info.validation_result)

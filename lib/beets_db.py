@@ -533,7 +533,7 @@ class BeetsDB:
     def installed_track_files(
         self,
         identity: ReleaseIdentity,
-    ) -> "tuple[InstalledTrackFile, ...] | None":
+    ) -> "tuple[InstalledTrackFile, ...] | CurrentBeetsAmbiguous | None":
         """The installed copy's audio files keyed by release-track identity.
 
         Issue #1445 item 3 (the upgrade guard). Identity and paths ONLY:
@@ -546,8 +546,10 @@ class BeetsDB:
         the file reads 263.36s). Comparing a candidate against it would
         compare against the release, never the installed audio.
 
-        ``None`` when the exact release is not uniquely installed: no
-        installed copy means nothing an import could destroy. The key
+        ``None`` when the exact release is not installed (nothing an import
+        could destroy); the :class:`CurrentBeetsAmbiguous` resolution when
+        it is not uniquely resolved, so the caller can say why it could not
+        compare. The key
         spelling mirrors :meth:`list_library_completeness_albums`: a Discogs
         item carries its synthetic ``<release>-<position>`` identity in
         ``mb_trackid``; a MusicBrainz item is keyed by ``mb_releasetrackid``
@@ -559,6 +561,8 @@ class BeetsDB:
         from lib.quality.installed_copy_guard import InstalledTrackFile
 
         current = self.resolve_current_release(identity)
+        if isinstance(current, CurrentBeetsAmbiguous):
+            return current
         if not isinstance(current, CurrentBeetsUnique):
             return None
         paths_by_item_id = {item.id: item.path for item in current.items}

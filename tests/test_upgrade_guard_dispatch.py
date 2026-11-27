@@ -74,6 +74,8 @@ class _World:
         installed_loader: InstalledLoader | None = None,
         guard_candidate: tuple[CandidateTrackLength, ...] | None = None,
         marked_incomplete: bool = False,
+        audio_corrupt: bool = False,
+        cancel_during_move: bool = False,
     ) -> None:
         candidate_tracks, installed_tracks = fairways()
         self.db = FakePipelineDB()
@@ -99,17 +101,21 @@ class _World:
         # No current evidence is loaded below, so the quality decision
         # admits this candidate as into an empty slot; the guard reads the
         # installed copy straight from Beets (the injected loader).
-        candidate = make_album_quality_evidence(
-            mb_release_id=_RELEASE, source_path=self.path,
-        )
         files = snapshot_audio_files(self.path)
+        candidate = make_album_quality_evidence(
+            mb_release_id=_RELEASE, source_path=self.path, files=files,
+        )
         candidate = msgspec.structs.replace(
-            candidate, files=files,
+            candidate, files=candidate.files,
             snapshot_fingerprint=snapshot_fingerprint(files),
         )
         self.claimed, candidate_result, execution_lease = _claim_dispatch_job(
             self.db, path=self.path, release_id=_RELEASE, force=force,
-            candidate_evidence=candidate,
+            candidate_evidence=None if audio_corrupt else candidate,
+            evidence_kwargs=(
+                {"audio_corrupt": True, "audio_error": "decode failed"}
+                if audio_corrupt else None
+            ),
         )
         cancellation_token = (
             CancellationToken() if execution_lease is not None else None
@@ -117,9 +123,30 @@ class _World:
         if guard_candidate is None and not force:
             guard_candidate = tuple(candidate_tracks)
         loader = installed_loader or _installed(installed_tracks)
+        from lib import import_manifest
+
+        real_move = import_manifest.move_failed_import_whole
+
+        def move_then_cancel(
+            src_path: str,
+            *,
+            scenario: str | None = None,
+            quarantine_root: str | None = None,
+            before_mutation: import_manifest.MutationCheckpoint | None = None,
+        ) -> str | None:
+            moved = real_move(
+                src_path, scenario=scenario, quarantine_root=quarantine_root,
+                before_mutation=before_mutation,
+            )
+            if cancel_during_move and cancellation_token is not None:
+                cancellation_token.cancel("operator stop during the move")
+            return moved
+
         with patch_dispatch_externals() as self.ext, patch(
             "lib.dispatch.subprocess_runner.parse_import_result",
             return_value=make_import_result(decision="import"),
+        ), patch.object(
+            import_manifest, "move_failed_import_whole", move_then_cancel,
         ), pinned_dispatch_authority(
             self.db, execution_lease, cancellation_token=cancellation_token,
         ) as (cancellation_token, owner_session_identity):
@@ -168,11 +195,15 @@ class TestUpgradeGuardDispatch(unittest.TestCase):
         force: bool = False,
         installed_loader: InstalledLoader | None = None,
         marked_incomplete: bool = False,
+        audio_corrupt: bool = False,
+        cancel_during_move: bool = False,
     ) -> _World:
         world = _World(
             force=force,
             installed_loader=installed_loader,
             marked_incomplete=marked_incomplete,
+            audio_corrupt=audio_corrupt,
+            cancel_during_move=cancel_during_move,
         )
         self.addCleanup(world.close)
         return world
@@ -251,6 +282,36 @@ class TestUpgradeGuardDispatch(unittest.TestCase):
         self.assertEqual(
             sum("UPGRADE GUARD COMPARED NOTHING" in line for line in logs.output),
             1)
+
+    def test_a_rejected_candidate_opens_no_installed_file(self) -> None:
+        """C3: the installed copy is read and measured only when the
+        decision would otherwise import over it."""
+        calls: list[dict[str, object]] = []
+
+        def recording(**kwargs: object) -> None:
+            calls.append(kwargs)
+
+        world = self.world(installed_loader=recording, audio_corrupt=True)
+        self.assertFalse(world.outcome.success)
+        self.assertEqual(calls, [], "an installed file was opened")
+
+    def test_marked_incomplete_opens_no_installed_file(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        def recording(**kwargs: object) -> None:
+            calls.append(kwargs)
+
+        world = self.world(installed_loader=recording, marked_incomplete=True)
+        self.assertTrue(world.beets_launched())
+        self.assertEqual(calls, [], "an installed file was opened")
+
+    def test_no_cancellation_checkpoint_after_the_folder_moved(self) -> None:
+        """C2: once the folder has moved the hold runs to its terminal
+        outcome, so the moved folder can never be left without its row."""
+        world = self.world(cancel_during_move=True)
+        self.assertEqual(world.outcome.code, "upgrade_held")
+        self.assertIsNotNone(world.outcome.terminal_outcome)
+        self.assertTrue(os.path.isdir(os.path.join(world.wrong_matches, _FOLDER)))
 
     def test_unreadable_library_never_imports(self) -> None:
         def broken(**_kwargs: object) -> None:
@@ -338,6 +399,33 @@ class TestInstalledLengthsAreMeasuredFromFiles(unittest.TestCase):
         self.assertEqual(
             sum("cannot measure installed file" in line for line in logs.output),
             1)
+
+    def test_ambiguous_installed_copy_skips_with_one_journal_line(self) -> None:
+        """C4: two Beets albums claim the release — nothing to key against,
+        and the journal says why."""
+        import sqlite3
+
+        from lib.dispatch.core import _load_installed_track_lengths
+
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("INSERT INTO albums VALUES (2, ?, NULL)", (_RELEASE,))
+        conn.execute(
+            "INSERT INTO items VALUES "
+            "(20, 2, ?, 'x', 1, 1, 1.0, 'MP3', 0, 0, 0, 'rt-1', '')",
+            (os.path.join(self.library, "other", "01.mp3").encode(),),
+        )
+        conn.commit()
+        conn.close()
+        with self.assertLogs("cratedigger", level=logging.WARNING) as logs:
+            tracks = _load_installed_track_lengths(
+                beets_library_db_path=self.db_path,
+                beets_library_root=self.library,
+                mb_release_id=_RELEASE,
+                label="Kurt Vile - So Outta Reach",
+            )
+        self.assertIsNone(tracks)
+        self.assertEqual(
+            sum("UPGRADE GUARD SKIPPED" in line for line in logs.output), 1)
 
     def test_comparison_records_that_lengths_were_measured(self) -> None:
         comparison = compare_installed_copy(*fairways())

@@ -19,6 +19,8 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, Protocol
 
+import msgspec
+
 from lib import transitions
 from lib.dispatch.evidence_gate import (
     _current_evidence_analysis_failed,
@@ -632,7 +634,11 @@ def _load_installed_track_lengths(
     ``exception`` path audits it and requeues, rather than letting an
     unreadable library wave a replacement through.
     """
-    from lib.beets_db import BeetsDB, release_identity_for_lookup
+    from lib.beets_db import (
+        BeetsDB,
+        CurrentBeetsAmbiguous,
+        release_identity_for_lookup,
+    )
     from lib.media_readiness import mediafile_length_seconds
 
     identity = release_identity_for_lookup(mb_release_id)
@@ -642,6 +648,17 @@ def _load_installed_track_lengths(
         beets_library_db_path, library_root=beets_library_root,
     ) as beets_db:
         files = beets_db.installed_track_files(identity)
+    if isinstance(files, CurrentBeetsAmbiguous):
+        logger.warning(
+            "UPGRADE GUARD SKIPPED: %s (release %s) — the installed copy is "
+            "not uniquely resolved in Beets (%s; album_ids=%s), so nothing "
+            "was compared; the guard fails open for this attempt",
+            label or mb_release_id,
+            mb_release_id,
+            files.reason,
+            files.album_ids,
+        )
+        return None
     if files is None:
         return None
     return _measure_installed_track_lengths(
@@ -1389,11 +1406,6 @@ def _run_evidence_gate(
     # helper below, which honours caller lifecycle authority:
     # automation self-heals; force imports preserve operator
     # status.
-    # Issue #1445 item 3: the upgrade guard's fact. Computed only for the
-    # automation lane; the decider below is what turns it into a hold.
-    upgrade_comparison = _upgrade_guard_comparison(
-        request, preamble, installed_tracks_loader,
-    )
     facts = AlbumQualityEvidenceDecisionFacts(
         verified_lossless_target=request.verified_lossless_target or None,
         target_format=request.target_format,
@@ -1404,16 +1416,40 @@ def _run_evidence_gate(
             db.request_marked_incomplete(request.request_id)
         ),
         candidate_covers_declared_program=attempt_program_covered,
-        installed_track_lengths_disagree=(
-            upgrade_comparison is not None and upgrade_comparison.holds
-        ),
     )
+    quality_ranks = cfg.quality_ranks if cfg is not None else None
     evidence_decision = full_pipeline_decision_from_evidence(
         evidence_gate.candidate,
         evidence_gate.current,
         facts=facts,
-        cfg=cfg.quality_ranks if cfg is not None else None,
+        cfg=quality_ranks,
     )
+    # Issue #1445 item 3: the upgrade guard. One code path, two steps, the
+    # same decision function both times: decide WITHOUT the guard's fact
+    # first, and only when that decision would import — on the guarded
+    # automation lane, with no operator incomplete mark (which turns the
+    # guard off anyway) — read and measure the installed copy, then decide
+    # again with the fact. A candidate the decision rejects anyway never
+    # opens an installed file.
+    upgrade_comparison: InstalledCopyComparison | None = None
+    if (
+        _import_allowed_by_evidence_pipeline(evidence_decision)
+        and request.upgrade_guard_candidate is not None
+        and not facts.installed_marked_incomplete
+    ):
+        upgrade_comparison = _upgrade_guard_comparison(
+            request, preamble, installed_tracks_loader,
+        )
+        if upgrade_comparison is not None and upgrade_comparison.holds:
+            facts = msgspec.structs.replace(
+                facts, installed_track_lengths_disagree=True,
+            )
+            evidence_decision = full_pipeline_decision_from_evidence(
+                evidence_gate.candidate,
+                evidence_gate.current,
+                facts=facts,
+                cfg=quality_ranks,
+            )
     if not _import_allowed_by_evidence_pipeline(evidence_decision):
         decision = evidence_decision_name(evidence_decision)
         if decision == DECISION_UPGRADE_HELD:
