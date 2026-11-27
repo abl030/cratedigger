@@ -2487,6 +2487,51 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         )
         self.assertEqual(data["held_upgrades"], 1)
         self.assertEqual(data["remaining"], 1)
+        self.assertFalse(data["group_empty"])
+
+    def test_converge_reports_held_copies_left_behind(self):
+        """Issue #1445 item 3 (C5): with only a held copy left after
+        converge, the ordinary group is empty but the request is not."""
+        self._seed_wrong_match(
+            download_log_id=100, request_id=42, username="u1",
+            failed_path="/fi/a", distance=0.167, mb_release_id="mb-42")
+        self._seed_wrong_match(
+            download_log_id=101, request_id=42, username="natetheneet",
+            failed_path="/fi/held", distance=0.02, mb_release_id="mb-42",
+            scenario="upgrade_held")
+
+        status, data = self._post("/api/wrong-matches/converge", {
+            "request_id": 42, "threshold_milli": 180,
+        })
+
+        self.assertEqual(status, 202)
+        self.assertEqual(data["remaining"], 1)  # the queued green row
+        self.assertEqual(data["held_upgrades"], 1)
+        self.assertFalse(data["group_empty"])
+
+    def test_converge_still_skips_a_held_folder_after_a_failed_force_import(self):
+        """Issue #1445 item 3 (C1): the newest row on a held folder is a
+        failed force import's own ``untracked_audio`` row; the folder is
+        still held, so converge neither imports nor deletes it."""
+        self._seed_wrong_match(
+            download_log_id=101, request_id=42, username="natetheneet",
+            failed_path="/fi/held", distance=0.02, mb_release_id="mb-42",
+            scenario="upgrade_held")
+        self._seed_wrong_match(
+            download_log_id=102, request_id=42, username="natetheneet",
+            failed_path="/fi/held", distance=None, mb_release_id="mb-42",
+            scenario="untracked_audio")
+
+        status, data = self._post("/api/wrong-matches/converge", {
+            "request_id": 42, "threshold_milli": 180,
+        })
+
+        self.assertEqual(status, 202)
+        self.assertEqual(self.db.list_import_jobs(), [])
+        self.mock_manual_cleanup.assert_not_called()
+        self.assertIn(
+            {"download_log_id": 102, "reason": "held_upgrade"}, data["skipped"])
+        self.assertEqual(data["held_upgrades"], 1)
 
     def test_converge_deletes_unmatched_when_legacy_client_requests_it(self):
         """Legacy true payloads still delete non-green rows while selected rows stay visible."""

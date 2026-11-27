@@ -84,7 +84,9 @@ OTHER_DISCOGS_MASTER = "6000"
 REPO = Path(__file__).resolve().parent.parent
 
 
-def _empty_wrong_match_summary(_db, request_id: int) -> WrongMatchDeleteSummary:
+def _empty_wrong_match_summary(
+    _db, request_id: int, **_kwargs: object,
+) -> WrongMatchDeleteSummary:
     """Stand-in for ``delete_wrong_match_group(db, request_id)``.
 
     Matches the production signature (two positional args). Tests previously
@@ -1863,6 +1865,50 @@ class TestReplaceWarnings(_ServiceCase):
             self.assertEqual(
                 [row["download_log_id"] for row in db.get_wrong_matches()],
                 [source.download_log_id],
+            )
+
+    def test_replace_also_removes_a_held_upgrade(self):
+        """Issue #1445 item 3: an ordinary delete-group skips held upgrades,
+        but Replace removes the installed album and every other Wrong
+        Matches row of the old request, so a held copy is an alternative to
+        nothing. Replace opts in: no folder of the old request survives in
+        wrong_matches/, and nothing is reported as skipped."""
+        with patch(
+            "lib.mbid_replace_service.trigger_plex_scan"
+        ), patch(
+            "lib.mbid_replace_service.trigger_jellyfin_scan"
+        ):
+            db = FakePipelineDB()
+            self._seed_old(db)
+            root = self.enterContext(tempfile.TemporaryDirectory())
+            ordinary = seed_visible_wrong_match(db, root, request_id=42)
+            held_path = os.path.join(root, "wrong_matches", "Held Copy")
+            os.makedirs(held_path)
+            with open(os.path.join(held_path, "01.flac"), "wb") as fh:
+                fh.write(b"audio")
+            db.log_download(
+                42, outcome="rejected",
+                validation_result={
+                    "scenario": "upgrade_held", "failed_path": held_path,
+                },
+            )
+
+            svc = self._make_service(db)
+            result = svc.replace_request_mbid(
+                42, target_mb_release_id=NEW_MBID,
+            )
+
+            self.assertEqual(result.outcome, RESULT_REPLACED)
+            self.assertFalse(
+                any("wrong-matches" in w for w in result.warnings),
+                f"unexpected cleanup warning: {result.warnings!r}",
+            )
+            self.assertFalse(os.path.exists(ordinary.path))
+            self.assertFalse(os.path.exists(held_path))
+            self.assertEqual(
+                [row for row in db.get_wrong_matches()
+                 if row["request_id"] == 42],
+                [],
             )
 
     def test_skipped_without_error_still_warns(self):

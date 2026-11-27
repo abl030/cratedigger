@@ -57,7 +57,7 @@ from lib.wrong_match_delete_service import (
     delete_wrong_match,
     delete_wrong_match_group,
 )
-from lib.wrong_match_policy import is_upgrade_held_scenario
+from lib.wrong_matches import wrong_match_row_is_held
 from web.overlay import compute_library_rank
 from web.routes._pydantic import PositiveInt, parse_body
 from web.routes._registry import RouteHandler, RouteRegistration, route
@@ -482,7 +482,7 @@ def post_wrong_match_converge(h: RouteHandler, body: dict[str, object]) -> None:
         lid = row["download_log_id"]
 
         vr = decode_validation_envelope(row.get("validation_result"))
-        if is_upgrade_held_scenario(vr.scenario):
+        if wrong_match_row_is_held(row):
             # Issue #1445 item 3: a held upgrade's distance is green, so it
             # would be force-imported here and Beets would replace the
             # installed copy the guard kept. Converge neither imports nor
@@ -584,7 +584,13 @@ def post_wrong_match_converge(h: RouteHandler, body: dict[str, object]) -> None:
         "dismissed": dismissed,
         "deleted": deleted,
         "remaining": remaining,
-        "group_empty": remaining == 0,
+        # Issue #1445 item 3: ``remaining`` counts the ordinary group only;
+        # held upgrades for the request are counted apart and are never
+        # touched by converge. ``group_empty`` means nothing at all is left
+        # for the request; ``ordinary_group_empty`` is what the UI uses to
+        # drop the ordinary group card while the held cards stay.
+        "group_empty": remaining == 0 and held_upgrades == 0,
+        "ordinary_group_empty": remaining == 0,
         "held_upgrades": held_upgrades,
         "selected": selected,
         "unmatched": unmatched,

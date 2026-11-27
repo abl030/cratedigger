@@ -22,6 +22,19 @@ if TYPE_CHECKING:
 _WRONG_MATCH_SOURCE_DIR_NAMES = ("failed_imports", WRONG_MATCH_QUARANTINE_DIR)
 
 
+def wrong_match_row_is_held(row: Mapping[str, object]) -> bool:
+    """Whether a ``get_wrong_matches`` row's FOLDER is a held upgrade.
+
+    Issue #1445 item 3. Keyed on the projection's ``held_download_log_id``
+    (the newest ``upgrade_held`` row naming the same folder), not on the
+    row's own scenario: held status is sticky across a later row on the
+    folder — a failed force import — until the operator deletes the folder
+    or a force import of it succeeds. Converge, delete-group, the Wrong
+    Matches projection and the cleanup reducer all ask this one question.
+    """
+    return row.get("held_download_log_id") is not None
+
+
 def wrong_match_row_is_visible(
     row: Mapping[str, object],
     *,

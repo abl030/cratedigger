@@ -42,7 +42,6 @@ from lib.validation_envelope import (
     decode_validation_envelope,
     scenario_covers_declared_program,
 )
-from lib.wrong_match_policy import is_upgrade_held_scenario
 from lib.wrong_matches import (
     WrongMatchSourceDB,
     cleanup_wrong_match_source,
@@ -81,6 +80,10 @@ class WrongMatchCleanupDB(WrongMatchSourceDB, QualityEvidenceDB, Protocol):
         ignore_import_job_id: int | None = None,
         limit: int = 50,
     ) -> list[ImportJob]: ...
+
+    def get_held_upgrade_download_log_id(
+        self, request_id: int, failed_path: str,
+    ) -> int | None: ...
 
     def record_wrong_match_triage(
         self, log_id: int, triage_result: WrongMatchTriageAudit,
@@ -339,22 +342,6 @@ def _cleanup_wrong_match(
             reason="request_missing",
         )
 
-    if is_upgrade_held_scenario(
-        decode_validation_envelope(entry.get("validation_result")).scenario
-    ):
-        # Issue #1445 item 3: never evaluated, never deleted, never given a
-        # triage block. Approving or discarding a held upgrade is the
-        # operator's call (force import / wrong-match delete). This guard
-        # sits in the reducer itself because the delete-all triage batch
-        # (``cleanup_all_wrong_matches``) reaches every visible row, not
-        # only the delete-eligible ones.
-        return _result(
-            download_log_id,
-            OUTCOME_SKIPPED_HELD_UPGRADE,
-            request_id=request_id,
-            reason="held_upgrade",
-        )
-
     raw_path = validation_failed_path(entry.get("validation_result"))
     if not raw_path:
         return _result(
@@ -362,6 +349,22 @@ def _cleanup_wrong_match(
             OUTCOME_SKIPPED_INVALID_ROW,
             request_id=request_id,
             reason="failed_path_missing",
+        )
+
+    if db.get_held_upgrade_download_log_id(request_id, raw_path) is not None:
+        # Issue #1445 item 3: never evaluated, never deleted, never given a
+        # triage block. The folder is held (sticky: also when a newer row
+        # on it — a failed force import — carries another scenario).
+        # Approving or discarding a held upgrade is the operator's call
+        # (force import / wrong-match delete). This guard sits in the
+        # reducer itself because the delete-all triage batch
+        # (``cleanup_all_wrong_matches``) reaches every visible row, not
+        # only the delete-eligible ones.
+        return _result(
+            download_log_id,
+            OUTCOME_SKIPPED_HELD_UPGRADE,
+            request_id=request_id,
+            reason="held_upgrade",
         )
 
     candidates = _path_candidates(failed_path_hint, raw_path)
