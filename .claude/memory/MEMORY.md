@@ -5,7 +5,7 @@
 - [Converge is operator-authority](project_converge_operator_authority.md) — Wrong Matches converge must NOT route deletions through the evidence classifier
 - [SSH signing agent hang](project_ssh_signing_agent_hang.md) — git commit hangs when a wedged forwarded agent socket lingers; fix: SSH_AUTH_SOCK= git commit
 - [discogs-api deploy + DB access](project_discogs_api_deploy_and_db_access.md) — runs on discogs LXC 192.168.1.44; deploy = push-deploy from doc1 (no fleet-update); DB at 10.20.0.13
-- [Opus for reviews](feedback_opus_for_reviews.md) — Review/verification subagents run on opus, never fable — user preserves fable credits for main-loop work
+- [Opus for reviews](feedback_opus_for_reviews.md) — Review/verification subagents run on opus, never fable; on larger builds opus codes too and Fable plans
 - [Agent off-script is not malfunction](feedback_agent_offscript_is_not_malfunction.md) — the operator can message a running agent directly; ask before undoing an artifact you didn't create
 - [Reviewer git-reset hazard](feedback_reviewer_git_reset_hazard.md) — Review subs must stay in the PR worktree; a reset --hard in the shared checkout wiped uncommitted work
 - [nixosconfig wrapper tracks module options](project_nixosconfig_wrapper_tracks_module_options.md) — module option renames silently break the wrapper; latent until next fleet-update
@@ -21,3 +21,4 @@
 - [Alert blast radius](feedback_alert_blast_radius.md) — never fix a silent-alert path by paging unconditionally; enumerate cases, fix only the broken one
 - [Mutant restore git-checkout trap](feedback_mutant_restore_git_checkout_trap.md) — restoring a mutant via git checkout wipes uncommitted edits in the same file; restore by inverse edit
 - [Ride Ruff defaults](feedback_ride_ruff_defaults.md) — keep Ruff's wide default set; upstream lint drift = fix the code, never loosen ruff.toml
+- [Short plain answers](feedback_short_plain_answers.md) — design write-ups: one item at a time, ELI5, verdict per item; 800 words got "too many words"
