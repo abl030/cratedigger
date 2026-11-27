@@ -11,12 +11,15 @@ post-commit plan. The post-import search-policy appliers live in
 from __future__ import annotations
 
 import logging
+import math
 import os
 import subprocess as sp
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, Protocol
+
+import msgspec
 
 from lib import transitions
 from lib.dispatch.evidence_gate import (
@@ -37,6 +40,7 @@ from lib.dispatch.helpers import (
 )
 from lib.dispatch.outcome_actions import (
     _do_mark_done,
+    _hold_upgrade_from_evidence_decision,
     _record_have_analysis_error,
     _record_rejection_and_maybe_requeue,
     _reject_import_from_evidence_decision,
@@ -93,6 +97,13 @@ from lib.quality import (
     override_bitrate_from_current_evidence,
     resolve_rejection_search_override,
     stage2_counterfactual_from_decision,
+)
+from lib.quality.decisions import DECISION_UPGRADE_HELD
+from lib.quality.installed_copy_guard import (
+    InstalledCopyComparison,
+    InstalledTrackFile,
+    InstalledTrackLength,
+    compare_installed_copy,
 )
 from lib.quality_evidence import EvidenceBuildResult, audit_v0_probe_from_metric
 from lib.terminal_outcomes import PendingImportTerminalOutcome
@@ -561,6 +572,142 @@ def _snapshot_current_album_directories(
         beets_library_db_path, library_root=beets_library_root,
     ) as beets_db:
         return beets_db.get_current_album_directories(mb_release_id)
+
+
+def _measure_installed_track_lengths(
+    files: Sequence[InstalledTrackFile],
+    *,
+    measure_fn: Callable[[str], float],
+    label: str,
+) -> tuple[InstalledTrackLength, ...]:
+    """Measure each installed file; an unusable one becomes length 0.0.
+
+    The comparison skips a non-positive length, so a missing, unreadable,
+    or non-finite/non-positive file drops out of the guard for that track
+    — with one journal line naming it — rather than failing the import.
+    """
+    measured: list[InstalledTrackLength] = []
+    for track in files:
+        seconds = 0.0
+        try:
+            seconds = measure_fn(track.path)
+        except Exception as exc:  # noqa: BLE001 - one unreadable file only skips its track
+            logger.warning(
+                "UPGRADE GUARD: cannot measure installed file %s for %s "
+                "(%s: %s); that track is skipped",
+                track.path, label, type(exc).__name__, exc,
+            )
+        else:
+            if not math.isfinite(seconds) or seconds <= 0:
+                logger.warning(
+                    "UPGRADE GUARD: installed file %s for %s measured %r "
+                    "seconds; that track is skipped",
+                    track.path, label, seconds,
+                )
+                seconds = 0.0
+        measured.append(InstalledTrackLength(
+            key=track.key, installed_seconds=seconds,
+        ))
+    return tuple(measured)
+
+
+def _load_installed_track_lengths(
+    *,
+    beets_library_db_path: str,
+    beets_library_root: str,
+    mb_release_id: str,
+    label: str = "",
+    measure_fn: Callable[[str], float] | None = None,
+) -> tuple[InstalledTrackLength, ...] | None:
+    """MEASURE the installed copy's track lengths for the upgrade guard.
+
+    Issue #1445 item 3. Beets supplies identity and paths only; every
+    length is read from the installed file itself (header-level, the same
+    ``mediafile`` reader that produced the candidate's ``item.length``),
+    here, under the RELEASE lock the caller holds. Beets' ``items.length``
+    must NOT be used: it holds the release's declared length, not the
+    file's (Kurt Vile "So Outta Reach", item 195486: DB 289.9s, file
+    336.3s) — see ``BeetsDB.installed_track_files``.
+
+    ``None`` = the exact release is not uniquely installed, so an import
+    replaces nothing. A Beets read error propagates: the dispatch
+    ``exception`` path audits it and requeues, rather than letting an
+    unreadable library wave a replacement through.
+    """
+    from lib.beets_db import (
+        BeetsDB,
+        CurrentBeetsAmbiguous,
+        release_identity_for_lookup,
+    )
+    from lib.media_readiness import mediafile_length_seconds
+
+    identity = release_identity_for_lookup(mb_release_id)
+    if identity is None:
+        return None
+    with BeetsDB(
+        beets_library_db_path, library_root=beets_library_root,
+    ) as beets_db:
+        files = beets_db.installed_track_files(identity)
+    if isinstance(files, CurrentBeetsAmbiguous):
+        logger.warning(
+            "UPGRADE GUARD SKIPPED: %s (release %s) — the installed copy is "
+            "not uniquely resolved in Beets (%s; album_ids=%s), so nothing "
+            "was compared; the guard fails open for this attempt",
+            label or mb_release_id,
+            mb_release_id,
+            files.reason,
+            files.album_ids,
+        )
+        return None
+    if files is None:
+        return None
+    return _measure_installed_track_lengths(
+        files,
+        measure_fn=measure_fn or mediafile_length_seconds,
+        label=label or mb_release_id,
+    )
+
+
+def _upgrade_guard_comparison(
+    request: DispatchRequest,
+    preamble: _DispatchPreamble,
+    installed_tracks_loader: Callable[
+        ..., tuple[InstalledTrackLength, ...] | None
+    ],
+) -> InstalledCopyComparison | None:
+    """Compare this candidate with the installed copy it would replace.
+
+    ``None`` when this lane is not guarded (``upgrade_guard_candidate`` is
+    unset: force, local import, YouTube rescue) or there is no installed
+    copy. A run that could key no track at all fails open and says so in
+    one journal line, so a silent no-op is findable.
+    """
+    if request.upgrade_guard_candidate is None:
+        return None
+    installed = installed_tracks_loader(
+        beets_library_db_path=preamble.beets_library_db_path,
+        beets_library_root=preamble.beets_library_root,
+        mb_release_id=request.mb_release_id,
+        label=request.label,
+    )
+    if installed is None:
+        return None
+    comparison = compare_installed_copy(
+        request.upgrade_guard_candidate, installed,
+    )
+    if comparison.compared_count == 0:
+        logger.warning(
+            "UPGRADE GUARD COMPARED NOTHING: %s (request %s, release %s) — "
+            "%d candidate track(s), %d installed track(s), none keyed by "
+            "release-track identity on both sides; the guard fails open "
+            "for this attempt",
+            request.label,
+            request.request_id,
+            request.mb_release_id,
+            len(request.upgrade_guard_candidate),
+            len(installed),
+        )
+    return comparison
 
 
 class _DownloadLogEntryReader(Protocol):
@@ -1091,6 +1238,10 @@ def _run_evidence_gate(
     current_evidence_loader: (
         Callable[..., CurrentEvidenceActionResult | None] | None
     ),
+    installed_tracks_loader: Callable[
+        ..., tuple[InstalledTrackLength, ...] | None
+    ] = _load_installed_track_lengths,
+    cancellation_token: CancellationToken | None = None,
 ) -> _EvidenceStage:
     """Load, reauthorize, and decide on action-time quality evidence.
 
@@ -1266,14 +1417,60 @@ def _run_evidence_gate(
         ),
         candidate_covers_declared_program=attempt_program_covered,
     )
+    quality_ranks = cfg.quality_ranks if cfg is not None else None
     evidence_decision = full_pipeline_decision_from_evidence(
         evidence_gate.candidate,
         evidence_gate.current,
         facts=facts,
-        cfg=cfg.quality_ranks if cfg is not None else None,
+        cfg=quality_ranks,
     )
+    # Issue #1445 item 3: the upgrade guard. One code path, two steps, the
+    # same decision function both times: decide WITHOUT the guard's fact
+    # first, and only when that decision would import — on the guarded
+    # automation lane, with no operator incomplete mark (which turns the
+    # guard off anyway) — read and measure the installed copy, then decide
+    # again with the fact. A candidate the decision rejects anyway never
+    # opens an installed file.
+    upgrade_comparison: InstalledCopyComparison | None = None
+    if (
+        _import_allowed_by_evidence_pipeline(evidence_decision)
+        and request.upgrade_guard_candidate is not None
+        and not facts.installed_marked_incomplete
+    ):
+        upgrade_comparison = _upgrade_guard_comparison(
+            request, preamble, installed_tracks_loader,
+        )
+        if upgrade_comparison is not None and upgrade_comparison.holds:
+            facts = msgspec.structs.replace(
+                facts, installed_track_lengths_disagree=True,
+            )
+            evidence_decision = full_pipeline_decision_from_evidence(
+                evidence_gate.candidate,
+                evidence_gate.current,
+                facts=facts,
+                cfg=quality_ranks,
+            )
     if not _import_allowed_by_evidence_pipeline(evidence_decision):
         decision = evidence_decision_name(evidence_decision)
+        if decision == DECISION_UPGRADE_HELD:
+            if upgrade_comparison is None:
+                raise RuntimeError(
+                    "upgrade_held decided without a stored comparison"
+                )
+            attempt_result.merge(_evidence_reject_import_result(
+                decision=decision,
+                candidate=evidence_gate.candidate,
+                current=evidence_gate.current,
+                evidence_decision=evidence_decision,
+                existing_v0_probe=existing_v0_probe,
+            ))
+            return _EvidenceStage(outcome=_hold_upgrade_from_evidence_decision(
+                request,
+                db,
+                attempt_result=attempt_result,
+                comparison=upgrade_comparison,
+                cancellation_token=cancellation_token,
+            ))
         detail = (
             evidence_gate.candidate.audio_error
             if (
@@ -1896,6 +2093,9 @@ def dispatch_import_core(
         Callable[..., tuple[DeleteNotification, ...]] | None
     ) = None,
     cancellation_token: CancellationToken | None = None,
+    installed_tracks_loader: Callable[
+        ..., tuple[InstalledTrackLength, ...] | None
+    ] = _load_installed_track_lengths,
 ) -> DispatchOutcome:
     """Core import dispatch — one typed ``DispatchRequest`` + a narrow DB port.
 
@@ -2040,6 +2240,8 @@ def dispatch_import_core(
                 active_execution_lease=active_execution_lease,
                 evidence_gate_fn=evidence_gate_fn,
                 current_evidence_loader=current_evidence_loader,
+                installed_tracks_loader=installed_tracks_loader,
+                cancellation_token=cancellation_token,
             )
             # Recorded before the two launch-authority refusals below: both
             # return with the sidecar already on disk, and this function's

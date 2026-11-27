@@ -2429,6 +2429,110 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.mock_manual_cleanup.assert_called_once_with(self.db, 102, require_visible=True)
         self.mock_cleanup.assert_not_called()
 
+    def test_get_wrong_matches_returns_held_upgrades_separately(self):
+        """Issue #1445 item 3: the API carries held upgrades as their own
+        list; the ordinary groups never contain them."""
+        import json
+
+        from tests.test_held_upgrade_view import fairways_validation_result
+
+        hold = json.loads(fairways_validation_result())["upgrade_hold"]
+        held_id = self._seed_wrong_match(
+            request_id=42, failed_path="/fi/held", distance=0.02,
+            mb_release_id="mb-42", scenario="upgrade_held",
+            validation_overrides={"upgrade_hold": hold})
+
+        status, data = self._get("/api/wrong-matches")
+
+        self.assertEqual(status, 200)
+        self.assertNotIn(
+            held_id,
+            [entry["download_log_id"]
+             for group in data["groups"] for entry in group["entries"]])
+        self.assertEqual(
+            [card["download_log_id"] for card in data["held_upgrades"]],
+            [held_id])
+        self.assertIn("odd one out", data["held_upgrades"][0]["sentence"])
+
+    def test_converge_never_approves_or_discards_a_held_upgrade(self):
+        """Issue #1445 item 3: a held upgrade has a green distance, so
+        converge would otherwise force-import it and Beets would replace
+        the installed copy the guard kept. It is skipped: no import job, no
+        delete, and it does not count as an ordinary leftover."""
+        self._seed_wrong_match(
+            download_log_id=100, request_id=42, username="u1",
+            failed_path="/fi/a", distance=0.167, mb_release_id="mb-42")
+        self._seed_wrong_match(
+            download_log_id=101, request_id=42, username="natetheneet",
+            failed_path="/fi/held", distance=0.02, mb_release_id="mb-42",
+            scenario="upgrade_held")
+        self._seed_wrong_match(
+            download_log_id=102, request_id=42, username="u3",
+            failed_path="/fi/c", distance=0.226, mb_release_id="mb-42")
+
+        status, data = self._post("/api/wrong-matches/converge", {
+            "request_id": 42, "threshold_milli": 180,
+        })
+
+        self.assertEqual(status, 202)
+        self.assertEqual(
+            {j.dedupe_key for j in self.db.list_import_jobs()},
+            {"force_import:download_log:100"},
+        )
+        self.mock_manual_cleanup.assert_called_once_with(
+            self.db, 102, require_visible=True)
+        self.assertIn(
+            {"download_log_id": 101, "reason": "held_upgrade"},
+            data["skipped"],
+        )
+        self.assertEqual(data["held_upgrades"], 1)
+        self.assertEqual(data["remaining"], 1)
+        self.assertFalse(data["group_empty"])
+
+    def test_converge_reports_held_copies_left_behind(self):
+        """Issue #1445 item 3 (C5): with only a held copy left after
+        converge, the ordinary group is empty but the request is not."""
+        self._seed_wrong_match(
+            download_log_id=100, request_id=42, username="u1",
+            failed_path="/fi/a", distance=0.167, mb_release_id="mb-42")
+        self._seed_wrong_match(
+            download_log_id=101, request_id=42, username="natetheneet",
+            failed_path="/fi/held", distance=0.02, mb_release_id="mb-42",
+            scenario="upgrade_held")
+
+        status, data = self._post("/api/wrong-matches/converge", {
+            "request_id": 42, "threshold_milli": 180,
+        })
+
+        self.assertEqual(status, 202)
+        self.assertEqual(data["remaining"], 1)  # the queued green row
+        self.assertEqual(data["held_upgrades"], 1)
+        self.assertFalse(data["group_empty"])
+
+    def test_converge_still_skips_a_held_folder_after_a_failed_force_import(self):
+        """Issue #1445 item 3 (C1): the newest row on a held folder is a
+        failed force import's own ``untracked_audio`` row; the folder is
+        still held, so converge neither imports nor deletes it."""
+        self._seed_wrong_match(
+            download_log_id=101, request_id=42, username="natetheneet",
+            failed_path="/fi/held", distance=0.02, mb_release_id="mb-42",
+            scenario="upgrade_held")
+        self._seed_wrong_match(
+            download_log_id=102, request_id=42, username="natetheneet",
+            failed_path="/fi/held", distance=None, mb_release_id="mb-42",
+            scenario="untracked_audio")
+
+        status, data = self._post("/api/wrong-matches/converge", {
+            "request_id": 42, "threshold_milli": 180,
+        })
+
+        self.assertEqual(status, 202)
+        self.assertEqual(self.db.list_import_jobs(), [])
+        self.mock_manual_cleanup.assert_not_called()
+        self.assertIn(
+            {"download_log_id": 102, "reason": "held_upgrade"}, data["skipped"])
+        self.assertEqual(data["held_upgrades"], 1)
+
     def test_converge_deletes_unmatched_when_legacy_client_requests_it(self):
         """Legacy true payloads still delete non-green rows while selected rows stay visible."""
         self._seed_wrong_match(

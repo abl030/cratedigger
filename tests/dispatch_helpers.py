@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from lib.import_evidence import CandidateEvidenceActionResult
     from lib.pipeline_db import DownloadLogOutcome, PipelineDB
     from lib.quality import SpectralDetail
+    from lib.quality.installed_copy_guard import CandidateTrackLength
 
 import psycopg2.extras
 
@@ -136,6 +137,7 @@ def make_dispatch_request(
     launch_authority_path: str | None = None,
     execution_lease: ExecutionLeaseSnapshot | None = None,
     owner_session_identity: OwnerSessionIdentity | None = None,
+    upgrade_guard_candidate: tuple[CandidateTrackLength, ...] | None = None,
 ) -> DispatchRequest:
     """Build a complete ``DispatchRequest`` with sensible defaults (#1277).
 
@@ -182,6 +184,7 @@ def make_dispatch_request(
         launch_authority_path=launch_authority_path,
         execution_lease=execution_lease,
         owner_session_identity=owner_session_identity,
+        upgrade_guard_candidate=upgrade_guard_candidate,
     )
 
 

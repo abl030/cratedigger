@@ -428,6 +428,15 @@ class WrongMatchCandidateRow(TypedDict):
     request_verified_lossless: bool | None
     request_current_spectral_grade: str | None
     request_current_spectral_bitrate: int | None
+    created_at: datetime
+    # Issue #1445 item 3: the newest ``upgrade_held`` row naming this same
+    # folder (all four NULL when the folder was never held). Held status
+    # is sticky to the folder even when a later attempt on it — a failed
+    # force import — wrote the newest row above under another scenario.
+    held_download_log_id: int | None
+    held_validation_result: dict[str, object] | None
+    held_soulseek_username: str | None
+    held_created_at: datetime | None
     # issue #829 Phase 5 PR4 — the codec-resolution facts behind the two
     # audit-only accusation flags this view renders: the candidate's own
     # for the per-entry chip, the installed copy's for the group badge.

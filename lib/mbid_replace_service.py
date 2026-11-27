@@ -1460,7 +1460,11 @@ class MbidReplaceService:
                 )
             else:
                 try:
-                    wm_summary = delete_wrong_match_group(self.db, request_id)
+                    # Issue #1445 item 3: Replace removes held upgrades
+                    # too — the album they would have replaced is gone.
+                    wm_summary = delete_wrong_match_group(
+                        self.db, request_id, include_held=True,
+                    )
                     if not wm_summary.success:
                         # Skipped-without-error is just as silent a failure as
                         # an error: sources and their pointers survive while

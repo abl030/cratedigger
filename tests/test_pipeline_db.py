@@ -12850,11 +12850,11 @@ class TestGetWrongMatches(unittest.TestCase):
 
     def _log_rejected(self, request_id: int, username: str,
                       failed_path: str | None,
-                      scenario: str | None = "high_distance") -> None:
+                      scenario: str | None = "high_distance") -> int:
         vr: dict[str, object] = {"scenario": scenario, "distance": 0.25}
         if failed_path is not None:
             vr["failed_path"] = failed_path
-        self.db.log_download(
+        return self.db.log_download(
             request_id=request_id,
             soulseek_username=username,
             outcome="rejected",
@@ -13033,6 +13033,35 @@ class TestGetWrongMatches(unittest.TestCase):
         rows = self.db.get_wrong_matches()
 
         self.assertEqual([row["soulseek_username"] for row in rows], ["legitimate-peer"])
+
+    def test_held_upgrade_status_is_sticky_to_its_folder(self):
+        """Issue #1445 item 3, on real SQL: a newer row on a held folder (a
+        failed force import) stays the visible row, but the folder still
+        carries its held row and comparison; another folder does not."""
+        held_id = self._log_rejected(
+            self.req1, "natetheneet", "/wm/Held", "upgrade_held")
+        newer_id = self._log_rejected(
+            self.req1, "natetheneet", "/wm/Held", "untracked_audio")
+        self._log_rejected(self.req1, "other", "/wm/Other", "high_distance")
+
+        rows = {row["download_log_id"]: row for row in self.db.get_wrong_matches()}
+
+        self.assertIn(newer_id, rows)
+        self.assertNotIn(held_id, rows)
+        held_row = rows[newer_id]
+        self.assertEqual(held_row["held_download_log_id"], held_id)
+        held_vr = held_row["held_validation_result"]
+        assert held_vr is not None
+        self.assertEqual(held_vr["scenario"], "upgrade_held")
+        self.assertEqual(held_row["held_soulseek_username"], "natetheneet")
+        others = [r for r in rows.values() if r["download_log_id"] != newer_id]
+        self.assertEqual(len(others), 1)
+        self.assertIsNone(others[0]["held_download_log_id"])
+        self.assertEqual(
+            self.db.get_held_upgrade_download_log_id(self.req1, "/wm/Held"),
+            held_id)
+        self.assertIsNone(
+            self.db.get_held_upgrade_download_log_id(self.req1, "/wm/Other"))
 
     def test_newer_terminal_corrupt_hides_same_path_older_legitimate_row(self):
         self._log_rejected(self.req1, "older-legitimate", "/same/path", "high_distance")

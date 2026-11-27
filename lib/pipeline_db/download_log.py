@@ -100,12 +100,14 @@ GRAB_OUTCOMES: tuple[DownloadLogOutcome, ...] = (
 from lib.pipeline_db._core import _PipelineDBBase
 from lib.validation_envelope import (
     FAILED_PATH_KEY,
+    SCENARIO_KEY,
     VALIDATION_PROJECTION_UNSET,
     WRONG_MATCH_TRIAGE_KEY,
     ValidationProjectionUnset,
     WrongMatchTriageAudit,
     derive_validation_log_columns,
 )
+from lib.wrong_match_policy import UPGRADE_HELD_SCENARIO
 
 
 @dataclass(frozen=True)
@@ -1032,6 +1034,11 @@ class _DownloadLogMixin(_PipelineDBBase):
                 ar.verified_lossless AS request_verified_lossless,
                 ar.current_spectral_grade AS request_current_spectral_grade,
                 ar.current_spectral_bitrate AS request_current_spectral_bitrate,
+                dl.created_at,
+                held.id AS held_download_log_id,
+                held.validation_result AS held_validation_result,
+                held.soulseek_username AS held_soulseek_username,
+                held.created_at AS held_created_at,
 {accusation_evidence_columns('e', CANDIDATE_EVIDENCE_PREFIX)}{accusation_evidence_columns('current_evidence', CURRENT_EVIDENCE_PREFIX).rstrip().rstrip(',')}
             FROM download_log dl
             JOIN album_requests ar ON dl.request_id = ar.id
@@ -1039,6 +1046,27 @@ class _DownloadLogMixin(_PipelineDBBase):
                 ON e.id = dl.candidate_evidence_id
             LEFT JOIN album_quality_evidence current_evidence
                 ON current_evidence.id = ar.current_evidence_id
+            -- Issue #1445 item 3: a folder that entered Wrong Matches as a
+            -- held upgrade stays held (with its stored comparison) even when
+            -- a later attempt on it — a failed force import — wrote a newer
+            -- row naming the same folder under another scenario.
+            -- Keyed on the EXACT failed_path string. That holds today
+            -- because the force lane writes its failure row with the held
+            -- row's own failed_path (the stored source path it was handed),
+            -- never a re-derived or normalized one; a writer that spelled
+            -- the same folder differently would break the stickiness.
+            LEFT JOIN LATERAL (
+                SELECT h.id, h.validation_result, h.soulseek_username,
+                       h.created_at
+                FROM download_log h
+                WHERE h.request_id = dl.request_id
+                  AND h.outcome = 'rejected'
+                  AND h.validation_result->>'{FAILED_PATH_KEY}'
+                      = dl.validation_result->>'{FAILED_PATH_KEY}'
+                  AND h.validation_result->>'{SCENARIO_KEY}' = '{UPGRADE_HELD_SCENARIO}'
+                ORDER BY h.id DESC
+                LIMIT 1
+            ) held ON TRUE
             WHERE dl.outcome = 'rejected'
               AND dl.validation_result->>'{FAILED_PATH_KEY}' IS NOT NULL
             ORDER BY dl.request_id, dl.validation_result->>'{FAILED_PATH_KEY}', dl.id DESC
@@ -1055,6 +1083,34 @@ class _DownloadLogMixin(_PipelineDBBase):
         rows.sort(key=lambda r: (r["request_id"], -int(r["download_log_id"])))
         return rows
 
+
+    def get_held_upgrade_download_log_id(
+        self, request_id: int, failed_path: str,
+    ) -> int | None:
+        """The newest held-upgrade row naming this request's folder, if any.
+
+        Issue #1445 item 3: held status is a property of the FOLDER, sticky
+        across later rows that name it (see ``get_wrong_matches``), until
+        the operator deletes it or a force import of it succeeds — both
+        clear ``failed_path`` from every row of the folder.
+
+        Limit: the folder is matched by the exact ``failed_path`` string.
+        That holds today because the force lane writes its failure row with
+        the held row's own ``failed_path`` string (the stored source path it
+        was handed); a writer that spelled the same folder differently
+        would not be recognised as the held folder.
+        """
+        cur = self._execute(f"""
+            SELECT id FROM download_log
+            WHERE request_id = %s
+              AND outcome = 'rejected'
+              AND validation_result->>'{FAILED_PATH_KEY}' = %s
+              AND validation_result->>'{SCENARIO_KEY}' = '{UPGRADE_HELD_SCENARIO}'
+            ORDER BY id DESC
+            LIMIT 1
+        """, (request_id, failed_path))
+        row = cur.fetchone()
+        return int(row["id"]) if row is not None else None
 
     def clear_wrong_match_path(self, log_id: int) -> bool:
         """Null out failed_path in validation_result for a download_log entry.

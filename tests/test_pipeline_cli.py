@@ -2926,7 +2926,10 @@ class TestQualityReplayShowsTheMark(unittest.TestCase):
         db.set_download_log_candidate_evidence(log_id, persisted.id)
         return db
 
-    def _replay(self, db: FakePipelineDB, *, marked: bool) -> str:
+    def _replay(
+        self, db: FakePipelineDB, *, marked: bool,
+        installed: bool | None = None,
+    ) -> str:
         from lib.quality import QualityRankConfig
         from scripts.pipeline_cli.quality import _print_live_candidate_replay
 
@@ -2941,6 +2944,7 @@ class TestQualityReplayShowsTheMark(unittest.TestCase):
                 q_override=None,
                 gate_unavailable_reason=None,
                 marked_incomplete=marked,
+                installed_copy_present=installed,
             )
         return "\n".join(str(call) for call in mock_print.call_args_list)
 
@@ -2955,6 +2959,47 @@ class TestQualityReplayShowsTheMark(unittest.TestCase):
         out = self._replay(db, marked=False)
         self.assertIn("Candidate evidence", out)
         self.assertNotIn("beets-whole attempt", out)
+        # No installed copy: nothing an upgrade guard could protect.
+        self.assertNotIn("#1445 upgrade guard", out)
+
+    def test_upgrade_replay_also_shows_the_upgrade_guard(self):
+        """Issue #1445 item 3: when the replayed candidate would replace
+        an installed copy, the replay also shows the held decision."""
+        from lib.quality import AlbumQualityEvidenceFile, AudioQualityMeasurement
+
+        db = self._seed()
+        current = make_album_quality_evidence(
+            mb_release_id="mbid-1",
+            source_path="/library/installed",
+            files=[AlbumQualityEvidenceFile(
+                relative_path="01 Installed.mp3", size_bytes=99,
+                mtime_ns=1, extension="mp3", container="mp3", codec="mp3",
+            )],
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=96, avg_bitrate_kbps=96,
+                median_bitrate_kbps=96, format="MP3", is_cbr=True,
+            ),
+        )
+        db.upsert_album_quality_evidence(current)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=current.mb_release_id,
+            snapshot_fingerprint=current.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_request_current_evidence(1, persisted.id)
+
+        out = self._replay(db, marked=False, installed=True)
+
+        self.assertIn("#1445 upgrade guard", out)
+        self.assertIn("REJECT, denylist, keep searching (final: wanted)", out)
+
+        # Linked current evidence without the album in Beets: nothing for
+        # the guard to protect, so no guarded line.
+        self.assertNotIn(
+            "#1445 upgrade guard", self._replay(db, marked=False, installed=False))
+        self.assertIn(
+            "could not tell whether Beets holds this release",
+            self._replay(db, marked=False, installed=None))
 
 
 class TestCmdSetIntent(unittest.TestCase):
@@ -4652,6 +4697,36 @@ class TestCmdShowSearchForensics(unittest.TestCase):
         self.assertIn("verdict:   Local storage error writing 2 files", out)
         self.assertIn("Storage error: ", out)
         self.assertNotIn("Peer message", out)
+
+    def test_show_renders_a_held_upgrade_like_the_web(self):
+        """Issue #1445 item 3: the CLI reads a held upgrade through the
+        same projection as Recents and Wrong Matches."""
+        from lib.held_upgrade_view import held_upgrade_view
+        from tests.test_held_upgrade_view import fairways_validation_result
+
+        validation_result = fairways_validation_result()
+        db = _ForensicsDB()
+        db.seed_request(self._row(id=1649))
+        db.set_stub_download_history([{
+            "id": 42692,
+            "request_id": 1649,
+            "created_at": "2026-10-26T02:10:00+00:00",
+            "outcome": "rejected",
+            "source": "slskd",
+            "soulseek_username": "natetheneet",
+            "beets_distance": 0.02,
+            "validation_result": validation_result,
+            "import_result": None,
+        }])
+
+        out = self._capture(db, 1649)
+
+        view = held_upgrade_view(validation_result)
+        assert view is not None
+        self.assertIn(f"upgrade held: {view.sentence}", out)
+        self.assertIn("Track  Release  Current  New", out)
+        self.assertIn("* 2", out)
+        self.assertIn("Secretive Girl", out)
 
 
 class TestCmdShowProcessingOwner(unittest.TestCase):

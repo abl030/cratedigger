@@ -133,6 +133,25 @@ export function spectralStripCell(grade, floor, admissible, withheld = undefined
  * @param {string} value - already-escaped candidate value (HTML)
  * @param {string|null} wasValue - already-escaped existing value (HTML), or null
  */
+/**
+ * Issue #1445 item 3: a held upgrade's per-track table. Every string is
+ * server-owned (lengths already m:ss, lib/held_upgrade_view.py); the tracks
+ * that tripped the guard carry `held-upgrade-differs`.
+ * @param {Array<{track: string, title: string, release: string, current: string, new: string, differs: boolean}>} rows
+ * @returns {string}
+ */
+export function renderHeldUpgradeTable(rows) {
+  const body = (Array.isArray(rows) ? rows : []).map(row => `
+      <tr class="${row.differs ? 'held-upgrade-differs' : ''}">
+        <td>${esc(row.track)}</td><td>${esc(row.title)}</td>
+        <td>${esc(row.release)}</td><td>${esc(row.current)}</td><td>${esc(row.new)}</td>
+      </tr>`).join('');
+  return `<div class="held-upgrade-table-wrap"><table class="held-upgrade-table">
+      <thead><tr><th>Track</th><th></th><th>Release lists</th><th>Current copy</th><th>New copy</th></tr></thead>
+      <tbody>${body}</tbody>
+    </table></div>`;
+}
+
 export function withWas(value, wasValue) {
   if (wasValue === null || wasValue === undefined) return value;
   return `${value} <span class="p-hist-was">(was ${wasValue})</span>`;
@@ -562,7 +581,10 @@ export function renderDownloadHistoryItem(h) {
   ];
   const verdict = h.verdict || h.beets_scenario || '';
   if (verdict) {
-    const rejectCls = FAILURE_OUTCOMES.includes(outcome) ? ' p-hist-verdict-reject' : '';
+    // Issue #1445 item 3: a held upgrade is a decision waiting on the
+    // operator, not a failure, so its sentence reads amber, not red.
+    const rejectCls = h.held_upgrade ? ' p-hist-verdict-held'
+      : FAILURE_OUTCOMES.includes(outcome) ? ' p-hist-verdict-reject' : '';
     html += `<div class="p-hist-verdict${rejectCls}">${esc(verdict)}</div>`;
   }
 
@@ -762,6 +784,14 @@ export function renderDownloadHistoryItem(h) {
       'Track length',
       `<span style="color:${calm ? '#aaa' : '#ec6'};">${esc(h.track_length_warning)}</span>${slotLines}`,
     ]);
+  }
+
+  // Issue #1445 item 3: a held upgrade. The sentence is the verdict line
+  // above; this row is its per-track table (lib/held_upgrade_view.py,
+  // shared with Wrong Matches and `pipeline-cli show`), tripped tracks
+  // highlighted.
+  if (h.held_upgrade) {
+    rows.push(['Track lengths', renderHeldUpgradeTable(h.held_upgrade.rows)]);
   }
 
   // Triage is the operator-action audit — it stays visible. The

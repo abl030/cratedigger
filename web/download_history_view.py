@@ -11,6 +11,7 @@ from lib.accusation_flags import (
     AccusationFlags,
     evidence_column_accusation_flags,
 )
+from lib.held_upgrade_view import HeldUpgradeView
 from lib.json_narrow import json_dict
 from lib.pipeline_db._shared import CURRENT_EVIDENCE_PREFIX
 from lib.track_length_shape import TrackLengthSlot
@@ -164,6 +165,9 @@ class DownloadHistoryViewRow(msgspec.Struct, frozen=True):
     track_length_badge_class: str | None = None
     track_length_slots: list[TrackLengthSlot] = msgspec.field(
         default_factory=list[TrackLengthSlot])
+    # Issue #1445 item 3: mirrors ClassifiedEntry.held_upgrade for the same
+    # strict-convert reason as the track-length fields above.
+    held_upgrade: HeldUpgradeView | None = None
 
     def to_dict(self) -> dict[str, object]:
         return msgspec.to_builtins(self)

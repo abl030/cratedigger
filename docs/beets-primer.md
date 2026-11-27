@@ -1157,7 +1157,7 @@ Located at `/mnt/virtio/cratedigger/beets-db/beets-library.db`. Two main tables:
 | `disc` | INTEGER | Disc number |
 | `path` | BLOB | Filesystem path to audio file |
 | `mb_trackid` | TEXT | MusicBrainz recording ID |
-| `length` | REAL | Duration in seconds |
+| `length` | REAL | The matched release's DECLARED track length in seconds, written at import — **not** a measurement of the file. On doc2, Kurt Vile "So Outta Reach" item 195486 stores 289.9s (the MusicBrainz value) while the file reads 336.3s. To know how long an installed file really is, read the file (the upgrade guard, `lib/dispatch/core.py::_load_installed_track_lengths`, does). |
 
 ### Useful Queries
 

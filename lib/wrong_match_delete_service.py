@@ -24,6 +24,7 @@ from lib.wrong_matches import (
     WrongMatchSourceDB,
     cleanup_wrong_match_source,
     unsafe_failed_import_path_reason,
+    wrong_match_row_is_held,
 )
 
 
@@ -199,6 +200,8 @@ def delete_wrong_match(
 def delete_wrong_match_group(
     db: WrongMatchDeleteDB,
     request_id: int,
+    *,
+    include_held: bool = False,
 ) -> WrongMatchDeleteSummary:
     results: list[WrongMatchDeleteResult] = []
     for row in list(db.get_wrong_matches()):
@@ -220,9 +223,19 @@ def delete_wrong_match_group(
             continue
         if _visible_wrong_match_row(db, log_id) is None:
             continue
+        if wrong_match_row_is_held(row) and not include_held:
+            # Issue #1445 item 3: a held upgrade is not an ordinary wrong
+            # match. It has its own discard ("Keep current copy", one
+            # ``delete_wrong_match``), so "delete all" on the request never
+            # sweeps it away unseen. Replace opts in (``include_held``):
+            # it removes the installed album and every other Wrong Matches
+            # row, so a held copy is then an alternative to nothing.
+            continue
         results.append(delete_wrong_match(db, log_id, require_visible=True))
 
-    remaining = _remaining_visible_count(db, request_id)
+    remaining = _remaining_visible_count(
+        db, request_id, include_held=include_held,
+    )
     # The folder fact is `deleted_path`/`path_missing` alone — `cleared_rows`
     # is a SEPARATE pointer-row count (already reported via `cleared` below)
     # and gating on it here dropped a candidate whose folder really went
@@ -570,8 +583,21 @@ def _visible_wrong_match_row(
     return None
 
 
-def _remaining_visible_count(db: WrongMatchDeleteDB, request_id: int) -> int:
-    return sum(1 for row in db.get_wrong_matches() if row.get("request_id") == request_id)
+def _remaining_visible_count(
+    db: WrongMatchDeleteDB, request_id: int, *, include_held: bool = False,
+) -> int:
+    """Wrong matches still visible for the request.
+
+    A held upgrade (issue #1445 item 3) is excluded unless the caller also
+    deletes held rows (``include_held``, Replace only): an ordinary group
+    delete never touches it, so counting it would make every group holding
+    one read as a failed delete.
+    """
+    return sum(
+        1 for row in db.get_wrong_matches()
+        if row.get("request_id") == request_id
+        and (include_held or not wrong_match_row_is_held(row))
+    )
 
 
 def _source_dirs(

@@ -17,7 +17,10 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Protocol
 
+import msgspec
+
 from lib.accusation_flags import evidence_column_accusation_flags
+from lib.held_upgrade_view import held_upgrade_view
 from lib.import_queue import ForceImportPayload, ImportJob, YoutubeImportPayload
 from lib.pipeline_db._shared import (
     CANDIDATE_EVIDENCE_PREFIX,
@@ -30,7 +33,7 @@ from lib.pipeline_db.rows import (
 from lib.quality import _is_explicit_label
 from lib.util import observe_failed_path
 from lib.validation_envelope import decode_validation_envelope
-from lib.wrong_matches import wrong_match_row_is_visible
+from lib.wrong_matches import wrong_match_row_is_held, wrong_match_row_is_visible
 from web.classify import average_quality_label
 from web.wrong_match_file_service import (
     source_dirs_from_validation_result,
@@ -286,6 +289,11 @@ def build_wrong_match_groups(
         ):
             continue
         vr = decode_validation_envelope(row.get("validation_result"))
+        if wrong_match_row_is_held(row):
+            # Issue #1445 item 3: a held upgrade is projected on its own by
+            # ``build_held_upgrades``, never inside an ordinary group where
+            # converge and delete-all act on the whole request.
+            continue
         failed_path = vr.failed_path or ""
         observation = observe_failed_path(failed_path)
         resolved_path = observation.path
@@ -432,3 +440,86 @@ def build_wrong_match_groups(
         entries_list.sort(key=_entry_sort_key)
 
     return [groups[rid] for rid in order]
+
+
+def _iso(value: object) -> str | None:
+    return value.isoformat() if isinstance(value, datetime) else None
+
+
+def build_held_upgrades(
+    *,
+    db: WrongMatchQueueDB,
+    include_replaced: bool = False,
+) -> list[dict[str, object]]:
+    """Held upgrades waiting for the operator, newest first (issue #1445).
+
+    One card per visible held FOLDER (``wrong_match_row_is_held`` — sticky
+    across a later failed attempt on it) whose folder is still there or
+    could not be read (flagged ``path_unavailable`` exactly like an
+    ordinary entry). The sentence and the m:ss track table come from the
+    comparison stored on the held row through ``lib.held_upgrade_view`` —
+    the same projection Recents and ``pipeline-cli show`` render.
+
+    "Use new copy" is the existing force import of ``held_download_log_id``
+    (the row carrying the beets envelope); "Keep current copy" is the
+    existing single wrong-match delete of ``download_log_id`` (the newest
+    visible row of the folder; the delete clears every row naming it).
+    When the newest row is a later failed attempt, ``last_attempt_failure``
+    says so truthfully.
+    """
+    active_jobs_by_log_id: dict[int, ImportJob] = {}
+    for job in db.list_active_import_jobs(limit=200):
+        if isinstance(job.payload, ForceImportPayload):
+            active_jobs_by_log_id[job.payload.download_log_id] = job
+    cards: list[dict[str, object]] = []
+    for row in db.get_wrong_matches():
+        if not wrong_match_row_is_visible(row, include_replaced=include_replaced):
+            continue
+        if not wrong_match_row_is_held(row):
+            continue
+        held_id = row["held_download_log_id"]
+        assert held_id is not None
+        view = held_upgrade_view(row.get("held_validation_result"))
+        if view is None:
+            continue
+        vr = decode_validation_envelope(row.get("validation_result"))
+        observation = observe_failed_path(vr.failed_path or "")
+        if not observation.present and not observation.indeterminate:
+            continue
+        last_attempt_failure: str | None = None
+        if row["download_log_id"] != held_id:
+            reason = vr.detail or (vr.scenario or "unknown").replace("_", " ")
+            last_attempt_failure = (
+                f"The last try to use the new copy failed: {reason}"
+            )
+        job = active_jobs_by_log_id.get(held_id)
+        evidence_format = row.get("evidence_storage_format")
+        evidence_avg = row.get("evidence_avg_bitrate")
+        cards.append({
+            "download_log_id": row["download_log_id"],
+            "held_download_log_id": held_id,
+            "request_id": row["request_id"],
+            "artist": row["artist_name"],
+            "album": row["album_title"],
+            "mb_release_id": row.get("mb_release_id"),
+            "failed_path": observation.path or vr.failed_path,
+            "path_unavailable": observation.indeterminate,
+            "soulseek_username": row.get("held_soulseek_username"),
+            "held_at": _iso(row.get("held_created_at")),
+            "last_attempt_at": (
+                _iso(row.get("created_at"))
+                if last_attempt_failure is not None else None
+            ),
+            "last_attempt_failure": last_attempt_failure,
+            "import_job": job.to_json_dict() if job is not None else None,
+            "format": (
+                evidence_format if isinstance(evidence_format, str) else None
+            ),
+            "avg_bitrate": (
+                evidence_avg if isinstance(evidence_avg, int) else None
+            ),
+            "sentence": view.sentence,
+            "rows": msgspec.to_builtins(view.rows),
+        })
+    cards.sort(key=lambda card: -int(str(card["held_download_log_id"])))
+    return cards

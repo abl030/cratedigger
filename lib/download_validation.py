@@ -63,7 +63,12 @@ from lib.quality import (
     compute_effective_override_bitrate,
     interpret_spectral_evidence,
 )
-from lib.release_identity import ReleaseIdentity, normalize_release_id
+from lib.quality.installed_copy_guard import CandidateTrackLength
+from lib.release_identity import (
+    ReleaseIdentity,
+    detect_release_source,
+    normalize_release_id,
+)
 from lib.staged_album import StagedAlbum
 from lib.util import log_validation_result
 
@@ -1333,6 +1338,16 @@ def _handle_valid_result(
                     owner_proof.owner_session_identity
                     if owner_proof is not None else None
                 ),
+                # Issue #1445 item 3: the automation import job is the only
+                # caller holding an execution-owner proof. The operator's
+                # YouTube rescue reaches this same seam without one and is
+                # never guarded.
+                upgrade_guard_candidate=(
+                    _upgrade_guard_candidate(
+                        bv_result, album_data.mb_release_id or "",
+                    )
+                    if owner_proof is not None else None
+                ),
             )
             dispatch = (
                 dispatch_fn if dispatch_fn is not None
@@ -1362,6 +1377,42 @@ def _handle_valid_result(
                     terminal_outcome=pending,
                 )
         return None
+
+
+def _upgrade_guard_candidate(
+    bv_result: ValidationResult,
+    mb_release_id: str,
+) -> tuple[CandidateTrackLength, ...]:
+    """The selected candidate's tracks, keyed for the upgrade guard.
+
+    Issue #1445 item 3. Reads only the ``is_target`` candidate's mapping (a
+    sibling pressing beets also considered says nothing about this import).
+    Keyed by release-track identity the way Beets stores it on the
+    installed items (see ``BeetsDB.installed_track_lengths``): a Discogs
+    track by its synthetic ``track_id``, a MusicBrainz one by its
+    ``release_track_id``. An empty result compares nothing (fail open).
+    """
+    discogs = detect_release_source(mb_release_id) == "discogs"
+    target = next(
+        (candidate for candidate in bv_result.candidates if candidate.is_target),
+        None,
+    )
+    if target is None:
+        return ()
+    return tuple(
+        CandidateTrackLength(
+            key=(
+                pair.track.track_id if discogs else pair.track.release_track_id
+            ).strip(),
+            medium=pair.track.medium,
+            medium_index=pair.track.medium_index,
+            title=pair.track.title,
+            declared_seconds=pair.track.length,
+            candidate_seconds=pair.item.length,
+            component_count=pair.track.discogs_indexed_component_count,
+        )
+        for pair in target.mapping
+    )
 
 
 # Executable, pyright-visible proof that production functions implement the

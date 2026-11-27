@@ -648,8 +648,15 @@ class _FakeDownloadLogMixin(_FakePipelineDBBase):
             if prev is None or entry.id > prev.id:
                 collapsed[key] = entry
         rows: list[dict[str, object]] = []
-        for entry in collapsed.values():
+        for (request_key, path_key), entry in collapsed.items():
             req = self._requests.get(entry.request_id, {})
+            # Mirrors the real LEFT JOIN LATERAL ``held`` (issue #1445).
+            held_id = self.get_held_upgrade_download_log_id(
+                request_key, path_key)
+            held = (
+                next(e for e in self.download_logs if e.id == held_id)
+                if held_id is not None else None
+            )
             # Mirror the real LEFT JOIN to album_quality_evidence: prefer
             # evidence-derived measurements over the legacy denorm columns.
             ev = self._evidence_by_id.get(entry.candidate_evidence_id) \
@@ -741,6 +748,18 @@ class _FakeDownloadLogMixin(_FakePipelineDBBase):
                     "current_spectral_grade"),
                 "request_current_spectral_bitrate": req.get(
                     "current_spectral_bitrate"),
+                "created_at": entry.created_at,
+                "held_download_log_id": held_id,
+                "held_validation_result": (
+                    _jsonb_column(held.validation_result)
+                    if held is not None else None
+                ),
+                "held_soulseek_username": (
+                    held.soulseek_username if held is not None else None
+                ),
+                "held_created_at": (
+                    held.created_at if held is not None else None
+                ),
                 **self._accusation_alias_projection(
                     ev, CANDIDATE_EVIDENCE_PREFIX),
                 **self._accusation_alias_projection(
@@ -752,6 +771,23 @@ class _FakeDownloadLogMixin(_FakePipelineDBBase):
         rows.sort(key=lambda r: (
             r["request_id"], -int(r["download_log_id"])))  # type: ignore[arg-type, operator]
         return cast("list[WrongMatchCandidateRow]", rows)
+
+    def get_held_upgrade_download_log_id(
+        self, request_id: int, failed_path: str,
+    ) -> int | None:
+        """Newest ``upgrade_held`` rejected row naming this folder."""
+        best: int | None = None
+        for entry in self.download_logs:
+            if entry.request_id != request_id or entry.outcome != "rejected":
+                continue
+            vr = self._validation_result_dict(entry.validation_result)
+            if not vr or vr.get("failed_path") != failed_path:
+                continue
+            if vr.get("scenario") != "upgrade_held":
+                continue
+            if best is None or entry.id > best:
+                best = entry.id
+        return best
 
     def clear_wrong_match_path(self, log_id: int) -> bool:
         """Strip ``failed_path`` from a download_log row's validation_result.

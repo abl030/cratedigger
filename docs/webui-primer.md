@@ -159,10 +159,10 @@ not on anyone's list.
 | `/api/pipeline/<id>` | GET | Single request details |
 | `/api/pipeline/force-import` | POST | Queue force-import for a rejected download `{"download_log_id": N}`; returns `202` + job id |
 | `/api/youtube-album` | POST | Resolve an MB/Discogs release or group to the cache-writing YouTube Music matrix; body `{"identifier": "...", "refresh": false}` |
-| `/api/wrong-matches` | GET | Group rejected downloads by release for triage |
+| `/api/wrong-matches` | GET | Group rejected downloads by release for triage; held upgrades come back separately as `held_upgrades` (issue #1445) |
 | `/api/wrong-matches/explorer` | GET | List files for one wrong-match candidate, including extracted tags and audio-preview URLs |
 | `/api/wrong-matches/audio` | GET | Stream an individual wrong-match audio file with byte-range support |
-| `/api/wrong-matches/converge` | POST | Queue every wrong-match candidate within a release's loosen threshold and delete the rest |
+| `/api/wrong-matches/converge` | POST | Queue every wrong-match candidate within a release's loosen threshold and delete the rest; never touches a held upgrade (`held_upgrades` count, `ordinary_group_empty`) |
 | `/api/wrong-matches/triage` | POST | Evidence-only full-queue Wrong Matches cleanup; requires `{"confirm_all_wrong_matches": true}` |
 | `/api/wrong-matches/triage/status` | GET | Poll the background sweep's state (`idle`/`running`/`completed`/`cancelled`/`failed`) and summary |
 | `/api/wrong-matches/triage/cancel` | POST | Request cancellation of the in-flight sweep, if any; never 409 — same route the CLI's `Ctrl-C` handler and the UI's Stop button both use (#1083). Optional `{"arm_pending": true}` (#1106) arms a sticky pre-cancel for the next sweep start admitted within a short window; only the CLI's `Ctrl-C` handler sends it — the UI's Stop button and the standalone `wrong-match-triage-cancel` command stay unarmed |
@@ -689,6 +689,21 @@ not on anyone's list.
   text, sentence in the hover title), and `web/js/history.js`'s detail grid
   as a labelled "Track length" row with the sentence and one line per
   track, so the explanation is visible without hovering.
+- **Held upgrades** (issue #1445 item 3) — when the automatic upgrade guard
+  keeps an installed copy because a new copy's track lengths disagree with
+  it, the new copy appears in a "Held upgrades" section at the top of the
+  Wrong Matches tab, above and apart from the ordinary groups and hidden
+  when empty. Copies are grouped under one heading per album; each card shows
+  the plain-English reason, a Track / Release lists / Current copy / New copy
+  table (m:ss, differing tracks highlighted), the peer and time, a line when
+  the last try to use the new copy failed, and two buttons: **Use new copy**
+  (the existing force import) and **Keep current copy** (the existing
+  wrong-match delete; that peer stays skipped for this album). Each asks once
+  more inline ("Yes, replace my current copy" / "Yes, delete the new copy",
+  with Cancel) before acting. The summary line counts held copies. The table
+  scrolls inside its own box and the buttons wrap at phone width. Recents and
+  History show the attempt with an "Upgrade held" badge, the sentence in
+  amber, and the same table.
 - **Wrong Matches unavailable sources** — a candidate whose folder the server
   could not READ (permissions, I/O — never a folder proven gone) stays in the
   list with a `source unavailable` badge, an amber card, both Force Import and

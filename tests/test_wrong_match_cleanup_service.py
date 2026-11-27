@@ -47,6 +47,7 @@ from lib.wrong_match_cleanup_service import (
     OUTCOME_SKIPPED_CANDIDATE_EVIDENCE_STALE,
     OUTCOME_SKIPPED_CURRENT_EVIDENCE_FAILED,
     OUTCOME_SKIPPED_CURRENT_EVIDENCE_MISSING,
+    OUTCOME_SKIPPED_HELD_UPGRADE,
     OUTCOME_SKIPPED_MISSING_PATH,
     OUTCOME_SKIPPED_OPERATIONAL,
     cleanup_all_wrong_matches,
@@ -1508,6 +1509,75 @@ class TestOperatorIncompleteMarkKeepsTheFolder(unittest.TestCase):
         self.assertEqual(
             result.outcome, OUTCOME_DELETED_VERIFIED_LOSSLESS_PARENT)
         self.assertFalse(os.path.exists(source))
+
+
+class TestHeldUpgradeIsNeverReduced(unittest.TestCase):
+    """Issue #1445 item 3: the reducer refuses a held upgrade early.
+
+    The worst case is pinned: the installed copy carries verified-lossless
+    proof, which today short-circuits straight to deletion for any row the
+    reducer looks at. A held upgrade is the operator's call, so neither the
+    per-row reducer nor the delete-all triage batch may touch it, and no
+    triage block is written onto it.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.db = FakePipelineDB()
+        self.db.seed_request(make_request_row(
+            id=1, status="wanted", mb_release_id="mbid-1",
+        ))
+        self.source = _make_source(self.tmp, "held-upgrade")
+        self.log_id = self.db.log_download(
+            1,
+            outcome="rejected",
+            validation_result={
+                "scenario": "upgrade_held",
+                "distance": 0.02,
+                "failed_path": self.source,
+            },
+        )
+        self.db.set_download_log_candidate_evidence(
+            self.log_id, _store_evidence(self.db, _evidence(self.source)))
+        current = msgspec.structs.replace(
+            _evidence(self.source, mb_release_id="mbid-1"),
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="measured",
+                source="library_audit",
+                classifier="verified_lossless",
+                detail="parent_lossless_proof",
+            ),
+        )
+        helper_patch = _patch_current_evidence_helper(
+            lambda *_a, **_kw: CurrentEvidenceActionResult(
+                evidence=current,
+                provenance=ActionEvidenceProvenance(current_status="loaded"),
+            )
+        )
+        helper_patch.start()
+        self.addCleanup(helper_patch.stop)
+
+    def _assert_untouched(self) -> None:
+        self.assertTrue(os.path.exists(os.path.join(self.source, "01.mp3")))
+        raw = self.db.get_download_log_entry(self.log_id)
+        assert raw is not None
+        envelope = decode_validation_envelope(raw["validation_result"])
+        self.assertIsNone(envelope.wrong_match_triage)
+        self.assertEqual(envelope.failed_path, self.source)
+
+    def test_single_row_reducer_skips_the_held_upgrade(self) -> None:
+        result = cleanup_wrong_match(self.db, self.log_id, cfg=_cfg())
+        self.assertEqual(result.outcome, OUTCOME_SKIPPED_HELD_UPGRADE)
+        self._assert_untouched()
+
+    def test_delete_all_triage_batch_skips_the_held_upgrade(self) -> None:
+        summary = cleanup_all_wrong_matches(
+            self.db, confirm_all_wrong_matches=True, cfg=_cfg(),
+        )
+        self.assertEqual(summary.skipped_held_upgrade, 1)
+        self.assertEqual(summary.deleted_verified_lossless_parent, 0)
+        self._assert_untouched()
 
 
 class TestCleanupDBProtocolParity(unittest.TestCase):

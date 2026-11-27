@@ -32,6 +32,7 @@ from lib.quality import (
     QualityComparisonBasis,
     V0ProbeEvidence,
 )
+from lib.quality.installed_copy_guard import InstalledCopyComparison
 
 
 class WrongMatchTriageAudit(msgspec.Struct, frozen=True, omit_defaults=True):
@@ -97,6 +98,8 @@ class ValidationResultEnvelope(msgspec.Struct, frozen=True):
     # can never supply. Issue #882 review F4.
     recommendation: str | None = None
     wrong_match_triage: WrongMatchTriageAudit | None = None
+    # Issue #1445 item 3: the stored comparison behind an upgrade hold.
+    upgrade_hold: InstalledCopyComparison | None = None
 
 
 FAILED_PATH_KEY = "failed_path"
@@ -114,6 +117,10 @@ CANDIDATE_PROGRAM_COVERED_SCENARIOS: frozenset[str] = frozenset({
     "strong_match",
     "high_distance",
     "unmapped_audio",
+    # Issue #1445 item 3: a held upgrade was a strong_match until the
+    # upgrade guard renamed its scenario, so it carries the same proof. A
+    # force import of the held row must see it covered too.
+    "upgrade_held",
 })
 
 

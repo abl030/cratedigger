@@ -81,6 +81,10 @@ class WrongMatchCleanupDB(WrongMatchSourceDB, QualityEvidenceDB, Protocol):
         limit: int = 50,
     ) -> list[ImportJob]: ...
 
+    def get_held_upgrade_download_log_id(
+        self, request_id: int, failed_path: str,
+    ) -> int | None: ...
+
     def record_wrong_match_triage(
         self, log_id: int, triage_result: WrongMatchTriageAudit,
     ) -> bool: ...
@@ -99,6 +103,9 @@ OUTCOME_SKIPPED_ACTIVE_JOB = "skipped_active_job"
 OUTCOME_SKIPPED_INVALID_ROW = "skipped_invalid_row"
 OUTCOME_SKIPPED_MISSING_PATH = "skipped_missing_path"
 OUTCOME_SKIPPED_OPERATIONAL = "skipped_operational"
+#: Issue #1445 item 3: a held upgrade is the operator's call; the reducer
+#: refuses it before reading anything else about the row.
+OUTCOME_SKIPPED_HELD_UPGRADE = "skipped_held_upgrade"
 OUTCOME_DELETE_FAILED = "delete_failed"
 
 OUTCOME_KEYS: tuple[str, ...] = (
@@ -115,6 +122,7 @@ OUTCOME_KEYS: tuple[str, ...] = (
     OUTCOME_SKIPPED_INVALID_ROW,
     OUTCOME_SKIPPED_MISSING_PATH,
     OUTCOME_SKIPPED_OPERATIONAL,
+    OUTCOME_SKIPPED_HELD_UPGRADE,
     OUTCOME_DELETE_FAILED,
 )
 
@@ -186,6 +194,7 @@ class WrongMatchCleanupSummary(msgspec.Struct, frozen=True):
     skipped_invalid_row: int = 0
     skipped_missing_path: int = 0
     skipped_operational: int = 0
+    skipped_held_upgrade: int = 0
     delete_failed: int = 0
     results: tuple[WrongMatchCleanupOutcome, ...] = ()
     cancelled: bool = False
@@ -340,6 +349,22 @@ def _cleanup_wrong_match(
             OUTCOME_SKIPPED_INVALID_ROW,
             request_id=request_id,
             reason="failed_path_missing",
+        )
+
+    if db.get_held_upgrade_download_log_id(request_id, raw_path) is not None:
+        # Issue #1445 item 3: never evaluated, never deleted, never given a
+        # triage block. The folder is held (sticky: also when a newer row
+        # on it — a failed force import — carries another scenario).
+        # Approving or discarding a held upgrade is the operator's call
+        # (force import / wrong-match delete). This guard sits in the
+        # reducer itself because the delete-all triage batch
+        # (``cleanup_all_wrong_matches``) reaches every visible row, not
+        # only the delete-eligible ones.
+        return _result(
+            download_log_id,
+            OUTCOME_SKIPPED_HELD_UPGRADE,
+            request_id=request_id,
+            reason="held_upgrade",
         )
 
     candidates = _path_candidates(failed_path_hint, raw_path)

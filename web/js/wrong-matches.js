@@ -1,6 +1,7 @@
 // @ts-check
 import { API, toast } from './state.js';
-import { esc, externalReleaseUrl, sourceLabel, wrongMatchExplorerFailureCopy } from './util.js';
+import { awstDateTime, esc, externalReleaseUrl, sourceLabel, wrongMatchExplorerFailureCopy } from './util.js';
+import { renderHeldUpgradeTable } from './history.js';
 import { renderReplaceButton } from './release_actions.js';
 import { consumePendingScrollRestore } from './search_plan.js';
 import {
@@ -884,13 +885,18 @@ export function entrySpectralCell(entry, spectralText) {
  * @param {any} data
  * @returns {string}
  */
-function convergeToast(data) {
+export function convergeToast(data) {
   const queued = data.queued || 0;
   const deleted = data.deleted || 0;
-  const skipped = (data.skipped || []).length;
+  // Issue #1445 item 3: converge never touches a held upgrade; say so
+  // rather than counting it as an ordinary skip.
+  const held = Number(data.held_upgrades) || 0;
+  const skipped = (data.skipped || [])
+    .filter((/** @type {any} */ s) => s && s.reason !== 'held_upgrade').length;
   const parts = [`Queued ${queued} candidate${queued !== 1 ? 's' : ''}`];
   if (deleted) parts.push(`deleted ${deleted}`);
   if (skipped) parts.push(`skipped ${skipped}`);
+  if (held) parts.push(`left ${held} held upgrade${held !== 1 ? 's' : ''} for you to decide`);
   return parts.join(', ');
 }
 
@@ -901,8 +907,10 @@ function convergeToast(data) {
 export function cleanupSummaryToast(data) {
   const deleted = Number(data?.deleted || 0)
     + Number(data?.deleted_verified_lossless_parent || 0);
+  // Issue #1445 item 3: a held upgrade the reducer refused is kept too.
   const kept = Number(data?.kept_would_import || 0)
-    + Number(data?.kept_uncertain || 0);
+    + Number(data?.kept_uncertain || 0)
+    + Number(data?.skipped_held_upgrade || 0);
   const skipped = Number(data?.skipped_candidate_evidence_missing || 0)
     + Number(data?.skipped_candidate_evidence_stale || 0)
     + Number(data?.skipped_current_evidence_missing || 0)
@@ -1034,6 +1042,22 @@ function wrongMatchCounts(groups) {
   };
 }
 
+/**
+ * @param {number} groups
+ * @param {number} entries
+ * @param {number} held
+ * @returns {string}
+ */
+export function wrongMatchesSummaryText(groups, entries, held) {
+  const base = `${groups} release${groups !== 1 ? 's' : ''} · ${entries} candidate${entries !== 1 ? 's' : ''} pending review`;
+  return held ? `${base} · ${held} held upgrade${held !== 1 ? 's' : ''}` : base;
+}
+
+/** @returns {any[]} */
+function heldUpgradeCards() {
+  return (_lastData && Array.isArray(_lastData.held_upgrades)) ? _lastData.held_upgrades : [];
+}
+
 function updateWrongMatchesSummary() {
   if (!_lastData || !Array.isArray(_lastData.groups) || !_lastEl) return;
   const counts = wrongMatchCounts(_lastData.groups);
@@ -1048,7 +1072,8 @@ function updateWrongMatchesSummary() {
   }
   const summary = document.getElementById('wrong-matches-summary');
   if (summary) {
-    summary.textContent = `${counts.groups} release${counts.groups !== 1 ? 's' : ''} · ${counts.entries} candidate${counts.entries !== 1 ? 's' : ''} pending review`;
+    summary.textContent = wrongMatchesSummaryText(
+      counts.groups, counts.entries, heldUpgradeCards().length);
   }
 }
 
@@ -1145,6 +1170,8 @@ export function renderWrongMatches(data, el) {
   /** @type {any[]} */
   const groups = (data.groups || []).filter((/** @type {any} */ g) => (g.pending_count || 0) > 0);
   const counts = wrongMatchCounts(groups);
+  /** @type {any[]} */
+  const held = Array.isArray(data.held_upgrades) ? data.held_upgrades : [];
   // The toolbar (including Stop) is ALWAYS rendered, even at zero
   // pending entries (issue #1106 F7) -- a mid-sweep Refresh that drains
   // the queue to empty must not lose the Stop control while a sweep
@@ -1153,7 +1180,7 @@ export function renderWrongMatches(data, el) {
   // enablement is derived by the caller (`_deriveTriageButtonState`).
   let html = `
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:8px 0;">
-      <div id="wrong-matches-summary" style="color:#888;">${counts.groups} release${counts.groups !== 1 ? 's' : ''} · ${counts.entries} candidate${counts.entries !== 1 ? 's' : ''} pending review</div>
+      <div id="wrong-matches-summary" style="color:#888;">${wrongMatchesSummaryText(counts.groups, counts.entries, held.length)}</div>
       <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
         <button id="wm-refresh-btn" class="p-btn" style="border-color:#888;color:#888;" onclick="event.stopPropagation(); window.refreshWrongMatches(this)" title="Refetch the queue from the server">Refresh</button>
         <button id="wm-bulk-triage-btn" class="p-btn delete" ${counts.entries === 0 ? 'disabled' : ''} onclick="event.stopPropagation(); window.bulkTriageWrongMatches()">Cleanup Wrong Matches (${counts.entries})</button>
@@ -1161,10 +1188,260 @@ export function renderWrongMatches(data, el) {
       </div>
     </div>`;
 
+  html += renderHeldUpgrades(held);
   html += groups.length === 0
     ? '<div style="color:#888;padding:12px;">No wrong matches in failed_imports.</div>'
     : groups.map(renderGroup).join('');
   el.innerHTML = html;
+}
+
+// ---------------------------------------------------------------------------
+// Held upgrades (issue #1445 item 3)
+// ---------------------------------------------------------------------------
+
+/**
+ * One held copy. Every sentence, length and table cell is server-owned
+ * (lib/held_upgrade_view.py). "Use new copy" is the existing force import
+ * of `held_download_log_id`; "Keep current copy" is the existing single
+ * wrong-match delete of `download_log_id`. Both ask once more before acting
+ * (an inline second click, not a native dialog).
+ * @param {any} card
+ * @returns {string}
+ */
+export function renderHeldUpgradeCard(card) {
+  const heldId = Number(card.held_download_log_id);
+  const deleteId = Number(card.download_log_id);
+  const from = card.soulseek_username ? `from ${esc(card.soulseek_username)}` : 'from an unknown peer';
+  const when = card.held_at ? ` · ${esc(awstDateTime(card.held_at))}` : '';
+  const format = card.format ? ` · ${esc(String(card.format).toUpperCase())}` : '';
+  const job = card.import_job;
+  const busy = Boolean(job) || Boolean(card.path_unavailable);
+  const lastTry = card.last_attempt_failure
+    ? `<div class="held-upgrade-last-try">${esc(card.last_attempt_failure)}${card.last_attempt_at ? ` (${esc(awstDateTime(card.last_attempt_at))})` : ''}</div>`
+    : '';
+  const unavailable = card.path_unavailable
+    ? '<div class="held-upgrade-last-try">The new copy\'s folder cannot be read right now, so neither choice is available yet.</div>'
+    : '';
+  const jobLine = job
+    ? `<div class="held-upgrade-help">Using the new copy is ${esc(String(job.status || 'queued'))}.</div>`
+    : '';
+  return `
+    <div class="held-upgrade-card" id="wm-held-card-${heldId}">
+      <div class="held-upgrade-meta">New copy ${from}${when}${format}</div>
+      <div class="held-upgrade-sentence">${esc(card.sentence || '')}</div>
+      ${lastTry}${unavailable}
+      ${renderHeldUpgradeTable(card.rows)}
+      <div class="held-upgrade-actions">
+        <button class="p-btn held-upgrade-use" id="wm-held-use-${heldId}" ${busy ? 'disabled' : ''}
+          onclick="event.stopPropagation(); window.useHeldUpgradeCopy(${heldId}, ${deleteId}, this)">Use new copy</button>
+        <button class="p-btn held-upgrade-keep" id="wm-held-keep-${heldId}" ${busy ? 'disabled' : ''}
+          onclick="event.stopPropagation(); window.keepCurrentCopy(${heldId}, ${deleteId}, this)">Keep current copy</button>
+        <button class="p-btn held-upgrade-cancel" id="wm-held-cancel-${heldId}" hidden
+          onclick="event.stopPropagation(); window.cancelHeldUpgradeChoice(${heldId})">Cancel</button>
+      </div>
+      ${jobLine}
+      <div class="held-upgrade-help" id="wm-held-help-${heldId}">Use new copy: replaces your current copy with this one. Keep current copy: deletes this new copy, and that peer stays skipped for this album.</div>
+    </div>`;
+}
+
+/**
+ * The Held upgrades section: one heading per album, its held copies under
+ * it, above and apart from the ordinary wrong matches. Empty string when
+ * nothing is held.
+ * @param {any[]} cards
+ * @returns {string}
+ */
+export function renderHeldUpgrades(cards) {
+  if (!Array.isArray(cards) || cards.length === 0) return '';
+  /** @type {Map<number, any[]>} */
+  const byRequest = new Map();
+  for (const card of cards) {
+    const rid = Number(card.request_id);
+    if (!byRequest.has(rid)) byRequest.set(rid, []);
+    /** @type {any[]} */ (byRequest.get(rid)).push(card);
+  }
+  const albums = [...byRequest.values()].map((albumCards) => `
+    <div class="held-upgrade-album" id="wm-held-album-${Number(albumCards[0].request_id)}">
+      <div class="held-upgrade-album-title">${esc(albumCards[0].album || '')} <span class="held-upgrade-artist">${esc(albumCards[0].artist || '')}</span></div>
+      ${albumCards.map(renderHeldUpgradeCard).join('')}
+    </div>`).join('');
+  return `
+    <section class="held-upgrades" id="wm-held-upgrades">
+      <div class="held-upgrades-title">Held upgrades (${cards.length})</div>
+      <div class="held-upgrades-intro">A new copy was found, but its track lengths do not match the copy you already have, so nothing was replaced. Choose which copy to keep.</div>
+      ${albums}
+    </section>`;
+}
+
+const USE_CONFIRM_LABEL = 'Yes, replace my current copy';
+const KEEP_CONFIRM_LABEL = 'Yes, delete the new copy';
+
+/**
+ * Whether THIS rendered button instance is armed. The armed state lives on
+ * the button element itself (``data-held-armed``) and nowhere else, so any
+ * redraw of the pane — which builds fresh, unarmed buttons — can never
+ * leave a plain-looking button one click away from acting. It also has to
+ * read "Yes, ..." on screen: a button that does not visibly ask never acts.
+ * @param {HTMLButtonElement} btn
+ * @param {string} confirmLabel
+ * @returns {boolean}
+ */
+function heldButtonIsArmed(btn, confirmLabel) {
+  return Boolean(btn && btn.dataset && btn.dataset.heldArmed === '1')
+    && btn.textContent === confirmLabel;
+}
+
+/**
+ * @param {HTMLButtonElement | null} btn
+ * @param {boolean} armed
+ */
+function setHeldButtonArmed(btn, armed) {
+  if (!btn) return;
+  if (!btn.dataset) /** @type {any} */ (btn).dataset = {};
+  if (armed) btn.dataset.heldArmed = '1';
+  else delete btn.dataset.heldArmed;
+}
+
+/**
+ * Show one card's choice state; ``armed`` names the one armed button.
+ * @param {number} heldId
+ * @param {'use' | 'keep' | null} armed
+ */
+function setHeldChoiceState(heldId, armed) {
+  const use = /** @type {HTMLButtonElement | null} */ (document.getElementById(`wm-held-use-${heldId}`));
+  const keep = /** @type {HTMLButtonElement | null} */ (document.getElementById(`wm-held-keep-${heldId}`));
+  const cancel = /** @type {HTMLButtonElement | null} */ (document.getElementById(`wm-held-cancel-${heldId}`));
+  setHeldButtonArmed(use, armed === 'use');
+  setHeldButtonArmed(keep, armed === 'keep');
+  if (use) {
+    use.textContent = armed === 'use' ? USE_CONFIRM_LABEL : 'Use new copy';
+    use.classList?.toggle('held-upgrade-armed', armed === 'use');
+    use.disabled = armed === 'keep';
+  }
+  if (keep) {
+    keep.textContent = armed === 'keep' ? KEEP_CONFIRM_LABEL : 'Keep current copy';
+    keep.classList?.toggle('held-upgrade-armed', armed === 'keep');
+    keep.disabled = armed === 'use';
+  }
+  if (cancel) cancel.hidden = !armed;
+}
+
+/** @param {number} heldId */
+export function cancelHeldUpgradeChoice(heldId) {
+  setHeldChoiceState(Number(heldId), null);
+}
+
+/**
+ * Drop one held card (and its album heading when it was the last).
+ * @param {number} heldId
+ */
+function removeHeldUpgradeCard(heldId) {
+  if (_lastData && Array.isArray(_lastData.held_upgrades)) {
+    _lastData.held_upgrades = _lastData.held_upgrades.filter(
+      (/** @type {any} */ c) => Number(c.held_download_log_id) !== heldId);
+  }
+  if (_lastEl) renderWrongMatches(_lastData, _lastEl);
+}
+
+/**
+ * "Use new copy": first click asks, second click force-imports the held
+ * copy (the existing force-import endpoint), then the section refreshes.
+ * @param {number} heldId
+ * @param {number} _deleteId
+ * @param {HTMLButtonElement} btn
+ */
+export async function useHeldUpgradeCopy(heldId, _deleteId, btn) {
+  const id = Number(heldId);
+  if (!heldButtonIsArmed(btn, USE_CONFIRM_LABEL)) {
+    setHeldChoiceState(id, 'use');
+    setHeldButtonArmed(btn, true);
+    return;
+  }
+  setHeldChoiceState(id, null);
+  setHeldButtonArmed(btn, false);
+  btn.disabled = true;
+  btn.textContent = 'Starting...';
+  const keep = /** @type {HTMLButtonElement | null} */ (document.getElementById(`wm-held-keep-${id}`));
+  if (keep) keep.disabled = true;
+  try {
+    const r = await fetch(`${API}/api/pipeline/force-import`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({download_log_id: id}),
+    });
+    const data = await r.json();
+    if (await handleProcessingLockedConflict({
+      httpStatus: r.status,
+      payload: data,
+      control: btn,
+      refetch: (requestId, generation) => refetchProcessingRequest(requestId, '', generation),
+    })) {
+      if (keep) keep.disabled = false;
+      return;
+    }
+    if (data.status === 'queued') {
+      btn.textContent = 'Queued';
+      toast(`Using the new copy: ${data.artist} - ${data.album}`);
+      if (data.job_id) await pollImportJob(data.job_id, btn);
+      invalidateWrongMatches();
+      await _refreshWrongMatches();
+    } else {
+      btn.disabled = false;
+      btn.textContent = 'Use new copy';
+      if (keep) keep.disabled = false;
+      toast(data.message || 'Could not start using the new copy', true);
+    }
+  } catch (_e) {
+    btn.disabled = false;
+    btn.textContent = 'Use new copy';
+    if (keep) keep.disabled = false;
+    toast('Use new copy request failed', true);
+  }
+}
+
+/**
+ * "Keep current copy": first click asks, second click deletes the held
+ * folder (the existing single wrong-match delete).
+ * @param {number} heldId
+ * @param {number} deleteId
+ * @param {HTMLButtonElement} btn
+ */
+export async function keepCurrentCopy(heldId, deleteId, btn) {
+  const id = Number(heldId);
+  if (!heldButtonIsArmed(btn, KEEP_CONFIRM_LABEL)) {
+    setHeldChoiceState(id, 'keep');
+    setHeldButtonArmed(btn, true);
+    return;
+  }
+  setHeldChoiceState(id, null);
+  setHeldButtonArmed(btn, false);
+  btn.disabled = true;
+  btn.textContent = 'Deleting...';
+  const use = /** @type {HTMLButtonElement | null} */ (document.getElementById(`wm-held-use-${id}`));
+  if (use) use.disabled = true;
+  try {
+    const r = await fetch(`${API}/api/wrong-matches/delete`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({download_log_id: Number(deleteId)}),
+    });
+    const data = await r.json();
+    if (r.ok && data.status === 'ok') {
+      toast('Kept your current copy; the new copy was deleted');
+      invalidateWrongMatches();
+      removeHeldUpgradeCard(id);
+    } else {
+      btn.disabled = false;
+      btn.textContent = 'Keep current copy';
+      if (use) use.disabled = false;
+      toast(data.error || data.message || 'Delete failed', true);
+    }
+  } catch (_e) {
+    btn.disabled = false;
+    btn.textContent = 'Keep current copy';
+    if (use) use.disabled = false;
+    toast('Delete request failed', true);
+  }
 }
 
 /**
@@ -1729,7 +2006,10 @@ export async function convergeWrongMatches(requestId, btn) {
     if (r.ok && data.status === 'ok') {
       toast(convergeToast(data));
       invalidateWrongMatches();
-      if (data.group_empty) {
+      // Issue #1445 item 3: held upgrades live in their own section, so
+      // the ordinary group card goes when ITS candidates are gone, even
+      // while held copies for the same album remain.
+      if (data.ordinary_group_empty) {
         removeWrongMatchGroup(requestId);
       } else {
         // Surgical: remove every unmatched row that actually got deleted (i.e.

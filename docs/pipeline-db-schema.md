@@ -699,6 +699,37 @@ WHERE beets_scenario IN ('no_choose_match', 'validation_error')
 ORDER BY id DESC LIMIT 20;
 ```
 
+`validation_result.upgrade_hold` (issue #1445 item 3) is present exactly
+when `scenario = 'upgrade_held'`: the per-track comparison of the held
+candidate with the installed copy it would have replaced
+(`InstalledCopyComparison`: `threshold_seconds`, `compared_count`, `holds`,
+`installed_lengths_source = "measured_from_files"`, and `rows` of
+`medium` / `medium_index` / `title` / `declared_seconds` /
+`installed_seconds` / `candidate_seconds` / `compared` / `tripped`). The
+installed lengths were measured from the installed files at decision time,
+not copied from Beets' `items.length` (which is the declared length).
+Recents, Wrong Matches and `pipeline-cli show` render from it through
+`lib/held_upgrade_view.py`; nothing re-measures. On such a row `detail` is
+the operator sentence, `valid` is false, and `import_result.decision` is
+`upgrade_held`.
+Held status belongs to the FOLDER: `get_wrong_matches` joins the newest
+`upgrade_held` row naming the same `failed_path` (`held_download_log_id`,
+`held_validation_result`, `held_soulseek_username`, `held_created_at`), so a
+later row on that folder — a failed force import — keeps it held until the
+operator deletes it or a force import of it succeeds (both clear
+`failed_path` from every row of the folder).
+
+```sql
+-- Held upgrades and the tracks that tripped the guard.
+SELECT dl.id, dl.request_id, r->>'medium_index' AS track, r->>'title' AS title,
+       r->>'declared_seconds' AS release, r->>'installed_seconds' AS current,
+       r->>'candidate_seconds' AS new
+FROM download_log dl,
+     jsonb_array_elements(dl.validation_result->'upgrade_hold'->'rows') r
+WHERE dl.beets_scenario = 'upgrade_held' AND (r->>'tripped')::bool
+ORDER BY dl.id DESC;
+```
+
 For historical `abandoned_auto_import` audit rows, `validation_result.failed_path`
 points at the prefixed failed-import folder when a leftover staged
 directory existed. A missing staged directory may produce the same audit

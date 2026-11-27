@@ -9,6 +9,7 @@ stable and playable.
 
 from __future__ import annotations
 
+import importlib
 import logging
 import os
 import stat
@@ -557,3 +558,26 @@ def normalize_media_metadata(
         if fail_closed:
             raise
         return MediaReadiness(())
+
+
+def mediafile_length_seconds(path: str) -> float:
+    """One audio file's length, read the way Beets reads ``item.length``.
+
+    Issue #1445 item 3: the upgrade guard compares the installed copy's
+    files with the candidate's, whose lengths the beets harness reports
+    from ``Item.from_path`` — i.e. through ``mediafile``. Reading the
+    installed side with the same reader keeps the two comparable
+    (``sine_440.mp3`` reads 0.54857s both ways). Header-level only (the
+    stream info mutagen parses); no decode. Raises on a missing or
+    unreadable file; the caller decides what an unusable track means.
+
+    Resolved via ``importlib`` because ``mediafile`` ships no type stubs
+    (same idiom as ``lib.retag_divergence_audit``).
+    """
+    media_file_cls = getattr(  # noqa: B009 - mediafile ships no type stubs
+        importlib.import_module("mediafile"), "MediaFile",
+    )
+    raw = getattr(media_file_cls(path), "length")  # noqa: B009 - untyped field
+    if not isinstance(raw, (int, float)):
+        raise TypeError(f"mediafile length is not a number: {raw!r}")
+    return float(raw)

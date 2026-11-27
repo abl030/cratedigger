@@ -103,6 +103,55 @@ class TestBuildWrongMatchGroupsInterface(unittest.TestCase):
         self.assertIsNone(entries[0]["import_job"])
         self.assertEqual(group["import_jobs"], [])
 
+    def test_held_upgrade_is_its_own_list_not_an_ordinary_group(self) -> None:
+        """Issue #1445 item 3: a held upgrade never sits in an ordinary
+        group (where converge/delete-all live); it is projected on its own,
+        with the shared sentence and m:ss table."""
+        import json
+
+        from tests.test_held_upgrade_view import fairways_validation_result
+        from web.wrong_match_queue_view import build_held_upgrades
+
+        ordinary = seed_visible_wrong_match(self.db, self.root, request_id=7)
+        path = os.path.join(self.root, "wrong_matches", "The Fairways")
+        os.makedirs(path)
+        held_payload = json.loads(fairways_validation_result())
+        held_payload["failed_path"] = path
+        held_id = self.db.log_download(
+            7, outcome="rejected", soulseek_username="natetheneet",
+            validation_result=held_payload,
+        )
+
+        groups = self._build()
+        entries = groups[0]["entries"]
+        assert isinstance(entries, list)
+        self.assertEqual(
+            [e["download_log_id"] for e in entries],
+            [ordinary.download_log_id])
+
+        held = build_held_upgrades(db=self.db)
+        self.assertEqual([card["download_log_id"] for card in held], [held_id])
+        card = held[0]
+        self.assertEqual(card["request_id"], 7)
+        self.assertEqual(card["failed_path"], path)
+        self.assertTrue(str(card["sentence"]).startswith("Kept your current copy."))
+        rows = card["rows"]
+        assert isinstance(rows, list)
+        self.assertEqual(
+            [row["track"] for row in rows if row["differs"]], ["2", "5"])
+
+    def test_held_upgrade_whose_folder_is_gone_leaves_the_list(self) -> None:
+        import json
+
+        from tests.test_held_upgrade_view import fairways_validation_result
+        from web.wrong_match_queue_view import build_held_upgrades
+
+        self.db.seed_request(make_request_row(id=7, mb_release_id=_MBID))
+        payload = json.loads(fairways_validation_result())
+        payload["failed_path"] = os.path.join(self.root, "wrong_matches", "gone")
+        self.db.log_download(7, outcome="rejected", validation_result=payload)
+        self.assertEqual(build_held_upgrades(db=self.db), [])
+
     def test_active_import_jobs_serialize_into_group_and_entry(self) -> None:
         """The job payloads carry the real serialized job, not a husk.
 

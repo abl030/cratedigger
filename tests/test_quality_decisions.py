@@ -58,6 +58,7 @@ from lib.quality import (
 )
 from lib.quality.compare import _shared_spectral_bitrates
 from lib.quality.decisions import post_import_search_action
+from lib.quality.pipeline import classify_full_pipeline_decision
 from lib.quality.spectral_interpretation import interpret_measurement
 from tests.evidence_helpers import make_audio_corrupt_validation_report
 
@@ -1033,6 +1034,9 @@ EXPECTED_RESULT_KEYS = {
     # AUDIT ONLY (issue #1241): the operator's incomplete mark plus beets'
     # coverage proof made this decision disregard the installed side.
     "installed_incomplete_disregarded",
+    # Issue #1445 item 3: "hold" when the upgrade guard held an import.
+    # Only the evidence twin ever sets it; the flat twin always says None.
+    "upgrade_guard",
 }
 
 # Valid values for each stage (None means stage was skipped)
@@ -1408,6 +1412,73 @@ class TestFullPipelineDecisionFromEvidence(unittest.TestCase):
         self.assertEqual(result["stage1_spectral"], "reject")
         self.assertEqual(result["final_status"], "wanted")
         self.assertEqual(evidence_decision_name(result), "spectral_reject")
+
+    # --- issue #1445 item 3: the upgrade guard ---------------------------
+
+    def _upgrade_pair(self) -> tuple[AlbumQualityEvidence, AlbumQualityEvidence]:
+        """A FLAC candidate that plainly upgrades an installed MP3 320."""
+        candidate = self._evidence(
+            owner_type="download_log_candidate", owner_id=42692,
+            min_bitrate=900, avg_bitrate=950, fmt="FLAC",
+            container="flac", storage_format="flac",
+        )
+        current = self._evidence(
+            owner_type="request_current", owner_id=1649,
+            min_bitrate=320, avg_bitrate=320, fmt="MP3", is_cbr=True,
+        )
+        return candidate, current
+
+    def test_upgrade_guard_holds_an_import_over_a_disagreeing_copy(self):
+        candidate, current = self._upgrade_pair()
+        unguarded = full_pipeline_decision_from_evidence(candidate, current)
+        self.assertTrue(unguarded["imported"])
+        self.assertIsNone(unguarded["upgrade_guard"])
+
+        held = full_pipeline_decision_from_evidence(
+            candidate, current,
+            facts=AlbumQualityEvidenceDecisionFacts(
+                installed_track_lengths_disagree=True),
+        )
+        self.assertFalse(held["imported"])
+        self.assertEqual(held["upgrade_guard"], "hold")
+        self.assertEqual(held["final_status"], "wanted")
+        self.assertTrue(held["keep_searching"])
+        self.assertIsNone(held["stage3_quality_gate"])
+        self.assertEqual(evidence_decision_name(held), "upgrade_held")
+        self.assertTrue(held["denylisted"])
+        # The quality verdict the hold overrode stays readable as audit.
+        self.assertEqual(held["stage2_import"], unguarded["stage2_import"])
+        self.assertEqual(
+            classify_full_pipeline_decision(held),
+            ("uncertain", False, "upgrade_held"),
+        )
+
+    def test_upgrade_guard_is_off_under_the_operator_incomplete_mark(self):
+        candidate, current = self._upgrade_pair()
+        for covered in (False, True):
+            with self.subTest(candidate_covers_declared_program=covered):
+                result = full_pipeline_decision_from_evidence(
+                    candidate, current,
+                    facts=AlbumQualityEvidenceDecisionFacts(
+                        installed_track_lengths_disagree=True,
+                        installed_marked_incomplete=True,
+                        candidate_covers_declared_program=covered,
+                    ),
+                )
+                self.assertTrue(result["imported"])
+                self.assertIsNone(result["upgrade_guard"])
+
+    def test_upgrade_guard_never_touches_a_non_import(self):
+        candidate, current = self._upgrade_pair()
+        # Swap roles: the MP3 candidate is a downgrade of the FLAC copy.
+        unguarded = full_pipeline_decision_from_evidence(current, candidate)
+        self.assertFalse(unguarded["imported"])
+        guarded = full_pipeline_decision_from_evidence(
+            current, candidate,
+            facts=AlbumQualityEvidenceDecisionFacts(
+                installed_track_lengths_disagree=True),
+        )
+        self.assertEqual(guarded, unguarded)
 
 
 class TestPreimportAudioGate(unittest.TestCase):

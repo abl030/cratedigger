@@ -27,6 +27,7 @@ from lib.current_library_display import (
     resolve_request_current_library,
 )
 from lib.failure_presentation import FailureEvidence, present_failure
+from lib.held_upgrade_view import held_upgrade_view
 from lib.import_evidence import HaveAnalysisFailure
 from lib.quality import ImportResult
 from scripts.pipeline_cli._format import _fmt_br, _fmt_measurement
@@ -278,6 +279,26 @@ def _render_failure_presentation(row: Mapping[str, object]) -> list[str]:
     return lines
 
 
+def _render_held_upgrade(row: Mapping[str, object]) -> list[str]:
+    """A held upgrade (issue #1445 item 3), from the SAME projection the
+    web's Recents, History and Wrong Matches render
+    (``lib.held_upgrade_view``). Tracks that tripped the guard are starred.
+    """
+    view = held_upgrade_view(row.get("validation_result"))
+    if view is None:
+        return []
+    lines = [
+        f"      upgrade held: {view.sentence}",
+        "        Track  Release  Current  New    Title",
+    ]
+    lines.extend(
+        f"      {'*' if track.differs else ' '} {track.track:<6} "
+        f"{track.release:<8} {track.current:<8} {track.new:<6} {track.title}"
+        for track in view.rows
+    )
+    return lines
+
+
 def _render_youtube_metadata(row: Mapping[str, object]) -> list[str]:
     if (row.get("source") or "slskd") != "youtube":
         return []
@@ -488,6 +509,8 @@ def cmd_show(
         for h in history:
             print(_render_download_history_header(h))
             for line in _render_failure_presentation(h):
+                print(line)
+            for line in _render_held_upgrade(h):
                 print(line)
             for line in _render_youtube_metadata(h):
                 print(line)

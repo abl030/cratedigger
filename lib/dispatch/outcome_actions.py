@@ -21,6 +21,7 @@ from lib.dispatch.helpers import (
 )
 from lib.dispatch.types import (
     DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
+    DISPATCH_CODE_UPGRADE_HELD,
     DispatchOutcome,
     ImportAttemptResult,
     PostCommitCleanup,
@@ -52,8 +53,10 @@ from lib.terminal_outcomes import (
 
 if TYPE_CHECKING:
     from lib.dispatch.types import DispatchDB, DispatchRequest
+    from lib.import_execution import CancellationToken
     from lib.pipeline_db import DownloadLogOutcome
     from lib.quality import ImportResult, MeasurementFailure
+    from lib.quality.installed_copy_guard import InstalledCopyComparison
 
 logger = logging.getLogger("cratedigger")
 
@@ -238,6 +241,125 @@ def _reject_import_from_evidence_decision(
         ),
         post_commit_wrong_match_scenario=decision,
         post_commit_cleanup=cleanup_plan,
+    )
+
+
+def _hold_upgrade_from_evidence_decision(
+    request: DispatchRequest,
+    db: DispatchDB,
+    *,
+    attempt_result: ImportAttemptResult,
+    comparison: InstalledCopyComparison,
+    cancellation_token: CancellationToken | None = None,
+) -> DispatchOutcome:
+    """Keep the installed copy and hand the candidate to the operator.
+
+    Issue #1445 item 3. Reached only from the automation import lane, under
+    the RELEASE lock, before any action file is written or Beets launches —
+    so nothing has been replaced. The candidate folder moves WHOLE into
+    ``wrong_matches/`` (one atomic rename, the Lane B precedent in
+    ``lib.download_rejection._reject_request_auto_import``) and the audit
+    row names it as ``failed_path`` under the ``upgrade_held`` scenario,
+    carrying the per-track comparison every surface renders from.
+
+    Search state is left exactly as any ordinary rejected attempt leaves
+    it: the request requeues per the caller's lifecycle authority, and no
+    ``search_filetype_override`` narrowing is computed. The contributing
+    peers are denylisted for THIS request only, without a cooldown strike
+    (``apply_cooldown=False``) — a hold is not the peer's fault, but the
+    identical folder must not be fetched again next cycle.
+
+    This helper checks cancellation only before the move.
+    The importer's owner checkpoint (``checkpoint_automation_owner``,
+    ``lib/import_execution.py``) still runs before the terminal commit, so a
+    cancel, a lost lease or a crash after the move and before the commit
+    leaves the folder in ``wrong_matches/`` with no row and no denylist
+    entry, while startup recovery requeues the request — the same window
+    Lanes A and B have. Nothing is imported or deleted in that window; the
+    worst case is an orphan folder nobody sees and the same peer's copy
+    being fetched again.
+    """
+    from lib.import_execution import cancellation_hook, checkpoint
+    from lib.import_manifest import move_failed_import_whole
+    from lib.quality.installed_copy_guard import held_upgrade_sentence
+
+    dl_info = request.dl_info
+    import_result = attempt_result.result
+    if import_result is None:
+        raise RuntimeError("an upgrade hold requires an import result")
+    _populate_dl_info_from_import_result(dl_info, import_result)
+    sentence = held_upgrade_sentence(comparison)
+    usernames = extract_usernames(request.files or [])
+    if dl_info.username:
+        usernames.add(dl_info.username)
+
+    # Cancellation is checked here before the move and not again in this
+    # helper. The importer's owner checkpoint still runs before the terminal
+    # commit, so a cancel or lost lease after the move can still leave the
+    # folder in wrong_matches/ with no row and no denylist entry (the Lane
+    # A/B window: nothing imported or deleted; worst case an orphan folder
+    # and the same peer fetched again). See the docstring.
+    checkpoint(cancellation_token)
+    failed_path = move_failed_import_whole(
+        request.path,
+        scenario="upgrade_held",
+        before_mutation=cancellation_hook(cancellation_token),
+    )
+
+    held = (
+        ValidationResult.from_json(dl_info.validation_result)
+        if dl_info.validation_result
+        else ValidationResult(distance=request.distance)
+    )
+    held.valid = False
+    held.scenario = "upgrade_held"
+    held.detail = sentence
+    held.failed_path = failed_path
+    held.denylisted_users = sorted(usernames)
+    held.upgrade_hold = comparison
+    validation_json = held.to_json()
+    dl_info.validation_result = validation_json
+
+    terminal_outcome = _record_rejection_and_maybe_requeue(
+        db,
+        request.request_id,
+        dl_info,
+        detail=sentence,
+        error=None,
+        requeue=request.requeue_on_failure,
+        outcome_label="rejected",
+        validation_result=validation_json,
+        staged_path=request.path,
+        attempt_result=attempt_result,
+        import_job_id=request.candidate_import_job_id,
+        source_download_log_id=request.candidate_download_log_id,
+        denylists=tuple(
+            TerminalDenylist(
+                username,
+                "upgrade held: track lengths differ from the installed copy",
+                apply_cooldown=False,
+            )
+            for username in sorted(usernames)
+        ),
+        cooled_down_users=request.cooled_down_users,
+    )
+    logger.warning(
+        "UPGRADE HELD: %s — %s | kept at %s | denylisted for this request: %s",
+        request.label,
+        sentence,
+        failed_path,
+        ", ".join(sorted(usernames)),
+    )
+    return DispatchOutcome(
+        success=False,
+        message=f"Upgrade held: {sentence}",
+        code=DISPATCH_CODE_UPGRADE_HELD,
+        terminal_outcome=(
+            terminal_outcome
+            if isinstance(terminal_outcome, PendingImportTerminalOutcome)
+            else None
+        ),
+        post_commit_wrong_match_scenario="upgrade_held",
     )
 
 
