@@ -91,6 +91,7 @@ from web.routes import imports as _imports_routes
 from web.routes import labels as _labels_routes
 from web.routes import library as _library_routes
 from web.routes import long_tail as _long_tail_routes
+from web.routes import other_pressings as _other_pressings_routes
 from web.routes import pipeline as _pipeline_routes
 from web.routes import pipeline_dashboard as _pipeline_dashboard_routes
 from web.routes import pipeline_mutations as _pipeline_mutations_routes
@@ -126,6 +127,7 @@ ALL_ROUTES: list[RouteRegistration] = merge_registries(
     _disk_coverage_routes,
     _labels_routes,
     _long_tail_routes,
+    _other_pressings_routes,
     _pipeline_routes,
     _pipeline_dashboard_routes,
     _pipeline_mutations_routes,

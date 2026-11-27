@@ -49,6 +49,7 @@ from scripts.pipeline_cli.imports import (
     import_preview_is_routed,
 )
 from scripts.pipeline_cli.long_tail import cmd_long_tail
+from scripts.pipeline_cli.other_pressings import cmd_other_pressings
 from scripts.pipeline_cli.quality import cmd_quality, cmd_repair_spectral
 from scripts.pipeline_cli.query import cmd_query
 from scripts.pipeline_cli.replace import cmd_replace
@@ -135,6 +136,7 @@ def main(*, api_socket: str | None = None):
         "force-import": cmd_force_import,
         "import-local": cmd_import_local,
         "beets-distance": cmd_beets_distance,
+        "other-pressings": cmd_other_pressings,
     }
     if args.command in api_commands:
         sys.exit(api_commands[args.command](None, args))

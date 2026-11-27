@@ -40,6 +40,10 @@ _INTERNAL_HOST = "cratedigger.internal"
 TIMEOUT_ENQUEUE_SECONDS = _TIMEOUT_SECONDS
 """Row lookups plus one INSERT (delete/upgrade/force-import/resolve-rg)."""
 
+TIMEOUT_PRESSING_CHECK_SECONDS = 60.0
+"""The other-pressing check (#1445): the service bounds its own mirror work
+to 30s, so this only needs headroom for the DB read and the reply."""
+
 TIMEOUT_MIRROR_SECONDS = 300.0
 """Replace: several inline MB/Discogs mirror lookups (this deployment's
 mirror timeout is 15s per call), a Beets exact delete, Wrong Matches group
