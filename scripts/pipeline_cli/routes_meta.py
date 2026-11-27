@@ -28,6 +28,7 @@ from scripts.pipeline_cli.beets_distance import add_beets_distance_subparser
 from scripts.pipeline_cli.destructive import add_destructive_subparsers
 from scripts.pipeline_cli.imports import add_imports_subparsers
 from scripts.pipeline_cli.long_tail import add_long_tail_subparser
+from scripts.pipeline_cli.other_pressings import add_other_pressings_subparser
 from scripts.pipeline_cli.quality import add_quality_subparsers
 from scripts.pipeline_cli.query import add_query_subparser
 from scripts.pipeline_cli.replace import add_replace_subparser
@@ -104,6 +105,9 @@ def _build_parser(
 
     # beets-distance
     add_beets_distance_subparser(sub)
+
+    # other-pressings
+    add_other_pressings_subparser(sub)
 
     # ban-source / library-delete
     add_destructive_subparsers(sub)

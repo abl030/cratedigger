@@ -1092,6 +1092,12 @@ class TestRoutedCommandDeadlines(unittest.TestCase):
                 api_mutations.TIMEOUT_FOLDER_READ_SECONDS,
             ),
             (
+                "other-pressings",
+                lambda: pipeline_cli.cmd_other_pressings(
+                    None, self._args(download_log_id=1, json=True)),
+                api_mutations.TIMEOUT_PRESSING_CHECK_SECONDS,
+            ),
+            (
                 "import-preview",
                 lambda: pipeline_cli.cmd_import_preview_from_download_log(
                     None,

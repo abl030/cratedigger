@@ -100,6 +100,7 @@ from scripts.pipeline_cli.imports import (
     cmd_import_preview_from_download_log,
 )
 from scripts.pipeline_cli.long_tail import cmd_long_tail
+from scripts.pipeline_cli.other_pressings import cmd_other_pressings
 from scripts.pipeline_cli.quality import (
     cmd_quality,
     cmd_repair_spectral,
@@ -158,6 +159,7 @@ __all__ = [
     "cmd_mark_complete",
     "cmd_mark_incomplete",
     "cmd_merge_rekey",
+    "cmd_other_pressings",
     "cmd_pipeline_delete",
     "cmd_quality",
     "cmd_query",

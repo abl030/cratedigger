@@ -160,6 +160,7 @@ not on anyone's list.
 | `/api/pipeline/force-import` | POST | Queue force-import for a rejected download `{"download_log_id": N}`; returns `202` + job id |
 | `/api/youtube-album` | POST | Resolve an MB/Discogs release or group to the cache-writing YouTube Music matrix; body `{"identifier": "...", "refresh": false}` |
 | `/api/wrong-matches` | GET | Group rejected downloads by release for triage; held upgrades come back separately as `held_upgrades` (issue #1445) |
+| `/api/other-pressings/<download_log_id>` | GET | Read-only, on-demand check of one attempt against the other releases in its MusicBrainz release group and the release's disc IDs (issue #1445); 200 answer (including a Discogs target, a release gone from MusicBrainz, and a release with no tracks), 404 unknown row, 503 mirror unreachable; `pipeline-cli other-pressings` relays it |
 | `/api/wrong-matches/explorer` | GET | List files for one wrong-match candidate, including extracted tags and audio-preview URLs |
 | `/api/wrong-matches/audio` | GET | Stream an individual wrong-match audio file with byte-range support |
 | `/api/wrong-matches/converge` | POST | Queue every wrong-match candidate within a release's loosen threshold and delete the rest; never touches a held upgrade (`held_upgrades` count, `ordinary_group_empty`) |
@@ -704,6 +705,39 @@ not on anyone's list.
   scrolls inside its own box and the buttons wrap at phone width. Recents and
   History show the attempt with an "Upgrade held" badge, the sentence in
   amber, and the same table.
+- **Check other pressings** (issue #1445) — a button beside the track-length
+  lines of any History row that has a track-length shape, and on each Held
+  upgrades card (for the new copy). Clicking runs the read-only check in
+  `lib/other_pressing_check.py` through `GET /api/other-pressings/<id>`; it
+  never runs at render time and writes nothing. The answer appears inline
+  and claims no more than the lengths show. It first says whether the files
+  fit the release's own listing (every track within 2s). A listed length
+  the release leaves blank falls back to the recording's, as Beets does,
+  and the sentence then says for which tracks the recording's length was
+  used; a pregap hidden track counts as track 0, as in Beets. If the files
+  fit, other pressings they also fit are reported as having "the same
+  listing within two seconds", never as a match. Only when the files do not
+  fit the release is a sibling they do fit reported as a matching pressing,
+  with where its titles differ (punctuation and case are not differences;
+  combining marks are) or that the listings differ only in length. A
+  sibling counts only on lengths it gives its own tracks: one that leaves
+  some or all track lengths blank, and fits only through its recordings'
+  lengths (which every release using those recordings shares), is counted
+  in its own sentence as not comparable. Disc IDs are judged twice: the
+  release's listed lengths against every attached table of contents (a
+  disc vouches for the listing only when it matches it; a blank listed
+  length is unknown, not a mismatch), and the files against every attached
+  disc (the listing's disc, a different attached disc, or none; 2 to 5s off
+  is said as "a few seconds off", more as "does not match"). With no disc
+  ID it says only that there is no disc to check against; a digital,
+  vinyl, cassette, DVD, Blu-ray or VHS medium is named as one that cannot
+  carry a disc ID, any other format (DualDisc, SACD, "Other") gets the
+  neutral sentence, and a multi-disc release is described disc by disc. A
+  release MusicBrainz lists with no tracks says so. Links go to the
+  matching pressings and the release on MusicBrainz. A Discogs release gets
+  "not available"; an unreachable or slow mirror (30s budget, a busy mirror
+  slot included) gets one plain sentence. `web/js/other_pressings.js` owns
+  the control; every sentence is server-owned.
 - **Wrong Matches unavailable sources** — a candidate whose folder the server
   could not READ (permissions, I/O — never a folder proven gone) stays in the
   list with a `source unavailable` badge, an amber card, both Force Import and

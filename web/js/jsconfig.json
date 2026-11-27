@@ -19,7 +19,7 @@
     // above the repository root, where tsc would otherwise find it.
     "types": []
   },
-  // The 31 modules plus `globals.d.ts`, which declares the cross-module
+  // The 32 modules plus `globals.d.ts`, which declares the cross-module
   // `window.*` handlers `main.js` installs. `tests/*.mjs` is deliberately
   // outside this project — see `docs/webui-primer.md`.
   "include": ["*.js", "*.d.ts"]

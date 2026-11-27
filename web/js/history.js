@@ -9,6 +9,7 @@ import {
   spectralWithheldPresentation,
 } from './quality_palette.js';
 import { cdRipProofPresentation } from './cd_rip_proof.js';
+import { renderOtherPressingsControl } from './other_pressings.js';
 
 /**
  * Render a single V0 probe value with its provenance suffix.
@@ -780,9 +781,11 @@ export function renderDownloadHistoryItem(h) {
     const slotLines = slots.map(slot =>
       `<div style="color:#888;" title="${esc(slot.file_name || '')}">${esc(slot.summary)}</div>`,
     ).join('');
+    // Issue #1445: whether this copy is another pressing is a question
+    // only the mirror can answer, so it is asked on demand, never here.
     rows.push([
       'Track length',
-      `<span style="color:${calm ? '#aaa' : '#ec6'};">${esc(h.track_length_warning)}</span>${slotLines}`,
+      `<span style="color:${calm ? '#aaa' : '#ec6'};">${esc(h.track_length_warning)}</span>${slotLines}${renderOtherPressingsControl(h.id)}`,
     ]);
   }
 

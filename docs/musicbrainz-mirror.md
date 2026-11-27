@@ -14,7 +14,28 @@ curl -s "http://192.168.1.43:5200/ws/2/release/MBID?inc=recordings+media&fmt=jso
 
 # Get release group
 curl -s "http://192.168.1.43:5200/ws/2/release-group/RGID?inc=releases&fmt=json"
+
+# Release with tracks and disc IDs (each disc's table of contents:
+# offsets in sectors, 75 per second; "sectors" is where the last track ends)
+curl -s "http://192.168.1.43:5200/ws/2/release/MBID?inc=recordings+media+discids+release-groups&fmt=json"
+
+# Every release in a release group with tracks and disc IDs, 25 per page
+curl -s "http://192.168.1.43:5200/ws/2/release?release-group=RGID&inc=recordings+media+discids&limit=25&offset=0&fmt=json"
 ```
+
+The last two are the reads behind the on-demand "Check other pressings"
+check (`lib/other_pressing_check.py`, issue #1445), through
+`lib/mb_api.get_release_with_discids` and
+`browse_release_group_with_discids`. They are uncached, take an explicit
+per-request timeout that also bounds the wait for a mirror slot, decode
+strictly (an error object in a 200 is a failure, not an empty release),
+and read at most 150 releases of a group, counting a release once even
+when browse lists it on two pages. A track's `length` is often null while
+its `recording.length` is set; the check falls back to the recording's
+length for the matched release's own listing exactly as Beets does, but
+never for another pressing, because every release using a recording shares
+its length. A medium's `pregap` (a hidden track before track 1) is counted
+as track 0, as Beets counts it.
 
 ## Notes
 
