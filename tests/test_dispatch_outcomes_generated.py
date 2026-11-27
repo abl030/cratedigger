@@ -2018,6 +2018,10 @@ class TestGeneratedDeleteIneligibleScenarioIsolation(unittest.TestCase):
             "strong_mismatch",
             "audio_corrupt",
             "untracked_audio",
+            # Issue #1445 item 3: a held upgrade links its evidence (the
+            # card renders the candidate's measurement) but the reducer
+            # must never see it.
+            "upgrade_held",
         )
         for scenario, link_fault in product(
             scenarios,

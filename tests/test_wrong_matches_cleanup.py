@@ -281,13 +281,14 @@ class TestWrongMatchDeleteService(unittest.TestCase):
         failed_path: str,
         outcome: str = "rejected",
         request_id: int = 1,
+        scenario: str = "high_distance",
     ) -> int:
         db.log_download(
             request_id,
             soulseek_username="alice",
             outcome=outcome,
             validation_result={
-                "scenario": "high_distance",
+                "scenario": scenario,
                 "failed_path": failed_path,
             },
         )
@@ -456,6 +457,47 @@ class TestWrongMatchDeleteService(unittest.TestCase):
             shutil.rmtree(root1, ignore_errors=True)
             shutil.rmtree(root2, ignore_errors=True)
             shutil.rmtree(root3, ignore_errors=True)
+
+    def test_delete_group_skips_a_held_upgrade(self):
+        """Issue #1445 item 3: "delete all" on a request's ordinary wrong
+        matches must not discard a held upgrade the operator has not looked
+        at; it has its own Keep current copy action. The held row is also
+        not an ordinary leftover, so the group still reads empty."""
+        from lib.wrong_match_delete_service import (
+            delete_wrong_match,
+            delete_wrong_match_group,
+        )
+
+        db = self._make_db()
+        root1, ordinary = make_failed_import_source()
+        root2, held = make_failed_import_source()
+        try:
+            for source in (ordinary, held):
+                with open(os.path.join(source, "01.mp3"), "wb") as f:
+                    f.write(b"audio")
+            self._log_download(db, failed_path=ordinary)
+            held_id = self._log_download(
+                db, failed_path=held, scenario="upgrade_held")
+
+            summary = delete_wrong_match_group(db, 1)
+
+            self.assertTrue(summary.success)
+            self.assertEqual(summary.processed, 1)
+            self.assertEqual(summary.deleted, 1)
+            self.assertTrue(summary.group_empty)
+            self.assertFalse(os.path.exists(ordinary))
+            self.assertTrue(os.path.isdir(held))
+            self.assertEqual(
+                [row["download_log_id"] for row in db.get_wrong_matches()],
+                [held_id])
+
+            # Discarding it stays possible, one row at a time.
+            result = delete_wrong_match(db, held_id, require_visible=True)
+            self.assertTrue(result.success)
+            self.assertFalse(os.path.exists(held))
+        finally:
+            shutil.rmtree(root1, ignore_errors=True)
+            shutil.rmtree(root2, ignore_errors=True)
 
     def test_delete_group_counts_a_proven_absence_as_cleared_missing(self):
         """A pointer-only clear is NOT a deletion, and the count says so.

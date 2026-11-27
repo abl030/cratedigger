@@ -68,6 +68,9 @@ _PRODUCER_FILES: tuple[str, ...] = (
     "lib/download_validation.py",
     "lib/download_processing.py",
     "lib/dispatch/manifest_guard.py",
+    # Issue #1445 item 3: the upgrade-guard hold writes ``failed_path``
+    # (the fifth admission site in docs/rejection-routing.md).
+    "lib/dispatch/outcome_actions.py",
 )
 
 # World failures with a reviewable folder (issue #1077, D4): kept + banned +
@@ -83,6 +86,10 @@ VISIBLE_NOT_DELETE_ELIGIBLE: frozenset[str] = frozenset({
     "validation_error",
     "incomplete_fileset",
     "unverifiable_source",
+    # Issue #1445 item 3: an automatic upgrade the guard held. Kept, its
+    # peer banned for the request, shown in its own Held upgrades section;
+    # converge, delete-group and the reducer all skip it.
+    "upgrade_held",
 })
 
 # Spelled by a registered producer, but structurally cannot reach EITHER

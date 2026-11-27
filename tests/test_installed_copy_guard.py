@@ -215,5 +215,35 @@ class TestHeldUpgradeSentence(unittest.TestCase):
             self.assertNotIn(token, sentence)
 
 
+class TestUpgradeHeldVocabulary(unittest.TestCase):
+    """One token, three readers: the decision, the scenario, the policy."""
+
+    def test_scenario_and_decision_share_one_token(self) -> None:
+        from lib.quality.decisions import DECISION_UPGRADE_HELD
+        from lib.validation_envelope import scenario_covers_declared_program
+        from lib.wrong_match_policy import (
+            UPGRADE_HELD_SCENARIO,
+            rejection_scenario_is_delete_eligible,
+            rejection_scenario_is_wrong_match_candidate,
+        )
+
+        self.assertEqual(UPGRADE_HELD_SCENARIO, DECISION_UPGRADE_HELD)
+        self.assertTrue(
+            rejection_scenario_is_wrong_match_candidate(UPGRADE_HELD_SCENARIO))
+        self.assertFalse(
+            rejection_scenario_is_delete_eligible(UPGRADE_HELD_SCENARIO))
+        # It was a strong_match: a force import of the held row is covered.
+        self.assertTrue(scenario_covers_declared_program(UPGRADE_HELD_SCENARIO))
+
+    def test_dispatch_action_keeps_the_folder_and_bans(self) -> None:
+        from lib.quality import dispatch_action
+
+        action = dispatch_action("upgrade_held")
+        self.assertTrue(action.record_rejection)
+        self.assertTrue(action.denylist)
+        self.assertFalse(action.cleanup)
+        self.assertFalse(action.mark_done)
+
+
 if __name__ == "__main__":
     unittest.main()

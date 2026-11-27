@@ -42,6 +42,7 @@ from lib.validation_envelope import (
     decode_validation_envelope,
     scenario_covers_declared_program,
 )
+from lib.wrong_match_policy import is_upgrade_held_scenario
 from lib.wrong_matches import (
     WrongMatchSourceDB,
     cleanup_wrong_match_source,
@@ -99,6 +100,9 @@ OUTCOME_SKIPPED_ACTIVE_JOB = "skipped_active_job"
 OUTCOME_SKIPPED_INVALID_ROW = "skipped_invalid_row"
 OUTCOME_SKIPPED_MISSING_PATH = "skipped_missing_path"
 OUTCOME_SKIPPED_OPERATIONAL = "skipped_operational"
+#: Issue #1445 item 3: a held upgrade is the operator's call; the reducer
+#: refuses it before reading anything else about the row.
+OUTCOME_SKIPPED_HELD_UPGRADE = "skipped_held_upgrade"
 OUTCOME_DELETE_FAILED = "delete_failed"
 
 OUTCOME_KEYS: tuple[str, ...] = (
@@ -115,6 +119,7 @@ OUTCOME_KEYS: tuple[str, ...] = (
     OUTCOME_SKIPPED_INVALID_ROW,
     OUTCOME_SKIPPED_MISSING_PATH,
     OUTCOME_SKIPPED_OPERATIONAL,
+    OUTCOME_SKIPPED_HELD_UPGRADE,
     OUTCOME_DELETE_FAILED,
 )
 
@@ -186,6 +191,7 @@ class WrongMatchCleanupSummary(msgspec.Struct, frozen=True):
     skipped_invalid_row: int = 0
     skipped_missing_path: int = 0
     skipped_operational: int = 0
+    skipped_held_upgrade: int = 0
     delete_failed: int = 0
     results: tuple[WrongMatchCleanupOutcome, ...] = ()
     cancelled: bool = False
@@ -331,6 +337,22 @@ def _cleanup_wrong_match(
             OUTCOME_SKIPPED_INVALID_ROW,
             request_id=request_id,
             reason="request_missing",
+        )
+
+    if is_upgrade_held_scenario(
+        decode_validation_envelope(entry.get("validation_result")).scenario
+    ):
+        # Issue #1445 item 3: never evaluated, never deleted, never given a
+        # triage block. Approving or discarding a held upgrade is the
+        # operator's call (force import / wrong-match delete). This guard
+        # sits in the reducer itself because the delete-all triage batch
+        # (``cleanup_all_wrong_matches``) reaches every visible row, not
+        # only the delete-eligible ones.
+        return _result(
+            download_log_id,
+            OUTCOME_SKIPPED_HELD_UPGRADE,
+            request_id=request_id,
+            reason="held_upgrade",
         )
 
     raw_path = validation_failed_path(entry.get("validation_result"))

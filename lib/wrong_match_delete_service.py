@@ -20,6 +20,7 @@ from lib.validation_envelope import (
     ValidationResultEnvelope,
     decode_validation_envelope,
 )
+from lib.wrong_match_policy import is_upgrade_held_scenario
 from lib.wrong_matches import (
     WrongMatchSourceDB,
     cleanup_wrong_match_source,
@@ -219,6 +220,11 @@ def delete_wrong_match_group(
             ))
             continue
         if _visible_wrong_match_row(db, log_id) is None:
+            continue
+        if _row_is_held_upgrade(row):
+            # Issue #1445 item 3: a held upgrade is not an ordinary wrong
+            # match. It has its own discard (one ``delete_wrong_match``),
+            # so "delete all" on the request never sweeps it away unseen.
             continue
         results.append(delete_wrong_match(db, log_id, require_visible=True))
 
@@ -570,8 +576,24 @@ def _visible_wrong_match_row(
     return None
 
 
+def _row_is_held_upgrade(row: Mapping[str, object]) -> bool:
+    return is_upgrade_held_scenario(
+        decode_validation_envelope(row.get("validation_result")).scenario
+    )
+
+
 def _remaining_visible_count(db: WrongMatchDeleteDB, request_id: int) -> int:
-    return sum(1 for row in db.get_wrong_matches() if row.get("request_id") == request_id)
+    """Ordinary wrong matches still visible for the request.
+
+    A held upgrade (issue #1445 item 3) is excluded: group delete never
+    touches it, so counting it would make every group holding one read as
+    a failed delete.
+    """
+    return sum(
+        1 for row in db.get_wrong_matches()
+        if row.get("request_id") == request_id
+        and not _row_is_held_upgrade(row)
+    )
 
 
 def _source_dirs(

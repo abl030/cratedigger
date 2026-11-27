@@ -57,6 +57,7 @@ from lib.wrong_match_delete_service import (
     delete_wrong_match,
     delete_wrong_match_group,
 )
+from lib.wrong_match_policy import is_upgrade_held_scenario
 from web.overlay import compute_library_rank
 from web.routes._pydantic import PositiveInt, parse_body
 from web.routes._registry import RouteHandler, RouteRegistration, route
@@ -464,6 +465,7 @@ def post_wrong_match_converge(h: RouteHandler, body: dict[str, object]) -> None:
     dismissed = 0
     deleted = 0
     remaining = 0
+    held_upgrades = 0
 
     for row in pdb.get_wrong_matches():
         if row.get("request_id") != rid:
@@ -474,6 +476,14 @@ def post_wrong_match_converge(h: RouteHandler, body: dict[str, object]) -> None:
         lid = row["download_log_id"]
 
         vr = decode_validation_envelope(row.get("validation_result"))
+        if is_upgrade_held_scenario(vr.scenario):
+            # Issue #1445 item 3: a held upgrade's distance is green, so it
+            # would be force-imported here and Beets would replace the
+            # installed copy the guard kept. Converge neither imports nor
+            # deletes it; it is not an ordinary leftover either.
+            skipped.append({"download_log_id": lid, "reason": "held_upgrade"})
+            held_upgrades += 1
+            continue
         distance = vr.distance
         observation = observe_failed_path(vr.failed_path or "")
         if observation.indeterminate:
@@ -569,6 +579,7 @@ def post_wrong_match_converge(h: RouteHandler, body: dict[str, object]) -> None:
         "deleted": deleted,
         "remaining": remaining,
         "group_empty": remaining == 0,
+        "held_upgrades": held_upgrades,
         "selected": selected,
         "unmatched": unmatched,
         "skipped": skipped,

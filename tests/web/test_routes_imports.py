@@ -2429,6 +2429,40 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.mock_manual_cleanup.assert_called_once_with(self.db, 102, require_visible=True)
         self.mock_cleanup.assert_not_called()
 
+    def test_converge_never_approves_or_discards_a_held_upgrade(self):
+        """Issue #1445 item 3: a held upgrade has a green distance, so
+        converge would otherwise force-import it and Beets would replace
+        the installed copy the guard kept. It is skipped: no import job, no
+        delete, and it does not count as an ordinary leftover."""
+        self._seed_wrong_match(
+            download_log_id=100, request_id=42, username="u1",
+            failed_path="/fi/a", distance=0.167, mb_release_id="mb-42")
+        self._seed_wrong_match(
+            download_log_id=101, request_id=42, username="natetheneet",
+            failed_path="/fi/held", distance=0.02, mb_release_id="mb-42",
+            scenario="upgrade_held")
+        self._seed_wrong_match(
+            download_log_id=102, request_id=42, username="u3",
+            failed_path="/fi/c", distance=0.226, mb_release_id="mb-42")
+
+        status, data = self._post("/api/wrong-matches/converge", {
+            "request_id": 42, "threshold_milli": 180,
+        })
+
+        self.assertEqual(status, 202)
+        self.assertEqual(
+            {j.dedupe_key for j in self.db.list_import_jobs()},
+            {"force_import:download_log:100"},
+        )
+        self.mock_manual_cleanup.assert_called_once_with(
+            self.db, 102, require_visible=True)
+        self.assertIn(
+            {"download_log_id": 101, "reason": "held_upgrade"},
+            data["skipped"],
+        )
+        self.assertEqual(data["held_upgrades"], 1)
+        self.assertEqual(data["remaining"], 1)
+
     def test_converge_deletes_unmatched_when_legacy_client_requests_it(self):
         """Legacy true payloads still delete non-green rows while selected rows stay visible."""
         self._seed_wrong_match(
