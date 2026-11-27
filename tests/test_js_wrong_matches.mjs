@@ -3091,6 +3091,116 @@ t.section('keepCurrentCopy() keeps the card and restores the button when the del
   t.contains(dom.toast.textContent, 'locked', 'failure surfaced');
 }
 
+// --- Issue #1445 item 3 review: an armed choice never survives a redraw ---
+
+function heldButtons(dom, heldId) {
+  const use = element({ id: `wm-held-use-${heldId}`, textContent: 'Use new copy', classList: { toggle() {} } });
+  const keep = element({ id: `wm-held-keep-${heldId}`, textContent: 'Keep current copy', classList: { toggle() {} } });
+  const cancel = element({ id: `wm-held-cancel-${heldId}`, hidden: true });
+  dom.elements[`wm-held-use-${heldId}`] = use;
+  dom.elements[`wm-held-keep-${heldId}`] = keep;
+  dom.elements[`wm-held-cancel-${heldId}`] = cancel;
+  return { use, keep, cancel };
+}
+
+const REDRAWS = {
+  'renderWrongMatches()': async (dom) => {
+    renderWrongMatches(heldData([heldCard()]), dom.wrongMatches);
+  },
+  'converge threshold change': async (dom) => {
+    renderWrongMatches(heldData([heldCard()]), dom.wrongMatches);
+    setWrongMatchConvergeThreshold(42, 230);
+  },
+  'Refresh': async () => {
+    await refreshWrongMatches();
+  },
+};
+
+for (const [choice, act, label] of [
+  ['use', useHeldUpgradeCopy, 'Use new copy'],
+  ['keep', keepCurrentCopy, 'Keep current copy'],
+]) {
+  for (const [redrawName, redraw] of Object.entries(REDRAWS)) {
+    t.section(`${label}: arming, then a redraw via ${redrawName}, then one click acts on nothing`);
+    {
+      installStorage();
+      const dom = installDom();
+      const mutations = [];
+      stubGlobals({ fetch: async (url, options = {}) => {
+        if (url === '/api/pipeline/force-import' || url === '/api/wrong-matches/delete') {
+          mutations.push(url);
+          return { ok: true, status: 200, json: async () => ({ status: 'ok' }) };
+        }
+        if (url === '/api/wrong-matches') {
+          return { ok: true, json: async () => heldData([heldCard()]) };
+        }
+        if (url === '/api/wrong-matches/triage/status') {
+          return { ok: true, json: async () => ({ state: 'idle' }) };
+        }
+        throw new Error(`unexpected fetch: ${url} ${options.method || ''}`);
+      } });
+      renderWrongMatches(heldData([heldCard()]), dom.wrongMatches);
+      const first = heldButtons(dom, 4269);
+      await act(4269, 4269, first[choice]);
+      t.contains(first[choice].textContent, 'Yes,', 'first click arms the visible button');
+      await redraw(dom);
+      // The redraw replaced the card: the operator now sees a plain button.
+      const fresh = heldButtons(dom, 4269);
+      await act(4269, 4269, fresh[choice]);
+      t.equal(mutations.length, 0, 'a button that does not say "Yes, ..." never acts');
+      t.contains(fresh[choice].textContent, 'Yes,', 'that click only armed the fresh button');
+      await flushMicrotasks();
+    }
+  }
+
+  t.section(`${label}: arm then confirm sends exactly one request`);
+  {
+    installStorage();
+    const dom = installDom();
+    renderWrongMatches(heldData([heldCard()]), dom.wrongMatches);
+    const buttons = heldButtons(dom, 4269);
+    const mutations = [];
+    stubGlobals({ fetch: async (url) => {
+      if (url === '/api/pipeline/force-import') {
+        mutations.push(url);
+        return { ok: true, status: 200, json: async () => ({ status: 'queued', artist: 'A', album: 'B' }) };
+      }
+      if (url === '/api/wrong-matches/delete') {
+        mutations.push(url);
+        return { ok: true, json: async () => ({ status: 'ok' }) };
+      }
+      if (url === '/api/wrong-matches') {
+        return { ok: true, json: async () => heldData([]) };
+      }
+      if (url === '/api/wrong-matches/triage/status') {
+        return { ok: true, json: async () => ({ state: 'idle' }) };
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    } });
+    await act(4269, 4269, buttons[choice]);
+    await act(4269, 4269, buttons[choice]);
+    t.equal(mutations.length, 1, 'exactly one request');
+    await act(4269, 4269, buttons[choice]);
+    t.equal(mutations.length, 1, 'disarmed after the action: a further click does not send another');
+    await flushMicrotasks();
+  }
+
+  t.section(`${label}: arming the other button disarms this one`);
+  {
+    installStorage();
+    const dom = installDom();
+    const buttons = heldButtons(dom, 4269);
+    const other = choice === 'use' ? 'keep' : 'use';
+    const otherAct = choice === 'use' ? keepCurrentCopy : useHeldUpgradeCopy;
+    stubGlobals({ fetch: async (url) => { throw new Error(`unexpected fetch: ${url}`); } });
+    await act(4269, 4269, buttons[choice]);
+    cancelHeldUpgradeChoice(4269);
+    await otherAct(4269, 4269, buttons[other]);
+    t.excludes(buttons[choice].textContent, 'Yes,', 'only one choice is armed at a time');
+    t.contains(buttons[other].textContent, 'Yes,', 'the other is armed');
+  }
+}
+
 t.section('convergeToast() reports held copies apart from ordinary skips');
 {
   t.equal(

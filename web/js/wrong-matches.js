@@ -1273,10 +1273,37 @@ export function renderHeldUpgrades(cards) {
     </section>`;
 }
 
-/** @type {Map<number, 'use' | 'keep'>} */
-const _heldArmed = new Map();
+const USE_CONFIRM_LABEL = 'Yes, replace my current copy';
+const KEEP_CONFIRM_LABEL = 'Yes, delete the new copy';
 
 /**
+ * Whether THIS rendered button instance is armed. The armed state lives on
+ * the button element itself (``data-held-armed``) and nowhere else, so any
+ * redraw of the pane — which builds fresh, unarmed buttons — can never
+ * leave a plain-looking button one click away from acting. It also has to
+ * read "Yes, ..." on screen: a button that does not visibly ask never acts.
+ * @param {HTMLButtonElement} btn
+ * @param {string} confirmLabel
+ * @returns {boolean}
+ */
+function heldButtonIsArmed(btn, confirmLabel) {
+  return Boolean(btn && btn.dataset && btn.dataset.heldArmed === '1')
+    && btn.textContent === confirmLabel;
+}
+
+/**
+ * @param {HTMLButtonElement | null} btn
+ * @param {boolean} armed
+ */
+function setHeldButtonArmed(btn, armed) {
+  if (!btn) return;
+  if (!btn.dataset) /** @type {any} */ (btn).dataset = {};
+  if (armed) btn.dataset.heldArmed = '1';
+  else delete btn.dataset.heldArmed;
+}
+
+/**
+ * Show one card's choice state; ``armed`` names the one armed button.
  * @param {number} heldId
  * @param {'use' | 'keep' | null} armed
  */
@@ -1284,14 +1311,15 @@ function setHeldChoiceState(heldId, armed) {
   const use = /** @type {HTMLButtonElement | null} */ (document.getElementById(`wm-held-use-${heldId}`));
   const keep = /** @type {HTMLButtonElement | null} */ (document.getElementById(`wm-held-keep-${heldId}`));
   const cancel = /** @type {HTMLButtonElement | null} */ (document.getElementById(`wm-held-cancel-${heldId}`));
-  if (armed) _heldArmed.set(heldId, armed); else _heldArmed.delete(heldId);
+  setHeldButtonArmed(use, armed === 'use');
+  setHeldButtonArmed(keep, armed === 'keep');
   if (use) {
-    use.textContent = armed === 'use' ? 'Yes, replace my current copy' : 'Use new copy';
+    use.textContent = armed === 'use' ? USE_CONFIRM_LABEL : 'Use new copy';
     use.classList?.toggle('held-upgrade-armed', armed === 'use');
     use.disabled = armed === 'keep';
   }
   if (keep) {
-    keep.textContent = armed === 'keep' ? 'Yes, delete the new copy' : 'Keep current copy';
+    keep.textContent = armed === 'keep' ? KEEP_CONFIRM_LABEL : 'Keep current copy';
     keep.classList?.toggle('held-upgrade-armed', armed === 'keep');
     keep.disabled = armed === 'use';
   }
@@ -1308,7 +1336,6 @@ export function cancelHeldUpgradeChoice(heldId) {
  * @param {number} heldId
  */
 function removeHeldUpgradeCard(heldId) {
-  _heldArmed.delete(heldId);
   if (_lastData && Array.isArray(_lastData.held_upgrades)) {
     _lastData.held_upgrades = _lastData.held_upgrades.filter(
       (/** @type {any} */ c) => Number(c.held_download_log_id) !== heldId);
@@ -1325,11 +1352,13 @@ function removeHeldUpgradeCard(heldId) {
  */
 export async function useHeldUpgradeCopy(heldId, _deleteId, btn) {
   const id = Number(heldId);
-  if (_heldArmed.get(id) !== 'use') {
+  if (!heldButtonIsArmed(btn, USE_CONFIRM_LABEL)) {
     setHeldChoiceState(id, 'use');
+    setHeldButtonArmed(btn, true);
     return;
   }
   setHeldChoiceState(id, null);
+  setHeldButtonArmed(btn, false);
   btn.disabled = true;
   btn.textContent = 'Starting...';
   const keep = /** @type {HTMLButtonElement | null} */ (document.getElementById(`wm-held-keep-${id}`));
@@ -1379,11 +1408,13 @@ export async function useHeldUpgradeCopy(heldId, _deleteId, btn) {
  */
 export async function keepCurrentCopy(heldId, deleteId, btn) {
   const id = Number(heldId);
-  if (_heldArmed.get(id) !== 'keep') {
+  if (!heldButtonIsArmed(btn, KEEP_CONFIRM_LABEL)) {
     setHeldChoiceState(id, 'keep');
+    setHeldButtonArmed(btn, true);
     return;
   }
   setHeldChoiceState(id, null);
+  setHeldButtonArmed(btn, false);
   btn.disabled = true;
   btn.textContent = 'Deleting...';
   const use = /** @type {HTMLButtonElement | null} */ (document.getElementById(`wm-held-use-${id}`));
