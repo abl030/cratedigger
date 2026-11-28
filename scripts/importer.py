@@ -28,6 +28,13 @@ from lib.automation_recovery_debris import (
     RecoveryDebrisRemovalFn,
     remove_recovery_debris,
 )
+from lib.beets_db import CurrentBeetsResolution, CurrentBeetsUnique, open_beets_db
+from lib.beets_delete import (
+    BeetsDeleteCompleted,
+    BeetsDeleteFn,
+    BeetsDeleteRequest,
+    run_beets_delete,
+)
 from lib.beets_startup import BeetsStartupError, enforce_beets_startup
 from lib.config import (
     CratediggerConfig,
@@ -111,6 +118,7 @@ from lib.processing_cleanup import (
     complete_owner_processing_cleanup,
 )
 from lib.quality import ActiveDownloadFileState, ActiveDownloadState
+from lib.release_identity import ReleaseIdentity
 from lib.terminal_outcomes import (
     AUTOMATION_WORLD_FAILURE_RESULT_KEY,
     AutomationTerminalAuthority,
@@ -430,9 +438,28 @@ class _ForceWrongMatchCleanupDB(_ForceActionCleanupDB, WrongMatchSourceDB, Proto
     def list_terminal_force_wrong_match_cleanup_jobs(self) -> list[ImportJob]: ...
 
 
+class _DisplacementBeets(Protocol):
+    """The Beets read the displacement needs: does the new copy resolve?"""
+
+    def resolve_current_release(
+        self, identity: ReleaseIdentity,
+    ) -> CurrentBeetsResolution: ...
+
+    def close(self) -> None: ...
+
+
+class _ForceDisplacementDB(_ForceActionCleanupDB, Protocol):
+    """Persistence surface for the post-import displacement receipt."""
+
+    def get_request(self, request_id: int) -> AlbumRequestRow | None: ...
+
+    def list_terminal_force_displacement_jobs(self) -> list[ImportJob]: ...
+
+
 class _StartupRecoveryDB(
     _AutomationRecoveryDB,
     _ForceWrongMatchCleanupDB,
+    _ForceDisplacementDB,
     Protocol,
 ):
     """Complete persistence surface used by the one-shot startup sweep."""
@@ -925,6 +952,148 @@ def _record_terminal_force_wrong_match_cleanup(
             "Failed to record wrong-match cleanup receipt for job %s", job.id,
         )
         return None
+
+
+def _open_displacement_beets(
+    library_db_path: str, library_root: str,
+) -> _DisplacementBeets:
+    """Open the same Beets library the displacement was recorded against."""
+    return open_beets_db(db_path=library_db_path, library_root=library_root)
+
+
+#: Exact-delete refusals meaning the old album is no longer at that id with
+#: that release: there is nothing left to displace, so the receipt is done.
+_DISPLACEMENT_ALREADY_GONE: frozenset[str] = frozenset({
+    "album_not_found",
+    "release_mismatch",
+})
+
+
+def _displace_after_force_import(
+    db: _ForceDisplacementDB,
+    job: ImportJob,
+    *,
+    beets_db_factory: Callable[[str, str], _DisplacementBeets] | None = None,
+    beets_delete_fn: BeetsDeleteFn | None = None,
+) -> dict[str, object] | None:
+    """Remove the old release's album a completed force import displaces.
+
+    Replace ``--adopt --after-import`` keeps the installed copy of the old
+    release and records its exact Beets id and release id on the adopted
+    candidate's job (``ForceImportDisplacement``). This runs only for a
+    ``completed`` job, after the terminal commit, and only once the job's
+    request release resolves in Beets: the old copy never goes before the
+    new one is proven present. A failed import never reaches here, so its
+    old copy stays.
+
+    Returns ``None`` when there is nothing to displace; otherwise the
+    ``displacement`` receipt. ``success`` is true when the old album is gone
+    (removed now, or already not at that id). Anything else is recorded with
+    ``success: false`` and retried at every startup
+    (``list_terminal_force_displacement_jobs``); nothing parks.
+    """
+    if job.status != "completed" or not isinstance(job.payload, ForceImportPayload):
+        return None
+    displace = job.payload.displace
+    if displace is None:
+        return None
+    receipt: dict[str, object] = {
+        "album_id": displace.album_id,
+        "expected_release_id": displace.expected_release_id,
+    }
+    open_beets = beets_db_factory or _open_displacement_beets
+    delete = beets_delete_fn or run_beets_delete
+    try:
+        request = (
+            db.get_request(job.request_id) if job.request_id is not None else None
+        )
+        new_identity = (
+            ReleaseIdentity.from_strict_fields(
+                request.get("mb_release_id"), request.get("discogs_release_id"),
+            )
+            if request is not None
+            else None
+        )
+        if new_identity is None:
+            return {
+                **receipt,
+                "success": False,
+                "outcome": "new_copy_not_in_library",
+                "detail": f"request {job.request_id} has no exact release id",
+            }
+        beets = open_beets(displace.library_db_path, displace.library_root)
+        try:
+            resolved = beets.resolve_current_release(new_identity)
+        finally:
+            beets.close()
+        if not isinstance(resolved, CurrentBeetsUnique):
+            return {
+                **receipt,
+                "success": False,
+                "outcome": "new_copy_not_in_library",
+                "detail": (
+                    f"{new_identity.release_id} resolves as "
+                    f"{type(resolved).__name__}, not one album"
+                ),
+            }
+        receipt["new_album_id"] = resolved.album_id
+        outcome = delete(BeetsDeleteRequest(
+            album_id=displace.album_id,
+            expected_release_id=displace.expected_release_id,
+            library_db_path=displace.library_db_path,
+            library_root=displace.library_root,
+        ))
+    except Exception as exc:
+        logger.exception("Displacement after force import job %s failed", job.id)
+        return {
+            **receipt,
+            "success": False,
+            "outcome": "failed",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    if isinstance(outcome, BeetsDeleteCompleted):
+        return {
+            **receipt,
+            "success": True,
+            "outcome": "removed",
+            "former_album_path": outcome.former_album_path,
+            "deleted_tracks": outcome.deleted_tracks,
+        }
+    if outcome.reason in _DISPLACEMENT_ALREADY_GONE:
+        return {
+            **receipt,
+            "success": True,
+            "outcome": "not_present",
+            "reason": outcome.reason,
+            "detail": outcome.detail,
+        }
+    return {
+        **receipt,
+        "success": False,
+        "outcome": "failed",
+        "reason": outcome.reason,
+        "detail": outcome.detail,
+        "album_still_present": outcome.album_still_present,
+    }
+
+
+def _record_force_displacement(
+    db: _ForceDisplacementDB,
+    job: ImportJob,
+    terminal_job: ImportJob,
+) -> ImportJob:
+    """Run the displacement and merge its receipt; the live and replay path."""
+    receipt = _displace_after_force_import(db, job)
+    if receipt is None:
+        return terminal_job
+    try:
+        merged = db.merge_import_job_result(job.id, {"displacement": receipt})
+    except Exception:
+        logger.exception(
+            "Failed to record displacement receipt for job %s", job.id,
+        )
+        return terminal_job
+    return merged or terminal_job
 
 
 def _execute_action_copy_dispatch(
@@ -2379,6 +2548,7 @@ def process_claimed_job(
                 )
                 if merged is not None:
                     terminal_job = merged
+            terminal_job = _record_force_displacement(db, job, terminal_job)
             return _record_terminal_force_action_cleanup(db, job, terminal_job)
         # A force/local-import/YouTube success without a bundle is recorded, not parked: the
         # job never owned the request's ``processing`` status, so the terminal
@@ -2396,6 +2566,7 @@ def process_claimed_job(
                 job.id,
                 {"wrong_match_dismissal": dismissal},
             ) or completed
+        completed = _record_force_displacement(db, job, completed)
         return _record_terminal_force_action_cleanup(db, job, completed)
     # U2: dispatch flipped this row back to the preview lane (or tried to).
     # We do NOT write a terminal failed status, do NOT bump retry counters,
@@ -2819,6 +2990,18 @@ def recover_abandoned_running_jobs(
                 "continuing",
                 job.id,
             )
+    # Replace ``--after-import``: a completed force import whose old-copy
+    # displacement receipt is missing or not proven done (a crash after the
+    # terminal commit, the new copy not yet resolvable, a failed delete).
+    # ``_displace_after_force_import`` never raises, and the list read sits
+    # outside it, so one bad row cannot stop the startup sweep.
+    try:
+        displacement_jobs = db.list_terminal_force_displacement_jobs()
+    except Exception:
+        logger.exception("Displacement recovery listing failed; continuing")
+        displacement_jobs = []
+    for job in displacement_jobs:
+        _record_force_displacement(db, job, job)
     recovered.extend(recover_abandoned_automation_owners(
         db,
         liveness_probe=liveness_probe,

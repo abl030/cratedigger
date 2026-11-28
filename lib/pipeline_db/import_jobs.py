@@ -36,6 +36,8 @@ from lib.import_queue import (
     IMPORT_PREVIEW_REQUEUE_MAX_DELAY,
     IMPORT_PREVIEW_REQUEUE_MAX_EXPONENT,
     AutomationHandoffResult,
+    ForceImportDisplacement,
+    ForceImportPayload,
     ImportJob,
     automation_import_dedupe_key,
     automation_import_payload,
@@ -731,6 +733,42 @@ class _ImportJobsMixin(
         return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
 
 
+    def find_pending_force_displacement(
+        self,
+        *,
+        download_log_id: int,
+        request_id: int,
+    ) -> ForceImportDisplacement | None:
+        """The displacement a re-import of this candidate must still carry.
+
+        Replace ``--after-import`` puts ``payload.displace`` on the adopted
+        candidate's first force job only. If that job fails and the operator
+        retries the same candidate with an ordinary force import, the retry
+        has to inherit it, or a successful retry would leave the old album
+        in Beets with nothing tracking it. Returns the newest such
+        displacement for this request and candidate, unless that job already
+        recorded a successful ``displacement`` receipt.
+        """
+        cur = self._execute("""
+            SELECT *
+            FROM import_jobs
+            WHERE job_type = 'force_import'
+              AND request_id = %s
+              AND payload->>'download_log_id' = %s::text
+              AND payload ? 'displace'
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+        """, (int(request_id), str(int(download_log_id))))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        job = ImportJob.from_row(dict(row))
+        receipt = (job.result or {}).get("displacement")
+        if is_str_object_dict(receipt) and receipt.get("success") is True:
+            return None
+        payload = job.payload
+        return payload.displace if isinstance(payload, ForceImportPayload) else None
+
     def count_import_jobs_by_status(self) -> dict[str, int]:
         cur = self._execute("""
             SELECT status, COUNT(*) AS count
@@ -914,6 +952,34 @@ class _ImportJobsMixin(
                    AND result ->> 'code' IS DISTINCT FROM 'requeue_exhausted'
                    AND result ->> 'deferred' IS DISTINCT FROM 'true')
               )
+            ORDER BY created_at ASC, id ASC
+        """)
+        return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
+
+    def list_terminal_force_displacement_jobs(self) -> list[ImportJob]:
+        """Return completed force jobs whose old-copy displacement is not proven done.
+
+        Replace ``--adopt --after-import`` writes ``payload.displace`` (the
+        exact Beets album of the old release) onto the adopted candidate's
+        force job; ``scripts/importer.py::_displace_after_force_import``
+        removes it after the job completes and records a ``displacement``
+        receipt. A crash after the terminal commit, a new copy not yet
+        resolvable in Beets, or a failed delete leaves that receipt missing
+        or ``success: false``; startup retries exactly those rows.
+
+        Success-keyed, like ``list_terminal_force_wrong_match_cleanup_jobs``:
+        a present-but-failed receipt is retried, never parked. Only
+        ``completed`` jobs qualify — a failed import keeps the old copy by
+        design, so it has nothing to replay. ``payload ? 'displace'`` is
+        closed by construction: ordinary force jobs never carry the key.
+        """
+        cur = self._execute("""
+            SELECT *
+            FROM import_jobs
+            WHERE job_type = 'force_import'
+              AND status = 'completed'
+              AND payload ? 'displace'
+              AND result #>> '{displacement,success}' IS DISTINCT FROM 'true'
             ORDER BY created_at ASC, id ASC
         """)
         return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]

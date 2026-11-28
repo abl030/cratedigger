@@ -132,8 +132,14 @@ One block per item:
   - Accept: `force-import <download_log_id>` (the held-upgrade "Use new
     copy" button is the same thing).
   - Reject: `wrong-match-delete <download_log_id>` ("Keep current copy").
-  - Real different pressing that the user wants instead: `replace`. Only
-    the operator can decide this.
+  - Sister pressing, and the user wants a good copy more than a particular
+    pressing: "Import as its own release" on the candidate card, which is
+    `replace <request_id> --to <sister_release_id> --adopt
+    <download_log_id> --after-import`. The request moves to the sister
+    release, the candidate imports there, and the current copy is removed
+    only after that import succeeds. The operator makes this call.
+  - Real different pressing that the user wants instead, with nothing to
+    adopt: plain `replace`. It removes the current copy straight away.
   - MB/Discogs data errors to fix upstream (wrong length, shared recording,
     missing disc ID), each with the release id.
 

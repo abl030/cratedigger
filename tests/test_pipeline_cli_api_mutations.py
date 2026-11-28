@@ -1076,7 +1076,8 @@ class TestRoutedCommandDeadlines(unittest.TestCase):
                     None,
                     self._args(
                         id=1, target_mb_release_id="x", cross_pathway=False,
-                        adopt_download_log_id=None, json=True)),
+                        adopt_download_log_id=None,
+                        displace_after_import=False, json=True)),
                 api_mutations.TIMEOUT_MIRROR_SECONDS,
             ),
             (

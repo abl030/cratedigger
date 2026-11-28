@@ -13,6 +13,7 @@ from lib.fs_authority import (
 )
 from lib.import_queue import (
     IMPORT_JOB_FORCE,
+    ForceImportDisplacement,
     ImportJob,
     force_import_dedupe_key,
     force_import_payload,
@@ -74,6 +75,13 @@ class ForceImportDB(Protocol):
         message: str | None = None,
     ) -> ImportJob: ...
 
+    def find_pending_force_displacement(
+        self,
+        *,
+        download_log_id: int,
+        request_id: int,
+    ) -> ForceImportDisplacement | None: ...
+
 
 @dataclass(frozen=True)
 class ForceImportEnqueueResult:
@@ -90,8 +98,16 @@ def enqueue_force_import(
     db: ForceImportDB,
     cfg: object,
     download_log_id: int,
+    *,
+    displace: ForceImportDisplacement | None = None,
 ) -> ForceImportEnqueueResult:
     """Authorize and enqueue one download-log-backed force import.
+
+    ``displace`` names the exact Beets album the importer removes once this
+    job completes (Replace ``--adopt --after-import`` only). Without it, a
+    pending displacement from an earlier force job of the same candidate is
+    carried forward, so a retry after a failed import still removes the old
+    copy once it lands.
 
     This is intentionally a preflight, not execution authority: the preview
     worker reopens the configured quarantine directory before reading it.
@@ -157,6 +173,12 @@ def enqueue_force_import(
             detail=str(exc),
         )
 
+    if displace is None:
+        # A retry of an adopted ``--after-import`` candidate keeps the old
+        # copy's pending removal (see ``find_pending_force_displacement``).
+        displace = db.find_pending_force_displacement(
+            download_log_id=download_log_id, request_id=request_id,
+        )
     job = db.enqueue_import_job(
         IMPORT_JOB_FORCE,
         request_id=request_id,
@@ -168,6 +190,7 @@ def enqueue_force_import(
                 entry.get("soulseek_username") or validation.soulseek_username
             ),
             source_dirs=normalize_source_dirs(validation.source_dirs),
+            displace=displace,
         ),
         message=(
             f"Force import queued for {request['artist_name']} - "

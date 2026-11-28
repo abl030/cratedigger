@@ -2032,6 +2032,118 @@ class TestImportJobQueueAPI(unittest.TestCase):
         self.assertNotIn(historical_failed.id, selected)
         self.assertNotIn(historical_null_result.id, selected)
 
+    def test_list_terminal_force_displacement_jobs_selects_unproven_receipts(
+        self,
+    ) -> None:
+        """Replace ``--after-import``: real-PG proof of the displacement
+        replay predicate (``payload ? 'displace'``, the ``#>>`` nested
+        success and ``IS DISTINCT FROM`` NULL handling). The fake is pinned
+        to the same matrix in ``tests/test_force_import_displacement.py``.
+        It also proves an ordinary force job is stored without the key.
+        """
+        from lib.import_queue import (
+            IMPORT_JOB_FORCE,
+            ForceImportDisplacement,
+            force_import_payload,
+        )
+
+        displace = ForceImportDisplacement(
+            album_id=77,
+            expected_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            library_db_path="/tmp/library.db",
+            library_root="/tmp/library",
+        )
+
+        def _job(suffix: str, *, with_displace: bool = True, completed=True,
+                 receipt: dict[str, object] | None = None):
+            job = self.db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=self.req_id,
+                dedupe_key=f"force-displacement-predicate:{suffix}",
+                payload=force_import_payload(
+                    download_log_id=1,
+                    failed_path="/tmp/predicate-source",
+                    displace=displace if with_displace else None,
+                ),
+            )
+            result: dict[str, object] = {"success": completed}
+            if receipt is not None:
+                result["displacement"] = receipt
+            if completed:
+                self.db.mark_import_job_completed(
+                    job.id, result=result, message="done",
+                )
+            else:
+                self.db._execute(
+                    "UPDATE import_jobs SET status = 'failed', "
+                    "result = %s::jsonb WHERE id = %s",
+                    (json.dumps(result), job.id),
+                )
+                self.db.conn.commit()
+            return job
+
+        missing = _job("missing")
+        failed_receipt = _job("failed-receipt", receipt={"success": False})
+        done = _job("done", receipt={"success": True})
+        plain = _job("plain", with_displace=False)
+        failed_import = _job("failed-import", completed=False)
+
+        selected = {
+            job.id for job in self.db.list_terminal_force_displacement_jobs()
+        }
+        self.assertEqual(selected, {missing.id, failed_receipt.id})
+        self.assertNotIn(done.id, selected)
+        self.assertNotIn(plain.id, selected)
+        self.assertNotIn(failed_import.id, selected)
+
+        stored = self.db.get_import_job(plain.id)
+        assert stored is not None
+        raw = self.db._execute(
+            "SELECT payload ? 'displace' AS has_key FROM import_jobs "
+            "WHERE id = %s",
+            (plain.id,),
+        ).fetchone()
+        assert raw is not None
+        self.assertFalse(raw["has_key"])
+
+    def test_find_pending_force_displacement_follows_the_newest_job(self):
+        """A retry of an adopted ``--after-import`` candidate inherits the
+        displacement until a job records a successful receipt."""
+        from lib.import_queue import (
+            IMPORT_JOB_FORCE,
+            ForceImportDisplacement,
+            force_import_payload,
+        )
+
+        displace = ForceImportDisplacement(
+            album_id=77,
+            expected_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            library_db_path="/tmp/library.db",
+            library_root="/tmp/library",
+        )
+
+        def lookup(log_id: int = 5):
+            return self.db.find_pending_force_displacement(
+                download_log_id=log_id, request_id=self.req_id,
+            )
+
+        self.assertIsNone(lookup())
+        job = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=self.req_id,
+            dedupe_key="pending-displacement:first",
+            payload=force_import_payload(
+                download_log_id=5, failed_path="/tmp/src", displace=displace,
+            ),
+        )
+        self.assertEqual(lookup(), displace)
+        self.assertIsNone(lookup(log_id=6), "another candidate inherits nothing")
+
+        self.db.mark_import_job_completed(
+            job.id, result={"displacement": {"success": True}}, message="ok",
+        )
+        self.assertIsNone(lookup(), "a proven receipt ends the inheritance")
+
     def test_enqueue_youtube_import_is_allowed_by_pg_constraint(self):
         from lib.import_queue import (
             IMPORT_JOB_YOUTUBE,

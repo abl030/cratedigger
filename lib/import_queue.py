@@ -142,6 +142,25 @@ _PositiveInt = Annotated[int, msgspec.Meta(gt=0)]
 _NonEmptyStr = Annotated[str, msgspec.Meta(min_length=1)]
 
 
+class ForceImportDisplacement(
+    msgspec.Struct, frozen=True, kw_only=True, forbid_unknown_fields=True,
+):
+    """The exact Beets album a force import displaces once it has landed.
+
+    Written only by Replace ``--adopt --after-import``: the operator chose to
+    import a Wrong Matches candidate as its own (sister) release and to keep
+    the installed copy of the old release until that import succeeds. The
+    importer removes this exact album after the terminal ``completed`` commit
+    (``scripts/importer.py::_displace_after_force_import``); a failed import
+    never reads it, so the old copy stays.
+    """
+
+    album_id: _PositiveInt
+    expected_release_id: _NonEmptyStr
+    library_db_path: _NonEmptyStr
+    library_root: _NonEmptyStr
+
+
 class ForceImportPayload(msgspec.Struct, kw_only=True, forbid_unknown_fields=True):
     """The strict JSONB contract for a ``force_import`` queue row."""
 
@@ -149,6 +168,7 @@ class ForceImportPayload(msgspec.Struct, kw_only=True, forbid_unknown_fields=Tru
     failed_path: _NonEmptyStr
     source_username: str | None = None
     source_dirs: list[str] = msgspec.field(default_factory=list[str])
+    displace: ForceImportDisplacement | None = None
 
 
 class AutomationImportPayload(
@@ -207,7 +227,12 @@ def decode_import_job_payload(job_type: str, value: Any) -> ImportJobPayload:
 
 def _payload_to_builtins(payload: ImportJobPayload) -> dict[str, Any]:
     """Serialize one canonical payload Struct to its JSONB object shape."""
-    return msgspec.convert(msgspec.to_builtins(payload), type=dict[str, Any])
+    builtins = msgspec.convert(msgspec.to_builtins(payload), type=dict[str, Any])
+    if isinstance(payload, ForceImportPayload) and payload.displace is None:
+        # Ordinary force imports keep their historical JSONB shape, and
+        # ``payload ? 'displace'`` stays a closed marker for the replay.
+        del builtins["displace"]
+    return builtins
 
 
 @dataclass(frozen=True)
@@ -562,12 +587,14 @@ def force_import_payload(
     failed_path: str,
     source_username: str | None = None,
     source_dirs: list[str] | None = None,
+    displace: ForceImportDisplacement | None = None,
 ) -> dict[str, Any]:
     return _payload_to_builtins(ForceImportPayload(
         download_log_id=download_log_id,
         failed_path=failed_path,
         source_username=source_username,
         source_dirs=source_dirs or [],
+        displace=displace,
     ))
 
 

@@ -705,6 +705,20 @@ not on anyone's list.
   scrolls inside its own box and the buttons wrap at phone width. Recents and
   History show the attempt with an "Upgrade held" badge, the sentence in
   amber, and the same table.
+- **Import as its own release** — a button on each actionable Wrong Matches
+  candidate (`web/js/own_release.js`), for a candidate that is really a
+  sister pressing when the operator wants a good copy more than a particular
+  pressing. Clicking runs the other-pressings check and offers the pressings
+  the files fit (`matching_pressings`, then `same_listing_pressings`) as
+  radio choices, plus a box for any pasted MB or Discogs release id; one
+  inline "Yes, import as this release" posts `POST
+  /api/pipeline/<id>/replace` with the chosen target,
+  `adopt_download_log_id` and `displace_after_import: true`. The request
+  moves to that release, this candidate is force-imported there, and the
+  current copy is removed only after that import completes (the importer's
+  `displacement` receipt); a failed import leaves it. The album's other
+  waiting candidates are deleted at once, as with any Replace. The panel
+  says all of that before the confirm.
 - **Check other pressings** (issue #1445) — a button beside the track-length
   lines of any History row that has a track-length shape, and on each Held
   upgrades card (for the new copy). Clicking runs the read-only check in

@@ -3,6 +3,7 @@ import { API, toast } from './state.js';
 import { awstDateTime, esc, externalReleaseUrl, sourceLabel, wrongMatchExplorerFailureCopy } from './util.js';
 import { renderHeldUpgradeTable } from './history.js';
 import { renderOtherPressingsControl } from './other_pressings.js';
+import { renderOwnReleaseControl } from './own_release.js';
 import { renderReplaceButton } from './release_actions.js';
 import { consumePendingScrollRestore } from './search_plan.js';
 import {
@@ -1807,6 +1808,7 @@ function renderEntryDetail(e, job, requestId) {
   html += `<button class="p-btn" data-pipeline-request-id="${requestId}" style="border-color:#6a9;color:#6a9;" ${blocked ? 'disabled' : ''} onclick="event.stopPropagation(); window.forceImportWrongMatch(${e.download_log_id}, this)">${importLabel}</button>`;
   html += `<button class="p-btn delete" data-pipeline-request-id="${requestId}" ${blocked ? 'disabled' : ''} onclick="event.stopPropagation(); window.deleteWrongMatch(${e.download_log_id}, this)">Delete</button>`;
   html += '</div>';
+  if (!blocked) html += renderOwnReleaseControl(e.download_log_id, requestId);
   if (unavailable) {
     // Say what is actually true: the server could not look. Nothing here
     // claims the folder is gone, and nothing offers to delete it.

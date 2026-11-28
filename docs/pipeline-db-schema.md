@@ -481,7 +481,13 @@ Key fields:
   the strict Struct selected by `job_type`, rejecting unknown fields and wrong
   types before any database mutation and again when a row is projected. Force
   jobs require a positive `download_log_id` and nonempty `failed_path`, with
-  optional `source_username` and `source_dirs`; automation jobs carry no
+  optional `source_username` and `source_dirs`, and an optional `displace`
+  object (`album_id`, `expected_release_id`, `library_db_path`,
+  `library_root`) written only by Replace `--adopt --after-import`: the exact
+  Beets album the importer removes once the job completes, recorded in
+  `result.displacement`. The key is absent, not null, on every other force
+  job, so `payload ? 'displace'` selects exactly those jobs for the startup
+  replay (`list_terminal_force_displacement_jobs`); automation jobs carry no
   fields; YouTube jobs require positive `request_id`/`download_log_id` values
   and nonempty `staged_path`/`browse_id` values; `local_import` jobs require a
   positive `request_id`, a nonempty `source_path`, and the Boolean

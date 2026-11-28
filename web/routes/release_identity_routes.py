@@ -308,6 +308,10 @@ class PipelineReplaceRequest(BaseModel):
     # A Wrong Matches candidate (download_log id) of the source request that
     # IS the target pressing: moved to the new request and force-imported.
     adopt_download_log_id: StrictPositiveInt | None = None
+    # With ``adopt_download_log_id``: keep the current copy until the
+    # adopted candidate's import lands, then remove it (the "import as its
+    # own release" button). Strict for the same reason as ``cross_pathway``.
+    displace_after_import: StrictBool = False
 
 
 def post_pipeline_replace(
@@ -328,6 +332,9 @@ def post_pipeline_replace(
     album (issue #1366). Optional ``adopt_download_log_id`` names a Wrong
     Matches candidate of the source request that is the target pressing;
     it moves to the new request and a force-import is queued for it.
+    ``displace_after_import: true`` (with an adopted candidate) keeps the
+    current copy until that import completes; the importer removes it then
+    (``displace_album_id`` names it in the response).
 
     Status-code mapping mirrors the CLI exit codes:
       * 200 — ``RESULT_REPLACED``
@@ -380,6 +387,7 @@ def post_pipeline_replace(
         target_mb_release_id=target,
         cross_pathway=req_body.cross_pathway,
         adopt_download_log_id=req_body.adopt_download_log_id,
+        displace_after_import=req_body.displace_after_import,
     )
 
     payload: dict[str, object] = {
@@ -396,6 +404,7 @@ def post_pipeline_replace(
         ),
         "adopt_download_log_id": result.adopt_download_log_id,
         "adopt_import_job_id": result.adopt_import_job_id,
+        "displace_album_id": result.displace_album_id,
     }
     if result.outcome == RESULT_REPLACED:
         h._json(payload)
