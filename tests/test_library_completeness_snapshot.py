@@ -11,7 +11,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from lib.library_completeness import (
+    CompletenessAlbum,
     CompletenessCounts,
+    CompletenessFinding,
     CompletenessReport,
     LibraryAlbum,
 )
@@ -141,6 +143,19 @@ class TestTrackLengthCachePublication(unittest.TestCase):
             )
             self.assertEqual(read_track_length_cache(cache), TrackLengthCache())
             self.assertTrue(os.path.exists(cache))
+
+    def test_previous_findings_come_from_the_prior_snapshot(self) -> None:
+        finding = CompletenessFinding("track_length", "hidden track? (track 9)")
+        prior = LibraryCompletenessSnapshot(
+            "2026-11-27T00:00:00+00:00", 1.0,
+            CompletenessReport("complete", CompletenessCounts(1, 1, 0, 0, 0), (
+                CompletenessAlbum(7, "a", "b", "r", (finding,), 9, 9, 9),)),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "snapshot.json")
+            self.assertEqual(census._previous_track_length_findings(path), {})
+            write_library_completeness_snapshot(path, prior)
+            self.assertEqual(census._previous_track_length_findings(path), {7: finding})
 
     def test_beets_unavailable_keeps_the_prior_cache(self) -> None:
         class LockedBeets:

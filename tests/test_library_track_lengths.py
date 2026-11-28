@@ -8,6 +8,7 @@ from collections.abc import Sequence
 
 from lib.library_completeness import (
     CatalogItem,
+    CompletenessFinding,
     LibraryAlbum,
     SourceManifest,
     TrackLengthResult,
@@ -69,7 +70,7 @@ class TestManifestCarriesListedLengths(unittest.TestCase):
         self.assertEqual((first.medium, first.medium_index, first.medium_track_count), (1, 1, 2))
         self.assertEqual((disc_two_first.medium, disc_two_first.medium_index), (2, 1))
 
-    def test_musicbrainz_pregap_is_position_zero(self) -> None:
+    def test_musicbrainz_pregap_is_unplaced(self) -> None:
         raw = _mb_raw([200_000])
         media = raw["media"]
         assert isinstance(media, list)
@@ -79,8 +80,23 @@ class TestManifestCarriesListedLengths(unittest.TestCase):
                             "recording": {"id": "rec-pregap", "video": False}}
         manifest = musicbrainz_manifest(MB_RELEASE, raw)
         pregap = manifest.components[0]
-        self.assertEqual((pregap.medium_index, pregap.declared_seconds), (0, 30.0))
+        self.assertEqual((pregap.medium_index, pregap.declared_seconds), (None, 30.0))
         self.assertEqual(pregap.medium_track_count, 1)
+
+    def test_trailing_video_does_not_move_the_last_track(self) -> None:
+        raw = _mb_raw([200_000, 400_000, 100_000])
+        media = raw["media"]
+        assert isinstance(media, list) and isinstance(media[0], dict)
+        tracks = media[0]["tracks"]
+        assert isinstance(tracks, list) and isinstance(tracks[2], dict)
+        tracks[2]["recording"] = {"id": "rec-video", "video": True}
+        manifest = musicbrainz_manifest(MB_RELEASE, raw)
+        self.assertEqual({c.medium_track_count for c in manifest.components}, {2})
+        album = _mb_album(["rt-1-1", "rt-1-2"])
+        result = track_length_result(album, manifest, _measured(
+            album, {"rt-1-1": 200.0, "rt-1-2": 285.0}))
+        assert result.finding is not None
+        self.assertEqual(result.finding.detail, "ending missing? (track 2)")
 
     def test_discogs_durations_and_composites(self) -> None:
         raw: dict[str, object] = {"id": "7", "tracks": [
@@ -292,11 +308,17 @@ class TestMeasurer(unittest.TestCase):
         self.assertIsNone(measurer.lengths_for(2, ["/b/1"]))
         self.assertEqual(reads, [])
 
-    def test_unreadable_file_is_used_but_not_cached(self) -> None:
-        measurer, _, _ = self._measurer(
-            TrackLengthCache(), lengths={"/a/1": 5.0}, sizes={"/a/1": 1, "/a/2": 1})
-        self.assertEqual(measurer.lengths_for(1, ["/a/1", "/a/2"]), {"/a/1": 5.0, "/a/2": None})
-        self.assertEqual(measurer.updated_cache().albums, {})
+    def test_unreadable_file_is_cached_and_not_reread(self) -> None:
+        sizes = {"/a/1": 1, "/a/2": 1}
+        first, _, _ = self._measurer(TrackLengthCache(), lengths={"/a/1": 5.0}, sizes=sizes)
+        self.assertEqual(first.lengths_for(1, ["/a/1", "/a/2"]), {"/a/1": 5.0, "/a/2": None})
+        second, reads, _ = self._measurer(first.updated_cache(), lengths={"/a/1": 5.0}, sizes=sizes)
+        self.assertEqual(second.lengths_for(1, ["/a/1", "/a/2"]), {"/a/1": 5.0, "/a/2": None})
+        self.assertEqual(reads, [])
+
+    def test_lengths_are_rounded_when_read(self) -> None:
+        measurer, _, _ = self._measurer(TrackLengthCache(), lengths={"/a/1": 5.123456})
+        self.assertEqual(measurer.lengths_for(1, ["/a/1"]), {"/a/1": 5.12})
 
     def test_unseen_albums_drop_and_kept_albums_carry_forward(self) -> None:
         cache = TrackLengthCache(albums={
@@ -369,6 +391,18 @@ class TestScanIntegration(unittest.TestCase):
         self.assertEqual((counts.track_length_measured, counts.track_length_pending,
                           counts.track_length_unlisted), (1, 1, 1))
         self.assertEqual(report.albums, ())
+
+    def test_pending_album_keeps_its_previous_finding(self) -> None:
+        album = _mb_album(["rt-1-1"])
+        previous = CompletenessFinding(
+            "track_length", "ending missing? (track 1)", sentence="old")
+        measurer = TrackLengthMeasurer(
+            TrackLengthCache(), budget_seconds=0.0, stat=_Stat({"/lib/a/rt-1-1.opus": 1}))
+        report = self._scan(TrackLengthCheck(measurer, previous={1: previous}),
+                            [album], _mb_raw([200_000]))
+        self.assertEqual(report.counts.track_length_pending, 1)
+        self.assertEqual(report.counts.track_length, 1)
+        self.assertEqual(report.albums[0].findings, (previous,))
 
     def test_unreachable_source_keeps_cached_measurements(self) -> None:
         album = _mb_album(["rt-1-1"])

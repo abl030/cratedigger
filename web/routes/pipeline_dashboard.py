@@ -237,8 +237,9 @@ def library_completeness_view(
     report["albums"] = albums + verified
     # Issue #1241: enrich each embedded album with its pipeline request and
     # the operator's incomplete-mark state so the card can offer the
-    # mark/clear action inline. Joined only for the capped embed, never for
-    # the persisted snapshot. A census album with no resolvable request
+    # mark/clear action inline. Joined for the albums this view returns
+    # (capped on the dashboard, every listed album on the CLI list route),
+    # never for the persisted snapshot. A census album with no resolvable request
     # (release_id absent from the pipeline) carries request_id=None and the
     # card renders no action for it. Per-album isolation (#1257 review F9):
     # the presentation projection refuses inconsistent mid-transition rows

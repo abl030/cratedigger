@@ -45,6 +45,7 @@ import msgspec
 
 from lib.library_completeness import (
     CatalogItem,
+    CompletenessAlbum,
     CompletenessFinding,
     LibraryAlbum,
     SourceComponent,
@@ -307,8 +308,11 @@ class TrackLengthMeasurer:
     run's time budget is spent; the album is measured on a later run. The
     budget clock starts at the first real read, so cached albums cost
     nothing. An album is finished once started, so a run overshoots by at
-    most one album. An album with a file that could not be read is used for
-    this run but not cached, so a passing IO error is retried next run.
+    most one album. A file that could not be read is cached as ``None``
+    under the same fingerprint: a missing or corrupt file stays that way
+    until it is rewritten or reappears, which changes the fingerprint and
+    reads the album again. Re-reading such albums daily would spend the
+    budget on the same broken files every run.
     """
 
     def __init__(
@@ -357,7 +361,9 @@ class TrackLengthMeasurer:
         finally:
             self._last_read = self._clock()
             self.files_read += 1
-        return seconds if seconds > 0 else None
+        # Rounded here, not only when cached, so a first run and a cached
+        # run classify the very same numbers.
+        return round(seconds, 2) if seconds > 0 else None
 
     def keep(self, album_id: int) -> None:
         """Carry an album's cached entry forward without measuring it.
@@ -383,14 +389,7 @@ class TrackLengthMeasurer:
         if self._budget_spent():
             return None
         lengths = tuple(self._read(path) for path in ordered)
-        if all(length is not None for length in lengths):
-            self._kept[key] = CachedAlbumLengths(
-                fingerprint=fingerprint,
-                lengths=tuple(
-                    round(length, 2) if length is not None else None
-                    for length in lengths
-                ),
-            )
+        self._kept[key] = CachedAlbumLengths(fingerprint=fingerprint, lengths=lengths)
         return dict(zip(ordered, lengths, strict=True))
 
     def updated_cache(self) -> TrackLengthCache:
@@ -399,10 +398,21 @@ class TrackLengthMeasurer:
 
 
 class TrackLengthCheck:
-    """The census's per-album length step (``scan_library_completeness``)."""
+    """The census's per-album length step (``scan_library_completeness``).
 
-    def __init__(self, measurer: TrackLengthMeasurer) -> None:
+    ``previous`` maps album id to the track-length finding the last
+    published snapshot carried. An album waiting for the read budget keeps
+    that finding, so an operator's dismissal of a multi-finding row does not
+    lapse for a day merely because the album's files changed and have not
+    been re-read yet.
+    """
+
+    def __init__(
+        self, measurer: TrackLengthMeasurer, *,
+        previous: Mapping[int, CompletenessFinding] | None = None,
+    ) -> None:
         self.measurer = measurer
+        self._previous = dict(previous or {})
 
     def __call__(
         self, album: LibraryAlbum, manifest: SourceManifest | None,
@@ -417,5 +427,17 @@ class TrackLengthCheck:
             album.album_id, [item.path for item in album.catalog_items],
         )
         if measured is None:
-            return TrackLengthResult(status="pending")
+            return TrackLengthResult(
+                status="pending", finding=self._previous.get(album.album_id))
         return track_length_result(album, manifest, measured)
+
+
+def previous_track_length_findings(
+    albums: Sequence[CompletenessAlbum],
+) -> dict[int, CompletenessFinding]:
+    """The track-length finding per album in a published snapshot."""
+    return {
+        album.album_id: finding
+        for album in albums for finding in album.findings
+        if finding.kind == "track_length"
+    }

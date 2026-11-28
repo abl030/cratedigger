@@ -238,6 +238,7 @@ def musicbrainz_manifest(
         if pregap is not None:
             entries.append(pregap)
         entries.extend(tracks)
+        last_audio_position = _last_audio_position(tracks)
         for raw_track in entries:
             track = _raw_mapping(raw_track, "MusicBrainz track is not an object")
             key = track.get("id")
@@ -253,20 +254,34 @@ def musicbrainz_manifest(
                 raise SourceManifestError("MusicBrainz recording lacks video boolean")
             name = track.get("title")
             title = name if isinstance(name, str) else ""
-            position = track.get("position")
             components.append(SourceComponent(
                 key=key, title=title, kind="non_audio" if video else "audio",
                 recording_id=recording_id,
                 declared_seconds=_mb_length_seconds(track.get("length")),
                 medium=medium_position,
-                medium_index=(
-                    position if isinstance(position, int)
-                    and not isinstance(position, bool) and position >= 0
-                    else None
-                ),
-                medium_track_count=len(tracks),
+                # A pregap (position 0) is left unplaced: the length check
+                # names it by title rather than "track 0".
+                medium_index=_positive_int(track.get("position")),
+                medium_track_count=last_audio_position,
             ))
     return _valid_manifest("musicbrainz", release_id, components)
+
+
+def _last_audio_position(tracks: list[object]) -> int | None:
+    """Position of a medium's last audio track (issue #1472).
+
+    The length check's "last track" means the last one with audio, so a
+    trailing enhanced-CD video track must not move it. ``None`` when no
+    audio track states its position.
+    """
+    positions = [
+        position for raw in tracks
+        if is_str_object_dict(raw)
+        and (position := _positive_int(raw.get("position"))) is not None
+        and not (is_str_object_dict(recording := raw.get("recording"))
+                 and recording.get("video") is True)
+    ]
+    return max(positions) if positions else None
 
 
 def _positive_int(value: object) -> int | None:

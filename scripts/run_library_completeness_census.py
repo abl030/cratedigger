@@ -9,6 +9,8 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 
+import msgspec
+
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
@@ -18,10 +20,15 @@ from lib.api_bases import configure_api_bases_from_runtime_config
 from lib.beets_db import open_beets_db
 from lib.beets_startup import BeetsStartupError, enforce_beets_startup
 from lib.config import resolve_startup_config_paths
-from lib.library_completeness import CompletenessBeets, scan_library_completeness
+from lib.library_completeness import (
+    CompletenessBeets,
+    CompletenessFinding,
+    scan_library_completeness,
+)
 from lib.library_completeness_snapshot import (
     LibraryCompletenessSnapshot,
     library_completeness_snapshot_path,
+    read_library_completeness_snapshot,
     write_library_completeness_snapshot,
 )
 from lib.library_track_lengths import (
@@ -29,6 +36,7 @@ from lib.library_track_lengths import (
     DEFAULT_LENGTH_READS_PER_SECOND,
     TrackLengthCheck,
     TrackLengthMeasurer,
+    previous_track_length_findings,
     read_track_length_cache,
     track_length_cache_path,
     write_track_length_cache,
@@ -69,6 +77,16 @@ def run_library_completeness_census(
     return LibraryCompletenessSnapshot(generated_at, time_fn() - started, report)
 
 
+def _previous_track_length_findings(path: str) -> dict[int, CompletenessFinding]:
+    """Yesterday's track-length findings; an unreadable snapshot has none."""
+    try:
+        snapshot = read_library_completeness_snapshot(path)
+    except (OSError, UnicodeDecodeError, ValueError, msgspec.ValidationError):
+        logger.exception("prior snapshot at %s unreadable; no findings carried", path)
+        return {}
+    return previous_track_length_findings(snapshot.report.albums) if snapshot else {}
+
+
 def publish_library_completeness_census(
     path: str, beets: CompletenessBeets, *,
     fetch_musicbrainz_raw: Callable[[str], dict[str, object]],
@@ -84,11 +102,14 @@ def publish_library_completeness_census(
     """
     check = None
     if length_cache_path is not None:
-        check = TrackLengthCheck(TrackLengthMeasurer(
-            read_track_length_cache(length_cache_path),
-            budget_seconds=length_budget_seconds,
-            reads_per_second=length_reads_per_second,
-        ))
+        check = TrackLengthCheck(
+            TrackLengthMeasurer(
+                read_track_length_cache(length_cache_path),
+                budget_seconds=length_budget_seconds,
+                reads_per_second=length_reads_per_second,
+            ),
+            previous=_previous_track_length_findings(path),
+        )
     snapshot = run_library_completeness_census(
         beets, fetch_musicbrainz_raw=fetch_musicbrainz_raw,
         fetch_discogs_raw=fetch_discogs_raw,
