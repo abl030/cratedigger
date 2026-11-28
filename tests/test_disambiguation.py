@@ -438,6 +438,50 @@ class TestRunImportDuplicateGuard(unittest.TestCase):
 
     @patch("harness.import_one.select.select")
     @patch("harness.import_one.subprocess.Popen")
+    def test_folder_collision_refusal_is_a_typed_guard_outcome(
+        self, mock_popen, mock_select,
+    ):
+        """#1465: a folder_collision notice after an allowed remove yields the
+        folder guard outcome, and nothing counts as replaced."""
+        from harness import import_one
+
+        messages = [
+            {"type": "resolve_duplicate", "duplicate_candidates": [
+                {"beets_album_id": 10, "mb_albumid": TARGET_MBID,
+                 "album_path": "/Beets/Target", "item_count": 10},
+            ]},
+            _choose_match(),
+            {"type": "folder_collision", "path": "/tmp/test",
+             "beets_album_id": 12, "folder": "/Beets/High Violet",
+             "planned_paths": ["/Beets/High Violet/01 Terrible Love.flac"],
+             "occupants": [{"beets_album_id": 11, "mb_albumid": OTHER_MBID,
+                            "discogs_albumid": "", "albumartist": "The National",
+                            "album": "High Violet", "item_paths": [
+                                "/Beets/High Violet/01 Other.flac"]}],
+             "unowned_files": [], "excluded_album_ids": [10, 12],
+             "message": "planned folder '/Beets/High Violet' already holds x"},
+            {"type": "session_end"},
+        ]
+        proc = _make_harness_proc(messages)
+        mock_popen.return_value = proc
+        mock_select.return_value = ([99], [], [])
+
+        outcome = import_one.run_import(
+            "/tmp/test", TARGET_MBID, max_distance=DEFAULT_MAX_DISTANCE)
+
+        self.assertEqual(outcome.exit_code,
+                         import_one.FOLDER_EXCLUSIVITY_GUARD_EXIT_CODE)
+        guard = outcome.folder_exclusivity_guard
+        assert guard is not None
+        self.assertEqual(guard.folder, "/Beets/High Violet")
+        self.assertEqual([o.beets_album_id for o in guard.occupants], [11])
+        self.assertEqual(guard.excluded_album_ids, [10, 12])
+        self.assertEqual(outcome.replaced_albums, [])
+        self.assertFalse(outcome.beets_owned_replacement)
+        self.assertEqual(outcome.failure_reason, guard.message)
+
+    @patch("harness.import_one.select.select")
+    @patch("harness.import_one.subprocess.Popen")
     def test_no_duplicate_not_kept(self, mock_popen, mock_select):
         """Normal import without duplicate resolution succeeds."""
         from harness import import_one

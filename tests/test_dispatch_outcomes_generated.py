@@ -132,6 +132,7 @@ _KNOWN_DECISIONS = tuple(sorted(
     | QUALITY_DECISION_REJECT_STAGE_DECISIONS
     | _PREIMPORT_FACT_REJECT_DECISIONS
     | {"spectral_reject", "duplicate_remove_guard_failed",
+       "folder_exclusivity_guard_failed",
        "totally_unmapped_decision"}
 ))
 _AUTOMATIC_RETAINED_ACTIONS = {

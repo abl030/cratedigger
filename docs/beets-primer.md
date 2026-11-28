@@ -875,6 +875,39 @@ machine has been removed. Beets owns the atomic delete-and-replace operation;
 Cratedigger's job is to fail before mutation when Beets' would-remove set is
 not exactly one same-release album.
 
+### Folder exclusivity guard (issue #1465)
+
+One album per folder is a library invariant (`check_folder_exclusivity` in
+`lib/world_invariants.py`). The asciified `%aunique` keys stop same-key
+siblings sharing a folder, but nothing in the templates stops an already
+occupied destination: Beets `replace` rules (`Foo?` and `Foo_` both render
+`Foo_` with different `%aunique` keys), path separator replacement, filename
+truncation, or an album whose stored path predates its sibling. Beets itself
+just suffixes clashing filenames with `.1` and moves in beside the occupant.
+
+Beets removes same-release duplicates (deleting their files) and moves the
+new files back to back inside `stages.manipulate_files`, so there is no point
+that is both after removal and before a file mutation. The harness instead
+appends one last plugin import stage (`harness/folder_guard.py`, installed by
+`_install_folder_exclusivity_stage`). It runs after `apply_choice` added the
+album row and before `manipulate_files`, and computes each item's
+destination with the duplicate set hidden from `Library.albums`, which is how
+`%aunique` finds siblings. That renders the post-removal folder without
+removing anything. The folder is refused when it holds items of any other
+Beets album, any audio file no duplicate owns, or any file at a planned
+destination.
+
+A refused task becomes SKIP: Beets removes no duplicate and moves no file,
+the staged source is untouched, and the harness drops the refused album rows
+(database only) once the session ends. It reports a `folder_collision`
+message; the controller returns exit code 8 and decision
+`folder_exclusivity_guard_failed` with the occupants and planned paths in
+`postflight.folder_exclusivity_guard`. Dispatch records the rejection, cleans
+the staged copy, denylists the source user for the request (with the global
+cooldown streak check) as the standard back-off, and returns the request to
+`wanted`. The collision is the operator's to resolve (retag or move the
+occupant); until then every retry is refused the same way.
+
 ### Exit Codes
 
 | Code | Meaning |
@@ -885,6 +918,7 @@ not exactly one same-release album.
 | 3 | Album path not found |
 | 4 | Target MBID not found in beets candidates |
 | 7 | Duplicate-remove guard failed before Beets removed anything |
+| 8 | Folder exclusivity guard refused before Beets removed or moved anything |
 
 ### Constants
 

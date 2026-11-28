@@ -109,6 +109,16 @@ def dispatch_action(decision: str) -> DispatchAction:
     elif decision == "duplicate_remove_guard_failed":
         return DispatchAction(record_rejection=True, denylist=True,
                               cleanup=False)
+    elif decision == "folder_exclusivity_guard_failed":
+        # Issue #1465: the planned library folder already holds another
+        # album, so Beets refused before removing or moving anything. Not
+        # the peer's fault, but the same pressing collides on every retry:
+        # the standard per-request denylist plus global cooldown limits the
+        # loop while the request stays searchable. The staged files are
+        # ordinary audio, not forensic evidence; the occupants and planned
+        # paths persist in ``postflight.folder_exclusivity_guard``.
+        return DispatchAction(record_rejection=True, denylist=True,
+                              cleanup=True)
     else:  # import_failed, conversion_failed, mbid_missing, crash, etc.
         return DispatchAction(record_rejection=True)
 

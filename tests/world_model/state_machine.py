@@ -235,9 +235,11 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
         with LifecycleWorld(TEST_DSN, repository_root()) as world:
             first_id, second_id = self._add_passenger_pressings(world)
 
-            world.import_request(first_id)
-            world.import_request(second_id)
-            world.import_request(first_id, codec="flac")
+            self.assertTrue(world.import_request(first_id))
+            self.assertTrue(world.import_request(second_id))
+            # A same-release upgrade must replace, never be refused as an
+            # occupant of its own folder (#1465 duplicate exclusion).
+            self.assertTrue(world.import_request(first_id, codec="flac"))
 
             world.assert_invariants()
             albums = world.beets.snapshots()
@@ -255,10 +257,15 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
             )
 
     def test_passenger_historical_template_poison_is_caught(self) -> None:
-        """The real lifecycle invariant must kill the pre-fix path policy."""
+        """The real lifecycle invariant must kill the pre-fix path policy.
+
+        The import-time folder guard (#1465) would refuse this import, so
+        it is switched off: this pins the audit backstop's own teeth.
+        """
 
         assert TEST_DSN is not None
         with LifecycleWorld(TEST_DSN, repository_root()) as world:
+            world.beets.folder_guard_enabled = False
             beets_config["paths"]["default"].set(
                 HISTORICAL_PASSENGER_PATH_TEMPLATE
             )
@@ -328,10 +335,14 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
                 )
 
     def test_raw_key_template_poison_is_caught(self) -> None:
-        """The lifecycle invariant must kill the pre-#1463 raw-key policy."""
+        """The lifecycle invariant must kill the pre-#1463 raw-key policy.
+
+        Folder guard off (#1465): this pins the audit backstop's own teeth.
+        """
 
         assert TEST_DSN is not None
         with LifecycleWorld(TEST_DSN, repository_root()) as world:
+            world.beets.folder_guard_enabled = False
             beets_config["paths"]["default"].set(
                 HISTORICAL_RAW_KEY_PATH_TEMPLATE
             )
@@ -353,6 +364,87 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
                 "the world model did not detect the Tristeza accent-only "
                 "folder collision",
             )
+
+    def _assert_folder_guard_refused(
+        self, world: LifecycleWorld, request_id: int, occupant_release: str,
+    ) -> None:
+        row = world.db._execute(
+            "SELECT status FROM album_requests WHERE id = %s", (request_id,),
+        ).fetchone()
+        assert row is not None
+        self.assertEqual(row[0] if not isinstance(row, dict) else row["status"],
+                         "wanted")
+        world.assert_invariants()
+        albums = world.beets.snapshots()
+        self.assertEqual([album.release_id for album in albums],
+                         [occupant_release])
+        self.assertTrue(all(
+            ".1." not in os.path.basename(path)
+            for album in albums for path in album.item_paths
+        ))
+        log = world.db._execute(
+            "SELECT outcome, beets_scenario FROM download_log "
+            "WHERE request_id = %s ORDER BY id DESC LIMIT 1",
+            (request_id,),
+        ).fetchone()
+        assert log is not None
+        values = tuple(log.values()) if isinstance(log, dict) else tuple(log)
+        self.assertEqual(values, ("rejected", "folder_exclusivity_guard_failed"))
+        # World automation imports carry no source username, so the
+        # denylist/cooldown back-off is pinned in tests/test_import_dispatch.py
+        # (test_folder_exclusivity_guard_rejects_denylists_and_stays_wanted).
+
+    def test_replace_rule_collision_is_refused_and_stays_wanted(self) -> None:
+        """#1465 residual class under the shipped template: Beets' default
+        replace rules render ``Foo?`` and ``Foo_`` into one folder while the
+        asciified %aunique keys still differ, so no bracket separates them.
+        The import is refused before any file moves; the request is
+        searchable again with the source user on the standard back-off."""
+
+        assert TEST_DSN is not None
+        with LifecycleWorld(TEST_DSN, repository_root()) as world:
+            occupant = "3b2e8f63-0c3c-4d2e-9b55-1465aaaa0001"
+            world.beets.import_release(BeetsWorldRelease(
+                release_id=occupant,
+                artist="Guard Artist",
+                album="Foo_",
+                year=2004,
+                codec="mp3",
+            ))
+            request_id = world.add_release(BeetsWorldRelease(
+                release_id="3b2e8f63-0c3c-4d2e-9b55-1465aaaa0002",
+                artist="Guard Artist",
+                album="Foo?",
+                year=2004,
+                codec="mp3",
+            ))
+
+            world.folder_guard_refusals_expected = True
+            imported = world.import_request(request_id)
+
+            self.assertFalse(imported)
+            self._assert_folder_guard_refused(world, request_id, occupant)
+
+    def test_folder_guard_refuses_the_raw_key_poison(self) -> None:
+        """With the guard on, the pre-#1463 raw-key collision never lands."""
+
+        assert TEST_DSN is not None
+        with LifecycleWorld(TEST_DSN, repository_root()) as world:
+            beets_config["paths"]["default"].set(
+                HISTORICAL_RAW_KEY_PATH_TEMPLATE
+            )
+            try:
+                request_id = self._add_tristeza_pressings(world)
+                world.folder_guard_refusals_expected = True
+                imported = world.import_request(request_id)
+                self.assertFalse(imported)
+                self._assert_folder_guard_refused(
+                    world, request_id, "7debce01-07b1-4a30-ab4d-54032a6e88cd",
+                )
+            finally:
+                beets_config["paths"]["default"].set(
+                    world.beets.consumer.default_path_template
+                )
 
     def test_rejected_identical_retry_preserves_evidence_capture_path(self) -> None:
         """Shrunk #743 world: candidate/current share one content address."""

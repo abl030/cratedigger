@@ -213,20 +213,20 @@ class TestWorldModelScheduling(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exactly 5 generated tests"):
             build_targets(manifest, examples=25, jobs=30, root_seed=91)
 
-    def test_production_census_fails_closed_unless_exactly_twenty_one_pins(self) -> None:
+    def test_production_census_fails_closed_unless_exactly_twenty_three_pins(self) -> None:
         manifest = WorldManifest(
             test_ids=PINS + GENERATED,
             generated_ids=GENERATED,
             database_key_paths=_database_keys(GENERATED),
         )
 
-        with self.assertRaisesRegex(ValueError, "exactly 21 deterministic pins"):
+        with self.assertRaisesRegex(ValueError, "exactly 23 deterministic pins"):
             build_targets(
                 manifest,
                 examples=25,
                 jobs=30,
                 root_seed=91,
-                expected_pins=21,
+                expected_pins=23,
             )
 
     def test_target_seed_is_stable_across_worker_pid_and_schedule_order(self) -> None:

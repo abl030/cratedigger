@@ -21,6 +21,7 @@ from beets import plugins as beets_plugins
 from beets.util import MoveOperation
 from mediafile import MediaFile
 
+from harness.folder_guard import FolderCollision, find_folder_collision
 from lib.beets_config_contract import SAFE_COMP_PATH
 from lib.release_identity import detect_release_source
 from lib.world_invariants import LibraryAlbumSnapshot
@@ -242,6 +243,19 @@ def build_subprocess_beets_config(
     }
 
 
+class FolderCollisionRefused(RuntimeError):
+    """The world importer refused an album whose planned folder is occupied.
+
+    Mirrors the harness folder exclusivity stage (#1465): raised after the
+    album row is added and before any duplicate removal or file move; the
+    refused row is already gone and the staged files are untouched.
+    """
+
+    def __init__(self, collision: FolderCollision) -> None:
+        super().__init__(collision.message())
+        self.collision = collision
+
+
 class BeetsWorld:
     """One isolated Beets SQLite database plus real tagged audio files."""
 
@@ -262,6 +276,9 @@ class BeetsWorld:
         self.incoming_root.mkdir()
         self.consumer = extract_consumer_beets_world_config(repo_root)
         self._import_counter = 0
+        # The production importer's folder exclusivity guard (#1465). Off
+        # only for audit-backstop tests that must see a collision land.
+        self.folder_guard_enabled = True
         try:
             self._configure_beets()
             self.library = beets_library.Library(
@@ -590,6 +607,19 @@ class BeetsWorld:
             if self._album_release_id(album) == release.release_id
         ]
         album = self.library.add_album(items)
+        if self.folder_guard_enabled:
+            collision = find_folder_collision(
+                self.library,
+                album,
+                list(album.items()),
+                {
+                    duplicate.id for duplicate in duplicate_albums
+                    if duplicate.id is not None
+                } if replace_duplicates else set(),
+            )
+            if collision is not None:
+                album.remove(delete=False, with_items=True)
+                raise FolderCollisionRefused(collision)
         if replace_duplicates:
             for duplicate in duplicate_albums:
                 duplicate.remove(delete=True)

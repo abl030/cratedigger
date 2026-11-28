@@ -530,6 +530,7 @@ _DENYLIST_REASON_DECISIONS: dict[str, str] = {
     "spectral analysis rejected the source": "spectral_reject",
     "mixed lossless+lossy source": "mixed_source",
     "duplicate remove guard failed": "duplicate_remove_guard_failed",
+    "library folder occupied": "folder_exclusivity_guard_failed",
     "provisional lossless source imported": "provisional_lossless_upgrade",
 }
 _IMPORT_PREVIEW_REASON_PREFIX = "import preview rejected: "

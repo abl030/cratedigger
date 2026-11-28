@@ -61,6 +61,7 @@ _DENYLIST_REASONS = {
     "bad_audio_hash": "matched curated bad audio hash",
     "mixed_source": "mixed lossless+lossy source",
     "duplicate_remove_guard_failed": "rejected: duplicate_remove_guard_failed",
+    "folder_exclusivity_guard_failed": "rejected: folder_exclusivity_guard_failed",
 }
 
 

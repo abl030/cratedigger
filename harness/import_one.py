@@ -92,6 +92,7 @@ from lib.quality import (
     ConversionInfo,
     DuplicateRemoveCandidate,
     DuplicateRemoveGuardInfo,
+    FolderExclusivityGuardInfo,
     HarnessItem,
     ImportResult,
     MeasuredImportDecisionInput,
@@ -146,6 +147,7 @@ HARNESS = os.path.join(os.path.dirname(__file__), "..", "harness", "run_beets_ha
 HARNESS_TIMEOUT = 300
 IMPORT_TIMEOUT = 1800
 DUPLICATE_REMOVE_GUARD_EXIT_CODE = 7
+FOLDER_EXCLUSIVITY_GUARD_EXIT_CODE = 8
 
 #: Apply-time Beets distance ceiling for an ordinary run. ``--force`` raises
 #: this run's ceiling to ``lib.beets.FORCE_IMPORT_DISTANCE_THRESHOLD``; see
@@ -437,6 +439,9 @@ class RunImportOutcome:
     exit_code: int
     beets_lines: list[str]
     duplicate_remove_guard: DuplicateRemoveGuardInfo | None = None
+    # Issue #1465: the harness refused the applied task before
+    # ``manipulate_files`` because its planned folder was occupied.
+    folder_exclusivity_guard: FolderExclusivityGuardInfo | None = None
     beets_owned_replacement: bool = False
     # Duplicates the guard ALLOWED beets to remove — the replaced pre-upgrade
     # copies, with their old library paths. Copied onto
@@ -1411,6 +1416,7 @@ def _run_import_once(
     applied_audio_count: int | None = None
     beets_owned_replacement = False
     replaced_albums: list[DuplicateRemoveCandidate] = []
+    folder_guard: FolderExclusivityGuardInfo | None = None
     timeout = HARNESS_TIMEOUT
 
     try:
@@ -1422,7 +1428,10 @@ def _run_import_once(
                 proc.wait()
                 _close_harness_process_streams(proc)
                 return RunImportOutcome(
-                    2, [], replaced_albums=replaced_albums,
+                    2, [],
+                    # A refused task replaced nothing, even after ``remove``.
+                    replaced_albums=(
+                        [] if folder_guard is not None else replaced_albums),
                     applied_distance=applied_distance,
                     failure_reason=(
                         f"beets harness produced no output for {timeout}s"
@@ -1451,6 +1460,22 @@ def _run_import_once(
             elif msg_type == "should_resume":
                 proc.stdin.write(json.dumps({"resume": False}) + "\n")
                 proc.stdin.flush()
+
+            elif msg_type == "folder_collision":
+                # Notification only (#1465): the harness already skipped the
+                # task, so Beets removes and moves nothing; keep reading to
+                # session_end so the refused rows are released first.
+                wire = {k: v for k, v in msg.items() if k != "type"}
+                try:
+                    folder_guard = msgspec.convert(
+                        wire, type=FolderExclusivityGuardInfo)
+                except msgspec.ValidationError as exc:
+                    folder_guard = FolderExclusivityGuardInfo(
+                        message=f"malformed folder_collision message: {exc}")
+                print(
+                    f"  [FOLDER-GUARD] Refused import: {folder_guard.message}",
+                    file=sys.stderr,
+                )
 
             elif msg_type == "resolve_duplicate":
                 candidates = _duplicate_candidates_from_message(msg)
@@ -1619,6 +1644,26 @@ def _run_import_once(
             continue
         print(f"  [BEETS] {line}", file=sys.stderr)
         beets_lines.append(line)
+
+    if folder_guard is not None:
+        # The refused task removed nothing: no replacement happened, so the
+        # duplicate the controller answered ``remove`` for is still in place.
+        failure_reason = folder_guard.message
+        if proc_rc not in (None, 0):
+            # The refusal stands (nothing was removed or moved); the exit
+            # status is recorded alongside it rather than replacing it.
+            failure_reason = (
+                f"{failure_reason}; harness then exited rc={proc_rc}"
+            )
+        return RunImportOutcome(
+            FOLDER_EXCLUSIVITY_GUARD_EXIT_CODE,
+            beets_lines,
+            folder_exclusivity_guard=folder_guard,
+            applied_distance=applied_distance,
+            admitted_audio_count=admitted_audio_count,
+            applied_audio_count=applied_audio_count,
+            failure_reason=failure_reason,
+        )
 
     if proc_rc not in (None, 0):
         return RunImportOutcome(
@@ -2190,6 +2235,12 @@ def _run_quality_evidence_authorized_import(
             r.postflight.duplicate_remove_guard = (
                 import_outcome.duplicate_remove_guard)
             r.error = import_outcome.duplicate_remove_guard.message
+        elif import_outcome.folder_exclusivity_guard is not None:
+            r.decision = "folder_exclusivity_guard_failed"
+            r.postflight.folder_exclusivity_guard = (
+                import_outcome.folder_exclusivity_guard)
+            r.postflight.replaced_albums = []
+            r.error = import_outcome.folder_exclusivity_guard.message
         else:
             r.decision = "mbid_missing" if rc == 4 else "import_failed"
             r.error = _harness_failure_error(import_outcome, rc)
@@ -3143,6 +3194,12 @@ def _run_import_one_stages(
             r.postflight.duplicate_remove_guard = (
                 import_outcome.duplicate_remove_guard)
             r.error = import_outcome.duplicate_remove_guard.message
+        elif import_outcome.folder_exclusivity_guard is not None:
+            r.decision = "folder_exclusivity_guard_failed"
+            r.postflight.folder_exclusivity_guard = (
+                import_outcome.folder_exclusivity_guard)
+            r.postflight.replaced_albums = []
+            r.error = import_outcome.folder_exclusivity_guard.message
         else:
             r.decision = "import_failed" if rc == 2 else "mbid_missing" if rc == 4 else "import_failed"
             r.error = _harness_failure_error(import_outcome, rc)

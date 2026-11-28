@@ -232,6 +232,17 @@ def duplicate_outcome(decision: str, task: object) -> DuplicateAction | None:
     return getattr(CAPABILITIES.duplicate_action, "REMOVE" if remove else "SKIP")
 
 
+def task_removes_duplicates(task: object) -> bool:
+    """Whether Beets will remove this task's duplicates before moving files."""
+    if CAPABILITIES.duplicate_era == "legacy":
+        return bool(vars(task).get("should_remove_duplicates", False))
+    action = CAPABILITIES.duplicate_action
+    if action is None:
+        raise BeetsCapabilityError("modern duplicate hook has no DuplicateAction enum")
+    removing = {getattr(action, name) for name in ("REMOVE", "UPGRADE") if hasattr(action, name)}
+    return getattr(task, "duplicate_action", None) in removing
+
+
 class _ModernDuplicatesAlbum(Protocol):
     def duplicates_query(self, fields: list[str]) -> object: ...
 
