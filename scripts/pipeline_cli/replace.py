@@ -45,6 +45,11 @@ def _render_replace(status: int, payload: dict[str, object]) -> None:
             "  Adopt import job:  "
             + (str(job_id) if job_id is not None else "NOT QUEUED (see warnings)")
         )
+        if payload.get("displace_album_id") is not None:
+            print(
+                f"  Current copy:      Beets album {payload['displace_album_id']}"
+                f" kept until job {job_id} imports"
+            )
     owner = payload.get("processing_owner")
     if is_str_object_dict(owner):
         print(
@@ -96,6 +101,7 @@ def cmd_replace(_db: object, args: argparse.Namespace) -> int:
                 # Namespace must too (no getattr default to hide a typo).
                 "cross_pathway": bool(args.cross_pathway),
                 "adopt_download_log_id": args.adopt_download_log_id,
+                "displace_after_import": bool(args.displace_after_import),
             },
         ),
         render=_render_replace,
@@ -131,5 +137,10 @@ def add_replace_subparser(
              "request that IS the target pressing: it moves to the new "
              "request (surviving the Wrong Matches cleanup) and a "
              "force-import is queued for it there")
+    p_replace.add_argument(
+        "--after-import", dest="displace_after_import", action="store_true",
+        help="With --adopt: keep the current copy until the adopted "
+             "candidate imports, then remove it. Without this, Replace "
+             "removes the current copy straight away")
     p_replace.add_argument("--json", action="store_true",
                            help="Print structured JSON instead of text")

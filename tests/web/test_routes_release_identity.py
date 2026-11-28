@@ -268,7 +268,8 @@ class TestPipelineReplaceContract(_FakeDbWebServerCase):
         self.assertEqual(
             svc.call_args.kwargs,
             {"target_mb_release_id": "1002", "cross_pathway": True,
-             "adopt_download_log_id": None},
+             "adopt_download_log_id": None,
+             "displace_after_import": False},
         )
         with self._patch_service(
             outcome="replaced", request_id=100, new_request_id=200,
@@ -280,7 +281,8 @@ class TestPipelineReplaceContract(_FakeDbWebServerCase):
         self.assertEqual(
             svc.call_args.kwargs,
             {"target_mb_release_id": "1002", "cross_pathway": False,
-             "adopt_download_log_id": None},
+             "adopt_download_log_id": None,
+             "displace_after_import": False},
         )
 
     def test_replace_forwards_adopt_and_returns_its_job(self):
@@ -290,16 +292,49 @@ class TestPipelineReplaceContract(_FakeDbWebServerCase):
         ) as svc:
             status, data = self._post(
                 "/api/pipeline/100/replace",
-                {"target_mb_release_id": "1002", "adopt_download_log_id": 7},
+                {"target_mb_release_id": "1002", "adopt_download_log_id": 7,
+             "displace_after_import": False},
             )
         self.assertEqual(status, 200)
         self.assertEqual(
             svc.call_args.kwargs,
             {"target_mb_release_id": "1002", "cross_pathway": False,
-             "adopt_download_log_id": 7},
+             "adopt_download_log_id": 7,
+             "displace_after_import": False},
         )
         self.assertEqual(data["adopt_download_log_id"], 7)
         self.assertEqual(data["adopt_import_job_id"], 31)
+
+    def test_replace_forwards_after_import_and_returns_the_album(self):
+        with self._patch_service(
+            outcome="replaced", request_id=100, new_request_id=200,
+            adopt_download_log_id=7, adopt_import_job_id=31,
+            displace_album_id=77,
+        ) as svc:
+            status, data = self._post(
+                "/api/pipeline/100/replace",
+                {"target_mb_release_id": "1002", "adopt_download_log_id": 7,
+                 "displace_after_import": True},
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            svc.call_args.kwargs,
+            {"target_mb_release_id": "1002", "cross_pathway": False,
+             "adopt_download_log_id": 7, "displace_after_import": True},
+        )
+        self.assertEqual(data["displace_album_id"], 77)
+
+    def test_replace_rejects_non_boolean_after_import(self):
+        with self._patch_service(
+            outcome="replaced", request_id=100, new_request_id=200,
+        ) as svc:
+            status, _data = self._post(
+                "/api/pipeline/100/replace",
+                {"target_mb_release_id": "1002", "adopt_download_log_id": 7,
+                 "displace_after_import": "true"},
+            )
+        self.assertEqual(status, 400)
+        svc.assert_not_called()
 
     def test_replace_rejects_non_integer_adopt(self):
         for bad in ("7", 0, True):
@@ -309,7 +344,8 @@ class TestPipelineReplaceContract(_FakeDbWebServerCase):
                 status, _data = self._post(
                     "/api/pipeline/100/replace",
                     {"target_mb_release_id": "1002",
-                     "adopt_download_log_id": bad},
+                     "adopt_download_log_id": bad,
+             "displace_after_import": False},
                 )
             self.assertEqual(status, 400, bad)
             svc.assert_not_called()

@@ -71,6 +71,9 @@ REPLACE_REASON_SOURCE_IDENTITY_INVALID = "source_identity_invalid"
 # ``--adopt``: the named download_log row is missing, belongs to another
 # request, or no longer carries a Wrong Matches folder.
 REPLACE_REASON_ADOPT_CANDIDATE_INVALID = "adopt_candidate_invalid"
+# ``--after-import`` without ``--adopt``: deferring the old copy's removal
+# until an import lands needs an import to wait for.
+REPLACE_REASON_DISPLACE_REQUIRES_ADOPT = "displace_requires_adopt"
 
 # POST /api/pipeline/<id>/resolve-rg status vocabulary
 # (web/routes/release_identity_routes.py::post_pipeline_resolve_rg). Two of these

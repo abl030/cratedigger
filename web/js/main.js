@@ -14,6 +14,7 @@ import { loadLongTail, setLongTailBand, onLongTailSearchInput } from './long_tai
 import { toggleLongTailDetail, toggleLongTailPeers, checkYoutube, pickYoutubeRescue, longTailAcceptSibling, longTailSetIntent, longTailSetImported, longTailDeleteRequest } from './long_tail_console.js';
 import { checkYoutubeRescue } from './youtube_rescue_control.js';
 import { checkOtherPressings } from './other_pressings.js';
+import { cancelOwnRelease, confirmOwnRelease, openOwnRelease } from './own_release.js';
 import { toggleLibDetail, toggleReleaseLibDetail, banSource, setLibQuality, upgradeAlbum, setIntent, confirmDeleteBeets, executeBeetsDeletion } from './library.js';
 import { disambRemove } from './analysis.js';
 import { loadWrongMatches, toggleWrongMatchGroup, toggleWrongMatchEntry, reloadWrongMatchExplorer, maybeLoadWrongMatchExplorer, refreshWrongMatches, forceImportWrongMatch, deleteWrongMatch, deleteWrongMatchGroup, bulkTriageWrongMatches, stopWrongMatchTriage, convergeWrongMatches, setWrongMatchConvergeThreshold, toggleWrongMatchesReplacedFilter, useHeldUpgradeCopy, keepCurrentCopy, cancelHeldUpgradeChoice } from './wrong-matches.js';
@@ -236,6 +237,9 @@ Object.assign(window, {
   // Issue #1445: the on-demand other-pressing check, from History detail
   // and from each Held upgrades card.
   checkOtherPressings,
+  openOwnRelease,
+  confirmOwnRelease,
+  cancelOwnRelease,
   openLabelDetail,
   openLabelDetailFromList,
   closeLabelDetail,

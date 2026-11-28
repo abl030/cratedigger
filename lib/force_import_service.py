@@ -13,6 +13,7 @@ from lib.fs_authority import (
 )
 from lib.import_queue import (
     IMPORT_JOB_FORCE,
+    ForceImportDisplacement,
     ImportJob,
     force_import_dedupe_key,
     force_import_payload,
@@ -90,8 +91,13 @@ def enqueue_force_import(
     db: ForceImportDB,
     cfg: object,
     download_log_id: int,
+    *,
+    displace: ForceImportDisplacement | None = None,
 ) -> ForceImportEnqueueResult:
     """Authorize and enqueue one download-log-backed force import.
+
+    ``displace`` names the exact Beets album the importer removes once this
+    job completes (Replace ``--adopt --after-import`` only).
 
     This is intentionally a preflight, not execution authority: the preview
     worker reopens the configured quarantine directory before reading it.
@@ -168,6 +174,7 @@ def enqueue_force_import(
                 entry.get("soulseek_username") or validation.soulseek_username
             ),
             source_dirs=normalize_source_dirs(validation.source_dirs),
+            displace=displace,
         ),
         message=(
             f"Force import queued for {request['artist_name']} - "

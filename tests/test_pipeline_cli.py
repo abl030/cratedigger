@@ -5979,7 +5979,7 @@ class TestCmdReplace(_FakeDbWebServerCase):
 
     def _run(self, *, mock_outcome, mock_kwargs=None, json_out=False,
              req_id=42, target_mbid="new-mbid", cross_pathway=False,
-             adopt=None):
+             adopt=None, after_import=False):
         from lib.mbid_replace_service import ReplaceResult
 
         result = ReplaceResult(
@@ -5991,6 +5991,7 @@ class TestCmdReplace(_FakeDbWebServerCase):
             id=req_id, target_mb_release_id=target_mbid, json=json_out,
             cross_pathway=cross_pathway,
             adopt_download_log_id=adopt,
+            displace_after_import=after_import,
             api_endpoint=TcpApiEndpoint(self.base),
         )
         stdout = io.StringIO()
@@ -6021,7 +6022,8 @@ class TestCmdReplace(_FakeDbWebServerCase):
         self.assertEqual(
             self._service_call.kwargs,
             {"target_mb_release_id": "1002", "cross_pathway": True,
-             "adopt_download_log_id": None},
+             "adopt_download_log_id": None,
+             "displace_after_import": False},
         )
         self._run(
             mock_outcome="replaced",
@@ -6031,7 +6033,8 @@ class TestCmdReplace(_FakeDbWebServerCase):
         self.assertEqual(
             self._service_call.kwargs,
             {"target_mb_release_id": "1002", "cross_pathway": False,
-             "adopt_download_log_id": None},
+             "adopt_download_log_id": None,
+             "displace_after_import": False},
         )
 
     def test_adopt_flag_reaches_the_service_and_renders_the_job(self):
@@ -6051,7 +6054,8 @@ class TestCmdReplace(_FakeDbWebServerCase):
         self.assertEqual(
             self._service_call.kwargs,
             {"target_mb_release_id": "1002", "cross_pathway": False,
-             "adopt_download_log_id": 42786},
+             "adopt_download_log_id": 42786,
+             "displace_after_import": False},
         )
         self.assertIn("Adopted candidate: 42786", out)
         self.assertIn("Adopt import job:  555", out)
@@ -6068,6 +6072,43 @@ class TestCmdReplace(_FakeDbWebServerCase):
         )
         self.assertEqual(rc, 0)
         self.assertIn("NOT QUEUED", out)
+
+    def test_after_import_rides_to_the_service_and_names_the_album(self):
+        """``--after-import`` keeps the current copy until the adopted
+        import lands; the output says which album waits for it."""
+        rc, out = self._run(
+            mock_outcome="replaced",
+            mock_kwargs={
+                "new_request_id": 99,
+                "adopt_download_log_id": 42786,
+                "adopt_import_job_id": 555,
+                "displace_album_id": 77,
+            },
+            target_mbid="1002",
+            adopt=42786,
+            after_import=True,
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            self._service_call.kwargs,
+            {"target_mb_release_id": "1002", "cross_pathway": False,
+             "adopt_download_log_id": 42786,
+             "displace_after_import": True},
+        )
+        self.assertIn(
+            "Current copy:      Beets album 77 kept until job 555 imports",
+            out,
+        )
+
+    def test_after_import_is_a_parser_flag(self):
+        from scripts.pipeline_cli.routes_meta import _build_parser
+
+        parser, _, _ = _build_parser()
+        parsed = parser.parse_args(
+            ["replace", "7", "--to", "x", "--adopt", "1", "--after-import"])
+        self.assertTrue(parsed.displace_after_import)
+        plain = parser.parse_args(["replace", "7", "--to", "x"])
+        self.assertFalse(plain.displace_after_import)
 
     def test_adopt_is_a_parser_flag(self):
         from scripts.pipeline_cli.routes_meta import _build_parser

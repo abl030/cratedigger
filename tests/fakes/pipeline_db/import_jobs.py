@@ -677,6 +677,32 @@ class _FakeImportJobsMixin(_FakePipelineDBBase):
         ))
         return [ImportJob.from_row(copy.deepcopy(row)) for row in rows]
 
+    def list_terminal_force_displacement_jobs(self) -> list[ImportJob]:
+        """Mirror of the real SQL predicate (see
+        ``lib/pipeline_db/import_jobs.py``): completed force jobs carrying
+        ``payload.displace`` whose ``displacement`` receipt is not
+        ``success: true``."""
+        rows = []
+        for row in self._import_jobs:
+            if row.get("job_type") != IMPORT_JOB_FORCE:
+                continue
+            if row.get("status") != "completed":
+                continue
+            payload = row.get("payload")
+            if not isinstance(payload, dict) or "displace" not in payload:
+                continue
+            result = row.get("result")
+            result_dict = result if isinstance(result, dict) else {}
+            receipt = result_dict.get("displacement")
+            success = receipt.get("success") if isinstance(receipt, dict) else None
+            if _jsonb_scalar_text(success) != "true":
+                rows.append(row)
+        rows.sort(key=lambda row: (
+            _as_datetime(row.get("created_at")),
+            int(row["id"]),
+        ))
+        return [ImportJob.from_row(copy.deepcopy(row)) for row in rows]
+
     def _candidate_job_type_routes(
         self,
         row: Mapping[str, object],

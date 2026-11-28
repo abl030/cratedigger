@@ -96,6 +96,7 @@ from lib.force_import_service import (
     ForceImportDB,
     enqueue_force_import,
 )
+from lib.import_queue import ForceImportDisplacement
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_IMPORT,
     MbidCollisionError,
@@ -118,6 +119,7 @@ from lib.replace_status import (
     REPLACE_REASON_CROSS_PATHWAY_TARGET,
     REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
     REPLACE_REASON_CURRENT_BEETS_UNAVAILABLE,
+    REPLACE_REASON_DISPLACE_REQUIRES_ADOPT,
     REPLACE_REASON_SOURCE_IDENTITY_INVALID,
     REPLACE_REASON_SOURCE_NO_RELEASE_GROUP,
     REPLACE_REASON_TARGET_NO_RELEASE_GROUP,
@@ -225,6 +227,10 @@ class ReplaceResult(msgspec.Struct, frozen=True):
       the force-import queued against the new request; ``None`` with the
       log id set means the adopt half failed after the supersede and a
       warning says why.
+    - ``displace_album_id``: set when ``--after-import`` kept the old
+      release's installed Beets album and handed its removal to the adopted
+      force-import job. ``None`` when nothing was installed, or when the job
+      could not carry it (a warning then says the old copy stays).
     """
 
     outcome: str
@@ -238,6 +244,7 @@ class ReplaceResult(msgspec.Struct, frozen=True):
     processing_owner: ProcessingOwnerProjection | None = None
     adopt_download_log_id: int | None = None
     adopt_import_job_id: int | None = None
+    displace_album_id: int | None = None
 
 
 def _processing_locked_replace(
@@ -281,6 +288,11 @@ class _AdoptCandidate:
 
     download_log_id: int
     failed_path: str
+    # ``--after-import``: keep the installed album of the old release until
+    # the adopted candidate's force import completes; the importer removes
+    # it then (``ForceImportDisplacement``). False is plain Replace, which
+    # removes it up front.
+    displace_after_import: bool = False
 
 
 @dataclass(frozen=True)
@@ -391,6 +403,7 @@ class MbidReplaceService:
         target_mb_release_id: str,
         cross_pathway: bool = False,
         adopt_download_log_id: int | None = None,
+        displace_after_import: bool = False,
     ) -> ReplaceResult:
         """Supersede ``request_id`` with a new row at ``target_mb_release_id``.
 
@@ -400,6 +413,15 @@ class MbidReplaceService:
         the new request (so the source's Wrong Matches cleanup cannot delete
         its folder) and a force-import is queued for it against the new
         request.
+
+        ``displace_after_import`` (requires ``adopt_download_log_id``) keeps
+        the old release's installed Beets album in place instead of
+        removing it in Phase 4. Its exact album id and release id ride on
+        the adopted candidate's force-import job, and the importer removes
+        that album only after the job completes. A failed import leaves the
+        old copy where it was. This is the "import it as its own release"
+        flow for an operator who wants a good copy and does not mind which
+        pressing it is.
 
         ``cross_pathway`` is the operator's explicit assertion that a target
         on the other pathway (a Discogs release for an MB source, or an MB
@@ -476,6 +498,17 @@ class MbidReplaceService:
                 ),
             )
 
+        if displace_after_import and adopt_download_log_id is None:
+            return ReplaceResult(
+                outcome=RESULT_TARGET_INVALID,
+                request_id=request_id,
+                reason=REPLACE_REASON_DISPLACE_REQUIRES_ADOPT,
+                error_message=(
+                    "keeping the current copy until the import lands needs "
+                    "a Wrong Matches candidate to import (--adopt)"
+                ),
+            )
+
         adopt: _AdoptCandidate | None = None
         if adopt_download_log_id is not None:
             adopt_or_error = self._resolve_adopt_candidate(
@@ -483,7 +516,11 @@ class MbidReplaceService:
             )
             if isinstance(adopt_or_error, ReplaceResult):
                 return adopt_or_error
-            adopt = adopt_or_error
+            adopt = _AdoptCandidate(
+                download_log_id=adopt_or_error.download_log_id,
+                failed_path=adopt_or_error.failed_path,
+                displace_after_import=displace_after_import,
+            )
 
         source_identity = ReleaseIdentity.from_strict_fields(
             source.get("mb_release_id"),
@@ -1430,7 +1467,25 @@ class MbidReplaceService:
             # REPLACES — the old pressing's install is displaced whenever
             # it resolves in beets (the Passenger regression, 2026-07-18).
             # Missing current Beets authority is a safe no-op.
-            if isinstance(current_beets, CurrentBeetsUnique):
+            #
+            # ``--after-import`` defers this one step: the exact album and
+            # its expected release id ride on the adopted candidate's force
+            # import instead, and the importer removes it only once that
+            # import completes (``ForceImportDisplacement``).
+            displacement: ForceImportDisplacement | None = None
+            defer_displacement = (
+                adopt is not None and adopt.displace_after_import
+            )
+            if defer_displacement and isinstance(
+                current_beets, CurrentBeetsUnique,
+            ):
+                displacement = ForceImportDisplacement(
+                    album_id=current_beets.album_id,
+                    expected_release_id=old_identity.release_id,
+                    library_db_path=current_library_db_path,
+                    library_root=current_library_root,
+                )
+            elif isinstance(current_beets, CurrentBeetsUnique):
                 try:
                     delete_outcome = self.beets_delete_fn(BeetsDeleteRequest(
                         album_id=current_beets.album_id,
@@ -1524,10 +1579,12 @@ class MbidReplaceService:
         # it has work to do. Releasing early caps lock-hold at fs
         # cleanup (sub-second) rather than ~30s worst case.
         adopt_import_job_id: int | None = None
+        displace_album_id: int | None = None
         if adopt is not None and adopt_moved:
             try:
                 queued = enqueue_force_import(
                     self.db, self.config, adopt.download_log_id,
+                    displace=displacement,
                 )
                 if (
                     queued.outcome == FORCE_IMPORT_RESULT_QUEUED
@@ -1536,6 +1593,8 @@ class MbidReplaceService:
                     and not queued.job.deduped
                 ):
                     adopt_import_job_id = queued.job.id
+                    if displacement is not None:
+                        displace_album_id = displacement.album_id
                 elif queued.job is not None:
                     warnings.append(
                         f"adopt: force-import deduped onto existing job "
@@ -1554,6 +1613,14 @@ class MbidReplaceService:
                     f"adopt: force-import enqueue raised "
                     f"{type(exc).__name__}: {exc}"
                 )
+
+        if displacement is not None and displace_album_id is None:
+            warnings.append(
+                f"after-import: Beets album id:{displacement.album_id} "
+                f"({displacement.expected_release_id}) was kept and is NOT "
+                "scheduled for removal, because no fresh import job carries "
+                "it; remove it by hand once the new copy is in"
+            )
 
         try:
             self.search_plan_service.generate_for_request(
@@ -1597,4 +1664,5 @@ class MbidReplaceService:
                 adopt.download_log_id if adopt is not None else None
             ),
             adopt_import_job_id=adopt_import_job_id,
+            displace_album_id=displace_album_id,
         )
