@@ -30,7 +30,10 @@ def _guard() -> FolderExclusivityGuardInfo:
 class _Run:
     """One ``run_import_one`` with the Beets child and conversion recorded."""
 
-    def __init__(self, *, lossless: bool, probe_collides: bool) -> None:
+    def __init__(
+        self, *, lossless: bool, probe_collides: bool,
+        target_format: str | None = None,
+    ) -> None:
         from harness import import_one
         from lib.beets_db import AlbumInfo
         from lib.evidence_action_file import (
@@ -75,6 +78,7 @@ class _Run:
                 candidate=evidence,
                 decision={"imported": True, "stage2_import": "import"},
                 decision_name="import",
+                target_format=target_format,
             )
         )
         beets = FakeBeetsDB()
@@ -126,8 +130,14 @@ class _Run:
 
 
 class TestFolderProbe(unittest.TestCase):
-    def run_one(self, *, lossless: bool, probe_collides: bool = False) -> _Run:
-        run = _Run(lossless=lossless, probe_collides=probe_collides)
+    def run_one(
+        self, *, lossless: bool, probe_collides: bool = False,
+        target_format: str | None = None,
+    ) -> _Run:
+        run = _Run(
+            lossless=lossless, probe_collides=probe_collides,
+            target_format=target_format,
+        )
         self.addCleanup(run.close)
         return run
 
@@ -148,6 +158,10 @@ class TestFolderProbe(unittest.TestCase):
         run = self.run_one(lossless=True)
         # The probe saw the original; the real import saw the conversion.
         self.assertEqual(run.calls, ["probe (flac present)", "import"])
+
+    def test_lossless_target_keeps_the_originals_and_is_not_probed(self) -> None:
+        run = self.run_one(lossless=True, probe_collides=True, target_format="flac")
+        self.assertEqual(run.calls, ["import (flac present)"])
 
     def test_lossy_source_is_not_probed(self) -> None:
         run = self.run_one(lossless=False)

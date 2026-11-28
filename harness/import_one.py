@@ -2187,6 +2187,7 @@ def _probe_folder_before_conversion(
     mbid: str,
     *,
     max_distance: float,
+    keeps_lossless: bool,
 ) -> FolderExclusivityGuardInfo | None:
     """The occupied library folder this import would land in, if any.
 
@@ -2200,8 +2201,12 @@ def _probe_folder_before_conversion(
     templates and none reads it. Lossy sources skip the probe; the real
     guard refuses them with nothing lost. A probe that fails or never
     reaches the guard returns ``None``: the real import's own guard decides.
+    A lossless target (``keeps_lossless``) never removes the originals, so
+    it needs no probe either.
     """
-    if request.dry_run or not _lossless_filenames(request.path):
+    if request.dry_run or keeps_lossless:
+        return None
+    if not _lossless_filenames(request.path):
         return None
     _log("[FOLDER-PROBE] Lossless source: checking its library folder "
          "before conversion")
@@ -2307,6 +2312,7 @@ def _run_quality_evidence_authorized_import(
         _validate_quality_evidence_action_snapshot(request.path, payload)
         probe_collision = _probe_folder_before_conversion(
             request, mbid, max_distance=max_distance,
+            keeps_lossless=payload.target_format in ("flac", "lossless"),
         )
         if probe_collision is not None:
             # Refused before anything was converted: the held copy is the
@@ -2750,14 +2756,6 @@ def _run_import_one_stages(
         if existing_audit.error:
             _log(f"  [SPECTRAL existing] error: {existing_audit.error}")
     _log_timing("spectral_analysis", stage_start)
-
-    # --- Folder probe (issue #1465): before anything is converted ---
-    probe_collision = _probe_folder_before_conversion(
-        request, mbid, max_distance=max_distance,
-    )
-    if probe_collision is not None:
-        _record_folder_guard_refusal(r, probe_collision)
-        return r
 
     # --- Convert lossless → V0 (unless keeping lossless on disk) ---
     keep_lossless = request.target_format in ("flac", "lossless")

@@ -936,8 +936,9 @@ probe switches off the `fetchart`, `lyrics` and `lastgenre` auto stages
 not depend on the format: the config contract pins the path templates and
 none reads it. A collision the probe reports refuses the import before any
 conversion, so the held copy is the download as fetched, lossless included,
-and a retry re-converts from it. Lossy sources skip the probe (the real guard
-refuses them with nothing lost). The real guard stays the authority: a probe
+and a retry re-converts from it. Lossy sources, and lossless sources whose
+target keeps lossless, skip the probe (nothing is removed before the real
+guard refuses them). A probe session never lets any task through. The real guard stays the authority: a probe
 that fails, or a library that changes between probe and import, falls back to
 it, and only then is a lossless download held as its converted copy.
 

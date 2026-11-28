@@ -660,6 +660,9 @@ class HarnessImportSession(ImportSession):
         """
         album = getattr(task, "album", None)
         if album is None or album.id is None:
+            if self._probe_folder:
+                # A probe never lets any task through, album or not.
+                task.set_choice(Action.SKIP)
             return
         duplicate_ids: set[int] = set()
         if beets_compat.task_removes_duplicates(task):
