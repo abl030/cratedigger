@@ -182,7 +182,9 @@ from tests.harness_test_support import (
     write_candidate_injection_sitecustomize,
 )
 
-OCCUPIED = sys.argv[1] == "occupied"
+MODE = sys.argv[1]
+OCCUPIED = MODE in ("occupied", "probe-occupied")
+PROBE = MODE.startswith("probe")
 OCCUPANT_RELEASE = "99999999-8888-7777-6666-555555555555"
 
 
@@ -250,7 +252,7 @@ with tempfile.TemporaryDirectory(prefix="cratedigger-folder-guard-") as root:
            "PYTHONPATH": shim + os.pathsep + os.environ.get("PYTHONPATH", "")}
     proc = subprocess.Popen(
         [os.environ.get("BASH", "bash"), os.environ["HARNESS_WRAPPER"],
-         "--noincremental", source],
+         "--noincremental", *(["--probe-folder"] if PROBE else []), source],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, env=env,
     )
@@ -274,12 +276,39 @@ with tempfile.TemporaryDirectory(prefix="cratedigger-folder-guard-") as root:
     types = [m["type"] for m in transcript]
     assert "resolve_duplicate" in types, (transcript[-2:], stderr)
     collisions = [m for m in transcript if m["type"] == "folder_collision"]
+    probes = [m for m in transcript if m["type"] == "folder_probe"]
 
     lib = Library(db_path, library_root)
     albums = {a.id: a for a in lib.albums()}
     library_files = [p for p, _ in manifest(library_root)]
     assert not any(".1." in os.path.basename(p) for p in library_files), library_files
-    if OCCUPIED:
+    if PROBE:
+        # Issue #1465 pre-conversion probe: one report, never a refusal
+        # message, and NOTHING kept, removed or moved, even though the
+        # controller answered ``remove`` for the same-release duplicate.
+        assert collisions == [], collisions
+        assert len(probes) == 1, (types, stderr)
+        probe = probes[0]
+        expected_albums = (
+            {duplicate_id, occupant_id} if OCCUPIED else {duplicate_id})
+        assert set(albums) == expected_albums, albums
+        assert len(list(lib.items())) == len(expected_albums), list(lib.items())
+        assert os.path.isfile(duplicate_path), duplicate_path
+        assert manifest(source) == before_source, (before_source, manifest(source))
+        assert {p for p, _ in manifest(library_root)} - {"library.db"} == {
+            p for p, _ in before_library} - {"library.db"}, manifest(library_root)
+        planned_folder = os.path.dirname(probe["planned_paths"][0])
+        assert planned_folder == os.path.dirname(occupant_path), probe
+        if OCCUPIED:
+            collision = probe["collision"]
+            assert [o["beets_album_id"] for o in collision["occupants"]] == [occupant_id], probe
+            print("HARNESS_PROBE_OCCUPIED_OK")
+        else:
+            assert probe["collision"] is None, probe
+            # Equivalence: the probe's folder is exactly where the control
+            # run (the same world, no probe) imports the album.
+            print("HARNESS_PROBE_FREE_OK planned=" + planned_folder)
+    elif OCCUPIED:
         assert len(collisions) == 1, (types, stderr)
         collision = collisions[0]
         assert [o["beets_album_id"] for o in collision["occupants"]] == [occupant_id], collision
@@ -328,6 +357,25 @@ class TestFolderGuardRealHarness(unittest.TestCase):
             proc.returncode, 0,
             f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
         self.assertIn("HARNESS_REFUSAL_OK", proc.stdout)
+
+    def test_probe_reports_an_occupied_folder_and_keeps_nothing(self) -> None:
+        proc = self._run("probe-occupied")
+        self.assertEqual(
+            proc.returncode, 0,
+            f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
+        self.assertIn("HARNESS_PROBE_OCCUPIED_OK", proc.stdout)
+
+    def test_probe_of_a_free_folder_plans_where_the_import_lands(self) -> None:
+        probe = self._run("probe-free")
+        self.assertEqual(
+            probe.returncode, 0,
+            f"STDOUT:\n{probe.stdout}\nSTDERR:\n{probe.stderr}")
+        self.assertIn("HARNESS_PROBE_FREE_OK", probe.stdout)
+        # The control run asserts the real import lands in the same folder
+        # the probe planned (the occupant path's folder, unoccupied here).
+        control = self._run("control")
+        self.assertEqual(control.returncode, 0, control.stderr)
+        self.assertIn("HARNESS_CONTROL_OK", control.stdout)
 
     def test_unoccupied_folder_imports_and_replaces_duplicate(self) -> None:
         proc = self._run("control")

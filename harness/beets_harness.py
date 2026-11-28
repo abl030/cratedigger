@@ -481,6 +481,10 @@ def _install_folder_exclusivity_stage() -> None:
     setattr(plugins, "import_stages", import_stages)  # noqa: B010 - module seam
 
 
+#: Auto import stages a folder probe switches off (issue #1465): network
+#: lookups that cannot affect the destination folder.
+_PROBE_SKIPPED_AUTO_PLUGINS: tuple[str, ...] = ("fetchart", "lyrics", "lastgenre")
+
 _protocol_stdout: TextIO | None = None
 
 
@@ -632,10 +636,15 @@ class HarnessImportSession(ImportSession):
         paths: Sequence[PathBytes] | None,
         query: Query | None = None,
         pretend: bool = False,
+        probe_folder: bool = False,
     ) -> None:
         super().__init__(lib, loghandler, paths, query)
         self._task_counter = 0
         self._pretend = pretend
+        # Issue #1465 pre-conversion probe: run the real apply path up to
+        # the folder guard, report the planned folder's state, and always
+        # refuse, so nothing is removed, moved or kept.
+        self._probe_folder = probe_folder
         # Album ids the folder exclusivity guard refused (#1465). Their rows
         # outlive the guard stage (``plugin_stage`` reloads them right after)
         # and are dropped, database only, once the pipeline has finished.
@@ -661,6 +670,23 @@ class HarnessImportSession(ImportSession):
         collision = folder_guard.find_folder_collision(
             self.lib, album, list(task.imported_items()), duplicate_ids,
         )
+        if self._probe_folder:
+            # The probe reports either way and never lets the task through.
+            # Plan before SKIP: a skipped task has no imported items.
+            planned = folder_guard.planned_destinations(
+                self.lib, list(task.imported_items()), duplicate_ids,
+            )
+            task.set_choice(Action.SKIP)
+            self._folder_refused_album_ids.append(album.id)
+            _send({
+                "type": "folder_probe",
+                "path": _path_str(task.paths[0]) if task.paths else "",
+                "beets_album_id": album.id,
+                "planned_paths": list(planned),
+                "collision": (
+                    None if collision is None else collision.to_wire()),
+            })
+            return
         if collision is None:
             return
         task.set_choice(Action.SKIP)
@@ -769,8 +795,12 @@ class HarnessImportSession(ImportSession):
                     # cause beets to apply it (DB write + scrub plugin strips
                     # tags from source files). Just skip after reporting.
                     return Action.SKIP
-                # Audit any MBID swap before apply mutates the album.
-                ev = _mbid_swap_event(task, candidates[idx])
+                # Audit any MBID swap before apply mutates the album. A
+                # folder probe keeps nothing, so it audits nothing.
+                ev = (
+                    None if self._probe_folder
+                    else _mbid_swap_event(task, candidates[idx])
+                )
                 if ev is not None:
                     _append_mutation_log(ev)
                 # Keep Discogs numeric ids out of mb_albumid/mb_releasegroupid (#570).
@@ -932,6 +962,15 @@ def main() -> None:
             "separate physical tracks"
         ),
     )
+    parser.add_argument(
+        "--probe-folder",
+        action="store_true",
+        help=(
+            "Issue #1465: run the apply path up to the folder exclusivity "
+            "guard, report whether the planned library folder is free, and "
+            "refuse the task (nothing is kept, removed or moved)"
+        ),
+    )
     args = parser.parse_args()
 
     # argparse --help exits above with ordinary stdout intact. Every normal
@@ -971,6 +1010,13 @@ def _run_protocol(args: argparse.Namespace) -> None:
         config["musicbrainz"]["ratelimit"] = 1
         print("Using upstream musicbrainz.org (rate-limited)", file=sys.stderr)
 
+    if args.probe_folder:
+        # The probe only needs the destination folder. These import stages
+        # do network lookups and cannot change it (the config contract pins
+        # the path templates; art, lyrics and genre are not in them).
+        for slow_stage in _PROBE_SKIPPED_AUTO_PLUGINS:
+            config[slow_stage]["auto"] = False
+
     # Load plugins (critical — chroma, fetchart, etc. participate in lookups)
     # Must happen AFTER config overrides so musicbrainz plugin sees correct host.
     plugins.load_plugins()
@@ -998,7 +1044,10 @@ def _run_protocol(args: argparse.Namespace) -> None:
     })
 
     # Create and run the session
-    session = HarnessImportSession(lib, None, paths, pretend=args.pretend)
+    session = HarnessImportSession(
+        lib, None, paths, pretend=args.pretend,
+        probe_folder=args.probe_folder,
+    )
     try:
         session.run()
     except EOFError:

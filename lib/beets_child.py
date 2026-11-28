@@ -172,6 +172,7 @@ def harness_session_argv(
     pretend: bool,
     preserve_discogs_flat_subtracks: bool = False,
     upstream_musicbrainz: bool = False,
+    probe_folder: bool = False,
 ) -> list[str]:
     """The one argv shape for a streaming harness session
     (``run_beets_harness.sh``): the validation session (``--pretend``) and
@@ -187,6 +188,9 @@ def harness_session_argv(
         argv.append("--upstream")
     if preserve_discogs_flat_subtracks:
         argv.append("--preserve-discogs-flat-subtracks")
+    if probe_folder:
+        # Issue #1465: the pre-conversion folder probe (never keeps a task).
+        argv.append("--probe-folder")
     argv.extend(["--search-id", mb_release_id, album_path])
     return argv
 

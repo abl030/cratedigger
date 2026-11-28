@@ -923,12 +923,23 @@ private action copy Beets ran on). A local import has no pipeline folder to
 hold, so its collision settles as an ordinary rejection. The collision itself
 is never resolved automatically.
 
-Limit: the held copy is the folder as the importer left it. A lossless
-download has already been converted to its import target (V0, or the
-verified-lossless target) and its lossless files removed before Beets runs,
-so the held copy is that conversion; a retry imports it and the lossless
-provenance does not carry over. Keeping the lossless originals would mean
-parking them outside the staged folder until Beets succeeds.
+**Pre-conversion probe.** The guard above runs inside the real session,
+after `import_one` has converted a lossless source to its import target and
+removed the lossless files. So when the staged folder holds lossless audio,
+`import_one` first runs the same harness session with `--probe-folder`
+(`_probe_folder_before_conversion`): the match is applied through the real
+pipeline up to the guard, which reports the planned folder (`folder_probe`
+with `planned_paths` and the collision, if any) and refuses the task, so
+nothing is kept, removed or moved, and the refused rows are released. The
+probe switches off the `fetchart`, `lyrics` and `lastgenre` auto stages
+(network lookups that cannot change the folder). The destination folder does
+not depend on the format: the config contract pins the path templates and
+none reads it. A collision the probe reports refuses the import before any
+conversion, so the held copy is the download as fetched, lossless included,
+and a retry re-converts from it. Lossy sources skip the probe (the real guard
+refuses them with nothing lost). The real guard stays the authority: a probe
+that fails, or a library that changes between probe and import, falls back to
+it, and only then is a lossless download held as its converted copy.
 
 ### Exit Codes
 
