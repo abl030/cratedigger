@@ -684,6 +684,8 @@ ALLOWLIST: dict[str, str] = {
         "list[ImportJob] — typed terminal cleanup rows, no dict projection",
     "list_terminal_force_wrong_match_cleanup_jobs":
         "list[ImportJob] — typed terminal cleanup rows, no dict projection",
+    "find_pending_force_displacement":
+        "ForceImportDisplacement | None — typed msgspec Struct, no dict projection",
     "list_terminal_force_displacement_jobs":
         "list[ImportJob] — typed terminal displacement rows, no dict projection",
     "list_automation_import_jobs_for_startup_recovery":

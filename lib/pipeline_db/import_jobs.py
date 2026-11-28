@@ -36,6 +36,8 @@ from lib.import_queue import (
     IMPORT_PREVIEW_REQUEUE_MAX_DELAY,
     IMPORT_PREVIEW_REQUEUE_MAX_EXPONENT,
     AutomationHandoffResult,
+    ForceImportDisplacement,
+    ForceImportPayload,
     ImportJob,
     automation_import_dedupe_key,
     automation_import_payload,
@@ -730,6 +732,42 @@ class _ImportJobsMixin(
         """, tuple(params))
         return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
 
+
+    def find_pending_force_displacement(
+        self,
+        *,
+        download_log_id: int,
+        request_id: int,
+    ) -> ForceImportDisplacement | None:
+        """The displacement a re-import of this candidate must still carry.
+
+        Replace ``--after-import`` puts ``payload.displace`` on the adopted
+        candidate's first force job only. If that job fails and the operator
+        retries the same candidate with an ordinary force import, the retry
+        has to inherit it, or a successful retry would leave the old album
+        in Beets with nothing tracking it. Returns the newest such
+        displacement for this request and candidate, unless that job already
+        recorded a successful ``displacement`` receipt.
+        """
+        cur = self._execute("""
+            SELECT *
+            FROM import_jobs
+            WHERE job_type = 'force_import'
+              AND request_id = %s
+              AND payload->>'download_log_id' = %s::text
+              AND payload ? 'displace'
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+        """, (int(request_id), str(int(download_log_id))))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        job = ImportJob.from_row(dict(row))
+        receipt = (job.result or {}).get("displacement")
+        if is_str_object_dict(receipt) and receipt.get("success") is True:
+            return None
+        payload = job.payload
+        return payload.displace if isinstance(payload, ForceImportPayload) else None
 
     def count_import_jobs_by_status(self) -> dict[str, int]:
         cur = self._execute("""

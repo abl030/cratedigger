@@ -2106,6 +2106,44 @@ class TestImportJobQueueAPI(unittest.TestCase):
         assert raw is not None
         self.assertFalse(raw["has_key"])
 
+    def test_find_pending_force_displacement_follows_the_newest_job(self):
+        """A retry of an adopted ``--after-import`` candidate inherits the
+        displacement until a job records a successful receipt."""
+        from lib.import_queue import (
+            IMPORT_JOB_FORCE,
+            ForceImportDisplacement,
+            force_import_payload,
+        )
+
+        displace = ForceImportDisplacement(
+            album_id=77,
+            expected_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            library_db_path="/tmp/library.db",
+            library_root="/tmp/library",
+        )
+
+        def lookup(log_id: int = 5):
+            return self.db.find_pending_force_displacement(
+                download_log_id=log_id, request_id=self.req_id,
+            )
+
+        self.assertIsNone(lookup())
+        job = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=self.req_id,
+            dedupe_key="pending-displacement:first",
+            payload=force_import_payload(
+                download_log_id=5, failed_path="/tmp/src", displace=displace,
+            ),
+        )
+        self.assertEqual(lookup(), displace)
+        self.assertIsNone(lookup(log_id=6), "another candidate inherits nothing")
+
+        self.db.mark_import_job_completed(
+            job.id, result={"displacement": {"success": True}}, message="ok",
+        )
+        self.assertIsNone(lookup(), "a proven receipt ends the inheritance")
+
     def test_enqueue_youtube_import_is_allowed_by_pg_constraint(self):
         from lib.import_queue import (
             IMPORT_JOB_YOUTUBE,

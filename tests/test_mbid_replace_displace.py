@@ -103,6 +103,46 @@ class TestReplaceDisplaceAfterImport(_ServiceCase):
             ),
         )
 
+    def test_a_retried_force_import_keeps_the_displacement(self):
+        """Review of #1481: the adopted import fails, the operator retries
+        it with the ordinary Force Import button. That retry must still
+        remove the old copy once it lands, or the old album is stranded with
+        no request and no warning."""
+        from lib.force_import_service import (
+            RESULT_QUEUED,
+            enqueue_force_import,
+        )
+
+        adopted = self._seed("Sister Pressing [aaaa]")
+        beets = self._installed_beets(album_id=77)
+        result = self._replace(adopt=adopted.download_log_id, beets=beets)
+        first = self.db.get_import_job(result.adopt_import_job_id or 0)
+        assert first is not None
+        self.db.mark_import_job_failed(
+            first.id, error="beets refused", result={"success": False},
+            message="beets refused",
+        )
+
+        retry = enqueue_force_import(self.db, self.cfg, adopted.download_log_id)
+
+        self.assertEqual(retry.outcome, RESULT_QUEUED, retry)
+        assert retry.job is not None
+        self.assertNotEqual(retry.job.id, first.id)
+        assert isinstance(retry.job.payload, ForceImportPayload)
+        assert isinstance(first.payload, ForceImportPayload)
+        self.assertEqual(retry.job.payload.displace, first.payload.displace)
+        self.assertEqual(self.deletes, [])
+
+    def test_an_unrelated_force_import_carries_nothing(self):
+        other = self._seed("Unrelated [cccc]")
+        from lib.force_import_service import enqueue_force_import
+
+        queued = enqueue_force_import(self.db, self.cfg, other.download_log_id)
+
+        assert queued.job is not None
+        assert isinstance(queued.job.payload, ForceImportPayload)
+        self.assertIsNone(queued.job.payload.displace)
+
     def test_plain_adopt_still_removes_up_front(self):
         """The default is unchanged: Replace removes the old album now."""
         adopted = self._seed("Sister Pressing [aaaa]")

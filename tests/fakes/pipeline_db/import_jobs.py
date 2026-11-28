@@ -42,6 +42,7 @@ from lib.import_queue import (
     IMPORT_JOB_RECOVERY_REQUIRED,
     IMPORT_JOB_YOUTUBE,
     AutomationHandoffResult,
+    ForceImportDisplacement,
     ForceImportPayload,
     ImportJob,
     YoutubeImportPayload,
@@ -53,6 +54,7 @@ from lib.import_queue import (
     validate_preview_failure_status,
     validate_status,
 )
+from lib.json_narrow import is_str_object_dict
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_IMPORT,
     CleanupJournalConflict,
@@ -676,6 +678,34 @@ class _FakeImportJobsMixin(_FakePipelineDBBase):
             int(row["id"]),
         ))
         return [ImportJob.from_row(copy.deepcopy(row)) for row in rows]
+
+    def find_pending_force_displacement(
+        self,
+        *,
+        download_log_id: int,
+        request_id: int,
+    ) -> ForceImportDisplacement | None:
+        """Mirror of the real SQL in ``lib/pipeline_db/import_jobs.py``."""
+        rows = [
+            row for row in self._import_jobs
+            if row.get("job_type") == IMPORT_JOB_FORCE
+            and row.get("request_id") == int(request_id)
+            and isinstance(row.get("payload"), dict)
+            and str(row["payload"].get("download_log_id")) == str(int(download_log_id))
+            and "displace" in row["payload"]
+        ]
+        if not rows:
+            return None
+        rows.sort(key=lambda row: (
+            _as_datetime(row.get("created_at")),
+            int(row["id"]),
+        ))
+        job = ImportJob.from_row(copy.deepcopy(rows[-1]))
+        receipt = (job.result or {}).get("displacement")
+        if is_str_object_dict(receipt) and receipt.get("success") is True:
+            return None
+        payload = job.payload
+        return payload.displace if isinstance(payload, ForceImportPayload) else None
 
     def list_terminal_force_displacement_jobs(self) -> list[ImportJob]:
         """Mirror of the real SQL predicate (see
