@@ -199,7 +199,7 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "same two closed slots, still read-only over album_requests"
         ),
     ),
-    ("lib/pipeline_db/download_log.py", "4b1feadd2dd2de53"): (
+    ("lib/pipeline_db/download_log.py", "d88f2b3bf935b520"): (
         (
             "validation key is selected from a closed server-owned vocabulary "
             "(#867 intentionally added terminal/evidence projection and moved final "
@@ -223,10 +223,14 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "(FAILED_PATH_KEY / SCENARIO_KEY / UPGRADE_HELD_SCENARIO); no caller "
             "input reaches the SQL and album_requests is still only read. "
             "Re-pinned (2bd86f69e67161c5 -> 4b1feadd2dd2de53) for an SQL comment "
-            "stating the exact-failed_path keying limit; statement unchanged"
+            "stating the exact-failed_path keying limit; statement unchanged. "
+            "Issue #1465 CHANGED it (4b1feadd2dd2de53 -> d88f2b3bf935b520): "
+            "the held scenario test is ``IN (...)`` over HELD_SCENARIOS, "
+            "rendered from server-owned constants by "
+            "``held_scenarios_sql_list``; still read-only, no caller input"
         ),
     ),
-    ("lib/pipeline_db/download_log.py", "79c0cef454e8849b"): (
+    ("lib/pipeline_db/download_log.py", "864253da677dbd15"): (
         (
             "issue #1445 item 3 get_held_upgrade_download_log_id: read-only "
             "SELECT on download_log; JSON keys and the scenario literal come "
@@ -234,7 +238,9 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, str], tuple[str, ...]] = {
             "SCENARIO_KEY / UPGRADE_HELD_SCENARIO); request id and failed path "
             "are value placeholders. Re-pinned (5742e20131f1ada9 -> "
             "79c0cef454e8849b) for a docstring note on the exact-failed_path "
-            "keying limit; statement unchanged"
+            "keying limit; statement unchanged. Issue #1465 CHANGED it "
+            "(79c0cef454e8849b -> 864253da677dbd15): ``IN (...)`` over the "
+            "constant HELD_SCENARIOS (``held_scenarios_sql_list``)"
         ),
     ),
     ("lib/pipeline_db/download_log.py", "e0154e89026dc8ef"): (

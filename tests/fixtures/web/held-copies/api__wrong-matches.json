@@ -1,0 +1,72 @@
+{
+  "groups": [],
+  "held_upgrades": [
+    {
+      "download_log_id": 5101,
+      "held_download_log_id": 5101,
+      "request_id": 7012,
+      "artist": "Guard Artist",
+      "album": "Foo?",
+      "mb_release_id": "3b2e8f63-0c3c-4d2e-9b55-1465aaaa0002",
+      "failed_path": "/mnt/virtio/Music/Processing/albums/wrong_matches/Guard Artist - Foo_1",
+      "path_unavailable": false,
+      "soulseek_username": "peer-two",
+      "held_at": "2026-11-28T06:40:00+00:00",
+      "last_attempt_at": null,
+      "last_attempt_failure": null,
+      "import_job": null,
+      "format": "mp3",
+      "avg_bitrate": 245,
+      "sentence": "Not imported: the library folder /mnt/virtio/Music/Beets/Guard Artist/2004 - Foo_ already holds Guard Artist - Foo_ (beets id 18342). Nothing was replaced. Move or retag what is there, then retry the import.",
+      "rows": [],
+      "kind": "folder_collision",
+      "label": "Library folder occupied"
+    },
+    {
+      "download_log_id": 5100,
+      "held_download_log_id": 5100,
+      "request_id": 7012,
+      "artist": "Guard Artist",
+      "album": "Foo?",
+      "mb_release_id": "3b2e8f63-0c3c-4d2e-9b55-1465aaaa0002",
+      "failed_path": "/mnt/virtio/Music/Processing/albums/wrong_matches/Guard Artist - Foo",
+      "path_unavailable": false,
+      "soulseek_username": "peer-one",
+      "held_at": "2026-11-28T03:15:00+00:00",
+      "last_attempt_at": null,
+      "last_attempt_failure": null,
+      "import_job": null,
+      "format": "mp3",
+      "avg_bitrate": 245,
+      "sentence": "Not imported: the library folder /mnt/virtio/Music/Beets/Guard Artist/2004 - Foo_ already holds Guard Artist - Foo_ (beets id 18342); 1 file no album owns. Nothing was replaced. Move or retag what is there, then retry the import.",
+      "rows": [],
+      "kind": "folder_collision",
+      "label": "Library folder occupied"
+    },
+    {
+      "download_log_id": 4269,
+      "held_download_log_id": 4269,
+      "request_id": 1649,
+      "artist": "The Fairways",
+      "album": "Is Everything All Right?",
+      "mb_release_id": "4c6f4a7b-c093-4006-a50e-3d6dfbdd2645",
+      "failed_path": "/mnt/virtio/Music/Processing/albums/wrong_matches/The Fairways - Is Everything All Right",
+      "path_unavailable": false,
+      "soulseek_username": "natetheneet",
+      "held_at": "2026-11-27T02:10:00+00:00",
+      "last_attempt_at": null,
+      "last_attempt_failure": null,
+      "import_job": null,
+      "format": "flac",
+      "avg_bitrate": null,
+      "sentence": "Kept your current copy. On the new copy track 2 runs 3:26 and track 5 runs 3:18, where your copy and the release agree, so the new copy is the odd one out.",
+      "rows": [
+        {"track": "1", "title": "A Song for Jenni", "release": "3:47", "current": "3:47", "new": "3:47", "differs": false},
+        {"track": "2", "title": "Secretive Girl", "release": "2:07", "current": "2:07", "new": "3:26", "differs": true},
+        {"track": "5", "title": "Is Everything All Right?", "release": "4:20", "current": "4:20", "new": "3:18", "differs": true}
+      ],
+      "kind": "upgrade",
+      "label": "Upgrade held"
+    }
+  ]
+}

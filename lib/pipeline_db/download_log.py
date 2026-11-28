@@ -108,7 +108,7 @@ from lib.validation_envelope import (
     WrongMatchTriageAudit,
     derive_validation_log_columns,
 )
-from lib.wrong_match_policy import UPGRADE_HELD_SCENARIO
+from lib.wrong_match_policy import held_scenarios_sql_list
 
 
 @dataclass(frozen=True)
@@ -1064,7 +1064,7 @@ class _DownloadLogMixin(_PipelineDBBase):
                   AND h.outcome = 'rejected'
                   AND h.validation_result->>'{FAILED_PATH_KEY}'
                       = dl.validation_result->>'{FAILED_PATH_KEY}'
-                  AND h.validation_result->>'{SCENARIO_KEY}' = '{UPGRADE_HELD_SCENARIO}'
+                  AND h.validation_result->>'{SCENARIO_KEY}' IN ({held_scenarios_sql_list()})
                 ORDER BY h.id DESC
                 LIMIT 1
             ) held ON TRUE
@@ -1106,7 +1106,7 @@ class _DownloadLogMixin(_PipelineDBBase):
             WHERE request_id = %s
               AND outcome = 'rejected'
               AND validation_result->>'{FAILED_PATH_KEY}' = %s
-              AND validation_result->>'{SCENARIO_KEY}' = '{UPGRADE_HELD_SCENARIO}'
+              AND validation_result->>'{SCENARIO_KEY}' IN ({held_scenarios_sql_list()})
             ORDER BY id DESC
             LIMIT 1
         """, (request_id, failed_path))

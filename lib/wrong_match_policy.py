@@ -46,9 +46,40 @@ WRONG_MATCH_QUARANTINE_DIR = "wrong_matches"
 UPGRADE_HELD_SCENARIO = "upgrade_held"
 
 
+#: Issue #1465: the harness refused an import because the library folder
+#: it would occupy already holds another album. Nothing was removed or
+#: moved; the candidate folder is held in Wrong Matches exactly like a held
+#: upgrade, so the operator can fix the folder on disk and retry the import
+#: ("Use new copy" is the same force import) or delete the copy.
+FOLDER_COLLISION_HELD_SCENARIO = "folder_exclusivity_guard_failed"
+
+#: Per-request denylist reason for a folder-collision hold (no cooldown).
+FOLDER_COLLISION_DENYLIST_REASON = "library folder occupied"
+
+#: Every scenario whose folder is HELD for the operator in Wrong Matches.
+HELD_SCENARIOS: frozenset[str] = frozenset({
+    UPGRADE_HELD_SCENARIO,
+    FOLDER_COLLISION_HELD_SCENARIO,
+})
+
+
 def is_upgrade_held_scenario(scenario: str | None) -> bool:
     """Whether a persisted rejection scenario is a held upgrade."""
     return scenario == UPGRADE_HELD_SCENARIO
+
+
+def is_held_scenario(scenario: str | None) -> bool:
+    """Whether a persisted rejection scenario holds its folder for the operator."""
+    return scenario in HELD_SCENARIOS
+
+
+def held_scenarios_sql_list() -> str:
+    """``'a', 'b'`` for an SQL ``IN (...)`` over the held scenarios.
+
+    Built from constants only (never user input), sorted for a stable
+    statement text.
+    """
+    return ", ".join(f"'{scenario}'" for scenario in sorted(HELD_SCENARIOS))
 
 
 PREIMPORT_FACT_REJECTION_SCENARIOS: frozenset[str] = frozenset({

@@ -40,6 +40,7 @@ from lib.dispatch.helpers import (
 )
 from lib.dispatch.outcome_actions import (
     _do_mark_done,
+    _hold_folder_collision,
     _hold_upgrade_from_evidence_decision,
     _record_have_analysis_error,
     _record_rejection_and_maybe_requeue,
@@ -111,6 +112,10 @@ from lib.terminal_outcomes import PendingImportTerminalOutcome
 from lib.validation_envelope import (
     decode_validation_envelope,
     scenario_covers_declared_program,
+)
+from lib.wrong_match_policy import (
+    FOLDER_COLLISION_DENYLIST_REASON,
+    FOLDER_COLLISION_HELD_SCENARIO,
 )
 
 if TYPE_CHECKING:
@@ -364,6 +369,42 @@ def _resolve_rejection_override(
     return current_override, narrowed_override
 
 
+@dataclass(frozen=True)
+class _FolderCollisionHold:
+    """Where a folder-collision refusal is held (issue #1465).
+
+    ``in_place_path`` is ``None`` for automation (move the staged folder
+    into ``wrong_matches/``) or the operator's own source folder for a force
+    retry (hold it where it already is).
+    """
+
+    in_place_path: str | None
+
+
+def _folder_collision_hold_target(
+    request: DispatchRequest, import_result: ImportResult,
+) -> _FolderCollisionHold | None:
+    """How to hold a folder-collision refusal, or ``None`` to settle it.
+
+    A force import runs Beets on a private action copy (``request.path``)
+    that the importer deletes after the terminal commit; the operator's
+    folder travels as ``launch_authority_path``. The hold must name THAT
+    folder, so a retry of a held folder updates its own card and a force
+    import of an ordinary Wrong Matches folder becomes held where it sits.
+    A local import has no separate source folder to hold (its copy is
+    disposable and the operator's folder is outside the pipeline), so it
+    settles as an ordinary rejection.
+    """
+    if import_result.decision != FOLDER_COLLISION_HELD_SCENARIO:
+        return None
+    if not request.force:
+        return _FolderCollisionHold(in_place_path=None)
+    source = request.launch_authority_path
+    if source and source != request.path and os.path.isdir(source):
+        return _FolderCollisionHold(in_place_path=source)
+    return None
+
+
 def _denylist_reason(decision: str, new_bitrate: int | None) -> str:
     """Canonical audit reason for a post-import source denylist."""
     if decision == "downgrade":
@@ -376,8 +417,8 @@ def _denylist_reason(decision: str, new_bitrate: int | None) -> str:
         return f"transcode: {new_bitrate}kbps" if new_bitrate else "transcode detected"
     if decision == "duplicate_remove_guard_failed":
         return "duplicate remove guard failed"
-    if decision == "folder_exclusivity_guard_failed":
-        return "library folder occupied"
+    if decision == FOLDER_COLLISION_HELD_SCENARIO:
+        return FOLDER_COLLISION_DENYLIST_REASON
     return f"rejected: {decision}"
 
 
@@ -1960,6 +2001,7 @@ def _settle_import_result(
             usernames,
             reason,
             request.cooled_down_users,
+            apply_cooldown=decision != FOLDER_COLLISION_HELD_SCENARIO,
         )
         logger.info(
             f"  Denylisted {usernames} for request {request.request_id}")
@@ -2446,6 +2488,18 @@ def dispatch_import_core(
                         "Beets returned without a terminal result"
                     ),
                     code="beets_acknowledgement_ambiguous",
+                )
+            collision_hold = _folder_collision_hold_target(request, ir)
+            if collision_hold is not None:
+                # Issue #1465: the harness refused before Beets removed or
+                # moved anything. Hold the candidate in Wrong Matches (the
+                # upgrade-hold lane) instead of cleaning it.
+                return _hold_folder_collision(
+                    request,
+                    db,
+                    attempt_result=attempt_result,
+                    cancellation_token=cancellation_token,
+                    in_place_path=collision_hold.in_place_path,
                 )
             settlement = _settle_import_result(
                 request,

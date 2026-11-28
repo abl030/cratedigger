@@ -47,6 +47,7 @@ import {
   toggleWrongMatchEntry,
   triageButtonPresentation,
   useHeldUpgradeCopy,
+  wrongMatchesSummaryText,
 } from '../web/js/wrong-matches.js';
 import { closeSearchPlanDetail } from '../web/js/search_plan.js';
 import { state } from '../web/js/state.js';
@@ -3077,6 +3078,66 @@ t.section('keepCurrentCopy() asks once, then deletes the folder and drops the ca
   await flushMicrotasks();
 }
 
+// --- Issue #1465: the folder-collision held card ---------------------------
+
+function collisionCard(overrides = {}) {
+  return heldCard({
+    download_log_id: 5100,
+    held_download_log_id: 5100,
+    kind: 'folder_collision',
+    label: 'Library folder occupied',
+    sentence: 'Not imported: the library folder /Beets/A/2004 - Foo_ already holds A - Foo_ (beets id 7). Nothing was replaced.',
+    rows: [],
+    ...overrides,
+  });
+}
+
+t.section('renderHeldUpgradeCard() words a folder collision as a retry, with no track table');
+{
+  const html = renderHeldUpgradeCard(collisionCard());
+  t.contains(html, '>Retry import</button>', 'retry, not "use new copy"');
+  t.contains(html, '>Delete this copy</button>', 'delete, not "keep current copy"');
+  t.contains(html, 'data-held-kind="folder_collision"', 'buttons carry their kind');
+  t.excludes(html, 'held-upgrade-differs', 'no track table');
+  t.excludes(html, '<table', 'no empty table either');
+  t.contains(html, 'already holds A - Foo_', 'the server sentence is shown');
+  t.contains(html, 'useHeldUpgradeCopy(5100, 5100, this)', 'retry is the force import of the held row');
+}
+
+t.section('renderHeldUpgrades() titles a mixed list "Held copies"');
+{
+  const mixed = renderHeldUpgrades([heldCard(), collisionCard({ request_id: 9 })]);
+  t.contains(mixed, 'Held copies (2)', 'neutral title once a collision is held');
+  t.equal(wrongMatchesSummaryText(0, 0, 2, true), '0 releases · 0 candidates pending review · 2 held copies', 'summary says copies too');
+  t.equal(wrongMatchesSummaryText(0, 0, 1, false), '0 releases · 0 candidates pending review · 1 held upgrade', 'upgrade-only summary unchanged');
+  t.contains(renderHeldUpgradeCard(collisionCard()), '>Copy from natetheneet', 'no "new copy" when nothing is replaced');
+  t.contains(mixed, 'library folder already holds another album', 'the intro explains both kinds');
+  const upgradesOnly = renderHeldUpgrades([heldCard()]);
+  t.contains(upgradesOnly, 'Held upgrades (1)', 'upgrade-only lists keep their title');
+}
+
+t.section('useHeldUpgradeCopy() on a folder collision asks in its own words');
+{
+  installStorage();
+  const dom = installDom();
+  const use = element({ id: 'wm-held-use-5100', textContent: 'Retry import', classList: { toggle() {} } });
+  use.dataset.heldKind = 'folder_collision';
+  const keep = element({ id: 'wm-held-keep-5100', textContent: 'Delete this copy', classList: { toggle() {} } });
+  keep.dataset.heldKind = 'folder_collision';
+  const cancel = element({ id: 'wm-held-cancel-5100', hidden: true });
+  dom.elements['wm-held-use-5100'] = use;
+  dom.elements['wm-held-keep-5100'] = keep;
+  dom.elements['wm-held-cancel-5100'] = cancel;
+  stubGlobals({ fetch: async (url) => { throw new Error(`unexpected fetch: ${url}`); } });
+  await useHeldUpgradeCopy(5100, 5100, use);
+  t.equal(use.textContent, 'Yes, import it now', 'armed in collision words');
+  cancelHeldUpgradeChoice(5100);
+  t.equal(use.textContent, 'Retry import', 'back to its own plain label');
+  t.equal(keep.textContent, 'Delete this copy', 'the other button keeps its own label');
+  await keepCurrentCopy(5100, 5100, keep);
+  t.equal(keep.textContent, 'Yes, delete this copy', 'delete asks in collision words');
+}
+
 t.section('keepCurrentCopy() keeps the card and restores the button when the delete fails');
 {
   installStorage();
@@ -3205,7 +3266,7 @@ t.section('convergeToast() reports held copies apart from ordinary skips');
 {
   t.equal(
     convergeToast({ queued: 1, deleted: 0, held_upgrades: 1, skipped: [{ download_log_id: 3, reason: 'held_upgrade' }] }),
-    'Queued 1 candidate, left 1 held upgrade for you to decide',
+    'Queued 1 candidate, left 1 held copy for you to decide',
     'held copy named, not counted as skipped',
   );
 }

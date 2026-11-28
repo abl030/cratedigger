@@ -91,6 +91,10 @@ VISIBLE_NOT_DELETE_ELIGIBLE: frozenset[str] = frozenset({
     # top of the Wrong Matches tab (Use new copy / Keep current copy);
     # converge, delete-group and the reducer all skip it.
     "upgrade_held",
+    # Issue #1465: an import the harness refused because its library folder
+    # is occupied. Held exactly like an upgrade hold (Retry import / Delete
+    # this copy); never delete-eligible.
+    "folder_exclusivity_guard_failed",
 })
 
 # Spelled by a registered producer, but structurally cannot reach EITHER

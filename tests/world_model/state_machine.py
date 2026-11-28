@@ -383,23 +383,39 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
             for album in albums for path in album.item_paths
         ))
         log = world.db._execute(
-            "SELECT outcome, beets_scenario FROM download_log "
-            "WHERE request_id = %s ORDER BY id DESC LIMIT 1",
+            "SELECT outcome, beets_scenario, "
+            "validation_result->>'failed_path' AS failed_path "
+            "FROM download_log WHERE request_id = %s ORDER BY id DESC LIMIT 1",
             (request_id,),
         ).fetchone()
         assert log is not None
-        values = tuple(log.values()) if isinstance(log, dict) else tuple(log)
-        self.assertEqual(values, ("rejected", "folder_exclusivity_guard_failed"))
+        outcome, scenario, failed_path = (
+            tuple(log.values()) if isinstance(log, dict) else tuple(log))
+        self.assertEqual(
+            (outcome, scenario), ("rejected", "folder_exclusivity_guard_failed"))
+        # Held, not cleaned: the intact copy waits in Wrong Matches for the
+        # operator to fix the folder on disk and retry (the upgrade-hold
+        # machinery), and it is held there.
+        assert isinstance(failed_path, str)
+        self.assertIn("/wrong_matches/", failed_path)
+        self.assertTrue(any(
+            name.endswith(".mp3") for name in os.listdir(failed_path)))
+        held = [
+            row for row in world.db.get_wrong_matches()
+            if row["request_id"] == request_id
+        ]
+        self.assertEqual(len(held), 1)
+        self.assertIsNotNone(held[0]["held_download_log_id"])
         # World automation imports carry no source username, so the
-        # denylist/cooldown back-off is pinned in tests/test_import_dispatch.py
-        # (test_folder_exclusivity_guard_rejects_denylists_and_stays_wanted).
+        # denylist-without-cooldown is pinned in
+        # tests/test_folder_collision_hold_dispatch.py.
 
     def test_replace_rule_collision_is_refused_and_stays_wanted(self) -> None:
         """#1465 residual class under the shipped template: Beets' default
         replace rules render ``Foo?`` and ``Foo_`` into one folder while the
         asciified %aunique keys still differ, so no bracket separates them.
-        The import is refused before any file moves; the request is
-        searchable again with the source user on the standard back-off."""
+        The import is refused before any file moves, the intact copy is held
+        in Wrong Matches, and the request is searchable again."""
 
         assert TEST_DSN is not None
         with LifecycleWorld(TEST_DSN, repository_root()) as world:

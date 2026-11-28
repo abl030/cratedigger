@@ -29,6 +29,7 @@ import msgspec
 
 from lib.quality import (
     AudioQualityMeasurement,
+    FolderExclusivityGuardInfo,
     QualityComparisonBasis,
     V0ProbeEvidence,
 )
@@ -100,6 +101,8 @@ class ValidationResultEnvelope(msgspec.Struct, frozen=True):
     wrong_match_triage: WrongMatchTriageAudit | None = None
     # Issue #1445 item 3: the stored comparison behind an upgrade hold.
     upgrade_hold: InstalledCopyComparison | None = None
+    # Issue #1465: the occupied library folder behind a folder-collision hold.
+    folder_collision: FolderExclusivityGuardInfo | None = None
 
 
 FAILED_PATH_KEY = "failed_path"

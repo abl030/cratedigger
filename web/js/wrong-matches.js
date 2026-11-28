@@ -897,7 +897,9 @@ export function convergeToast(data) {
   const parts = [`Queued ${queued} candidate${queued !== 1 ? 's' : ''}`];
   if (deleted) parts.push(`deleted ${deleted}`);
   if (skipped) parts.push(`skipped ${skipped}`);
-  if (held) parts.push(`left ${held} held upgrade${held !== 1 ? 's' : ''} for you to decide`);
+  // Issue #1465: the count covers both held kinds (upgrades and folder
+  // collisions), so the toast names neither.
+  if (held) parts.push(`left ${held} held cop${held !== 1 ? 'ies' : 'y'} for you to decide`);
   return parts.join(', ');
 }
 
@@ -1047,11 +1049,26 @@ function wrongMatchCounts(groups) {
  * @param {number} groups
  * @param {number} entries
  * @param {number} held
+ * @param {boolean} [anyCollision] a folder-collision hold (#1465) is among
+ *   the held cards, so they are "copies", not all "upgrades"
  * @returns {string}
  */
-export function wrongMatchesSummaryText(groups, entries, held) {
+export function wrongMatchesSummaryText(groups, entries, held, anyCollision = false) {
   const base = `${groups} release${groups !== 1 ? 's' : ''} · ${entries} candidate${entries !== 1 ? 's' : ''} pending review`;
-  return held ? `${base} · ${held} held upgrade${held !== 1 ? 's' : ''}` : base;
+  if (!held) return base;
+  const noun = anyCollision
+    ? `cop${held !== 1 ? 'ies' : 'y'}`
+    : `upgrade${held !== 1 ? 's' : ''}`;
+  return `${base} · ${held} held ${noun}`;
+}
+
+/**
+ * Whether any held card is a folder-collision hold (issue #1465).
+ * @param {any[]} cards
+ * @returns {boolean}
+ */
+function anyFolderCollision(cards) {
+  return cards.some((/** @type {any} */ c) => c && c.kind === 'folder_collision');
 }
 
 /** @returns {any[]} */
@@ -1073,8 +1090,10 @@ function updateWrongMatchesSummary() {
   }
   const summary = document.getElementById('wrong-matches-summary');
   if (summary) {
+    const heldCards = heldUpgradeCards();
     summary.textContent = wrongMatchesSummaryText(
-      counts.groups, counts.entries, heldUpgradeCards().length);
+      counts.groups, counts.entries, heldCards.length,
+      anyFolderCollision(heldCards));
   }
 }
 
@@ -1181,7 +1200,7 @@ export function renderWrongMatches(data, el) {
   // enablement is derived by the caller (`_deriveTriageButtonState`).
   let html = `
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:8px 0;">
-      <div id="wrong-matches-summary" style="color:#888;">${wrongMatchesSummaryText(counts.groups, counts.entries, held.length)}</div>
+      <div id="wrong-matches-summary" style="color:#888;">${wrongMatchesSummaryText(counts.groups, counts.entries, held.length, anyFolderCollision(held))}</div>
       <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
         <button id="wm-refresh-btn" class="p-btn" style="border-color:#888;color:#888;" onclick="event.stopPropagation(); window.refreshWrongMatches(this)" title="Refetch the queue from the server">Refresh</button>
         <button id="wm-bulk-triage-btn" class="p-btn delete" ${counts.entries === 0 ? 'disabled' : ''} onclick="event.stopPropagation(); window.bulkTriageWrongMatches()">Cleanup Wrong Matches (${counts.entries})</button>
@@ -1210,9 +1229,13 @@ export function renderWrongMatches(data, el) {
  * @returns {string}
  */
 export function renderHeldUpgradeCard(card) {
+  const kind = card.kind === 'folder_collision' ? 'folder_collision' : 'upgrade';
+  const labels = HELD_LABELS[kind];
   const heldId = Number(card.held_download_log_id);
   const deleteId = Number(card.download_log_id);
   const from = card.soulseek_username ? `from ${esc(card.soulseek_username)}` : 'from an unknown peer';
+  // A folder collision has no current copy to compare against.
+  const copyNoun = kind === 'folder_collision' ? 'Copy' : 'New copy';
   const when = card.held_at ? ` · ${esc(awstDateTime(card.held_at))}` : '';
   const format = card.format ? ` · ${esc(String(card.format).toUpperCase())}` : '';
   const job = card.import_job;
@@ -1224,25 +1247,25 @@ export function renderHeldUpgradeCard(card) {
     ? '<div class="held-upgrade-last-try">The new copy\'s folder cannot be read right now, so neither choice is available yet.</div>'
     : '';
   const jobLine = job
-    ? `<div class="held-upgrade-help">Using the new copy is ${esc(String(job.status || 'queued'))}.</div>`
+    ? `<div class="held-upgrade-help">${esc(labels.jobPrefix)} ${esc(String(job.status || 'queued'))}.</div>`
     : '';
   return `
     <div class="held-upgrade-card" id="wm-held-card-${heldId}">
-      <div class="held-upgrade-meta">New copy ${from}${when}${format}</div>
+      <div class="held-upgrade-meta">${copyNoun} ${from}${when}${format}</div>
       <div class="held-upgrade-sentence">${esc(card.sentence || '')}</div>
       ${lastTry}${unavailable}
-      ${renderHeldUpgradeTable(card.rows)}
+      ${Array.isArray(card.rows) && card.rows.length > 0 ? renderHeldUpgradeTable(card.rows) : ''}
       <div class="held-upgrade-actions">
-        <button class="p-btn held-upgrade-use" id="wm-held-use-${heldId}" ${busy ? 'disabled' : ''}
-          onclick="event.stopPropagation(); window.useHeldUpgradeCopy(${heldId}, ${deleteId}, this)">Use new copy</button>
-        <button class="p-btn held-upgrade-keep" id="wm-held-keep-${heldId}" ${busy ? 'disabled' : ''}
-          onclick="event.stopPropagation(); window.keepCurrentCopy(${heldId}, ${deleteId}, this)">Keep current copy</button>
+        <button class="p-btn held-upgrade-use" id="wm-held-use-${heldId}" data-held-kind="${kind}" ${busy ? 'disabled' : ''}
+          onclick="event.stopPropagation(); window.useHeldUpgradeCopy(${heldId}, ${deleteId}, this)">${esc(labels.use)}</button>
+        <button class="p-btn held-upgrade-keep" id="wm-held-keep-${heldId}" data-held-kind="${kind}" ${busy ? 'disabled' : ''}
+          onclick="event.stopPropagation(); window.keepCurrentCopy(${heldId}, ${deleteId}, this)">${esc(labels.keep)}</button>
         <button class="p-btn held-upgrade-cancel" id="wm-held-cancel-${heldId}" hidden
           onclick="event.stopPropagation(); window.cancelHeldUpgradeChoice(${heldId})">Cancel</button>
       </div>
       ${jobLine}
       ${renderOtherPressingsControl(heldId)}
-      <div class="held-upgrade-help" id="wm-held-help-${heldId}">Use new copy: replaces your current copy with this one. Keep current copy: deletes this new copy, and that peer stays skipped for this album.</div>
+      <div class="held-upgrade-help" id="wm-held-help-${heldId}">${esc(labels.help)}</div>
     </div>`;
 }
 
@@ -1267,16 +1290,55 @@ export function renderHeldUpgrades(cards) {
       <div class="held-upgrade-album-title">${esc(albumCards[0].album || '')} <span class="held-upgrade-artist">${esc(albumCards[0].artist || '')}</span></div>
       ${albumCards.map(renderHeldUpgradeCard).join('')}
     </div>`).join('');
+  const anyCollision = anyFolderCollision(cards);
+  const title = anyCollision ? 'Held copies' : 'Held upgrades';
+  const intro = anyCollision
+    ? 'Nothing was imported or replaced for these copies. Upgrades wait because their track lengths do not match the copy you have; the others wait because their library folder already holds another album. Fix the folder on disk, then retry, or delete the copy.'
+    : 'A new copy was found, but its track lengths do not match the copy you already have, so nothing was replaced. Choose which copy to keep.';
   return `
     <section class="held-upgrades" id="wm-held-upgrades">
-      <div class="held-upgrades-title">Held upgrades (${cards.length})</div>
-      <div class="held-upgrades-intro">A new copy was found, but its track lengths do not match the copy you already have, so nothing was replaced. Choose which copy to keep.</div>
+      <div class="held-upgrades-title">${title} (${cards.length})</div>
+      <div class="held-upgrades-intro">${intro}</div>
       ${albums}
     </section>`;
 }
 
-const USE_CONFIRM_LABEL = 'Yes, replace my current copy';
-const KEEP_CONFIRM_LABEL = 'Yes, delete the new copy';
+/**
+ * Button wording per held kind. ``upgrade`` (#1445) chooses between two
+ * copies; ``folder_collision`` (#1465) retries an import the occupied
+ * library folder refused, once the operator has fixed it on disk.
+ */
+const HELD_LABELS = {
+  upgrade: {
+    use: 'Use new copy',
+    keep: 'Keep current copy',
+    useConfirm: 'Yes, replace my current copy',
+    keepConfirm: 'Yes, delete the new copy',
+    jobPrefix: 'Using the new copy is',
+    useToast: 'Using the new copy',
+    keepToast: 'Kept your current copy; the new copy was deleted',
+    help: 'Use new copy: replaces your current copy with this one. Keep current copy: deletes this new copy, and that peer stays skipped for this album.',
+  },
+  folder_collision: {
+    use: 'Retry import',
+    keep: 'Delete this copy',
+    useConfirm: 'Yes, import it now',
+    keepConfirm: 'Yes, delete this copy',
+    jobPrefix: 'The import is',
+    useToast: 'Retrying the import',
+    keepToast: 'Deleted this copy',
+    help: 'Retry import: imports this copy again; move or retag what is in the library folder first, or it is refused again. Delete this copy: removes it, and that peer stays skipped for this album.',
+  },
+};
+
+/**
+ * The labels for one rendered held button (its ``data-held-kind``).
+ * @param {HTMLButtonElement | null} btn
+ */
+function heldLabelsFor(btn) {
+  const kind = btn && btn.dataset ? btn.dataset.heldKind : undefined;
+  return kind === 'folder_collision' ? HELD_LABELS.folder_collision : HELD_LABELS.upgrade;
+}
 
 /**
  * Whether THIS rendered button instance is armed. The armed state lives on
@@ -1315,13 +1377,14 @@ function setHeldChoiceState(heldId, armed) {
   const cancel = /** @type {HTMLButtonElement | null} */ (document.getElementById(`wm-held-cancel-${heldId}`));
   setHeldButtonArmed(use, armed === 'use');
   setHeldButtonArmed(keep, armed === 'keep');
+  const labels = heldLabelsFor(use || keep);
   if (use) {
-    use.textContent = armed === 'use' ? USE_CONFIRM_LABEL : 'Use new copy';
+    use.textContent = armed === 'use' ? labels.useConfirm : labels.use;
     use.classList?.toggle('held-upgrade-armed', armed === 'use');
     use.disabled = armed === 'keep';
   }
   if (keep) {
-    keep.textContent = armed === 'keep' ? KEEP_CONFIRM_LABEL : 'Keep current copy';
+    keep.textContent = armed === 'keep' ? labels.keepConfirm : labels.keep;
     keep.classList?.toggle('held-upgrade-armed', armed === 'keep');
     keep.disabled = armed === 'use';
   }
@@ -1354,7 +1417,8 @@ function removeHeldUpgradeCard(heldId) {
  */
 export async function useHeldUpgradeCopy(heldId, _deleteId, btn) {
   const id = Number(heldId);
-  if (!heldButtonIsArmed(btn, USE_CONFIRM_LABEL)) {
+  const labels = heldLabelsFor(btn);
+  if (!heldButtonIsArmed(btn, labels.useConfirm)) {
     setHeldChoiceState(id, 'use');
     setHeldButtonArmed(btn, true);
     return;
@@ -1383,21 +1447,21 @@ export async function useHeldUpgradeCopy(heldId, _deleteId, btn) {
     }
     if (data.status === 'queued') {
       btn.textContent = 'Queued';
-      toast(`Using the new copy: ${data.artist} - ${data.album}`);
+      toast(`${labels.useToast}: ${data.artist} - ${data.album}`);
       if (data.job_id) await pollImportJob(data.job_id, btn);
       invalidateWrongMatches();
       await _refreshWrongMatches();
     } else {
       btn.disabled = false;
-      btn.textContent = 'Use new copy';
+      btn.textContent = labels.use;
       if (keep) keep.disabled = false;
-      toast(data.message || 'Could not start using the new copy', true);
+      toast(data.message || 'Could not start the import', true);
     }
   } catch (_e) {
     btn.disabled = false;
-    btn.textContent = 'Use new copy';
+    btn.textContent = labels.use;
     if (keep) keep.disabled = false;
-    toast('Use new copy request failed', true);
+    toast(`${labels.use} request failed`, true);
   }
 }
 
@@ -1410,7 +1474,8 @@ export async function useHeldUpgradeCopy(heldId, _deleteId, btn) {
  */
 export async function keepCurrentCopy(heldId, deleteId, btn) {
   const id = Number(heldId);
-  if (!heldButtonIsArmed(btn, KEEP_CONFIRM_LABEL)) {
+  const labels = heldLabelsFor(btn);
+  if (!heldButtonIsArmed(btn, labels.keepConfirm)) {
     setHeldChoiceState(id, 'keep');
     setHeldButtonArmed(btn, true);
     return;
@@ -1429,18 +1494,18 @@ export async function keepCurrentCopy(heldId, deleteId, btn) {
     });
     const data = await r.json();
     if (r.ok && data.status === 'ok') {
-      toast('Kept your current copy; the new copy was deleted');
+      toast(labels.keepToast);
       invalidateWrongMatches();
       removeHeldUpgradeCard(id);
     } else {
       btn.disabled = false;
-      btn.textContent = 'Keep current copy';
+      btn.textContent = labels.keep;
       if (use) use.disabled = false;
       toast(data.error || data.message || 'Delete failed', true);
     }
   } catch (_e) {
     btn.disabled = false;
-    btn.textContent = 'Keep current copy';
+    btn.textContent = labels.keep;
     if (use) use.disabled = false;
     toast('Delete request failed', true);
   }
