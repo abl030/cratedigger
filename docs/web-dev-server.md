@@ -83,7 +83,10 @@ complete" button POSTs `/api/pipeline/mark-complete`, and its
 `/api/pipeline/dashboard/library-census/refresh` — the GET-only live-db
 dev server dispatches neither (both 405, observed in the census button's
 own screenshot round): the buttons render for screenshot verification
-but the actions need the real deployment.
+but the actions need the real deployment. The same holds for the Bad rip
+and Replace buttons on the track-length rows (issue #1472). The read-only
+`GET /api/pipeline/library-census` list (behind `pipeline-cli
+library-census`) does work here.
 
 ## What it serves
 

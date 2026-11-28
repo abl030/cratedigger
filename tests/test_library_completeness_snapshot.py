@@ -20,6 +20,12 @@ from lib.library_completeness_snapshot import (
     read_library_completeness_snapshot,
     write_library_completeness_snapshot,
 )
+from lib.library_track_lengths import (
+    CachedAlbumLengths,
+    TrackLengthCache,
+    read_track_length_cache,
+    write_track_length_cache,
+)
 from scripts import run_library_completeness_census as census
 from scripts.run_library_completeness_census import publish_library_completeness_census
 
@@ -113,6 +119,45 @@ class TestLibraryCompletenessSnapshot(unittest.TestCase):
         self.assertIs(
             publish.call_args.kwargs["resolve_musicbrainz_redirect"], resolver,
         )
+        self.assertEqual(
+            publish.call_args.kwargs["length_cache_path"],
+            "/runtime/library-track-lengths.json",
+        )
+
+
+class TestTrackLengthCachePublication(unittest.TestCase):
+    """Issue #1472: the length cache is published beside the snapshot."""
+
+    def test_real_run_writes_the_cache(self) -> None:
+        class NoAlbums:
+            def list_library_completeness_albums(self) -> list[LibraryAlbum]:
+                return []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = os.path.join(tmpdir, "library-track-lengths.json")
+            publish_library_completeness_census(
+                os.path.join(tmpdir, "snapshot.json"), NoAlbums(),
+                fetch_musicbrainz_raw=lambda _: {}, fetch_discogs_raw=lambda _: {},
+                length_cache_path=cache,
+            )
+            self.assertEqual(read_track_length_cache(cache), TrackLengthCache())
+            self.assertTrue(os.path.exists(cache))
+
+    def test_beets_unavailable_keeps_the_prior_cache(self) -> None:
+        class LockedBeets:
+            def list_library_completeness_albums(self) -> list[LibraryAlbum]:
+                exc = sqlite3.OperationalError("locked")
+                exc.sqlite_errorcode = sqlite3.SQLITE_LOCKED
+                raise exc
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = os.path.join(tmpdir, "library-track-lengths.json")
+            prior = TrackLengthCache(albums={"1": CachedAlbumLengths("f", (1.0,))})
+            write_track_length_cache(cache, prior)
+            publish_library_completeness_census(
+                os.path.join(tmpdir, "snapshot.json"), LockedBeets(),
+                fetch_musicbrainz_raw=lambda _: {}, fetch_discogs_raw=lambda _: {},
+                length_cache_path=cache,
+            )
+            self.assertEqual(read_track_length_cache(cache), prior)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,8 @@ import {
   renderPipelineDashboard,
   renderRetagDivergenceAlbumRowInner,
   renderRetagDivergenceCensusCard,
+  renderTrackLengthActions,
+  renderTrackLengthCoverage,
   renderUnfindableCard,
   renderWantedTrendCard,
   retagDivergenceSnapshotAgeHours,
@@ -889,6 +891,70 @@ t.section('renderLibraryCompletenessCard() wires the mark buttons per row (#1241
     'card wires the mark action to the unmarked album');
   t.excludes(html, 'window.toggleMarkIncomplete(null',
     'card never wires an action to an unresolvable album');
+}
+
+t.section('renderLibraryCompletenessCard() lists track-length findings in two bands (#1472)');
+{
+  const html = renderLibraryCompletenessCard({
+    state: 'ok', error: null, albums_shown: 2, albums_listed_total: 2,
+    snapshot: {
+      generated_at: new Date().toISOString(),
+      duration_seconds: 900.0,
+      report: {
+        status: 'complete',
+        counts: {albums_scanned: 8648, audio_complete: 8648,
+                 missing_source_audio: 0, catalog_drift: 0, unknown: 0,
+                 track_length: 1, track_length_harmless: 1,
+                 track_length_measured: 3100, track_length_pending: 5548,
+                 track_length_unlisted: 12},
+        albums: [
+          {album_id: 42005, artist: 'Booka Shade', title: 'Movements',
+           release_id: 'rel-booka', request_id: 3264, request_status: 'imported',
+           catalog_items: 14, marked_incomplete: false, marked_complete: false,
+           findings: [{kind: 'track_length', detail: 'ending missing? (track 14)',
+                       sentence: 'Last track runs 4:23 but the release lists 6:18.',
+                       probably_harmless: false}]},
+          {album_id: 7, artist: 'Damien Rice', title: 'O',
+           release_id: 'rel-rice', request_id: 77, request_status: 'imported',
+           marked_incomplete: false, marked_complete: false,
+           findings: [{kind: 'track_length', detail: 'hidden track? (track 10)',
+                       sentence: 'Usually a hidden track kept in the same file. Probably fine.',
+                       probably_harmless: true}]},
+        ],
+      },
+    },
+  });
+  const review = html.indexOf('Track lengths contradict the release');
+  const harmless = html.indexOf('Track lengths differ, probably fine');
+  t.ok(review >= 0 && harmless > review, 'both track-length bands render, review band first');
+  t.ok(html.indexOf('Movements') > review && html.indexOf('Movements') < harmless,
+    'a contradicting copy sits in the review band');
+  t.ok(html.indexOf('Damien Rice') > harmless, 'a probably-harmless shape sits in its own band');
+  t.contains(html, 'Last track runs 4:23 but the release lists 6:18.',
+    'the row shows the plain-English sentence, not the stable detail key');
+  t.contains(html, 'window.banSource(3264, &quot;rel-booka&quot;)', 'track-length rows offer the existing Bad Rip');
+  t.contains(html, 'window.openReplacePicker({sourceRequestId: 3264',
+    'track-length rows offer the existing Replace');
+  t.contains(html, 'window.toggleMarkComplete(3264, true, this)', 'track-length rows can be dismissed');
+  t.contains(html, 'Track lengths checked', 'measurement progress is shown');
+  t.contains(html, '5,548 waiting for a later run', 'albums the budget has not reached are said');
+  t.contains(html, '12 with no listed lengths to compare', 'releases with nothing to compare are said, not flagged');
+}
+
+t.section('renderTrackLengthActions() locks while the request is processing');
+{
+  const html = renderTrackLengthActions({
+    request_id: 5, request_status: 'processing', release_id: 'rel-x',
+    album_id: 1, artist: 'A', title: 'B',
+  });
+  t.excludes(html, 'window.banSource(', 'Bad Rip is not clickable while processing');
+  t.ok(renderTrackLengthActions({request_id: null, release_id: 'rel-x'}) === '',
+    'no request, no actions');
+}
+
+t.section('renderTrackLengthCoverage() is omitted for older snapshots');
+{
+  t.ok(renderTrackLengthCoverage({albums_scanned: 1}) === '', 'no measurement counts, no row');
 }
 
 t.section('renderMarkCompleteButton() three-state contract');
