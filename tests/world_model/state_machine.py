@@ -235,9 +235,11 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
         with LifecycleWorld(TEST_DSN, repository_root()) as world:
             first_id, second_id = self._add_passenger_pressings(world)
 
-            world.import_request(first_id)
-            world.import_request(second_id)
-            world.import_request(first_id, codec="flac")
+            self.assertTrue(world.import_request(first_id))
+            self.assertTrue(world.import_request(second_id))
+            # A same-release upgrade must replace, never be refused as an
+            # occupant of its own folder (#1465 duplicate exclusion).
+            self.assertTrue(world.import_request(first_id, codec="flac"))
 
             world.assert_invariants()
             albums = world.beets.snapshots()
@@ -417,6 +419,7 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
                 codec="mp3",
             ))
 
+            world.folder_guard_refusals_expected = True
             imported = world.import_request(request_id)
 
             self.assertFalse(imported)
@@ -432,6 +435,7 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
             )
             try:
                 request_id = self._add_tristeza_pressings(world)
+                world.folder_guard_refusals_expected = True
                 imported = world.import_request(request_id)
                 self.assertFalse(imported)
                 self._assert_folder_guard_refused(

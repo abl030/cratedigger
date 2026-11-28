@@ -1428,7 +1428,10 @@ def _run_import_once(
                 proc.wait()
                 _close_harness_process_streams(proc)
                 return RunImportOutcome(
-                    2, [], replaced_albums=replaced_albums,
+                    2, [],
+                    # A refused task replaced nothing, even after ``remove``.
+                    replaced_albums=(
+                        [] if folder_guard is not None else replaced_albums),
                     applied_distance=applied_distance,
                     failure_reason=(
                         f"beets harness produced no output for {timeout}s"
@@ -1647,15 +1650,15 @@ def _run_import_once(
         # duplicate the controller answered ``remove`` for is still in place.
         failure_reason = folder_guard.message
         if proc_rc not in (None, 0):
+            # The refusal stands (nothing was removed or moved); the exit
+            # status is recorded alongside it rather than replacing it.
             failure_reason = (
-                f"{failure_reason}; harness then exited rc={proc_rc} before "
-                "releasing the refused rows"
+                f"{failure_reason}; harness then exited rc={proc_rc}"
             )
         return RunImportOutcome(
-            FOLDER_EXCLUSIVITY_GUARD_EXIT_CODE if proc_rc in (None, 0) else 2,
+            FOLDER_EXCLUSIVITY_GUARD_EXIT_CODE,
             beets_lines,
-            folder_exclusivity_guard=(
-                folder_guard if proc_rc in (None, 0) else None),
+            folder_exclusivity_guard=folder_guard,
             applied_distance=applied_distance,
             admitted_audio_count=admitted_audio_count,
             applied_audio_count=applied_audio_count,

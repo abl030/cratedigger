@@ -261,8 +261,11 @@ class LifecycleWorld:
         self._last_subprocess_run: ImportOneRun | None = None
         # Set when the importer's folder exclusivity guard refused (#1465):
         # a harness-side rejection carries no dispatch code, like the
-        # duplicate-remove guard, but is an expected world outcome.
+        # duplicate-remove guard. Only a test that built a genuine collision
+        # may see one; any other refusal is a guard false positive and fails
+        # the import loud.
         self._folder_guard_refused = False
+        self.folder_guard_refusals_expected = False
         self._replaced_snapshots: dict[int, dict[str, object]] = {}
         self._transitions: list[LifecycleTransitionSnapshot] = []
         self._last_preview_boundary: PreviewBoundaryObservation | None = None
@@ -2149,7 +2152,7 @@ class LifecycleWorld:
             refused = True
             self._last_subprocess_run = None
         self._folder_guard_refused = False
-        return refused
+        return refused and self.folder_guard_refusals_expected
 
     def _run_beets_subprocess(self, **kwargs: Any) -> ImportOneRun:
         """Run the production subprocess boundary against scratch Beets only."""
