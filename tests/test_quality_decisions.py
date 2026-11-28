@@ -2631,6 +2631,7 @@ class TestDecisionDenylists(unittest.TestCase):
         ("empty_fileset", False),
         ("mixed_source", True),
         ("duplicate_remove_guard_failed", True),
+        ("folder_exclusivity_guard_failed", True),
         ("import_failed", False),
         ("unknown_decision_not_in_any_table", False),
         # --- stage3/retained-import decisions: resolved via

@@ -212,6 +212,36 @@ class DuplicateRemoveGuardInfo(msgspec.Struct):
     quarantine_error: str | None = None
 
 
+class FolderOccupantInfo(msgspec.Struct, frozen=True):
+    """One Beets album already holding files in an import's planned folder."""
+
+    beets_album_id: int | None = None
+    mb_albumid: str = ""
+    discogs_albumid: str = ""
+    albumartist: str = ""
+    album: str = ""
+    item_paths: list[str] = []
+
+
+class FolderExclusivityGuardInfo(msgspec.Struct):
+    """Import-time folder exclusivity refusal (issue #1465).
+
+    The harness computed the folder the new album would occupy once its
+    same-release duplicates were removed and found it already holding
+    another album's items or unowned audio. Nothing was removed or moved.
+    Wire shape of the harness ``folder_collision`` message (minus ``type``).
+    """
+
+    folder: str = ""
+    planned_paths: list[str] = []
+    occupants: list[FolderOccupantInfo] = []
+    unowned_files: list[str] = []
+    excluded_album_ids: list[int] = []
+    beets_album_id: int | None = None
+    path: str = ""
+    message: str = ""
+
+
 class PostflightInfo(msgspec.Struct):
     """Beets post-import verification data.
 
@@ -235,6 +265,7 @@ class PostflightInfo(msgspec.Struct):
     disambiguation_failure: DisambiguationFailure | None = None
     moved_siblings: list[MovedSibling] = []
     duplicate_remove_guard: DuplicateRemoveGuardInfo | None = None
+    folder_exclusivity_guard: FolderExclusivityGuardInfo | None = None
     # Beets albums the dup-guard ALLOWED beets to remove during this import —
     # the replaced pre-upgrade copies. Their ``album_path``s are where the
     # album lived before a path-changing upgrade, which is what the Jellyfin

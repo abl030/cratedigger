@@ -21,7 +21,7 @@ import logging
 import math
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, TextIO, TypeGuard
 
@@ -30,10 +30,11 @@ from beets.autotag import AlbumInfo, AlbumMatch, TrackInfo, TrackMatch
 from beets.dbcore import Query
 
 try:
-    from harness import beets_compat, discogs_patches
+    from harness import beets_compat, discogs_patches, folder_guard
 except ModuleNotFoundError:  # direct wrapper execution puts harness/ first
     beets_compat = importlib.import_module("beets_compat")
     discogs_patches = importlib.import_module("discogs_patches")
+    folder_guard = importlib.import_module("folder_guard")
 
 if TYPE_CHECKING:
     # Current Beets imports are type-only. Runtime aliases below deliberately
@@ -440,6 +441,46 @@ def _install_release_id_duplicate_lookup() -> None:
     BeetsImportTask.find_duplicates = find_duplicates
 
 
+ImportStageFunc = Callable[[ImportSession, "ImportTask"], None]
+
+
+def _is_stage_list_factory(
+    value: object,
+) -> TypeGuard[Callable[[], list[ImportStageFunc]]]:
+    return callable(value)
+
+
+def _folder_exclusivity_stage(session: ImportSession, task: ImportTask) -> None:
+    if isinstance(session, HarnessImportSession):
+        session.guard_folder_exclusivity(task)
+
+
+def _install_folder_exclusivity_stage() -> None:
+    """Append the folder guard after every plugin import stage (#1465).
+
+    ``ImportSession.run`` builds its plugin stages from
+    ``plugins.import_stages()`` and runs them after the album row is added
+    and before ``manipulate_files``. Last, so a plugin stage that edits path
+    fields has already run when the destination is computed.
+    """
+    current: object = getattr(plugins, "import_stages", None)
+    if not _is_stage_list_factory(current):
+        raise beets_compat.BeetsCapabilityError(
+            "beets.plugins.import_stages is missing; the folder exclusivity "
+            "guard cannot run before manipulate_files")
+    if getattr(current, "_cratedigger_folder_guard", False):
+        return
+    original = current
+
+    def import_stages() -> list[ImportStageFunc]:
+        return [*original(), _folder_exclusivity_stage]
+
+    setattr(  # noqa: B010 - marker is intentionally attached at runtime
+        import_stages, "_cratedigger_folder_guard", True,
+    )
+    setattr(plugins, "import_stages", import_stages)  # noqa: B010 - module seam
+
+
 _protocol_stdout: TextIO | None = None
 
 
@@ -595,6 +636,49 @@ class HarnessImportSession(ImportSession):
         super().__init__(lib, loghandler, paths, query)
         self._task_counter = 0
         self._pretend = pretend
+        # Album ids the folder exclusivity guard refused (#1465). Their rows
+        # outlive the guard stage (``plugin_stage`` reloads them right after)
+        # and are dropped, database only, once the pipeline has finished.
+        self._folder_refused_album_ids: list[int] = []
+
+    def guard_folder_exclusivity(self, task: ImportTask) -> None:
+        """Refuse an album task whose planned folder is not its own (#1465).
+
+        Runs as the last plugin import stage: the album row exists, Beets has
+        removed nothing and moved nothing. A refused task becomes SKIP, so
+        ``manipulate_files`` neither removes duplicates nor moves files, and
+        ``cleanup`` leaves the source untouched.
+        """
+        album = getattr(task, "album", None)
+        if album is None or album.id is None:
+            return
+        duplicate_ids: set[int] = set()
+        if beets_compat.task_removes_duplicates(task):
+            duplicate_ids = {
+                dup.id for dup in task.find_duplicates(self.lib)
+                if dup.id is not None
+            }
+        collision = folder_guard.find_folder_collision(
+            self.lib, album, list(task.imported_items()), duplicate_ids,
+        )
+        if collision is None:
+            return
+        task.set_choice(Action.SKIP)
+        self._folder_refused_album_ids.append(album.id)
+        _send({
+            "type": "folder_collision",
+            "path": _path_str(task.paths[0]) if task.paths else "",
+            "beets_album_id": album.id,
+            **collision.to_wire(),
+        })
+
+    def release_folder_refusals(self) -> None:
+        """Drop refused albums' rows; their files never left the source."""
+        for album_id in self._folder_refused_album_ids:
+            album = self.lib.get_album(album_id)
+            if album is not None:
+                album.remove(delete=False, with_items=True)
+        self._folder_refused_album_ids.clear()
 
     def choose_match(self, task: ImportTask) -> AlbumMatch | Action:
         """Present album match candidates as JSON; read decision from stdin."""
@@ -890,6 +974,7 @@ def _run_protocol(args: argparse.Namespace) -> None:
     # Load plugins (critical — chroma, fetchart, etc. participate in lookups)
     # Must happen AFTER config overrides so musicbrainz plugin sees correct host.
     plugins.load_plugins()
+    _install_folder_exclusivity_stage()
 
     # Pretend mode is handled in HarnessImportSession._apply_decision():
     # we return Action.SKIP instead of the candidate, so beets never calls
@@ -919,6 +1004,8 @@ def _run_protocol(args: argparse.Namespace) -> None:
     except EOFError:
         print("Controller disconnected — aborting.", file=sys.stderr)
         sys.exit(1)
+    finally:
+        session.release_folder_refusals()
 
     _send({"type": "session_end"})
 

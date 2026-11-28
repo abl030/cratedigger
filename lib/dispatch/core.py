@@ -257,6 +257,32 @@ def _describe_rejection(
                     for candidate in guard.candidates
                 ],
             )
+    elif decision == "folder_exclusivity_guard_failed":
+        scenario = "folder_exclusivity_guard_failed"
+        folder_guard = import_result.postflight.folder_exclusivity_guard
+        detail = (
+            folder_guard.message if folder_guard is not None
+            else import_result.error
+        )
+        logger.error(
+            "FOLDER EXCLUSIVITY GUARD: request_id=%s %s folder=%r "
+            "occupants=%s unowned_files=%s",
+            request_id,
+            label,
+            folder_guard.folder if folder_guard is not None else None,
+            [
+                {
+                    "beets_album_id": occupant.beets_album_id,
+                    "mb_albumid": occupant.mb_albumid,
+                    "discogs_albumid": occupant.discogs_albumid,
+                    "album": f"{occupant.albumartist} - {occupant.album}",
+                }
+                for occupant in (
+                    folder_guard.occupants if folder_guard is not None else []
+                )
+            ],
+            folder_guard.unowned_files if folder_guard is not None else [],
+        )
     else:
         scenario = decision or "import_error"
         detail = import_result.error
@@ -349,6 +375,8 @@ def _denylist_reason(decision: str, new_bitrate: int | None) -> str:
         return f"transcode: {new_bitrate}kbps" if new_bitrate else "transcode detected"
     if decision == "duplicate_remove_guard_failed":
         return "duplicate remove guard failed"
+    if decision == "folder_exclusivity_guard_failed":
+        return "library folder occupied"
     return f"rejected: {decision}"
 
 

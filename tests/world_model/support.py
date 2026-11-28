@@ -70,6 +70,7 @@ from lib.quality import (
     AlbumQualityEvidence,
     AudioQualityMeasurement,
     DownloadInfo,
+    FolderExclusivityGuardInfo,
     QualityRankConfig,
     SpectralAnalysisDetail,
     V0ProbeEvidence,
@@ -117,7 +118,7 @@ from scripts.import_preview_worker import (
     _prepare_force_action_path,
     process_claimed_preview_job,
 )
-from tests.beets_world import BeetsWorld, BeetsWorldRelease
+from tests.beets_world import BeetsWorld, BeetsWorldRelease, FolderCollisionRefused
 from tests.dispatch_helpers import (
     claim_next_import_job,
     claim_next_import_preview_job,
@@ -191,6 +192,29 @@ class PreviewBoundaryObservation:
     candidate_status: str | None
 
 
+
+def _folder_guard_refusal_run(
+    refused: FolderCollisionRefused, staged_path: str,
+) -> ImportOneRun:
+    """The ``import_one`` result the production importer emits when the
+    harness folder exclusivity stage refuses (#1465)."""
+
+    guard = msgspec.convert(
+        {**refused.collision.to_wire(), "path": staged_path},
+        type=FolderExclusivityGuardInfo,
+    )
+    result = make_import_result(decision="folder_exclusivity_guard_failed")
+    result.exit_code = 8
+    result.error = guard.message
+    result.postflight.folder_exclusivity_guard = guard
+    return ImportOneRun(
+        command=("in-process-beets-world",),
+        returncode=8,
+        stdout=result.to_sentinel_line(),
+        stderr="",
+        import_result=result,
+    )
+
 class LifecycleWorld:
     """One disposable pipeline DB slate coupled to one Beets library."""
 
@@ -235,6 +259,10 @@ class LifecycleWorld:
         self._dispatch_counter = 0
         self._operator_counter = 0
         self._last_subprocess_run: ImportOneRun | None = None
+        # Set when the importer's folder exclusivity guard refused (#1465):
+        # a harness-side rejection carries no dispatch code, like the
+        # duplicate-remove guard, but is an expected world outcome.
+        self._folder_guard_refused = False
         self._replaced_snapshots: dict[int, dict[str, object]] = {}
         self._transitions: list[LifecycleTransitionSnapshot] = []
         self._last_preview_boundary: PreviewBoundaryObservation | None = None
@@ -1226,10 +1254,14 @@ class LifecycleWorld:
             on_spawn = kwargs.get("on_spawn")
             if callable(on_spawn):
                 on_spawn(os.getpid())
-            album = self.beets.import_staged_release(
-                attempt,
-                str(kwargs["path"]),
-            )
+            try:
+                album = self.beets.import_staged_release(
+                    attempt,
+                    str(kwargs["path"]),
+                )
+            except FolderCollisionRefused as refused:
+                self._folder_guard_refused = True
+                return _folder_guard_refusal_run(refused, str(kwargs["path"]))
             result = make_import_result(
                 decision="import",
                 new_min_bitrate=min_bitrate,
@@ -1319,7 +1351,7 @@ class LifecycleWorld:
         if not outcome.success and outcome.code not in {
             "quality_pipeline_rejected",
             "have_analysis_error",
-        }:
+        } and not self._consume_folder_guard_refusal():
             subprocess_detail = self._subprocess_failure_detail()
             raise AssertionError(
                 "production dispatch rejected world import for request "
@@ -1438,10 +1470,14 @@ class LifecycleWorld:
         )
 
         def run_real_beets_import(**kwargs: Any) -> ImportOneRun:
-            album = self.beets.import_staged_release(
-                attempt,
-                str(kwargs["path"]),
-            )
+            try:
+                album = self.beets.import_staged_release(
+                    attempt,
+                    str(kwargs["path"]),
+                )
+            except FolderCollisionRefused as refused:
+                self._folder_guard_refused = True
+                return _folder_guard_refusal_run(refused, str(kwargs["path"]))
             result = make_import_result(
                 decision="import",
                 new_min_bitrate=min_bitrate,
@@ -1508,7 +1544,7 @@ class LifecycleWorld:
         if not outcome.success and outcome.code not in {
             "quality_pipeline_rejected",
             "have_analysis_error",
-        }:
+        } and not self._consume_folder_guard_refusal():
             subprocess_detail = self._subprocess_failure_detail()
             raise AssertionError(
                 "production force import failed operationally: "
@@ -2103,6 +2139,17 @@ class LifecycleWorld:
             deleted_artifacts=tracks,
             preserved_paths=(),
         )
+
+    def _consume_folder_guard_refusal(self) -> bool:
+        refused = self._folder_guard_refused
+        run = self._last_subprocess_run
+        if (run is not None and run.import_result is not None
+                and run.import_result.decision
+                == "folder_exclusivity_guard_failed"):
+            refused = True
+            self._last_subprocess_run = None
+        self._folder_guard_refused = False
+        return refused
 
     def _run_beets_subprocess(self, **kwargs: Any) -> ImportOneRun:
         """Run the production subprocess boundary against scratch Beets only."""

@@ -2135,6 +2135,17 @@ def _rejection_verdict(entry: LogEntry) -> str:
             return f"Duplicate remove guard failed: {entry.beets_detail}"
         return "Duplicate remove guard failed"
 
+    if scenario == "folder_exclusivity_guard_failed":
+        ir = _parse_import_result(entry)
+        folder_guard = (
+            ir.postflight.folder_exclusivity_guard if ir is not None else None
+        )
+        if folder_guard is not None and folder_guard.message:
+            return f"Library folder occupied: {folder_guard.message}"
+        if entry.beets_detail:
+            return f"Library folder occupied: {entry.beets_detail}"
+        return "Library folder occupied"
+
     # ``lib/beets.py`` sets this from ``if not result.mbid_found``: the
     # requested release ID is not in the candidate set beets emitted. That
     # fires whether or not the set was empty — 18 of the 50 live rows carry

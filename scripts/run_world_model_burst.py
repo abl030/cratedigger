@@ -1123,7 +1123,7 @@ def main(
                     root_seed=root_seed,
                     steps=args.steps,
                     expected_generated=expected_generated,
-                    expected_pins=21 if args.engine == "in-process" else None,
+                    expected_pins=23 if args.engine == "in-process" else None,
                 )
                 planned_targets = targets
                 print(

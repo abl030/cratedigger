@@ -51,6 +51,8 @@ from lib.quality import (
     DuplicateRemoveGuardInfo,
     EvidenceProvenance,
     EvidenceSubject,
+    FolderExclusivityGuardInfo,
+    FolderOccupantInfo,
     ImportResult,
     QualityRankConfig,
     SpectralMeasurement,
@@ -3023,6 +3025,46 @@ class TestDispatchImport(unittest.TestCase):
                                 error="ffmpeg failed")
         r = self._dispatch(ir)
         self.assertEqual(r["db"].download_logs[0].outcome, "rejected")
+
+    def test_folder_exclusivity_guard_rejects_denylists_and_stays_wanted(self):
+        """#1465: an occupied library folder records audit evidence, puts
+        the source user through the standard denylist/cooldown back-off,
+        and returns the request to wanted (never parked)."""
+        guard = FolderExclusivityGuardInfo(
+            folder="/Beets/Artist/Album",
+            planned_paths=["/Beets/Artist/Album/01 Track.mp3"],
+            occupants=[FolderOccupantInfo(
+                beets_album_id=101, mb_albumid="other-mbid",
+                albumartist="Artist", album="Album",
+                item_paths=["/Beets/Artist/Album/01 Other.mp3"],
+            )],
+            excluded_album_ids=[100, 102],
+            beets_album_id=102,
+            message="planned folder '/Beets/Artist/Album' already holds "
+                    "beets albums id:101",
+        )
+        ir = make_import_result(decision="folder_exclusivity_guard_failed")
+        ir.exit_code = 8
+        ir.error = guard.message
+        ir.postflight.folder_exclusivity_guard = guard
+
+        r = self._dispatch(ir)
+
+        db = r["db"]
+        self.assertEqual(db.request(42)["status"], "wanted")
+        log = db.download_logs[0]
+        self.assertEqual(log.outcome, "rejected")
+        self.assertEqual(log.beets_scenario, "folder_exclusivity_guard_failed")
+        self.assertIn("/Beets/Artist/Album", log.beets_detail or "")
+        self.assertTrue(len(db.denylist) > 0)
+        self.assertTrue(all(
+            entry.reason == "library folder occupied" for entry in db.denylist
+        ), db.denylist)
+        persisted = ImportResult.from_json(log.import_result)
+        persisted_guard = persisted.postflight.folder_exclusivity_guard
+        assert persisted_guard is not None
+        self.assertEqual(persisted_guard.occupants[0].beets_album_id, 101)
+        self.assertEqual(persisted_guard.excluded_album_ids, [100, 102])
 
     def test_duplicate_remove_guard_failure_denylists_and_quarantines(self):
         from lib.dispatch import dispatch_import_core

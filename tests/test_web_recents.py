@@ -1266,6 +1266,30 @@ class TestClassifyVerdict(unittest.TestCase):
         self.assertIn("duplicate remove guard failed", _text(result, "verdict").lower())
         self.assertIn("2 duplicates", _text(result, "verdict").lower())
 
+    def test_folder_exclusivity_guard_verdict(self):
+        from lib.quality import FolderExclusivityGuardInfo
+
+        ir = ImportResult(
+            exit_code=8,
+            decision="folder_exclusivity_guard_failed",
+            postflight=PostflightInfo(
+                folder_exclusivity_guard=FolderExclusivityGuardInfo(
+                    folder="/Beets/Artist/Album",
+                    message=("planned folder '/Beets/Artist/Album' already "
+                             "holds beets albums id:101"),
+                ),
+            ),
+        )
+        result = _classified(
+            outcome="rejected",
+            beets_scenario="folder_exclusivity_guard_failed",
+            import_result=ir.to_json(),
+        )
+
+        verdict = _text(result, "verdict")
+        self.assertTrue(verdict.startswith("Library folder occupied: "), verdict)
+        self.assertIn("id:101", verdict)
+
     def test_mbid_not_found_verdict(self):
         """The producer's own fact: the requested ID was not in the set.
 
