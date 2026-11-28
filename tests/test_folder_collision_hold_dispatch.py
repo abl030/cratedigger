@@ -72,7 +72,10 @@ def _refusal() -> ImportResult:
 
 
 class _World:
-    def __init__(self, *, force: bool = False, held_source: bool = False) -> None:
+    def __init__(
+        self, *, force: bool = False, held_source: bool = False,
+        local_import: bool = False,
+    ) -> None:
         self.db = FakePipelineDB()
         self.db.seed_request(make_request_row(
             id=42,
@@ -83,12 +86,29 @@ class _World:
         albums = os.path.join(self.tmp.name, "albums")
         self.wrong_matches = os.path.join(albums, "wrong_matches")
         parent = self.wrong_matches if held_source else albums
-        self.path = os.path.join(parent, _FOLDER)
-        os.makedirs(self.path)
-        with open(os.path.join(self.path, "01 Track 1.mp3"), "wb") as fh:
+        # The operator's folder. A force import runs Beets on a private
+        # action copy (scripts/importer.py ``force-action-<job>``), which the
+        # importer deletes after the terminal commit; the operator's folder
+        # travels as ``launch_authority_path`` (None for a local import).
+        self.source = os.path.join(parent, _FOLDER)
+        os.makedirs(self.source)
+        with open(os.path.join(self.source, "01 Track 1.mp3"), "wb") as fh:
             fh.write(b"fixture audio")
+        if force:
+            self.path = os.path.join(albums, "force-action-77")
+            os.makedirs(self.path)
+            with open(os.path.join(self.path, "01 Track 1.mp3"), "wb") as fh:
+                fh.write(b"fixture audio")
+        else:
+            self.path = self.source
+        launch_authority = (
+            self.source if force and not local_import else None)
         self.claimed, candidate_result, execution_lease = _claim_dispatch_job(
-            self.db, path=self.path, release_id=_RELEASE, force=force,
+            # A local import's job names its own action copy (there is no
+            # separate pipeline source); a force retry's names the folder.
+            self.db, path=self.path if local_import else self.source,
+            release_id=_RELEASE, force=force,
+            action_path=self.path if force and not local_import else None,
         )
         cancellation_token = (
             CancellationToken() if execution_lease is not None else None
@@ -118,6 +138,7 @@ class _World:
                     execution_lease=execution_lease,
                     owner_session_identity=owner_session_identity,
                     cooled_down_users=set(),
+                    launch_authority_path=launch_authority,
                 ),
                 self.db,
                 cfg=_full_dispatch_config(),
@@ -180,27 +201,51 @@ class TestFolderCollisionHoldDispatch(unittest.TestCase):
         self.assertEqual(
             world.db.get_held_upgrade_download_log_id(42, kept), log.id)
 
-    def test_force_retry_that_still_collides_is_held_in_place(self) -> None:
+    def test_force_retry_that_still_collides_is_held_on_the_operators_folder(
+        self,
+    ) -> None:
         world = self.world(force=True, held_source=True)
         self.assertEqual(world.outcome.code, "folder_collision_held")
-        # The held folder stays exactly where it is; nothing is cleaned.
-        self.assertTrue(os.path.isfile(os.path.join(world.path, "01 Track 1.mp3")))
+        # The operator's held folder stays exactly where it is.
+        self.assertTrue(
+            os.path.isfile(os.path.join(world.source, "01 Track 1.mp3")))
         self.assertFalse(os.path.exists(
             os.path.join(world.wrong_matches, "wrong_matches")))
         world.ext.cleanup.assert_not_called()
         log = world.db.download_logs[-1]
         payload = json.loads(log.validation_result)
         self.assertEqual(payload["scenario"], "folder_exclusivity_guard_failed")
-        self.assertEqual(payload["failed_path"], world.path)
+        # The hold names the OPERATOR'S folder, never the private action
+        # copy Beets ran on (the importer deletes that copy).
+        self.assertEqual(payload["failed_path"], world.source)
+        self.assertNotIn("force-action", payload["failed_path"])
         self.assertEqual(payload["folder_collision"]["folder"], _LIBRARY_FOLDER)
         # The operator's retry denylists nobody, strikes nobody, and leaves
         # the request's status alone.
         self.assertEqual(world.db.denylist, [])
         self.assertEqual(world.db.cooldowns_applied, [])
         self.assertEqual(world.db.request(42)["status"], "unsearchable")
-        # The folder is (still) held, by this newest row.
+        # The folder is held, by this newest row, so its card is current.
         (row,) = world.db.get_wrong_matches()
         self.assertEqual(row["held_download_log_id"], log.id)
+        self.assertEqual(
+            world.db.get_held_upgrade_download_log_id(42, world.source), log.id)
+
+    def test_local_import_collision_settles_without_a_hold(self) -> None:
+        """A local import has no pipeline folder to hold: its action copy is
+        disposable and the operator's folder is outside the pipeline."""
+        world = self.world(force=True, local_import=True)
+        self.assertNotEqual(world.outcome.code, "folder_collision_held")
+        self.assertEqual(world.db.get_wrong_matches(), [])
+        log = world.db.download_logs[-1]
+        self.assertEqual(log.beets_scenario, "folder_exclusivity_guard_failed")
+        self.assertIsNone(json.loads(log.validation_result or "{}").get("failed_path"))
+        # No cooldown strike here either; the operator's folder is untouched.
+        self.assertEqual(world.db.cooldowns_applied, [])
+        self.assertTrue(
+            os.path.isfile(os.path.join(world.source, "01 Track 1.mp3")))
+        for entry in world.db.denylist:
+            self.assertEqual(entry.reason, "library folder occupied")
 
 
 if __name__ == "__main__":

@@ -251,8 +251,14 @@ def _claim_dispatch_job(
     request_id: int = 42,
     evidence_kwargs=None,
     candidate_evidence=None,
+    action_path: str | None = None,
 ):
-    """Create the production-shaped job/evidence authority for a core test."""
+    """Create the production-shaped job/evidence authority for a core test.
+
+    ``action_path`` (force only): the private action copy Beets runs on.
+    The job payload names the operator's folder (``path``), while the
+    candidate evidence snapshots the action copy, as in production.
+    """
     from lib.import_evidence import (
         ActionEvidenceProvenance,
         CandidateEvidenceActionResult,
@@ -262,12 +268,14 @@ def _claim_dispatch_job(
 
     # Production-shaped dispatch tests must persist the snapshot of the path
     # they later hand to the freshness guard.
-    os.makedirs(path, mode=0o700, exist_ok=True)
-    fixture_track = os.path.join(path, "01 - Track.mp3")
-    if not os.path.exists(fixture_track):
-        with open(fixture_track, "wb") as handle:
-            handle.write(b"fixture audio")
-    files = snapshot_audio_files(path)
+    evidence_path = action_path or path
+    for fixture_dir in {path, evidence_path}:
+        os.makedirs(fixture_dir, mode=0o700, exist_ok=True)
+        fixture_track = os.path.join(fixture_dir, "01 - Track.mp3")
+        if not os.path.exists(fixture_track):
+            with open(fixture_track, "wb") as handle:
+                handle.write(b"fixture audio")
+    files = snapshot_audio_files(evidence_path)
     request = db.request(request_id)
     request["mb_release_id"] = release_id
     preview_lease: ExecutionLeaseSnapshot | None = None
@@ -308,14 +316,14 @@ def _claim_dispatch_job(
         msgspec.structs.replace(
             candidate_evidence,
             mb_release_id=release_id,
-            source_path=path,
+            source_path=evidence_path,
             files=files,
             snapshot_fingerprint=snapshot_fingerprint(files),
         )
         if candidate_evidence is not None
         else make_album_quality_evidence(
             mb_release_id=release_id,
-            source_path=path,
+            source_path=evidence_path,
             files=files,
             **(evidence_kwargs or {}),
         )

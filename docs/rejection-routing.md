@@ -134,7 +134,10 @@ gate `PipelineDB.get_wrong_matches()` filters on:
    `lib.dispatch.outcome_actions._hold_folder_collision`, through the same
    `_hold_candidate_folder` helper as the upgrade hold. Reached after Beets
    ran: the harness refused the task before `manipulate_files`, so nothing
-   was removed or moved and the staged folder is intact. Automation moves it
+   was removed or moved. The folder is held as the importer left it: a
+   lossless download has already been converted to its import target and its
+   lossless files removed before Beets ran, so a retry imports that
+   conversion (lossless provenance does not carry over). Automation moves it
    whole into `wrong_matches/`; a force import of a folder already there is
    held in place (no move, no denylist). The envelope keeps the beets
    result, renames `scenario` to `folder_exclusivity_guard_failed`, sets

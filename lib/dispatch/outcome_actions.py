@@ -311,17 +311,23 @@ def _hold_folder_collision(
     *,
     attempt_result: ImportAttemptResult,
     cancellation_token: CancellationToken | None = None,
+    in_place_path: str | None = None,
 ) -> DispatchOutcome:
     """Hold a candidate whose library folder is occupied (issue #1465).
 
-    A force import (the operator's retry of a held folder, or of any Wrong
-    Matches folder) that still collides is held IN PLACE: no move, no new
-    denylist entry, the request's status untouched. Its row is the newest
-    hold naming the folder, so the card shows the current occupants.
+    ``in_place_path``: a force import (the operator's retry of a held
+    folder, or of any Wrong Matches folder) that still collides is held IN
+    PLACE on the operator's own folder (not the private action copy Beets
+    ran on): no move, no new denylist entry, the request's status
+    untouched. Its row is the newest hold naming the folder, so the card
+    shows the current occupants.
 
     Reached from the automation import lane after the harness refused the
     task before ``manipulate_files``: Beets removed nothing and moved
-    nothing, and the staged folder is intact. It is held in Wrong Matches
+    nothing. The staged folder is held as the importer left it: a lossless
+    download was already converted to its import target (and its lossless
+    files removed) before Beets ran, so a retry imports that conversion and
+    the lossless provenance does not carry over. It is held in Wrong Matches
     like a held upgrade, so the operator can fix the folder on disk and
     retry the import ("Use new copy" is the same force import) or delete
     the copy. The peers are denylisted for THIS request only and take no
@@ -353,7 +359,7 @@ def _hold_folder_collision(
         message=f"Library folder occupied: {sentence}",
         log_label="LIBRARY FOLDER OCCUPIED",
         cancellation_token=cancellation_token,
-        in_place=request.force,
+        in_place_path=in_place_path,
     )
 
 
@@ -370,13 +376,13 @@ def _hold_candidate_folder(
     message: str,
     log_label: str,
     cancellation_token: CancellationToken | None,
-    in_place: bool = False,
+    in_place_path: str | None = None,
 ) -> DispatchOutcome:
     """Move a candidate WHOLE into ``wrong_matches/`` and hold it there.
 
-    ``in_place`` (a force import of a folder that already lives where the
-    operator keeps it) records the hold on the folder as it stands: no
-    move and no denylist entry.
+    ``in_place_path`` (a force import's own source folder, already where
+    the operator keeps it) records the hold on that folder as it stands:
+    no move and no denylist entry.
 
     Shared by every held scenario (``lib.wrong_match_policy.HELD_SCENARIOS``):
     one atomic rename, an audit row naming the folder as ``failed_path``
@@ -404,13 +410,13 @@ def _hold_candidate_folder(
     # and the same peer fetched again). See the docstring.
     checkpoint(cancellation_token)
     failed_path = (
-        request.path if in_place else move_failed_import_whole(
+        in_place_path if in_place_path is not None else move_failed_import_whole(
             request.path,
             scenario=scenario,
             before_mutation=cancellation_hook(cancellation_token),
         )
     )
-    if in_place:
+    if in_place_path is not None:
         # The peer was denylisted when the copy was first held.
         usernames.clear()
 

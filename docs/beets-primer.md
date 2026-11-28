@@ -904,7 +904,7 @@ message; the controller returns exit code 8 and decision
 `folder_exclusivity_guard_failed` with the occupants and planned paths in
 `postflight.folder_exclusivity_guard`.
 
-Dispatch then **holds** the intact copy in Wrong Matches through the same
+Dispatch then **holds** the copy in Wrong Matches through the same
 machinery as a held upgrade (`_hold_folder_collision` in
 `lib/dispatch/outcome_actions.py`; `HELD_SCENARIOS` in
 `lib/wrong_match_policy.py`). The folder moves whole into `wrong_matches/`,
@@ -918,8 +918,17 @@ The held card names the occupied folder and what is in it. The operator
 fixes the folder on disk (moves or retags the occupant), then presses
 **Retry import** (the same force import "Use new copy" runs) or **Delete
 this copy**. A retry that still collides is held again in place, so the card
-always shows the current occupants. The collision itself is never resolved
-automatically.
+always shows the current occupants, on the operator's own folder (never the
+private action copy Beets ran on). A local import has no pipeline folder to
+hold, so its collision settles as an ordinary rejection. The collision itself
+is never resolved automatically.
+
+Limit: the held copy is the folder as the importer left it. A lossless
+download has already been converted to its import target (V0, or the
+verified-lossless target) and its lossless files removed before Beets runs,
+so the held copy is that conversion; a retry imports it and the lossless
+provenance does not carry over. Keeping the lossless originals would mean
+parking them outside the staged folder until Beets succeeds.
 
 ### Exit Codes
 
