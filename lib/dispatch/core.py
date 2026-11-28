@@ -40,6 +40,7 @@ from lib.dispatch.helpers import (
 )
 from lib.dispatch.outcome_actions import (
     _do_mark_done,
+    _hold_folder_collision,
     _hold_upgrade_from_evidence_decision,
     _record_have_analysis_error,
     _record_rejection_and_maybe_requeue,
@@ -111,6 +112,10 @@ from lib.terminal_outcomes import PendingImportTerminalOutcome
 from lib.validation_envelope import (
     decode_validation_envelope,
     scenario_covers_declared_program,
+)
+from lib.wrong_match_policy import (
+    FOLDER_COLLISION_DENYLIST_REASON,
+    FOLDER_COLLISION_HELD_SCENARIO,
 )
 
 if TYPE_CHECKING:
@@ -376,8 +381,8 @@ def _denylist_reason(decision: str, new_bitrate: int | None) -> str:
         return f"transcode: {new_bitrate}kbps" if new_bitrate else "transcode detected"
     if decision == "duplicate_remove_guard_failed":
         return "duplicate remove guard failed"
-    if decision == "folder_exclusivity_guard_failed":
-        return "library folder occupied"
+    if decision == FOLDER_COLLISION_HELD_SCENARIO:
+        return FOLDER_COLLISION_DENYLIST_REASON
     return f"rejected: {decision}"
 
 
@@ -1960,6 +1965,7 @@ def _settle_import_result(
             usernames,
             reason,
             request.cooled_down_users,
+            apply_cooldown=decision != FOLDER_COLLISION_HELD_SCENARIO,
         )
         logger.info(
             f"  Denylisted {usernames} for request {request.request_id}")
@@ -2446,6 +2452,17 @@ def dispatch_import_core(
                         "Beets returned without a terminal result"
                     ),
                     code="beets_acknowledgement_ambiguous",
+                )
+            if ir.decision == FOLDER_COLLISION_HELD_SCENARIO:
+                # Issue #1465: the harness refused before Beets removed or
+                # moved anything. Hold the intact candidate in Wrong
+                # Matches (the upgrade-hold lane) instead of cleaning it;
+                # a force import of a folder already there is held in place.
+                return _hold_folder_collision(
+                    request,
+                    db,
+                    attempt_result=attempt_result,
+                    cancellation_token=cancellation_token,
                 )
             settlement = _settle_import_result(
                 request,

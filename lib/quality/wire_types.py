@@ -9,6 +9,7 @@ from typing import Self
 
 import msgspec
 
+from lib.quality.import_result_types import FolderExclusivityGuardInfo
 from lib.quality.installed_copy_guard import InstalledCopyComparison
 
 # ---------------------------------------------------------------------------
@@ -308,6 +309,10 @@ class ValidationResult(msgspec.Struct):
     # surface (Recents, Wrong Matches, pipeline-cli) renders the hold from
     # this stored evidence, never from a fresh measurement.
     upgrade_hold: InstalledCopyComparison | None = None
+    # Issue #1465: populated exactly when ``scenario ==
+    # "folder_exclusivity_guard_failed"`` on a held folder — the occupied
+    # library folder and its occupants, as the harness reported them.
+    folder_collision: FolderExclusivityGuardInfo | None = None
 
     def to_json(self) -> str:
         """Serialize to JSON string via msgspec.json.encode."""

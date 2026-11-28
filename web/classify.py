@@ -1439,7 +1439,7 @@ def _classify(
         held = held_upgrade_view(entry.validation_result)
         if held is not None:
             return _Classification(
-                "Upgrade held", "badge-warn", "#a86f20", held.sentence,
+                held.label, "badge-warn", "#a86f20", held.sentence,
             )
 
     # --- Verified-lossless proof lock (non-punitive decline) ---

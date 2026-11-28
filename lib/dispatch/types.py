@@ -94,6 +94,9 @@ DISPATCH_CODE_PROCESSING_LOCKED = "processing_locked"
 DISPATCH_CODE_QUALITY_PIPELINE_REJECTED = "quality_pipeline_rejected"
 #: Issue #1445 item 3: the upgrade guard kept the installed copy.
 DISPATCH_CODE_UPGRADE_HELD = "upgrade_held"
+#: Issue #1465: the harness refused an occupied library folder; the copy is
+#: held in Wrong Matches for the operator.
+DISPATCH_CODE_FOLDER_COLLISION_HELD = "folder_collision_held"
 DISPATCH_CODE_IMPORT_MANIFEST_REJECTED = "import_manifest_rejected"
 
 # Scenarios whose ``path`` is the user's source data (``failed_imports/…``),

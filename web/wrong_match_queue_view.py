@@ -20,7 +20,7 @@ from typing import Protocol
 import msgspec
 
 from lib.accusation_flags import evidence_column_accusation_flags
-from lib.held_upgrade_view import held_upgrade_view
+from lib.held_upgrade_view import HELD_KIND_FOLDER_COLLISION, held_upgrade_view
 from lib.import_queue import ForceImportPayload, ImportJob, YoutubeImportPayload
 from lib.pipeline_db._shared import (
     CANDIDATE_EVIDENCE_PREFIX,
@@ -490,7 +490,9 @@ def build_held_upgrades(
         if row["download_log_id"] != held_id:
             reason = vr.detail or (vr.scenario or "unknown").replace("_", " ")
             last_attempt_failure = (
-                f"The last try to use the new copy failed: {reason}"
+                f"The last try to import this copy failed: {reason}"
+                if view.kind == HELD_KIND_FOLDER_COLLISION
+                else f"The last try to use the new copy failed: {reason}"
             )
         job = active_jobs_by_log_id.get(held_id)
         evidence_format = row.get("evidence_storage_format")
@@ -520,6 +522,8 @@ def build_held_upgrades(
             ),
             "sentence": view.sentence,
             "rows": msgspec.to_builtins(view.rows),
+            "kind": view.kind,
+            "label": view.label,
         })
     cards.sort(key=lambda card: -int(str(card["held_download_log_id"])))
     return cards

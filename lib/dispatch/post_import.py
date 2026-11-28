@@ -61,10 +61,15 @@ def _apply_or_stage_denylists(
     usernames: set[str],
     reason: str,
     cooled_down_users: set[str] | None,
+    *,
+    apply_cooldown: bool = True,
 ) -> PendingImportTerminalOutcome | None:
+    """``apply_cooldown=False`` denylists for the request only, with no
+    global cooldown strike (a rejection that is not the peer's fault, e.g.
+    the issue #1465 occupied library folder)."""
     if pending is not None:
         return pending.append_denylists(*(
-            TerminalDenylist(username, reason, apply_cooldown=True)
+            TerminalDenylist(username, reason, apply_cooldown=apply_cooldown)
             for username in sorted(usernames)
         ))
     # Every denylist entry (and its cooldown check, when the caller wants
@@ -80,12 +85,13 @@ def _apply_or_stage_denylists(
         denylists=tuple(
             TerminalDenylist(
                 username, reason,
-                apply_cooldown=cooled_down_users is not None,
+                apply_cooldown=(
+                    apply_cooldown and cooled_down_users is not None),
             )
             for username in sorted(usernames)
         ),
     ))
-    if cooled_down_users is not None:
+    if apply_cooldown and cooled_down_users is not None:
         cooled_down_users.update(result.cooled_down_users)
     return None
 

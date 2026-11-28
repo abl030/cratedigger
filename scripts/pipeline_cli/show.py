@@ -287,6 +287,9 @@ def _render_held_upgrade(row: Mapping[str, object]) -> list[str]:
     view = held_upgrade_view(row.get("validation_result"))
     if view is None:
         return []
+    if not view.rows:
+        # Issue #1465: a folder-collision hold has no track table.
+        return [f"      {view.label.lower()}: {view.sentence}"]
     lines = [
         f"      upgrade held: {view.sentence}",
         "        Track  Release  Current  New    Title",

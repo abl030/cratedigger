@@ -902,11 +902,24 @@ the staged source is untouched, and the harness drops the refused album rows
 (database only) once the session ends. It reports a `folder_collision`
 message; the controller returns exit code 8 and decision
 `folder_exclusivity_guard_failed` with the occupants and planned paths in
-`postflight.folder_exclusivity_guard`. Dispatch records the rejection, cleans
-the staged copy, denylists the source user for the request (with the global
-cooldown streak check) as the standard back-off, and returns the request to
-`wanted`. The collision is the operator's to resolve (retag or move the
-occupant); until then every retry is refused the same way.
+`postflight.folder_exclusivity_guard`.
+
+Dispatch then **holds** the intact copy in Wrong Matches through the same
+machinery as a held upgrade (`_hold_folder_collision` in
+`lib/dispatch/outcome_actions.py`; `HELD_SCENARIOS` in
+`lib/wrong_match_policy.py`). The folder moves whole into `wrong_matches/`,
+its audit row stores the collision as `validation_result.folder_collision`,
+the source user is denylisted for that request only with **no cooldown
+strike** (not the peer's fault; the denylist already stops the same copy
+being fetched again), and the request returns to `wanted`, so searching
+never stops. Each further peer's copy that collides is held the same way.
+
+The held card names the occupied folder and what is in it. The operator
+fixes the folder on disk (moves or retags the occupant), then presses
+**Retry import** (the same force import "Use new copy" runs) or **Delete
+this copy**. A retry that still collides is held again in place, so the card
+always shows the current occupants. The collision itself is never resolved
+automatically.
 
 ### Exit Codes
 

@@ -77,8 +77,9 @@ on anything spelled but unclassified.
 | `request_missing_request_id` | `lib/download_validation.py:1071` | **yes** (D4) | `wrong_matches/` — whole-folder move (D4) | yes | no — not in the allowlist | yes → `wanted` |
 | `timeout` | `lib/dispatch/core.py:1465` (`import_one.py` subprocess timeout) | no | none — no folder move at all | no | n/a | per caller |
 | `exception` | `lib/dispatch/core.py:1494` (unhandled exception in dispatch) | no | none | no | n/a | per caller |
-| `quality_downgrade` / `transcode_downgrade` / `suspect_lossless_downgrade` / `suspect_lossless_probe_missing` / `lossless_source_locked` / `duplicate_remove_guard_failed` / `folder_exclusivity_guard_failed` / `verified_lossless_locked` | `lib/dispatch/core.py::_describe_rejection` (post-beets-launch quality decisions) | decision-dependent (`decision_denylists`) | none — `_cleanup_staged_dir` (auto) or preserved (force, `mark_done=False`); never quarantined into Wrong Matches | no — the persisted `validation_result.scenario` stays `strong_match` (D8), and none of these ever get a `failed_path` regardless | n/a | per caller |
+| `quality_downgrade` / `transcode_downgrade` / `suspect_lossless_downgrade` / `suspect_lossless_probe_missing` / `lossless_source_locked` / `duplicate_remove_guard_failed` / `verified_lossless_locked` | `lib/dispatch/core.py::_describe_rejection` (post-beets-launch quality decisions) | decision-dependent (`decision_denylists`) | none — `_cleanup_staged_dir` (auto) or preserved (force, `mark_done=False`); never quarantined into Wrong Matches | no — the persisted `validation_result.scenario` stays `strong_match` (D8), and none of these ever get a `failed_path` regardless | n/a | per caller |
 | `upgrade_held` | `lib/dispatch/outcome_actions.py::_hold_upgrade_from_evidence_decision`, reached from `lib/dispatch/core.py::_run_evidence_gate` when `full_pipeline_decision_from_evidence` decides `upgrade_held` (issue #1445 item 3: an automatic upgrade whose track lengths disagree with the installed copy it would replace; issue #1471: or, when the operator marked the installed copy incomplete, whose track lengths are short of the release's listing — `upgrade_hold.basis = "declared_program"`) | **yes, this request only, no cooldown strike** (`apply_cooldown=False` — a hold is not the peer's fault, but the same folder must not be fetched again) | `wrong_matches/` — **whole-folder move**, before Beets launches; nothing in the library is touched | yes — in the "Held upgrades" section at the top of the Wrong Matches tab (`web/wrong_match_queue_view.py::build_held_upgrades`, rendered by `web/js/wrong-matches.js::renderHeldUpgrades`), never inside an ordinary group. **Sticky to the folder:** `get_wrong_matches` projects the newest `upgrade_held` row naming each folder (`held_download_log_id`, `held_validation_result`), so a newer row on the folder — a failed force import — is recorded and shown truthfully ("the last try to use the new copy failed: …") while the folder stays held | **no** — the reducer refuses a held folder early (`get_held_upgrade_download_log_id` → `OUTCOME_SKIPPED_HELD_UPGRADE`), so the delete-all triage batch cannot reach it either; converge skips it (its green distance would otherwise force-import over the copy the guard kept) and counts it apart (`held_upgrades`; `group_empty` only when nothing at all is left, `ordinary_group_empty` drives the UI); delete-group skips it and leaves it out of the remaining count; **Replace deletes it** (`include_held=True`) | yes → `wanted`, search state exactly as any ordinary rejected attempt leaves it (no override narrowing) |
+| `folder_exclusivity_guard_failed` | `lib/dispatch/outcome_actions.py::_hold_folder_collision`, reached from `lib/dispatch/core.py::dispatch_import_core` when the harness refused the task before `manipulate_files` because its library folder is occupied (issue #1465: Beets removed and moved nothing) | **yes, this request only, no cooldown strike** (`apply_cooldown=False` — not the peer's fault, and the denylist already stops the same copy being fetched again); a force retry denylists nobody | `wrong_matches/` — **whole-folder move** after the harness refused (automation); a force import of a folder already there is held **in place** | yes — a held card in the same section as held upgrades (`kind=folder_collision`: the occupied folder and its occupants, no track table; **Retry import** is the force import, **Delete this copy** the wrong-match delete). Sticky to the folder exactly like `upgrade_held` (`HELD_SCENARIOS`) | **no** — converge, delete-group and the reducer skip it like a held upgrade; Replace deletes it | automation: yes → `wanted`, searching continues; force: no, preserves status |
 | `abandoned_auto_import` | **HISTORICAL — no current writer.** Pre-#898 interrupted-request auto-import cleanup rows. Only reader: `lib/pipeline_db/misc.py:262` (a `WHERE … <> 'abandoned_auto_import'` exclusion, not a producer). Registered historical in `tests/test_wrong_match_scenario_producer_audit.py`. | — | — | — | — | — |
 
 Every folder/audio-integrity fact's denylist policy above and the general
@@ -90,7 +91,7 @@ decisions can ever reach a Wrong-Matches-relevant admission surface (a
 `failed_path`) at all — most cannot, because they are cleaned up immediately
 and never quarantined.
 
-## The five sites that actually write `failed_path`
+## The sites that actually write `failed_path`
 
 Only these ever set `validation_result->>'failed_path'`, which is the sole
 gate `PipelineDB.get_wrong_matches()` filters on:
@@ -129,7 +130,17 @@ gate `PipelineDB.get_wrong_matches()` filters on:
    nobody sees and the same peer's copy being fetched again. The job-backed terminal outcome commits after the
    journaled processor cleanup finds the canonical source already gone
    (a no-op). That window is the same one Lanes A and B have.
-5. **The evidence-gate `audio_corrupt` reject, before D3** — historical only.
+5. **The folder-collision hold** (issue #1465) —
+   `lib.dispatch.outcome_actions._hold_folder_collision`, through the same
+   `_hold_candidate_folder` helper as the upgrade hold. Reached after Beets
+   ran: the harness refused the task before `manipulate_files`, so nothing
+   was removed or moved and the staged folder is intact. Automation moves it
+   whole into `wrong_matches/`; a force import of a folder already there is
+   held in place (no move, no denylist). The envelope keeps the beets
+   result, renames `scenario` to `folder_exclusivity_guard_failed`, sets
+   `failed_path`, and stores the harness's report as `folder_collision`.
+   Same cancellation window as the upgrade hold.
+6. **The evidence-gate `audio_corrupt` reject, before D3** — historical only.
    Current code deletes instead (see the events table above); the read-side
    exclusion for the historical cohort remains in `wrong_match_row_is_visible`
    (`lib/wrong_matches.py`) and `PipelineDB.get_retained_failure_paths` (the

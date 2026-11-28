@@ -53,6 +53,7 @@ from lib.validation_envelope import (
     WrongMatchTriageAudit,
     derive_validation_log_columns,
 )
+from lib.wrong_match_policy import is_held_scenario
 from tests.fakes._shared import _utcnow
 from tests.fakes.pipeline_db._base import _FakePipelineDBBase
 from tests.fakes.pipeline_db._shared import _jsonb_column
@@ -806,7 +807,7 @@ class _FakeDownloadLogMixin(_FakePipelineDBBase):
     def get_held_upgrade_download_log_id(
         self, request_id: int, failed_path: str,
     ) -> int | None:
-        """Newest ``upgrade_held`` rejected row naming this folder."""
+        """Newest held (``HELD_SCENARIOS``) rejected row naming this folder."""
         best: int | None = None
         for entry in self.download_logs:
             if entry.request_id != request_id or entry.outcome != "rejected":
@@ -814,7 +815,7 @@ class _FakeDownloadLogMixin(_FakePipelineDBBase):
             vr = self._validation_result_dict(entry.validation_result)
             if not vr or vr.get("failed_path") != failed_path:
                 continue
-            if vr.get("scenario") != "upgrade_held":
+            if not is_held_scenario(str(vr.get("scenario") or "")):
                 continue
             if best is None or entry.id > best:
                 best = entry.id

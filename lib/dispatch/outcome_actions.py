@@ -8,6 +8,7 @@ evidence reject helper.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import msgspec
@@ -20,12 +21,14 @@ from lib.dispatch.helpers import (
     _v0_probe_log_fields,
 )
 from lib.dispatch.types import (
+    DISPATCH_CODE_FOLDER_COLLISION_HELD,
     DISPATCH_CODE_QUALITY_PIPELINE_REJECTED,
     DISPATCH_CODE_UPGRADE_HELD,
     DispatchOutcome,
     ImportAttemptResult,
     PostCommitCleanup,
 )
+from lib.held_upgrade_view import folder_collision_sentence
 from lib.import_evidence import (
     HaveAnalysisFailure,
     classify_have_analysis_failure,
@@ -50,6 +53,7 @@ from lib.terminal_outcomes import (
     TerminalDenylist,
     TerminalDownloadAudit,
 )
+from lib.wrong_match_policy import FOLDER_COLLISION_DENYLIST_REASON
 
 if TYPE_CHECKING:
     from lib.dispatch.types import DispatchDB, DispatchRequest
@@ -279,16 +283,115 @@ def _hold_upgrade_from_evidence_decision(
     worst case is an orphan folder nobody sees and the same peer's copy
     being fetched again.
     """
+    from lib.quality.installed_copy_guard import held_upgrade_sentence
+
+    sentence = held_upgrade_sentence(comparison)
+
+    def decorate(held: ValidationResult) -> None:
+        held.upgrade_hold = comparison
+
+    return _hold_candidate_folder(
+        request,
+        db,
+        attempt_result=attempt_result,
+        scenario="upgrade_held",
+        sentence=sentence,
+        denylist_reason=_hold_denylist_reason(comparison),
+        decorate=decorate,
+        code=DISPATCH_CODE_UPGRADE_HELD,
+        message=f"Upgrade held: {sentence}",
+        log_label="UPGRADE HELD",
+        cancellation_token=cancellation_token,
+    )
+
+
+def _hold_folder_collision(
+    request: DispatchRequest,
+    db: DispatchDB,
+    *,
+    attempt_result: ImportAttemptResult,
+    cancellation_token: CancellationToken | None = None,
+) -> DispatchOutcome:
+    """Hold a candidate whose library folder is occupied (issue #1465).
+
+    A force import (the operator's retry of a held folder, or of any Wrong
+    Matches folder) that still collides is held IN PLACE: no move, no new
+    denylist entry, the request's status untouched. Its row is the newest
+    hold naming the folder, so the card shows the current occupants.
+
+    Reached from the automation import lane after the harness refused the
+    task before ``manipulate_files``: Beets removed nothing and moved
+    nothing, and the staged folder is intact. It is held in Wrong Matches
+    like a held upgrade, so the operator can fix the folder on disk and
+    retry the import ("Use new copy" is the same force import) or delete
+    the copy. The peers are denylisted for THIS request only and take no
+    cooldown strike: the collision is not their fault, and denylisting
+    already stops the same copy being fetched again. Searching continues.
+    """
+    import_result = attempt_result.result
+    guard = (
+        import_result.postflight.folder_exclusivity_guard
+        if import_result is not None else None
+    )
+    sentence = folder_collision_sentence(guard)
+
+    def decorate(held: ValidationResult) -> None:
+        held.folder_collision = guard
+
+    return _hold_candidate_folder(
+        request,
+        db,
+        attempt_result=attempt_result,
+        # Spelled literally for the Wrong Matches producer audit
+        # (tests/test_wrong_match_scenario_producer_audit.py); equal to
+        # ``lib.wrong_match_policy.FOLDER_COLLISION_HELD_SCENARIO``.
+        scenario="folder_exclusivity_guard_failed",
+        sentence=sentence,
+        denylist_reason=FOLDER_COLLISION_DENYLIST_REASON,
+        decorate=decorate,
+        code=DISPATCH_CODE_FOLDER_COLLISION_HELD,
+        message=f"Library folder occupied: {sentence}",
+        log_label="LIBRARY FOLDER OCCUPIED",
+        cancellation_token=cancellation_token,
+        in_place=request.force,
+    )
+
+
+def _hold_candidate_folder(
+    request: DispatchRequest,
+    db: DispatchDB,
+    *,
+    attempt_result: ImportAttemptResult,
+    scenario: str,
+    sentence: str,
+    denylist_reason: str,
+    decorate: Callable[[ValidationResult], None],
+    code: str,
+    message: str,
+    log_label: str,
+    cancellation_token: CancellationToken | None,
+    in_place: bool = False,
+) -> DispatchOutcome:
+    """Move a candidate WHOLE into ``wrong_matches/`` and hold it there.
+
+    ``in_place`` (a force import of a folder that already lives where the
+    operator keeps it) records the hold on the folder as it stands: no
+    move and no denylist entry.
+
+    Shared by every held scenario (``lib.wrong_match_policy.HELD_SCENARIOS``):
+    one atomic rename, an audit row naming the folder as ``failed_path``
+    under ``scenario`` (``decorate`` adds the scenario's own evidence), a
+    per-request denylist with no cooldown strike, and the caller's requeue.
+    See ``_hold_upgrade_from_evidence_decision`` for the cancellation window.
+    """
     from lib.import_execution import cancellation_hook, checkpoint
     from lib.import_manifest import move_failed_import_whole
-    from lib.quality.installed_copy_guard import held_upgrade_sentence
 
     dl_info = request.dl_info
     import_result = attempt_result.result
     if import_result is None:
-        raise RuntimeError("an upgrade hold requires an import result")
+        raise RuntimeError("a held folder requires an import result")
     _populate_dl_info_from_import_result(dl_info, import_result)
-    sentence = held_upgrade_sentence(comparison)
     usernames = extract_usernames(request.files or [])
     if dl_info.username:
         usernames.add(dl_info.username)
@@ -300,11 +403,16 @@ def _hold_upgrade_from_evidence_decision(
     # A/B window: nothing imported or deleted; worst case an orphan folder
     # and the same peer fetched again). See the docstring.
     checkpoint(cancellation_token)
-    failed_path = move_failed_import_whole(
-        request.path,
-        scenario="upgrade_held",
-        before_mutation=cancellation_hook(cancellation_token),
+    failed_path = (
+        request.path if in_place else move_failed_import_whole(
+            request.path,
+            scenario=scenario,
+            before_mutation=cancellation_hook(cancellation_token),
+        )
     )
+    if in_place:
+        # The peer was denylisted when the copy was first held.
+        usernames.clear()
 
     held = (
         ValidationResult.from_json(dl_info.validation_result)
@@ -312,11 +420,11 @@ def _hold_upgrade_from_evidence_decision(
         else ValidationResult(distance=request.distance)
     )
     held.valid = False
-    held.scenario = "upgrade_held"
+    held.scenario = scenario
     held.detail = sentence
     held.failed_path = failed_path
     held.denylisted_users = sorted(usernames)
-    held.upgrade_hold = comparison
+    decorate(held)
     validation_json = held.to_json()
     dl_info.validation_result = validation_json
 
@@ -334,17 +442,14 @@ def _hold_upgrade_from_evidence_decision(
         import_job_id=request.candidate_import_job_id,
         source_download_log_id=request.candidate_download_log_id,
         denylists=tuple(
-            TerminalDenylist(
-                username,
-                _hold_denylist_reason(comparison),
-                apply_cooldown=False,
-            )
+            TerminalDenylist(username, denylist_reason, apply_cooldown=False)
             for username in sorted(usernames)
         ),
         cooled_down_users=request.cooled_down_users,
     )
     logger.warning(
-        "UPGRADE HELD: %s — %s | kept at %s | denylisted for this request: %s",
+        "%s: %s — %s | kept at %s | denylisted for this request: %s",
+        log_label,
         request.label,
         sentence,
         failed_path,
@@ -352,14 +457,14 @@ def _hold_upgrade_from_evidence_decision(
     )
     return DispatchOutcome(
         success=False,
-        message=f"Upgrade held: {sentence}",
-        code=DISPATCH_CODE_UPGRADE_HELD,
+        message=message,
+        code=code,
         terminal_outcome=(
             terminal_outcome
             if isinstance(terminal_outcome, PendingImportTerminalOutcome)
             else None
         ),
-        post_commit_wrong_match_scenario="upgrade_held",
+        post_commit_wrong_match_scenario=scenario,
     )
 
 

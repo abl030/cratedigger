@@ -111,5 +111,56 @@ class TestHeldUpgradeSurvivesAFailedForceImport(unittest.TestCase):
         self.assertEqual(build_held_upgrades(db=self.db), [])
 
 
+
+class TestFolderCollisionHoldIsProtectedLikeAnUpgradeHold(unittest.TestCase):
+    """Issue #1465: a folder-collision hold is the second held kind; every
+    surface that protects a held upgrade protects it the same way."""
+
+    def setUp(self) -> None:
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.db = FakePipelineDB()
+        self.db.seed_request(make_request_row(id=42, status="wanted"))
+        self.folder = os.path.join(self.root, "wrong_matches", "Guard - Foo")
+        os.makedirs(self.folder)
+        with open(os.path.join(self.folder, "01.mp3"), "wb") as fh:
+            fh.write(b"audio")
+        self.held_id = self.db.log_download(
+            42, outcome="rejected", soulseek_username="peer1",
+            validation_result={
+                "scenario": "folder_exclusivity_guard_failed",
+                "failed_path": self.folder,
+                "folder_collision": {
+                    "folder": "/Beets/Guard/2004 - Foo_",
+                    "occupants": [{
+                        "beets_album_id": 7, "albumartist": "Guard",
+                        "album": "Foo_",
+                    }],
+                },
+            },
+        )
+
+    def test_card_is_the_collision_kind(self) -> None:
+        (card,) = build_held_upgrades(db=self.db)
+        self.assertEqual(card["held_download_log_id"], self.held_id)
+        self.assertEqual(card["kind"], "folder_collision")
+        self.assertEqual(card["label"], "Library folder occupied")
+        self.assertEqual(card["rows"], [])
+        self.assertIn("Guard - Foo_ (beets id 7)", str(card["sentence"]))
+        self.assertIsNone(card["last_attempt_failure"])
+
+    def test_delete_group_skips_the_folder(self) -> None:
+        summary = delete_wrong_match_group(self.db, 42)
+        self.assertEqual(summary.processed, 0)
+        self.assertTrue(os.path.isdir(self.folder))
+
+    def test_triage_batch_refuses_the_folder(self) -> None:
+        summary = cleanup_all_wrong_matches(
+            self.db, confirm_all_wrong_matches=True, cfg=_cfg(),
+        )
+        self.assertEqual(summary.skipped_held_upgrade, 1)
+        self.assertTrue(os.path.isdir(self.folder))
+
+
 if __name__ == "__main__":
     unittest.main()
