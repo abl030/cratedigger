@@ -480,6 +480,69 @@ class TestRunImportDuplicateGuard(unittest.TestCase):
         self.assertFalse(outcome.beets_owned_replacement)
         self.assertEqual(outcome.failure_reason, guard.message)
 
+    def _probe(self, mock_popen, mock_select, collision):
+        from harness import import_one
+
+        messages = [
+            {"type": "resolve_duplicate", "duplicate_candidates": [
+                {"beets_album_id": 10, "mb_albumid": TARGET_MBID,
+                 "album_path": "/Beets/Target", "item_count": 10},
+            ]},
+            _choose_match(),
+            {"type": "folder_probe", "path": "/tmp/test", "beets_album_id": 12,
+             "planned_paths": ["/Beets/High Violet/01 Terrible Love.flac"],
+             "collision": collision},
+            {"type": "session_end"},
+        ]
+        proc = _make_harness_proc(messages)
+        mock_popen.return_value = proc
+        mock_select.return_value = ([99], [], [])
+        outcome = import_one.run_import(
+            "/tmp/test", TARGET_MBID, max_distance=DEFAULT_MAX_DISTANCE,
+            probe_folder=True)
+        argv = mock_popen.call_args.args[0]
+        self.assertIn("--probe-folder", argv)
+        return outcome
+
+    @patch("harness.import_one.select.select")
+    @patch("harness.import_one.subprocess.Popen")
+    def test_folder_probe_collision_is_the_typed_guard_outcome(
+        self, mock_popen, mock_select,
+    ):
+        """#1465 pre-conversion probe: a reported collision is the refusal;
+        nothing the probe answered counts as replaced."""
+        from harness import import_one
+
+        outcome = self._probe(mock_popen, mock_select, {
+            "folder": "/Beets/High Violet",
+            "planned_paths": ["/Beets/High Violet/01 Terrible Love.flac"],
+            "occupants": [{"beets_album_id": 11, "mb_albumid": OTHER_MBID,
+                           "albumartist": "The National", "album": "High Violet",
+                           "item_paths": []}],
+            "unowned_files": [], "excluded_album_ids": [10, 12],
+            "message": "planned folder '/Beets/High Violet' already holds x",
+        })
+        self.assertEqual(outcome.exit_code,
+                         import_one.FOLDER_EXCLUSIVITY_GUARD_EXIT_CODE)
+        guard = outcome.folder_exclusivity_guard
+        assert guard is not None
+        self.assertEqual(guard.folder, "/Beets/High Violet")
+        self.assertEqual(guard.beets_album_id, 12)
+        self.assertEqual(outcome.replaced_albums, [])
+        self.assertFalse(outcome.beets_owned_replacement)
+        self.assertTrue(outcome.folder_probe_reported)
+
+    @patch("harness.import_one.select.select")
+    @patch("harness.import_one.subprocess.Popen")
+    def test_folder_probe_of_a_free_folder_lets_the_import_decide(
+        self, mock_popen, mock_select,
+    ):
+        outcome = self._probe(mock_popen, mock_select, None)
+        self.assertEqual(outcome.exit_code, 0)
+        self.assertIsNone(outcome.folder_exclusivity_guard)
+        self.assertEqual(outcome.replaced_albums, [])
+        self.assertTrue(outcome.folder_probe_reported)
+
     @patch("harness.import_one.select.select")
     @patch("harness.import_one.subprocess.Popen")
     def test_no_duplicate_not_kept(self, mock_popen, mock_select):

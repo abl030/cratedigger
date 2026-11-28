@@ -442,6 +442,8 @@ class RunImportOutcome:
     # Issue #1465: the harness refused the applied task before
     # ``manipulate_files`` because its planned folder was occupied.
     folder_exclusivity_guard: FolderExclusivityGuardInfo | None = None
+    # Issue #1465: a pre-conversion probe reached the folder guard.
+    folder_probe_reported: bool = False
     beets_owned_replacement: bool = False
     # Duplicates the guard ALLOWED beets to remove — the replaced pre-upgrade
     # copies, with their old library paths. Copied onto
@@ -1374,6 +1376,7 @@ def _run_import_once(
     beets_library_root: str | None = None,
     preserve_discogs_flat_subtracks: bool = False,
     upstream_musicbrainz: bool = False,
+    probe_folder: bool = False,
 ) -> RunImportOutcome:
     """Drive the beets harness to import one album.
 
@@ -1392,6 +1395,7 @@ def _run_import_once(
         pretend=False,
         preserve_discogs_flat_subtracks=preserve_discogs_flat_subtracks,
         upstream_musicbrainz=upstream_musicbrainz,
+        probe_folder=probe_folder,
     )
     print(f"  [HARNESS] {' '.join(cmd)}", file=sys.stderr)
 
@@ -1417,6 +1421,7 @@ def _run_import_once(
     beets_owned_replacement = False
     replaced_albums: list[DuplicateRemoveCandidate] = []
     folder_guard: FolderExclusivityGuardInfo | None = None
+    folder_probe_reported = False
     timeout = HARNESS_TIMEOUT
 
     try:
@@ -1460,6 +1465,31 @@ def _run_import_once(
             elif msg_type == "should_resume":
                 proc.stdin.write(json.dumps({"resume": False}) + "\n")
                 proc.stdin.flush()
+
+            elif msg_type == "folder_probe":
+                # Issue #1465 pre-conversion probe: notification only; the
+                # harness already refused the task and keeps nothing.
+                folder_probe_reported = True
+                collision_wire = msg.get("collision")
+                if _as_json_dict(collision_wire):
+                    wire = {
+                        **collision_wire,
+                        "path": msg.get("path", ""),
+                        "beets_album_id": msg.get("beets_album_id"),
+                    }
+                    try:
+                        folder_guard = msgspec.convert(
+                            wire, type=FolderExclusivityGuardInfo)
+                    except msgspec.ValidationError as exc:
+                        folder_guard = FolderExclusivityGuardInfo(
+                            message=f"malformed folder_probe message: {exc}")
+                    print(
+                        f"  [FOLDER-PROBE] Occupied: {folder_guard.message}",
+                        file=sys.stderr,
+                    )
+                else:
+                    print("  [FOLDER-PROBE] Planned folder is free",
+                          file=sys.stderr)
 
             elif msg_type == "folder_collision":
                 # Notification only (#1465): the harness already skipped the
@@ -1645,6 +1675,20 @@ def _run_import_once(
         print(f"  [BEETS] {line}", file=sys.stderr)
         beets_lines.append(line)
 
+    if probe_folder:
+        # A probe keeps nothing, so nothing it answered was replaced. Only a
+        # reported collision is a result; anything else (a free folder, or
+        # a probe that never reached the guard) lets the real import decide.
+        return RunImportOutcome(
+            FOLDER_EXCLUSIVITY_GUARD_EXIT_CODE if folder_guard is not None else 0,
+            beets_lines,
+            folder_exclusivity_guard=folder_guard,
+            folder_probe_reported=folder_probe_reported,
+            applied_distance=applied_distance,
+            failure_reason=(
+                folder_guard.message if folder_guard is not None else None),
+        )
+
     if folder_guard is not None:
         # The refused task removed nothing: no replacement happened, so the
         # duplicate the controller answered ``remove`` for is still in place.
@@ -1703,8 +1747,13 @@ def run_import(
     beets_library_db_path: str | None = None,
     beets_library_root: str | None = None,
     upstream_musicbrainz: bool = False,
+    probe_folder: bool = False,
 ) -> RunImportOutcome:
     """Import one exact release with at most one safe Discogs retry.
+
+    ``probe_folder`` (issue #1465) runs the same session as the pre-conversion
+    folder probe: the harness applies the match, reports whether the planned
+    library folder is free, and keeps nothing.
 
     ``max_distance`` is required for the same reason ``_run_import_once``
     requires it: this function reaches the apply decision, so no caller may
@@ -1728,6 +1777,7 @@ def run_import(
         beets_library_db_path=beets_library_db_path,
         beets_library_root=beets_library_root,
         upstream_musicbrainz=upstream_musicbrainz,
+        probe_folder=probe_folder,
     )
     if not outcome.retry_discogs_flat_subtracks:
         return outcome
@@ -1746,6 +1796,7 @@ def run_import(
         beets_library_root=beets_library_root,
         preserve_discogs_flat_subtracks=True,
         upstream_musicbrainz=upstream_musicbrainz,
+        probe_folder=probe_folder,
     )
 
 
@@ -2131,6 +2182,65 @@ def _cleanup_staged_dir(
     _log_timing("cleanup_staged_dir", stage_start)
 
 
+def _probe_folder_before_conversion(
+    request: ImportOneRequest,
+    mbid: str,
+    *,
+    max_distance: float,
+    keeps_lossless: bool,
+) -> FolderExclusivityGuardInfo | None:
+    """The occupied library folder this import would land in, if any.
+
+    Issue #1465. The folder exclusivity guard inside the real Beets session
+    runs after conversion, which removes a lossless source's original files.
+    For a staged folder holding lossless audio, this runs the same Beets
+    session first as a probe (the harness applies the match, reports the
+    planned folder's state and keeps nothing), so a collision is refused
+    while the download is still exactly as fetched. The destination folder
+    does not depend on the format: the config contract pins the path
+    templates and none reads it. Lossy sources skip the probe; the real
+    guard refuses them with nothing lost. A probe that fails or never
+    reaches the guard returns ``None``: the real import's own guard decides.
+    A lossless target (``keeps_lossless``) never removes the originals, so
+    it needs no probe either.
+    """
+    if request.dry_run or keeps_lossless:
+        return None
+    if not _lossless_filenames(request.path):
+        return None
+    _log("[FOLDER-PROBE] Lossless source: checking its library folder "
+         "before conversion")
+    stage_start = time.monotonic()
+    try:
+        outcome = run_import(
+            request.path,
+            mbid,
+            max_distance=max_distance,
+            upstream_musicbrainz=request.upstream_musicbrainz,
+            probe_folder=True,
+            **import_beets_subprocess_kwargs(request),
+        )
+    except Exception as exc:  # noqa: BLE001 - the real import's guard still decides
+        _log(f"[WARN] Folder probe failed ({type(exc).__name__}: {exc}); "
+             "the import's own folder guard decides")
+        return None
+    finally:
+        _log_timing("folder_probe", stage_start)
+    return outcome.folder_exclusivity_guard
+
+
+def _record_folder_guard_refusal(
+    r: ImportResult, guard: FolderExclusivityGuardInfo,
+) -> None:
+    """The refused-import result for an occupied library folder (#1465)."""
+    r.exit_code = FOLDER_EXCLUSIVITY_GUARD_EXIT_CODE
+    r.decision = "folder_exclusivity_guard_failed"
+    r.postflight.folder_exclusivity_guard = guard
+    r.postflight.replaced_albums = []
+    r.error = guard.message
+    _log(f"[ERROR] Library folder occupied: {guard.message}")
+
+
 def _run_quality_evidence_authorized_import(
     *,
     request: ImportOneRequest,
@@ -2200,6 +2310,15 @@ def _run_quality_evidence_authorized_import(
             return r
 
         _validate_quality_evidence_action_snapshot(request.path, payload)
+        probe_collision = _probe_folder_before_conversion(
+            request, mbid, max_distance=max_distance,
+            keeps_lossless=payload.target_format in ("flac", "lossless"),
+        )
+        if probe_collision is not None:
+            # Refused before anything was converted: the held copy is the
+            # download exactly as fetched, lossless originals included.
+            _record_folder_guard_refusal(r, probe_collision)
+            return r
         quality_is_transcode = _materialize_quality_evidence_action(
             work_path=request.path,
             payload=payload,

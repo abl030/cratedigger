@@ -324,10 +324,11 @@ def _hold_folder_collision(
 
     Reached from the automation import lane after the harness refused the
     task before ``manipulate_files``: Beets removed nothing and moved
-    nothing. The staged folder is held as the importer left it: a lossless
-    download was already converted to its import target (and its lossless
-    files removed) before Beets ran, so a retry imports that conversion and
-    the lossless provenance does not carry over. It is held in Wrong Matches
+    nothing. A lossless source is normally refused by the pre-conversion
+    folder probe (``harness/import_one.py``), so the held folder is the
+    download as fetched; only a refusal by the real guard after conversion
+    (the probe failed, or the library changed in between) holds a lossless
+    download as its converted copy. It is held in Wrong Matches
     like a held upgrade, so the operator can fix the folder on disk and
     retry the import ("Use new copy" is the same force import) or delete
     the copy. The peers are denylisted for THIS request only and take no
