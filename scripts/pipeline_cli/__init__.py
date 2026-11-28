@@ -99,6 +99,7 @@ from scripts.pipeline_cli.imports import (
     cmd_import_preview,
     cmd_import_preview_from_download_log,
 )
+from scripts.pipeline_cli.library_census import cmd_library_census
 from scripts.pipeline_cli.long_tail import cmd_long_tail
 from scripts.pipeline_cli.other_pressings import cmd_other_pressings
 from scripts.pipeline_cli.quality import (
@@ -153,6 +154,7 @@ __all__ = [
     "cmd_import_local",
     "cmd_import_preview",
     "cmd_import_preview_from_download_log",
+    "cmd_library_census",
     "cmd_library_delete",
     "cmd_list",
     "cmd_long_tail",

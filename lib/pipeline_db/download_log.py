@@ -12,6 +12,7 @@ from lib.convergence_service import normalize_contributor_usernames
 from lib.pipeline_db._shared import (
     CANDIDATE_EVIDENCE_PREFIX,
     CURRENT_EVIDENCE_PREFIX,
+    BadAudioHashInput,
     accusation_evidence_columns,
 )
 from lib.pipeline_db.pg_safe import pg_jsonb_text
@@ -1224,3 +1225,46 @@ class _DownloadLogMixin(_PipelineDBBase):
         """, (request_id,))
         row = cur.fetchone()
         return row["soulseek_username"] if row else None
+
+    def get_recent_import_source_audio_hashes(
+        self,
+        request_id: int,
+        release_id: str,
+    ) -> list[BadAudioHashInput]:
+        """Source-format audio hashes of the request's latest import.
+
+        Issue #1471 gap 1. Reads the candidate evidence of the newest
+        successful import row (the same outcomes ``get_recent_successful_
+        uploader`` considers) and returns every file hash measured on the
+        staged, pre-conversion files, with the file extension as the
+        ``audio_format`` the pre-import gate looks up under. Empty when that
+        import predates the hashes, its evidence names another release, or
+        nothing was hashed.
+        """
+        cur = self._execute("""
+            WITH latest AS (
+                SELECT candidate_evidence_id
+                FROM download_log
+                WHERE request_id = %s
+                  AND outcome IN ('success', 'force_import', 'local_import')
+                ORDER BY id DESC
+                LIMIT 1
+            )
+            SELECT encode(files.audio_sha256, 'hex') AS audio_sha256_hex,
+                   LOWER(files.extension) AS audio_format
+            FROM latest
+            JOIN album_quality_evidence AS evidence
+              ON evidence.id = latest.candidate_evidence_id
+            JOIN album_quality_evidence_files AS files
+              ON files.evidence_id = evidence.id
+            WHERE evidence.mb_release_id = %s
+              AND files.audio_sha256 IS NOT NULL
+            ORDER BY files.relative_path
+        """, (request_id, release_id))
+        return [
+            BadAudioHashInput(
+                hash_value=bytes.fromhex(str(row["audio_sha256_hex"])),
+                audio_format=str(row["audio_format"]).lstrip("."),
+            )
+            for row in cur.fetchall()
+        ]

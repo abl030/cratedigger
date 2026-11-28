@@ -62,6 +62,9 @@ class SupportsDestructivePipelineDB(transitions.TransitionsDB, Protocol):
     ) -> AbstractContextManager[bool]: ...
     def delete_request(self, request_id: int) -> bool: ...
     def get_recent_successful_uploader(self, request_id: int) -> str | None: ...
+    def get_recent_import_source_audio_hashes(
+        self, request_id: int, release_id: str,
+    ) -> list[BadAudioHashInput]: ...
     def add_bad_audio_hashes(
         self,
         request_id: int,
@@ -333,6 +336,19 @@ def _ban_source_locked(
                 continue
             hashes.append(BadAudioHashInput(digest, audio_format))
 
+    # Issue #1471 gap 1: the library copy may be a conversion (FLAC -> Opus)
+    # whose hashes can never match the rip as peers share it. Record the
+    # source-format hashes measured on the staged files at import too.
+    source_hashes = pipeline_db.get_recent_import_source_audio_hashes(
+        request.request_id, release_id,
+    )
+    seen = {(h.hash_value, h.audio_format) for h in hashes}
+    for source_hash in source_hashes:
+        key = (source_hash.hash_value, source_hash.audio_format)
+        if key not in seen:
+            seen.add(key)
+            hashes.append(source_hash)
+
     hashes_recorded = pipeline_db.add_bad_audio_hashes(
         request.request_id,
         reported_username,
@@ -367,6 +383,7 @@ def _ban_source_locked(
     validation_result = json.dumps({
         "scenario": "curator_ban",
         "hashes_recorded": hashes_recorded,
+        "source_hashes_found": len(source_hashes),
         "denylisted_username": reported_username,
         "reason": reason,
         "cleanup_absent_after": cleanup_absent_after,

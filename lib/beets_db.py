@@ -1513,7 +1513,7 @@ class BeetsDB:
         rows = self._conn.execute(
             "SELECT a.id, a.albumartist, a.album, a.mb_albumid, "
             "a.discogs_albumid, i.path, i.mb_releasetrackid, i.mb_trackid, "
-            "i.title, i.track "
+            "i.title, i.track, i.disc "
             "FROM albums a LEFT JOIN items i ON i.album_id = a.id "
             "ORDER BY a.id ASC, i.id ASC"
         ).fetchall()
@@ -1526,7 +1526,7 @@ class BeetsDB:
         order: list[int] = []
         for (raw_album_id, raw_artist, raw_title, raw_mb, raw_discogs,
              raw_path, raw_release_track, raw_recording, raw_item_title,
-             raw_track) in rows:
+             raw_track, raw_disc) in rows:
             album_id = int(raw_album_id)
             if album_id not in identities:
                 # The completeness audit needs one independently fetched raw
@@ -1566,6 +1566,8 @@ class BeetsDB:
                 recording_id=normalize_release_id(raw_recording),
                 title=self._decode_path(raw_item_title) if raw_item_title else "",
                 track=int(raw_track) if isinstance(raw_track, int) else None,
+                disc=(int(raw_disc) if isinstance(raw_disc, int)
+                      and not isinstance(raw_disc, bool) and raw_disc > 0 else None),
             ))
             directories_by_album[album_id].add(os.path.dirname(resolved))
         result: list[LibraryAlbum] = []

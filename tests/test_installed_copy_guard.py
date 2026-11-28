@@ -13,11 +13,14 @@ import unittest
 import msgspec
 
 from lib.quality.installed_copy_guard import (
+    HOLD_BASIS_DECLARED_PROGRAM,
+    HOLD_BASIS_INSTALLED_COPY,
     UPGRADE_GUARD_TRACK_LENGTH_SECONDS,
     CandidateTrackLength,
     InstalledCopyComparison,
     InstalledTrackLength,
     compare_installed_copy,
+    compare_with_declared_program,
     held_upgrade_sentence,
 )
 
@@ -213,6 +216,104 @@ class TestHeldUpgradeSentence(unittest.TestCase):
             compare_installed_copy(candidate, installed))
         for token in ("rt-", "_", "download_log", "mbid"):
             self.assertNotIn(token, sentence)
+
+
+def eels(
+    *, last_candidate: float = 193.0,
+) -> list[CandidateTrackLength]:
+    """EELS (issue #1471 evidence): last track 3:13 against 15:05 listed."""
+    tracks = [(1, "Opening", 200.0, 200.4), (2, "Middle", 180.0, 179.8)]
+    tracks.append((3, "Closing", 905.0, last_candidate))
+    return [
+        CandidateTrackLength(
+            key=f"rt-{index}", medium=1, medium_index=index, title=title,
+            declared_seconds=declared, candidate_seconds=candidate,
+        )
+        for index, title, declared, candidate in tracks
+    ]
+
+
+class TestCompareWithDeclaredProgram(unittest.TestCase):
+    """Issue #1471 gap 2: the yardstick when the copy is marked incomplete."""
+
+    def test_missing_end_of_last_track_holds(self) -> None:
+        comparison = compare_with_declared_program(eels(), None)
+        self.assertTrue(comparison.holds)
+        self.assertEqual(comparison.basis, HOLD_BASIS_DECLARED_PROGRAM)
+        self.assertEqual(
+            [row.medium_index for row in comparison.rows if row.tripped], [3])
+        self.assertEqual(comparison.compared_count, 3)
+
+    def test_a_complete_candidate_proceeds(self) -> None:
+        comparison = compare_with_declared_program(
+            eels(last_candidate=906.0), None)
+        self.assertFalse(comparison.holds)
+
+    def test_longer_than_listed_never_trips(self) -> None:
+        """An unlisted hidden track kept in the file is not short."""
+        comparison = compare_with_declared_program(
+            eels(last_candidate=1400.0), None)
+        self.assertFalse(comparison.holds)
+
+    def test_exactly_at_threshold_does_not_trip(self) -> None:
+        comparison = compare_with_declared_program(
+            eels(last_candidate=905.0 - UPGRADE_GUARD_TRACK_LENGTH_SECONDS),
+            None,
+        )
+        self.assertFalse(comparison.holds)
+
+    def test_no_declared_length_or_composite_is_never_compared(self) -> None:
+        tracks = [
+            CandidateTrackLength(
+                key="a", medium=1, medium_index=1, title="Unlisted",
+                declared_seconds=0.0, candidate_seconds=10.0,
+            ),
+            CandidateTrackLength(
+                key="b", medium=1, medium_index=2, title="Medley",
+                declared_seconds=600.0, candidate_seconds=10.0,
+                component_count=3,
+            ),
+        ]
+        comparison = compare_with_declared_program(tracks, None)
+        self.assertEqual(comparison.compared_count, 0)
+        self.assertFalse(comparison.holds)
+
+    def test_installed_lengths_are_shown_but_never_decide(self) -> None:
+        installed = [
+            InstalledTrackLength(key="rt-3", installed_seconds=193.2),
+        ]
+        comparison = compare_with_declared_program(eels(), installed)
+        self.assertTrue(comparison.holds)
+        last = comparison.rows[-1]
+        self.assertEqual(last.installed_seconds, 193.2)
+        self.assertEqual(
+            compare_with_declared_program(eels(), None).holds,
+            comparison.holds,
+        )
+
+    def test_sentence_names_the_short_track_against_the_release(self) -> None:
+        sentence = held_upgrade_sentence(
+            compare_with_declared_program(eels(), None))
+        self.assertEqual(
+            sentence,
+            "Kept your current copy, which you marked incomplete. The new "
+            "copy is short too: track 3 runs 3:13 where the release says "
+            "15:05.",
+        )
+
+    def test_basis_round_trips_and_legacy_rows_decode_as_installed(self) -> None:
+        comparison = compare_with_declared_program(eels(), None)
+        decoded = msgspec.json.decode(
+            msgspec.json.encode(comparison), type=InstalledCopyComparison)
+        self.assertEqual(decoded, comparison)
+        legacy = msgspec.to_builtins(
+            compare_installed_copy(*fairways()))
+        assert isinstance(legacy, dict)
+        legacy.pop("basis")
+        self.assertEqual(
+            msgspec.convert(legacy, type=InstalledCopyComparison).basis,
+            HOLD_BASIS_INSTALLED_COPY,
+        )
 
 
 class TestUpgradeHeldVocabulary(unittest.TestCase):

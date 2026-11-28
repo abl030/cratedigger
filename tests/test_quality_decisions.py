@@ -1468,6 +1468,41 @@ class TestFullPipelineDecisionFromEvidence(unittest.TestCase):
                 self.assertTrue(result["imported"])
                 self.assertIsNone(result["upgrade_guard"])
 
+    def test_marked_incomplete_holds_a_candidate_short_of_the_release(self):
+        """Issue #1471 gap 2: the mark admits a covering candidate, but one
+        measurably short of the release is held for the operator instead of
+        replacing the marked copy (and clearing the mark)."""
+        candidate, current = self._upgrade_pair()
+        marked = AlbumQualityEvidenceDecisionFacts(
+            installed_marked_incomplete=True,
+            candidate_covers_declared_program=True,
+        )
+        admitted = full_pipeline_decision_from_evidence(
+            candidate, current, facts=marked)
+        self.assertTrue(admitted["imported"])
+        self.assertTrue(admitted["installed_incomplete_disregarded"])
+
+        held = full_pipeline_decision_from_evidence(
+            candidate, current,
+            facts=msgspec.structs.replace(
+                marked, candidate_short_of_declared_program=True),
+        )
+        self.assertFalse(held["imported"])
+        self.assertEqual(held["upgrade_guard"], "hold")
+        self.assertEqual(evidence_decision_name(held), "upgrade_held")
+        self.assertEqual(held["final_status"], "wanted")
+        self.assertTrue(held["keep_searching"])
+
+    def test_short_of_release_is_inert_without_the_mark(self):
+        candidate, current = self._upgrade_pair()
+        result = full_pipeline_decision_from_evidence(
+            candidate, current,
+            facts=AlbumQualityEvidenceDecisionFacts(
+                candidate_short_of_declared_program=True),
+        )
+        self.assertTrue(result["imported"])
+        self.assertIsNone(result["upgrade_guard"])
+
     def test_upgrade_guard_never_touches_a_non_import(self):
         candidate, current = self._upgrade_pair()
         # Swap roles: the MP3 candidate is a downgrade of the FLAC copy.

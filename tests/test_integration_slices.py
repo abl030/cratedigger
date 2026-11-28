@@ -4470,9 +4470,11 @@ class TestBadAudioHashSlice(unittest.TestCase):
         # slices via the persisted-evidence path).
         self.assertEqual(len(db.denylist), 0)
 
-    def test_empty_table_runs_no_hashing(self):
-        """When ``has_any_bad_audio_hashes`` is False, the gate fast-skips:
-        no calls to ``hash_audio_content`` or ``lookup_bad_audio_hash``."""
+    def test_empty_table_runs_no_lookup(self):
+        """When ``has_any_bad_audio_hashes`` is False, the gate fast-skips
+        every ``lookup_bad_audio_hash``. Issue #1471: the files are still
+        hashed, because the digests ride the candidate evidence for a later
+        Bad Rip."""
         from pathlib import Path
 
         from lib.config import CratediggerConfig
@@ -4502,7 +4504,8 @@ class TestBadAudioHashSlice(unittest.TestCase):
 
         self.assertFalse(measurement.audio_corrupt)
         self.assertIsNone(measurement.matched_bad_hash_id)
-        hashfn.assert_not_called()
+        self.assertEqual(hashfn.call_count, 4)
+        self.assertEqual(len(measurement.source_audio_hashes), 4)
         lookup.assert_not_called()
         self.assertEqual(len(db.denylist), 0)
 

@@ -348,6 +348,93 @@ class TestBanSourceAuthority(unittest.TestCase):
         self.assertEqual(self.db.download_logs, [])
         self.assertEqual(delete_calls, [])
 
+    def test_converted_import_records_the_source_format_hashes_too(
+        self,
+    ) -> None:
+        """Issue #1471 gap 1: a FLAC rip imported as Opus is banned in FLAC.
+
+        The library copy hashes as Opus, which no FLAC candidate can match.
+        The import's candidate evidence kept the staged FLAC hashes; the ban
+        records those as well, so the same rip from another peer is caught.
+        """
+        from lib.quality import AlbumQualityEvidenceFile
+        from tests.evidence_helpers import make_album_quality_evidence
+
+        evidence = make_album_quality_evidence(
+            mb_release_id=RELEASE_A,
+            files=[
+                AlbumQualityEvidenceFile(
+                    relative_path=f"0{n}.mp3",
+                    size_bytes=1000 + n,
+                    mtime_ns=1,
+                    extension="mp3",
+                    container="mp3",
+                    codec="mp3",
+                    audio_sha256=bytes([n]) * 32,
+                )
+                for n in (1, 2)
+            ],
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=RELEASE_A,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        log_id = self.db.log_download(
+            41, soulseek_username="peer", outcome="success")
+        self.db.set_download_log_candidate_evidence(log_id, stored.id)
+        self.beets.set_album_ids_for_release(RELEASE_A, [7])
+        self.beets.set_item_paths(RELEASE_A, [
+            (701, "/library/A/01.opus"),
+            (702, "/library/A/02.opus"),
+        ])
+
+        def exact_delete(request: BeetsDeleteRequest) -> BeetsDeleteCompleted:
+            return BeetsDeleteCompleted(
+                album_id=request.album_id,
+                album_name="Album A",
+                artist_name="Artist A",
+                former_album_path="/library/A",
+                deleted_tracks=2,
+                deleted_artifacts=2,
+                preserved_paths=(),
+            )
+
+        with patch(
+            "lib.destructive_release_service.hash_audio_content",
+            side_effect=lambda path, _format: (
+                b"\x09" * 32 if Path(path).name == "01.opus"
+                else b"\x0a" * 32
+            ),
+        ):
+            result = ban_source(
+                pipeline_db=self.db,
+                beets_db=self.beets,
+                request=BanSourceRequest(request_id=41),
+                beets_delete_fn=exact_delete,
+            )
+
+        self.assertIsInstance(result, BanSourceSuccess)
+        assert isinstance(result, BanSourceSuccess)
+        self.assertEqual(result.hashes_recorded, 4)
+        self.assertEqual(
+            sorted(
+                (row.hash_value, row.audio_format)
+                for row in self.db.bad_audio_hashes
+            ),
+            [
+                (b"\x01" * 32, "mp3"),
+                (b"\x02" * 32, "mp3"),
+                (b"\x09" * 32, "opus"),
+                (b"\x0a" * 32, "opus"),
+            ],
+        )
+        ban_row = self.db.download_logs[-1]
+        self.assertEqual(ban_row.outcome, "curator_ban")
+        audit = json.loads(str(ban_row.validation_result))
+        self.assertEqual(audit["source_hashes_found"], 2)
+
     def test_unique_snapshot_items_are_hashed_and_exact_album_id_is_deleted(
         self,
     ) -> None:

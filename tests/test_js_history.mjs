@@ -1138,7 +1138,10 @@ t.section('Amaterasu Shiroi: force import HAVE stays pre-import');
   t.equal(spectralCount, 2, 'candidate spectral belongs only to IN');
   const v0Count = strip.split('V0 258k avg (min 246k)').length - 1;
   t.equal(v0Count, 1, 'candidate V0 belongs only to IN');
-  t.contains(strip, '~80k suspect', 'HAVE keeps its own spectral snapshot');
+  // The basis clamped HAVE to 96 below its raw avg 101: 96 is the class the
+  // comparator decided on, so the chip prints it rather than the legacy
+  // ~80k bucket (issue #1466).
+  t.contains(strip, '~96k suspect', 'HAVE chip shows the class the decider used');
   t.contains(strip, 'V0 220k avg (min 201k)', 'HAVE keeps its own V0 snapshot');
 }
 
@@ -1545,6 +1548,77 @@ t.section('renderEvidenceStrip() clamps ONLY the candidate on spectral_candidate
   // ...and the grade chip must not re-print the same floor beside it.
   t.excludes(strip, '~160k likely transcode',
     'the basis already carries the floor; the chip must not double it up');
+}
+
+t.section('spectral chips print the class the decider used, not the legacy bucket (issue #1466)');
+{
+  // download_log 43361: the legacy bucket read both cliffs as ~96k while the
+  // comparator's ladder classed IN at 128 and HAVE at 96. The card printed
+  // ~96k on both chips beside a verdict that used 128.
+  const strip = renderEvidenceFixture({
+    actual_min_bitrate: 192,
+    source_format: 'mp3',
+    source_avg_bitrate: 192, source_min_bitrate: 192,
+    spectral_grade: 'likely_transcode', spectral_bitrate: 96,
+    existing_avg_bitrate: 320, existing_min_bitrate: 320,
+    existing_spectral_grade: 'likely_transcode', existing_spectral_bitrate: 96,
+    comparison_basis: {
+      verdict: 'better', branch: 'rank',
+      new_rank: 'acceptable', existing_rank: 'poor',
+      new_metric: 'avg', existing_metric: 'avg',
+      new_value_kbps: 128, existing_value_kbps: 96,
+      new_format: 'MP3', existing_format: 'MP3',
+      spectral_clamped: true, tolerance_kbps: null,
+      verified_lossless_bypass: false,
+    },
+  });
+  const [inRow, haveRow] = strip.split('HAVE');
+  t.contains(inRow, '~128k', 'IN chip shows the class the comparator used');
+  t.excludes(inRow, '~96k', 'IN chip must not show the legacy bucket that contradicts the verdict');
+  t.contains(haveRow, '~96k', 'HAVE chip shows its decided class');
+  const detail = renderDownloadHistoryFixture({
+    created_at: '2026-11-27T09:22:00Z',
+    actual_min_bitrate: 192,
+    source_format: 'mp3',
+    source_avg_bitrate: 192, source_min_bitrate: 192,
+    spectral_grade: 'likely_transcode', spectral_bitrate: 96,
+    existing_avg_bitrate: 320, existing_min_bitrate: 320,
+    existing_spectral_grade: 'likely_transcode', existing_spectral_bitrate: 96,
+    comparison_basis: {
+      verdict: 'better', branch: 'rank',
+      new_rank: 'acceptable', existing_rank: 'poor',
+      new_metric: 'avg', existing_metric: 'avg',
+      new_value_kbps: 128, existing_value_kbps: 96,
+      new_format: 'MP3', existing_format: 'MP3',
+      spectral_clamped: true, tolerance_kbps: null,
+      verified_lossless_bypass: false,
+    },
+  });
+  t.contains(detail, '~128kbps', 'detail Spectral row shows the decided IN class');
+  t.excludes(detail.split('Spectral')[1].split('HAVE')[0], '~96kbps',
+    'detail IN chip drops the legacy bucket');
+
+  // A clamp that did not bind (class >= raw metric) leaves no class number
+  // to show: printing the raw avg as a spectral floor would be a new lie.
+  const unbound = renderEvidenceFixture({
+    actual_min_bitrate: 192,
+    source_format: 'mp3',
+    source_avg_bitrate: 192, source_min_bitrate: 192,
+    spectral_grade: 'likely_transcode', spectral_bitrate: 96,
+    existing_avg_bitrate: 320, existing_min_bitrate: 320,
+    existing_spectral_grade: 'likely_transcode', existing_spectral_bitrate: 96,
+    comparison_basis: {
+      verdict: 'better', branch: 'rank',
+      new_rank: 'acceptable', existing_rank: 'poor',
+      new_metric: 'avg', existing_metric: 'avg',
+      new_value_kbps: 192, existing_value_kbps: 96,
+      new_format: 'MP3', existing_format: 'MP3',
+      spectral_clamped: true, tolerance_kbps: null,
+      verified_lossless_bypass: false,
+    },
+  });
+  t.excludes(unbound.split('HAVE')[0], '~96k', 'legacy bucket still suppressed');
+  t.excludes(unbound.split('HAVE')[0], '~192k likely', 'non-binding value is not a spectral floor');
 }
 
 t.section('renderEvidenceStrip() escapes basis strings');

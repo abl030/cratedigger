@@ -3931,6 +3931,7 @@ class TestDropEvidenceFileContentDigestMigration(unittest.TestCase):
                 self.assertEqual(
                     [row[0] for row in cur.fetchall()],
                     [
+                        "audio_sha256",
                         "codec",
                         "container",
                         "decode_ok",

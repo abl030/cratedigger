@@ -51,6 +51,11 @@ from tests.test_installed_copy_guard import fairways
 _RELEASE = "4c6f4a7b-c093-4006-a50e-3d6dfbdd2645"
 _FOLDER = "The Fairways - Is Everything All Right"
 
+_SHORT_OF_RELEASE_REASON = (
+    "upgrade held: track lengths short of the release "
+    "(installed copy marked incomplete)"
+)
+
 InstalledLoader = Callable[..., tuple[InstalledTrackLength, ...] | None]
 
 
@@ -62,6 +67,15 @@ def _installed(tracks: list[InstalledTrackLength]) -> InstalledLoader:
 
 def _not_installed(**_kwargs: object) -> None:
     return None
+
+
+def _matches_release() -> tuple[CandidateTrackLength, ...]:
+    """The Fairways candidate with every file as long as the release says."""
+    candidate, _ = fairways()
+    return tuple(
+        msgspec.structs.replace(t, candidate_seconds=t.declared_seconds)
+        for t in candidate
+    )
 
 
 class _World:
@@ -197,10 +211,12 @@ class TestUpgradeGuardDispatch(unittest.TestCase):
         marked_incomplete: bool = False,
         audio_corrupt: bool = False,
         cancel_during_move: bool = False,
+        guard_candidate: tuple[CandidateTrackLength, ...] | None = None,
     ) -> _World:
         world = _World(
             force=force,
             installed_loader=installed_loader,
+            guard_candidate=guard_candidate,
             marked_incomplete=marked_incomplete,
             audio_corrupt=audio_corrupt,
             cancel_during_move=cancel_during_move,
@@ -262,8 +278,59 @@ class TestUpgradeGuardDispatch(unittest.TestCase):
         self.assertNotEqual(world.outcome.code, "upgrade_held")
 
     def test_operator_incomplete_mark_turns_the_guard_off(self) -> None:
-        world = self.world(marked_incomplete=True)
+        """The mark turns the installed-copy comparison off: a candidate the
+        release listing agrees with imports over a disagreeing copy."""
+        world = self.world(
+            marked_incomplete=True, guard_candidate=_matches_release(),
+        )
         self.assertTrue(world.beets_launched())
+
+    def test_marked_incomplete_holds_a_candidate_short_of_the_release(
+        self,
+    ) -> None:
+        """Issue #1471 gap 2. Fairways track 5 runs 3:18 where the release
+        says 4:20: under the mark it is short of the declared program, so it
+        is held instead of replacing the marked copy and clearing the mark.
+        """
+        calls: list[dict[str, object]] = []
+        _, installed = fairways()
+
+        def recording(**kwargs: object) -> tuple[InstalledTrackLength, ...]:
+            calls.append(kwargs)
+            return tuple(installed)
+
+        world = self.world(marked_incomplete=True, installed_loader=recording)
+        self.assertEqual(world.outcome.code, "upgrade_held")
+        self.assertFalse(world.beets_launched(), "Beets must never start")
+        self.assertEqual(len(calls), 1, "installed copy measured for display")
+
+        finalize_claimed_dispatch(world.db, world.claimed, world.outcome)
+        payload = json.loads(world.db.download_logs[-1].validation_result)
+        hold = payload["upgrade_hold"]
+        self.assertEqual(hold["basis"], "declared_program")
+        self.assertEqual(
+            [row["medium_index"] for row in hold["rows"] if row["tripped"]],
+            [5])
+        tripped = next(row for row in hold["rows"] if row["tripped"])
+        self.assertEqual(tripped["installed_seconds"], 259.9)
+        self.assertTrue(payload["detail"].startswith(
+            "Kept your current copy, which you marked incomplete."))
+        self.assertEqual(
+            [(e.request_id, e.username, e.reason) for e in world.db.denylist],
+            [(42, "natetheneet", _SHORT_OF_RELEASE_REASON)])
+        self.assertIsNotNone(world.db.request(42)["marked_incomplete_at"])
+
+    def test_marked_but_nothing_installed_imports_a_short_candidate(
+        self,
+    ) -> None:
+        """Bad Rip removes the copy and leaves the mark: with nothing to
+        keep, a short candidate fills the empty slot instead of being held
+        under a sentence about a copy that does not exist."""
+        world = self.world(
+            marked_incomplete=True, installed_loader=_not_installed,
+        )
+        self.assertTrue(world.beets_launched())
+        self.assertNotEqual(world.outcome.code, "upgrade_held")
 
     def test_no_installed_copy_imports(self) -> None:
         world = self.world(installed_loader=_not_installed)
@@ -301,7 +368,10 @@ class TestUpgradeGuardDispatch(unittest.TestCase):
         def recording(**kwargs: object) -> None:
             calls.append(kwargs)
 
-        world = self.world(installed_loader=recording, marked_incomplete=True)
+        world = self.world(
+            installed_loader=recording, marked_incomplete=True,
+            guard_candidate=_matches_release(),
+        )
         self.assertTrue(world.beets_launched())
         self.assertEqual(calls, [], "an installed file was opened")
 

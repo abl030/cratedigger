@@ -51,6 +51,7 @@ from lib.quality_evidence import (
     persist_candidate_evidence_from_measurement,
     propagate_candidate_evidence_to_current,
     snapshot_audio_files,
+    snapshot_fingerprint,
 )
 from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
 from tests.evidence_helpers import (
@@ -480,6 +481,40 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
 
         self.assertFalse(result.available)
         self.assertEqual(result.status, "empty_fileset")
+
+    def test_clean_import_evidence_carries_the_source_audio_hashes(self):
+        """Issue #1471 gap 1: a clean (importable) measurement's per-file
+        hashes reach the candidate evidence files, keyed by relative path,
+        and never change the content address."""
+        digests = {"01.mp3": b"\x01" * 32, "02.mp3": b"\x02" * 32}
+        result = evidence_from_import_result(
+            mb_release_id="mb-hashes",
+            source_path=self.root,
+            import_result=ImportResult(
+                decision="import",
+                source_measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=245,
+                    format="MP3",
+                ),
+            ),
+            measurement=PreimportMeasurement(
+                folder_layout="flat",
+                audio_file_count=2,
+                filetype_band="mp3",
+                source_audio_hashes=digests,
+            ),
+        )
+
+        self.assertEqual(result.status, "ready")
+        assert result.evidence is not None
+        self.assertEqual(
+            {f.relative_path: f.audio_sha256 for f in result.evidence.files},
+            digests,
+        )
+        self.assertEqual(
+            result.evidence.snapshot_fingerprint,
+            snapshot_fingerprint(snapshot_audio_files(self.root)),
+        )
 
     def test_measurement_only_reject_evidence_has_no_target_policy(self):
         report = make_audio_corrupt_validation_report("01.mp3")

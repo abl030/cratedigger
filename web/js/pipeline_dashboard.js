@@ -9,6 +9,8 @@
 // (#1278 item: dashboard composer).
 import { state } from './state.js';
 import { esc, awstDate, awstDateTime, awstTime } from './util.js';
+import { buildReleaseActionState } from './release_action_state.js';
+import { renderBadRipButton, renderReplaceButton } from './release_actions.js';
 
 /**
  * Compose the full dashboard (nav, header, all cards) into `el`.
@@ -269,6 +271,64 @@ export function renderMarkCompleteButton(row) {
 }
 
 /**
+ * Bad Rip and Replace for one track-length census row (#1472): the same
+ * buttons, routes and confirmations as the library and pipeline views, so
+ * no new destructive lane. Both stay locked while the request is
+ * processing. Rendered only when the route resolved a pipeline request.
+ * @param {{request_id?: number|null, request_status?: string|null, release_id?: string, album_id?: number, artist?: string, title?: string, catalog_items?: number}} row
+ * @returns {string}
+ */
+export function renderTrackLengthActions(row) {
+  if (row.request_id == null || !row.release_id) return '';
+  const actionState = buildReleaseActionState({
+    id: row.release_id,
+    pipeline_status: row.request_status ?? null,
+    pipeline_id: row.request_id,
+    in_library: true,
+    beets_album_id: row.album_id ?? null,
+    artist: row.artist || '',
+    album: row.title || '',
+    track_count: row.catalog_items ?? 0,
+  });
+  return renderBadRipButton(actionState, {className: 'p-btn'})
+    + renderReplaceButton({
+      mode: 'standard',
+      sourceRequestId: row.request_id,
+      sourceLabel: `${row.artist || ''} — ${row.title || ''}`,
+      processingState: actionState,
+    }, {className: 'p-btn'});
+}
+
+/**
+ * How far the gentle track-length measurement has got (#1472): albums
+ * measured, albums still waiting for a later run's read budget, and
+ * albums whose release lists no lengths to compare against. Omitted for a
+ * snapshot from before the measurement existed.
+ * @param {any} counts
+ * @returns {string}
+ */
+export function renderTrackLengthCoverage(counts) {
+  if (!counts || counts.track_length_measured == null) return '';
+  const pending = Number(counts.track_length_pending) || 0;
+  const unlisted = Number(counts.track_length_unlisted) || 0;
+  const notes = [];
+  if (pending > 0) notes.push(`${formatCount(pending)} waiting for a later run`);
+  if (unlisted > 0) notes.push(`${formatCount(unlisted)} with no listed lengths to compare`);
+  const suffix = notes.length ? ` <span class="metric-muted">(${notes.join('; ')})</span>` : '';
+  return `<div class="metric-row"><span>Track lengths checked</span><strong>${formatCount(counts.track_length_measured)} / ${formatCount(counts.albums_scanned)}${suffix}</strong></div>`;
+}
+
+/**
+ * The plain words for one finding: a track-length finding's sentence,
+ * otherwise its detail.
+ * @param {any} finding
+ * @returns {string}
+ */
+function completenessFindingText(finding) {
+  return finding.sentence || finding.detail || '';
+}
+
+/**
  * Render the persisted read-only source/catalog/files census.
  * @param {any} census
  * @returns {string}
@@ -288,26 +348,36 @@ export function renderLibraryCompletenessCard(census) {
   const report = snapshot.report || {};
   const counts = report.counts || {};
   const rows = Array.isArray(report.albums) ? report.albums : [];
+  // Track-length findings (#1472) split by the shape's own
+  // probably_harmless flag; the harmless band is the lower-priority one.
+  /** @type {{key: string, kind: string, harmless?: boolean, label: string, tone: string}[]} */
   const categories = [
-    {kind: 'missing_source_audio', label: 'Missing source audio', tone: 'metric-bad'},
-    {kind: 'catalog_drift', label: 'Catalog drift', tone: 'metric-warn'},
-    {kind: 'unknown', label: 'Unknown', tone: 'metric-warn'},
+    {key: 'missing_source_audio', kind: 'missing_source_audio', label: 'Missing source audio', tone: 'metric-bad'},
+    {key: 'catalog_drift', kind: 'catalog_drift', label: 'Catalog drift', tone: 'metric-warn'},
+    {key: 'unknown', kind: 'unknown', label: 'Unknown', tone: 'metric-warn'},
+    {key: 'track_length', kind: 'track_length', harmless: false, label: 'Track lengths contradict the release', tone: 'metric-warn'},
+    {key: 'track_length_harmless', kind: 'track_length', harmless: true, label: 'Track lengths differ, probably fine', tone: 'metric-muted'},
   ];
   const listedRows = rows.filter(row => !row.marked_complete);
   const verifiedRows = rows.filter(row => row.marked_complete);
-  const renderCategory = ({kind, label, tone}) => {
+  /** @param {{key: string, kind: string, harmless?: boolean, label: string, tone: string}} category */
+  const renderCategory = ({key, kind, harmless, label, tone}) => {
     const categoryRows = listedRows.map(row => ({
       row,
       details: (Array.isArray(row.findings) ? row.findings : [])
-        .filter(finding => finding.kind === kind)
-        .map(finding => finding.detail || ''),
+        .filter(/** @param {any} finding */ finding => finding.kind === kind
+          && (harmless === undefined || Boolean(finding.probably_harmless) === harmless))
+        .map(completenessFindingText),
     })).filter(entry => entry.details.length > 0);
-    const total = Number.isFinite(Number(counts[kind])) ? Number(counts[kind]) : categoryRows.length;
+    const total = Number.isFinite(Number(counts[key])) ? Number(counts[key]) : categoryRows.length;
     const countTone = total > 0 ? tone : 'metric-muted';
+    const actions = kind === 'track_length'
+      ? (/** @param {any} row */ row => `${renderMarkIncompleteButton(row)}${renderTrackLengthActions(row)}${renderMarkCompleteButton(row)}`)
+      : (/** @param {any} row */ row => `${renderMarkIncompleteButton(row)}${renderMarkCompleteButton(row)}`);
     return `<details class="completeness-category">
       <summary><span>${label}</span><strong class="${countTone}">${formatCount(total)}</strong></summary>
       <div class="completeness-category-body">
-        ${categoryRows.map(({row, details}) => `<div class="metric-row completeness-album-row"><span>#${esc(String(row.album_id ?? '?'))} ${esc(row.artist || '?')} — ${esc(row.title || '?')}</span><strong>${esc(details.join('; '))}</strong>${renderMarkIncompleteButton(row)}${renderMarkCompleteButton(row)}</div>`).join('')}
+        ${categoryRows.map(({row, details}) => `<div class="metric-row completeness-album-row${kind === 'track_length' ? ' completeness-length-row' : ''}"><span>#${esc(String(row.album_id ?? '?'))} ${esc(row.artist || '?')} — ${esc(row.title || '?')}</span><strong>${esc(details.join('; '))}</strong>${actions(row)}</div>`).join('')}
         ${categoryRows.length === 0 ? '<div class="completeness-category-empty">No albums</div>' : ''}
         ${categoryRows.length < total ? `<div class="completeness-category-limit">Showing ${formatCount(categoryRows.length)} of ${formatCount(total)}</div>` : ''}
       </div>
@@ -322,6 +392,7 @@ export function renderLibraryCompletenessCard(census) {
         <div class="metric-row"><span>Status</span><strong class="${statusClass}">${esc(stale ? `${report.status || 'unknown'} (stale)` : report.status || 'unknown')}</strong></div>
         <div class="metric-row"><span>Last run</span><strong class="metric-value-push">${snapshot.generated_at ? awstDateTime(snapshot.generated_at) : 'n/a'} (${formatDuration(snapshot.duration_seconds)})</strong>${runButton}</div>
         <div class="metric-row"><span>Audio complete</span><strong>${formatCount(counts.audio_complete)} / ${formatCount(counts.albums_scanned)}</strong></div>
+        ${renderTrackLengthCoverage(counts)}
         ${categories.map(renderCategory).join('')}
         ${renderVerifiedCategory(verifiedRows)}
       </div>
@@ -340,7 +411,7 @@ export function renderVerifiedCategory(verifiedRows) {
   return `<details class="completeness-category">
       <summary><span>Verified complete by operator</span><strong class="metric-muted">${formatCount(verifiedRows.length)}</strong></summary>
       <div class="completeness-category-body">
-        ${verifiedRows.map(row => `<div class="metric-row completeness-album-row"><span>#${esc(String(row.album_id ?? '?'))} ${esc(row.artist || '?')} — ${esc(row.title || '?')}</span><strong class="metric-muted">${esc((Array.isArray(row.findings) ? row.findings : []).map(/** @param {any} f */ f => f.detail || '').join('; '))}</strong>${renderMarkCompleteButton(row)}</div>`).join('')}
+        ${verifiedRows.map(row => `<div class="metric-row completeness-album-row"><span>#${esc(String(row.album_id ?? '?'))} ${esc(row.artist || '?')} — ${esc(row.title || '?')}</span><strong class="metric-muted">${esc((Array.isArray(row.findings) ? row.findings : []).map(completenessFindingText).join('; '))}</strong>${renderMarkCompleteButton(row)}</div>`).join('')}
       </div>
     </details>`;
 }

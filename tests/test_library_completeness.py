@@ -1067,10 +1067,11 @@ class TestBeetsCompletenessProjection(unittest.TestCase):
               CREATE TABLE albums (id INTEGER PRIMARY KEY, albumartist TEXT, album TEXT,
                 mb_albumid TEXT, discogs_albumid INTEGER);
               CREATE TABLE items (id INTEGER PRIMARY KEY, album_id INTEGER, path BLOB,
-                mb_releasetrackid TEXT, mb_trackid TEXT, title TEXT, track INTEGER);
+                mb_releasetrackid TEXT, mb_trackid TEXT, title TEXT, track INTEGER,
+                disc INTEGER);
             """)
             conn.execute("INSERT INTO albums VALUES (1, 'Dirt Dress', 'Theme Songs', NULL, 4738671)")
-            conn.execute("INSERT INTO items VALUES (1, 1, ?, '', '4738671-1A', '1A', 1)", (path.encode(),))
+            conn.execute("INSERT INTO items VALUES (1, 1, ?, '', '4738671-1A', '1A', 1, 2)", (path.encode(),))
             conn.commit()
             conn.close()
             with BeetsDB(db_path, library_root=root) as beets:
@@ -1078,6 +1079,7 @@ class TestBeetsCompletenessProjection(unittest.TestCase):
             self.assertEqual(rows[0].identity, ReleaseIdentity("discogs", "4738671"))
             self.assertEqual(rows[0].catalog_items[0].source_key, "4738671-1A")
             self.assertEqual(rows[0].catalog_items[0].path, path)
+            self.assertEqual(rows[0].catalog_items[0].disc, 2)
 
     def test_symlink_escape_is_refused_without_rewriting_catalog_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1094,10 +1096,11 @@ class TestBeetsCompletenessProjection(unittest.TestCase):
               CREATE TABLE albums (id INTEGER PRIMARY KEY, albumartist TEXT, album TEXT,
                 mb_albumid TEXT, discogs_albumid INTEGER);
               CREATE TABLE items (id INTEGER PRIMARY KEY, album_id INTEGER, path BLOB,
-                mb_releasetrackid TEXT, mb_trackid TEXT, title TEXT, track INTEGER);
+                mb_releasetrackid TEXT, mb_trackid TEXT, title TEXT, track INTEGER,
+                disc INTEGER);
             """)
             conn.execute("INSERT INTO albums VALUES (1, 'Artist', 'Album', NULL, 1)")
-            conn.execute("INSERT INTO items VALUES (1, 1, ?, '', '1-A1', 'A1', 1)", (escaped_path.encode(),))
+            conn.execute("INSERT INTO items VALUES (1, 1, ?, '', '1-A1', 'A1', 1, 1)", (escaped_path.encode(),))
             conn.commit()
             conn.close()
             with BeetsDB(db_path, library_root=root) as beets:
@@ -1115,7 +1118,8 @@ class TestBeetsCompletenessProjection(unittest.TestCase):
               CREATE TABLE albums (id INTEGER PRIMARY KEY, albumartist TEXT, album TEXT,
                 mb_albumid TEXT, discogs_albumid INTEGER);
               CREATE TABLE items (id INTEGER PRIMARY KEY, album_id INTEGER, path BLOB,
-                mb_releasetrackid TEXT, mb_trackid TEXT, title TEXT, track INTEGER);
+                mb_releasetrackid TEXT, mb_trackid TEXT, title TEXT, track INTEGER,
+                disc INTEGER);
             """)
             conn.execute("INSERT INTO albums VALUES (1, 'a', 'b', '00000000-0000-4000-8000-000000000001', 4738671)")
             conn.commit()

@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     )
 from lib.pipeline_db import (
     DOWNLOAD_LOG_OUTCOMES,
+    BadAudioHashInput,
     DownloadLogCounts,
 )
 from lib.pipeline_db._shared import (
@@ -209,6 +210,36 @@ class _FakeDownloadLogMixin(_FakePipelineDBBase):
                 continue
             return entry.soulseek_username
         return None
+
+    def get_recent_import_source_audio_hashes(
+        self,
+        request_id: int,
+        release_id: str,
+    ) -> list[BadAudioHashInput]:
+        """Mirror of the real query: newest successful import's evidence."""
+        latest = next(
+            (
+                entry for entry in reversed(self.download_logs)
+                if entry.request_id == request_id
+                and entry.outcome in (
+                    "success", "force_import", "local_import",
+                )
+            ),
+            None,
+        )
+        if latest is None or latest.candidate_evidence_id is None:
+            return []
+        evidence = self._evidence_by_id.get(latest.candidate_evidence_id)
+        if evidence is None or evidence.mb_release_id != release_id:
+            return []
+        return [
+            BadAudioHashInput(
+                hash_value=file.audio_sha256,
+                audio_format=file.extension.lower().lstrip("."),
+            )
+            for file in sorted(evidence.files, key=lambda f: f.relative_path)
+            if file.audio_sha256 is not None
+        ]
 
     def get_retained_failure_paths(self) -> set[str]:
         retained: set[str] = set()

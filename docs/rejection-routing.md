@@ -23,10 +23,22 @@ comment on the same issue.
 - **Cleanup-lane admission** — `rejection_scenario_is_delete_eligible`. May a
   kept, banned, visible folder be evaluated for deletion by
   `lib.wrong_match_cleanup_service.cleanup_wrong_match` (the reducer, D2/D9,
-  untouched by this issue)? An explicit four-item allowlist, not a fail-open
-  exclusion set (D6). Everything else — world failures with a reviewable
-  folder, every unknown/novel scenario string, and `None` — is never
-  delete-eligible; the reducer is never even consulted for them.
+  untouched by this issue) **automatically, straight after the rejection**?
+  An explicit four-item allowlist, not a fail-open exclusion set (D6).
+  Everything else — world failures with a reviewable folder, every
+  unknown/novel scenario string, and `None` — is never delete-eligible; the
+  automatic callers (`lib/download_rejection.py`, `scripts/importer.py`)
+  never consult the reducer for them.
+- **The operator's Cleanup sweep is not gated by that allowlist** (issue
+  #1468). `cleanup_all_wrong_matches` — the "Cleanup Wrong Matches" button,
+  `pipeline-cli wrong-match-triage`, behind `confirm_all_wrong_matches` —
+  runs the reducer on every visible row, whatever its scenario. Its purpose
+  is to delete the proven non-imports so that what remains is the list of
+  possible imports to review; a non-allowlisted row the reducer can prove
+  redundant (for example under a verified-lossless parent) belongs in that
+  deletion just as much as an allowlisted one. Rows the reducer cannot prove
+  redundant stay kept, banned, and visible. Pinned by
+  `test_operator_sweep_evaluates_rows_outside_the_delete_allowlist`.
 
 Deletion for a **kept, banned, visible** folder therefore only ever happens
 through two routes, neither of which is "entering the lane": the cleanup
@@ -66,7 +78,7 @@ on anything spelled but unclassified.
 | `timeout` | `lib/dispatch/core.py:1465` (`import_one.py` subprocess timeout) | no | none — no folder move at all | no | n/a | per caller |
 | `exception` | `lib/dispatch/core.py:1494` (unhandled exception in dispatch) | no | none | no | n/a | per caller |
 | `quality_downgrade` / `transcode_downgrade` / `suspect_lossless_downgrade` / `suspect_lossless_probe_missing` / `lossless_source_locked` / `duplicate_remove_guard_failed` / `folder_exclusivity_guard_failed` / `verified_lossless_locked` | `lib/dispatch/core.py::_describe_rejection` (post-beets-launch quality decisions) | decision-dependent (`decision_denylists`) | none — `_cleanup_staged_dir` (auto) or preserved (force, `mark_done=False`); never quarantined into Wrong Matches | no — the persisted `validation_result.scenario` stays `strong_match` (D8), and none of these ever get a `failed_path` regardless | n/a | per caller |
-| `upgrade_held` | `lib/dispatch/outcome_actions.py::_hold_upgrade_from_evidence_decision`, reached from `lib/dispatch/core.py::_run_evidence_gate` when `full_pipeline_decision_from_evidence` decides `upgrade_held` (issue #1445 item 3: an automatic upgrade whose track lengths disagree with the installed copy it would replace) | **yes, this request only, no cooldown strike** (`apply_cooldown=False` — a hold is not the peer's fault, but the same folder must not be fetched again) | `wrong_matches/` — **whole-folder move**, before Beets launches; nothing in the library is touched | yes — in the "Held upgrades" section at the top of the Wrong Matches tab (`web/wrong_match_queue_view.py::build_held_upgrades`, rendered by `web/js/wrong-matches.js::renderHeldUpgrades`), never inside an ordinary group. **Sticky to the folder:** `get_wrong_matches` projects the newest `upgrade_held` row naming each folder (`held_download_log_id`, `held_validation_result`), so a newer row on the folder — a failed force import — is recorded and shown truthfully ("the last try to use the new copy failed: …") while the folder stays held | **no** — the reducer refuses a held folder early (`get_held_upgrade_download_log_id` → `OUTCOME_SKIPPED_HELD_UPGRADE`), so the delete-all triage batch cannot reach it either; converge skips it (its green distance would otherwise force-import over the copy the guard kept) and counts it apart (`held_upgrades`; `group_empty` only when nothing at all is left, `ordinary_group_empty` drives the UI); delete-group skips it and leaves it out of the remaining count; **Replace deletes it** (`include_held=True`) | yes → `wanted`, search state exactly as any ordinary rejected attempt leaves it (no override narrowing) |
+| `upgrade_held` | `lib/dispatch/outcome_actions.py::_hold_upgrade_from_evidence_decision`, reached from `lib/dispatch/core.py::_run_evidence_gate` when `full_pipeline_decision_from_evidence` decides `upgrade_held` (issue #1445 item 3: an automatic upgrade whose track lengths disagree with the installed copy it would replace; issue #1471: or, when the operator marked the installed copy incomplete, whose track lengths are short of the release's listing — `upgrade_hold.basis = "declared_program"`) | **yes, this request only, no cooldown strike** (`apply_cooldown=False` — a hold is not the peer's fault, but the same folder must not be fetched again) | `wrong_matches/` — **whole-folder move**, before Beets launches; nothing in the library is touched | yes — in the "Held upgrades" section at the top of the Wrong Matches tab (`web/wrong_match_queue_view.py::build_held_upgrades`, rendered by `web/js/wrong-matches.js::renderHeldUpgrades`), never inside an ordinary group. **Sticky to the folder:** `get_wrong_matches` projects the newest `upgrade_held` row naming each folder (`held_download_log_id`, `held_validation_result`), so a newer row on the folder — a failed force import — is recorded and shown truthfully ("the last try to use the new copy failed: …") while the folder stays held | **no** — the reducer refuses a held folder early (`get_held_upgrade_download_log_id` → `OUTCOME_SKIPPED_HELD_UPGRADE`), so the delete-all triage batch cannot reach it either; converge skips it (its green distance would otherwise force-import over the copy the guard kept) and counts it apart (`held_upgrades`; `group_empty` only when nothing at all is left, `ordinary_group_empty` drives the UI); delete-group skips it and leaves it out of the remaining count; **Replace deletes it** (`include_held=True`) | yes → `wanted`, search state exactly as any ordinary rejected attempt leaves it (no override narrowing) |
 | `abandoned_auto_import` | **HISTORICAL — no current writer.** Pre-#898 interrupted-request auto-import cleanup rows. Only reader: `lib/pipeline_db/misc.py:262` (a `WHERE … <> 'abandoned_auto_import'` exclusion, not a producer). Registered historical in `tests/test_wrong_match_scenario_producer_audit.py`. | — | — | — | — | — |
 
 Every folder/audio-integrity fact's denylist policy above and the general
@@ -387,24 +399,26 @@ producer_audit.py`'s registered producer files —
 producer: `lib.wrong_match_cleanup_service.cleanup_wrong_match` (the reducer),
 via `db.record_wrong_match_triage`. Nothing else writes it — not Lane A, not
 Lane B, not the force-import manifest guard, not force-import success/failure
-consumption. Because the reducer is only ever reached for the
+consumption. The automatic lane reaches the reducer only for the
 **cleanup-lane-admission allowlist** (`rejection_scenario_is_delete_eligible`
 — `extra_tracks` / `high_distance` / `mbid_not_found` / `no_choose_match`,
-D6), every OTHER worklist-visible scenario in the events table above —
+D6), so every OTHER worklist-visible scenario in the events table above —
 `unmapped_audio`, `untracked_audio`, `validation_error`, `request_missing_mbid`,
-`request_missing_request_id`, `incomplete_fileset`, `unverifiable_source`,
-`upgrade_held` — never gets a `wrong_match_triage` block, past or present. This was always
-true; issue #1077 widens which of those rows are worklist-visible in the
-first place (D1: kept implies visible), so the "visible with no triage chip"
-population is now larger than before, not new.
+`request_missing_request_id`, `incomplete_fileset`, `unverifiable_source` —
+carries a `wrong_match_triage` block only once the operator's Cleanup sweep
+has evaluated it (see "Cleanup-lane admission" above). `upgrade_held` never
+carries one: the reducer refuses a held folder before writing any audit.
+Issue #1077 widens which of those rows are worklist-visible in the first
+place (D1: kept implies visible), so the "visible with no triage chip"
+population is larger than before, not new.
 
 `web/js/recents.js` and `web/js/history.js` both render the
 `wrong_match_triage_*` fields conditionally (`if (h.wrong_match_triage_summary)
 { … }` in `history.js`; the equivalent guard in `recents.js`) — a row with no
 triage evidence simply shows no chip/detail, which is the CORRECT and
-expected rendering for the whole non-delete-eligible cohort, not a missing-data
-bug. Only a row the reducer actually evaluated (delete-eligible, evaluated at
-least once) ever carries this block.
+expected rendering for a row no sweep has evaluated yet, not a missing-data
+bug. Only a row the reducer actually evaluated (by the automatic lane or the
+operator's sweep) ever carries this block.
 
 ## What is deliberately unchanged
 

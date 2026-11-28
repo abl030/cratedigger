@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, ClassVar, Protocol, TypedDict, cast, get_args
+from typing import Any, ClassVar, Literal, Protocol, TypedDict, cast, get_args
 from unittest.mock import patch
 
 import msgspec
@@ -13923,6 +13923,119 @@ class TestRecentSuccessfulUploader(unittest.TestCase):
             self.db.get_recent_successful_uploader(self.req_id), "alice")
         self.assertEqual(
             self.db.get_recent_successful_uploader(other), "bob")
+
+
+@requires_postgres
+class TestRecentImportSourceAudioHashes(unittest.TestCase):
+    """Issue #1471 gap 1: source hashes persist on candidate evidence files
+    and come back for the request's newest successful import."""
+
+    RELEASE = "src-hash-uuid"
+
+    def setUp(self):
+        self.db = make_db()
+        self.req_id = self.db.add_request(
+            mb_release_id=self.RELEASE,
+            artist_name="A",
+            album_title="B",
+            source="request",
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    @staticmethod
+    def _files(digests: dict[str, bytes | None]):
+        from lib.quality import AlbumQualityEvidenceFile
+
+        return [
+            AlbumQualityEvidenceFile(
+                relative_path=name,
+                size_bytes=1000 + index,
+                mtime_ns=1,
+                extension=name.rsplit(".", 1)[1],
+                container=name.rsplit(".", 1)[1],
+                codec=name.rsplit(".", 1)[1],
+                audio_sha256=digest,
+            )
+            for index, (name, digest) in enumerate(digests.items())
+        ]
+
+    def _store(self, digests, *, release=RELEASE) -> int:
+        from tests.evidence_helpers import make_album_quality_evidence
+
+        evidence = make_album_quality_evidence(
+            mb_release_id=release,
+            files=self._files(digests),
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        return stored.id
+
+    def _import(
+        self,
+        evidence_id: int,
+        outcome: Literal["success", "force_import"] = "success",
+    ) -> int:
+        log_id = self.db.log_download(
+            self.req_id, soulseek_username="peer", outcome=outcome)
+        self.db.set_download_log_candidate_evidence(log_id, evidence_id)
+        return log_id
+
+    def test_returns_the_latest_imports_source_hashes_in_its_format(self):
+        old = self._store({"01.mp3": b"\x01" * 32})
+        self._import(old)
+        new = self._store({"01.mp3": b"\x02" * 32, "02.mp3": b"\x03" * 32})
+        self._import(new, outcome="force_import")
+        self.db.log_download(self.req_id, outcome="rejected")
+
+        hashes = self.db.get_recent_import_source_audio_hashes(
+            self.req_id, self.RELEASE)
+
+        self.assertEqual(
+            [(h.hash_value, h.audio_format) for h in hashes],
+            [(b"\x02" * 32, "mp3"), (b"\x03" * 32, "mp3")],
+        )
+
+    def test_files_without_a_hash_are_skipped(self):
+        self._import(self._store({"01.mp3": b"\x04" * 32, "02.ogg": None}))
+        hashes = self.db.get_recent_import_source_audio_hashes(
+            self.req_id, self.RELEASE)
+        self.assertEqual([h.hash_value for h in hashes], [b"\x04" * 32])
+
+    def test_evidence_for_another_release_contributes_nothing(self):
+        self._import(self._store({"01.mp3": b"\x05" * 32}, release="other"))
+        self.assertEqual(
+            self.db.get_recent_import_source_audio_hashes(
+                self.req_id, self.RELEASE),
+            [],
+        )
+
+    def test_no_import_means_no_hashes(self):
+        self.assertEqual(
+            self.db.get_recent_import_source_audio_hashes(
+                self.req_id, self.RELEASE),
+            [],
+        )
+
+    def test_rewrite_without_hashes_keeps_the_stored_ones(self):
+        evidence_id = self._store({"01.mp3": b"\x06" * 32})
+        # Same content address written again by a writer that never hashed.
+        self._store({"01.mp3": None})
+        self._import(evidence_id)
+        hashes = self.db.get_recent_import_source_audio_hashes(
+            self.req_id, self.RELEASE)
+        self.assertEqual([h.hash_value for h in hashes], [b"\x06" * 32])
+
+    def test_evidence_loads_never_carry_the_hash(self):
+        evidence_id = self._store({"01.mp3": b"\x07" * 32})
+        loaded = self.db.load_album_quality_evidence_by_id(evidence_id)
+        assert loaded is not None
+        self.assertIsNone(loaded.files[0].audio_sha256)
 
 
 @requires_postgres

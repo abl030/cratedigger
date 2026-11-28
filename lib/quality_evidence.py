@@ -805,21 +805,23 @@ def _apply_measurement_facts_to_files(
     into the snapshot rows before persisting evidence. This lets the
     importer's ``full_pipeline_decision_from_evidence`` (U11) consume
     ``decode_ok=False`` flags as the per-file evidence for ``audio_corrupt``.
+
+    Issue #1471: the measurement's per-file source audio hashes are stamped
+    the same way (``audio_sha256``), keyed by the same relative path.
     """
-    if not measurement.corrupt_files:
-        return files
     corrupt_set = set(measurement.corrupt_files)
+    digests = measurement.source_audio_hashes
+    if not corrupt_set and not digests:
+        return files
     out: list[AlbumQualityEvidenceFile] = []
     for f in files:
-        if f.relative_path in corrupt_set:
-            out.append(AlbumQualityEvidenceFile(
-                relative_path=f.relative_path,
-                size_bytes=f.size_bytes,
-                mtime_ns=f.mtime_ns,
-                extension=f.extension,
-                container=f.container,
-                codec=f.codec,
-                decode_ok=False,
+        corrupt = f.relative_path in corrupt_set
+        digest = digests.get(f.relative_path)
+        if corrupt or digest is not None:
+            out.append(msgspec.structs.replace(
+                f,
+                decode_ok=False if corrupt else f.decode_ok,
+                audio_sha256=digest if digest is not None else f.audio_sha256,
             ))
         else:
             out.append(f)
@@ -899,7 +901,7 @@ def evidence_from_import_result(
             return EvidenceBuildResult(None, "failed", str(exc))
     if not files:
         return EvidenceBuildResult(None, "empty_fileset", "no audio files found")
-    if measurement is not None and measurement.audio_corrupt:
+    if measurement is not None:
         files = _apply_measurement_facts_to_files(files, measurement)
     audio_measurement = import_result.source_measurement
     target_contract = import_result.target_quality_contract

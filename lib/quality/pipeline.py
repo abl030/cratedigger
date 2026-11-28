@@ -1167,6 +1167,14 @@ class AlbumQualityEvidenceDecisionFacts(msgspec.Struct, frozen=True):
     # decider turns an import into ``upgrade_held`` when it is set, unless
     # the operator marked the installed copy incomplete.
     installed_track_lengths_disagree: bool = False
+    # Issue #1471 gap 2 — the other half of the guard. True when the
+    # candidate is measurably SHORT of the release's declared track lengths
+    # (``lib.quality.installed_copy_guard.compare_with_declared_program``).
+    # Read only when the operator marked the installed copy incomplete: the
+    # mark turns the installed-copy comparison off, and beets' coverage
+    # proof says every track has a file, never that it is long enough. Only
+    # the automation import lane computes it.
+    candidate_short_of_declared_program: bool = False
 
 
 class QualityEvidenceActionPayload(msgspec.Struct, frozen=True):
@@ -1280,12 +1288,18 @@ def _apply_upgrade_guard(
     the operator has already said the installed copy is not worth keeping.
     The overridden quality verdict stays in ``stage2_import`` as audit;
     ``evidence_decision_name`` reads ``upgrade_guard`` first.
+
+    Issue #1471 gap 2: with the mark set, the release's declared program is
+    the yardstick instead. A candidate measurably short of it would replace
+    the marked copy and clear the mark while missing the same thing, so it
+    is held for the operator too.
     """
-    if (
-        not facts.installed_track_lengths_disagree
-        or facts.installed_marked_incomplete
-        or not result.get("imported")
-    ):
+    holds = (
+        facts.candidate_short_of_declared_program
+        if facts.installed_marked_incomplete
+        else facts.installed_track_lengths_disagree
+    )
+    if not holds or not result.get("imported"):
         return result
     return _finalize_denylist({
         **result,

@@ -576,6 +576,14 @@
   .completeness-category-body { display: flex; flex-direction: column; gap: 4px; padding: 5px 0 2px 15px; }
   .completeness-album-row { align-items: flex-start; }
   .completeness-album-row span { min-width: 0; }
+  /* Track-length rows (#1472) carry a full sentence and four actions:
+     stack title, sentence and a wrapping button line instead of squeezing
+     them into one flex row (which collapsed to one letter per line at
+     phone width). */
+  .completeness-length-row { flex-wrap: wrap; justify-content: flex-start; gap: 4px 6px; padding-bottom: 6px; }
+  .completeness-length-row > span, .completeness-length-row > strong { flex: 1 1 100%; }
+  .completeness-album-row.completeness-length-row > strong { text-align: left; font-weight: 400; max-width: none; }
+  .completeness-length-row > button { flex: 0 0 auto; white-space: nowrap; }
   .completeness-album-row strong { max-width: 50%; overflow-wrap: anywhere; }
   .completeness-category-empty, .completeness-category-limit { color: #666; font-size: 0.76em; }
   .completeness-category-limit { text-align: right; }

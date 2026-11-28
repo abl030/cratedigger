@@ -336,7 +336,7 @@ def _hold_upgrade_from_evidence_decision(
         denylists=tuple(
             TerminalDenylist(
                 username,
-                "upgrade held: track lengths differ from the installed copy",
+                _hold_denylist_reason(comparison),
                 apply_cooldown=False,
             )
             for username in sorted(usernames)
@@ -361,6 +361,18 @@ def _hold_upgrade_from_evidence_decision(
         ),
         post_commit_wrong_match_scenario="upgrade_held",
     )
+
+
+def _hold_denylist_reason(comparison: InstalledCopyComparison) -> str:
+    """The per-request denylist reason for a held upgrade, by its yardstick."""
+    from lib.quality.installed_copy_guard import HOLD_BASIS_DECLARED_PROGRAM
+
+    if comparison.basis == HOLD_BASIS_DECLARED_PROGRAM:
+        return (
+            "upgrade held: track lengths short of the release "
+            "(installed copy marked incomplete)"
+        )
+    return "upgrade held: track lengths differ from the installed copy"
 
 
 def _do_mark_done(

@@ -155,7 +155,12 @@ Three metrics are supported:
   prone to false negatives on lo-fi VBR.
 
 Spectral cliff detection continues to use `min` regardless of this setting —
-it cares about the worst track, not the typical one. `transcode_detection()`
+it cares about the worst track, not the typical one. This is an operator
+decision, re-affirmed in issue #1466: an album is only as good as its worst
+track, so a copy that fixes the worst track upgrades even when the typical
+track (the median cliff) is unchanged and the container bitrate drops. The
+known cost is that one track's 500 Hz reading can flip the album class on a
+bucket edge; the median was considered and declined. `transcode_detection()`
 no longer reads any bitrate: absent or errored spectral analysis fails
 closed as a transcode verdict. The former spectral-fallback threshold
 derived from the MP3 band table (issue #66) is gone — missing or

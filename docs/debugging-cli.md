@@ -417,6 +417,15 @@ inside socket authorization, never credentials.
   oneshot stays the single execution path). The dashboard card's
   "Run census now" button is the same route. 200/0 requested; 503/5
   unconfigured or state dir unwritable.
+- `pipeline-cli library-census [--category CATEGORY] [--json]` — List what
+  the published census found, relayed to `GET /api/pipeline/library-census`
+  (the projection the dashboard card renders, without its per-category cap).
+  `--category track_length` is the cleanup worklist of installed copies whose
+  measured track lengths contradict their release (issue #1472);
+  `track_length_harmless` lists the shapes that read as probably fine (a
+  hidden track kept in the file, a different split). Each row names the
+  request the existing actions take: `mark-incomplete`, `mark-complete`,
+  `ban-source`, `replace`. Nothing is removed automatically.
 - `pipeline-cli set-quality` — Set request quality through its canonical web route.
 - `pipeline-cli show` — Show a request, attempts, and quality state.
 - `pipeline-cli sync-file-tags` — Write one

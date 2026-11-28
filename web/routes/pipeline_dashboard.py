@@ -154,8 +154,51 @@ def _empty_retag_divergence_census(state: str) -> dict[str, object]:
     }
 
 
+#: The census card's bands. ``track_length`` findings split by the shape's
+#: own ``probably_harmless`` (issue #1472): a hidden track kept in the file
+#: or a different split sits in a lower-priority band of its own.
+LIBRARY_COMPLETENESS_CATEGORIES: tuple[str, ...] = (
+    "missing_source_audio", "catalog_drift", "unknown",
+    "track_length", "track_length_harmless",
+)
+
+
+def _album_categories(album: dict[str, object]) -> set[str]:
+    categories: set[str] = set()
+    findings = album.get("findings")
+    # ``msgspec.to_builtins`` keeps the struct's tuple a tuple.
+    listed: list[object] = (
+        msgspec.convert(findings, type=list[object])
+        if isinstance(findings, (list, tuple)) else []
+    )
+    for finding in listed:
+        if not is_str_object_dict(finding):
+            continue
+        kind = finding.get("kind")
+        if kind == "track_length" and finding.get("probably_harmless") is True:
+            categories.add("track_length_harmless")
+        elif isinstance(kind, str):
+            categories.add(kind)
+    return categories
+
+
 def _dashboard_library_completeness() -> dict[str, object]:
     """Read the daily source/catalog/filesystem census without rescanning."""
+    return library_completeness_view(
+        cap_per_category=DASHBOARD_LIBRARY_COMPLETENESS_ALBUM_CAP)
+
+
+def library_completeness_view(
+    *, cap_per_category: int | None, category: str | None = None,
+) -> dict[str, object]:
+    """The census as the card and ``pipeline-cli library-census`` see it.
+
+    One projection for both surfaces. The dashboard caps each category at
+    ``cap_per_category`` albums so one large band (track lengths, say)
+    cannot crowd the others out; the list route passes ``None`` for every
+    album, optionally narrowed to one ``category``. Operator-verified albums
+    always ride along, flagged ``marked_complete``.
+    """
     rt = runtime()
     path = rt.library_completeness_snapshot_path
     if path is None:
@@ -176,14 +219,27 @@ def _dashboard_library_completeness() -> dict[str, object]:
     albums: list[dict[str, object]] = []
     verified: list[dict[str, object]] = []
     for index, album in enumerate(report["albums"]):
+        if category is not None and category not in _album_categories(album):
+            continue
         album["marked_complete"] = index in verified_indexes
         (verified if album["marked_complete"] else albums).append(album)
     total = len(albums)
-    report["albums"] = albums[:DASHBOARD_LIBRARY_COMPLETENESS_ALBUM_CAP] + verified
+    if cap_per_category is not None:
+        shown: list[dict[str, object]] = []
+        per_category: dict[str, int] = {}
+        for album in albums:
+            categories = _album_categories(album)
+            if any(per_category.get(c, 0) < cap_per_category for c in categories):
+                shown.append(album)
+                for c in categories:
+                    per_category[c] = per_category.get(c, 0) + 1
+        albums = shown
+    report["albums"] = albums + verified
     # Issue #1241: enrich each embedded album with its pipeline request and
     # the operator's incomplete-mark state so the card can offer the
-    # mark/clear action inline. Joined only for the capped embed, never for
-    # the persisted snapshot. A census album with no resolvable request
+    # mark/clear action inline. Joined for the albums this view returns
+    # (capped on the dashboard, every listed album on the CLI list route),
+    # never for the persisted snapshot. A census album with no resolvable request
     # (release_id absent from the pipeline) carries request_id=None and the
     # card renders no action for it. Per-album isolation (#1257 review F9):
     # the presentation projection refuses inconsistent mid-transition rows
@@ -199,6 +255,9 @@ def _dashboard_library_completeness() -> dict[str, object]:
             )
             req = None
         album["request_id"] = req["id"] if req else None
+        # Issue #1472: Bad Rip / Replace on a track-length row lock while
+        # the request is processing, as they do everywhere else.
+        album["request_status"] = req.get("status") if req else None
         album["marked_incomplete"] = bool(
             req and req.get("marked_incomplete_at")
         )
@@ -206,6 +265,22 @@ def _dashboard_library_completeness() -> dict[str, object]:
         "state": "ok", "error": None, "snapshot": snapshot_dict,
         "albums_shown": len(report["albums"]), "albums_listed_total": total,
     }
+
+
+def get_library_census(h: RouteHandler, params: dict[str, list[str]]) -> None:
+    """Every album the census lists, optionally one ``category`` only.
+
+    The read behind ``pipeline-cli library-census``: the same projection the
+    dashboard card renders, without its per-category cap.
+    """
+    category = params.get("category", [""])[0].strip() or None
+    if category is not None and category not in LIBRARY_COMPLETENESS_CATEGORIES:
+        h._json({
+            "error": "unknown_category",
+            "categories": list(LIBRARY_COMPLETENESS_CATEGORIES),
+        }, status=400)
+        return
+    h._json(library_completeness_view(cap_per_category=None, category=category))
 
 
 def _apply_operator_complete_marks(
@@ -248,6 +323,12 @@ def _apply_operator_complete_marks(
             missing_source_audio=counts.missing_source_audio - ("missing_source_audio" in kinds),
             catalog_drift=counts.catalog_drift - ("catalog_drift" in kinds),
             unknown=counts.unknown - ("unknown" in kinds),
+            track_length=counts.track_length - any(
+                f.kind == "track_length" and not f.probably_harmless
+                for f in album.findings),
+            track_length_harmless=counts.track_length_harmless - any(
+                f.kind == "track_length" and f.probably_harmless
+                for f in album.findings),
             audio_complete=counts.audio_complete
             + bool(kinds & {"missing_source_audio", "unknown"}),
         )
@@ -300,6 +381,14 @@ ROUTES: list[RouteRegistration] = [
         "GET", "/api/pipeline/dashboard", get_pipeline_dashboard,
         "Operational metrics for the dashboard subtab (searches, cycles, "
         "redis, read-only library census snapshots).",
+        classified=True,
+    ),
+    route(
+        "GET", "/api/pipeline/library-census", get_library_census,
+        "Every album the library-completeness census lists, with the "
+        "operator's marks and the request to act on (?category= narrows to "
+        "missing_source_audio, catalog_drift, unknown, track_length or "
+        "track_length_harmless). Read-only; reads the published snapshot.",
         classified=True,
     ),
     route(
