@@ -73,7 +73,30 @@ DEFAULT_LENGTH_READS_PER_SECOND: Final[float] = 20.0
 
 
 class TrackLengthReadError(RuntimeError):
-    """An installed file's length could not be read."""
+    """An installed file's length could not be read.
+
+    ``transient`` is true when the cause was an IO failure other than a
+    missing file (EIO, ESTALE, a virtiofs hiccup): reading again later may
+    succeed, so the result must not be cached. A missing file or a corrupt
+    header stays that way until the file changes, which the album
+    fingerprint notices.
+    """
+
+    def __init__(self, message: str, *, transient: bool = False) -> None:
+        super().__init__(message)
+        self.transient = transient
+
+
+def _transient_cause(exc: BaseException) -> bool:
+    """Whether an IO error other than "not found" sits in ``exc``'s chain."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, OSError) and not isinstance(current, FileNotFoundError):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def read_track_length_seconds(path: str) -> float:
@@ -88,10 +111,10 @@ def read_track_length_seconds(path: str) -> float:
     try:
         return mediafile_length_seconds(path)
     except (OSError, ValueError, TypeError) as exc:
-        raise TrackLengthReadError(str(exc)) from exc
+        raise TrackLengthReadError(str(exc), transient=_transient_cause(exc)) from exc
     except Exception as exc:
         if isinstance(exc, error_type):
-            raise TrackLengthReadError(str(exc)) from exc
+            raise TrackLengthReadError(str(exc), transient=_transient_cause(exc)) from exc
         raise
 
 
@@ -308,11 +331,12 @@ class TrackLengthMeasurer:
     run's time budget is spent; the album is measured on a later run. The
     budget clock starts at the first real read, so cached albums cost
     nothing. An album is finished once started, so a run overshoots by at
-    most one album. A file that could not be read is cached as ``None``
-    under the same fingerprint: a missing or corrupt file stays that way
-    until it is rewritten or reappears, which changes the fingerprint and
-    reads the album again. Re-reading such albums daily would spend the
-    budget on the same broken files every run.
+    most one album. A missing file or corrupt header is cached as ``None``
+    under the same fingerprint: it stays that way until the file is
+    rewritten or reappears, which changes the fingerprint and reads the
+    album again, so broken albums do not eat the budget every run. Any
+    other IO failure (``TrackLengthReadError.transient``) is used for this
+    run but leaves the album uncached, so it is read again next run.
     """
 
     def __init__(
@@ -338,6 +362,7 @@ class TrackLengthMeasurer:
         self._sleep = sleep
         self._deadline: float | None = None
         self._last_read: float | None = None
+        self._transient_failure = False
         self.files_read = 0
 
     def _budget_spent(self) -> bool:
@@ -357,6 +382,7 @@ class TrackLengthMeasurer:
             seconds = self._read_length(path)
         except TrackLengthReadError as exc:
             logger.info("track length unreadable for %s: %s", path, exc)
+            self._transient_failure = self._transient_failure or exc.transient
             return None
         finally:
             self._last_read = self._clock()
@@ -388,8 +414,10 @@ class TrackLengthMeasurer:
             return dict(zip(ordered, cached.lengths, strict=True))
         if self._budget_spent():
             return None
+        self._transient_failure = False
         lengths = tuple(self._read(path) for path in ordered)
-        self._kept[key] = CachedAlbumLengths(fingerprint=fingerprint, lengths=lengths)
+        if not self._transient_failure:
+            self._kept[key] = CachedAlbumLengths(fingerprint=fingerprint, lengths=lengths)
         return dict(zip(ordered, lengths, strict=True))
 
     def updated_cache(self) -> TrackLengthCache:
@@ -400,16 +428,16 @@ class TrackLengthMeasurer:
 class TrackLengthCheck:
     """The census's per-album length step (``scan_library_completeness``).
 
-    ``previous`` maps album id to the track-length finding the last
-    published snapshot carried. An album waiting for the read budget keeps
-    that finding, so an operator's dismissal of a multi-finding row does not
-    lapse for a day merely because the album's files changed and have not
-    been re-read yet.
+    ``previous`` maps album id to ``(release_id, finding)`` from the last
+    published snapshot. An album waiting for the read budget keeps that
+    finding while it still names the same release, so an operator's
+    dismissal of a multi-finding row does not lapse for a day merely because
+    the album's files changed and have not been re-read yet.
     """
 
     def __init__(
         self, measurer: TrackLengthMeasurer, *,
-        previous: Mapping[int, CompletenessFinding] | None = None,
+        previous: Mapping[int, tuple[str, CompletenessFinding]] | None = None,
     ) -> None:
         self.measurer = measurer
         self._previous = dict(previous or {})
@@ -427,17 +455,19 @@ class TrackLengthCheck:
             album.album_id, [item.path for item in album.catalog_items],
         )
         if measured is None:
-            return TrackLengthResult(
-                status="pending", finding=self._previous.get(album.album_id))
+            carried = self._previous.get(album.album_id)
+            finding = (carried[1] if carried is not None
+                       and carried[0] == manifest.release_id else None)
+            return TrackLengthResult(status="pending", finding=finding)
         return track_length_result(album, manifest, measured)
 
 
 def previous_track_length_findings(
     albums: Sequence[CompletenessAlbum],
-) -> dict[int, CompletenessFinding]:
-    """The track-length finding per album in a published snapshot."""
+) -> dict[int, tuple[str, CompletenessFinding]]:
+    """``album_id -> (release_id, track-length finding)`` from a snapshot."""
     return {
-        album.album_id: finding
+        album.album_id: (album.release_id, finding)
         for album in albums for finding in album.findings
         if finding.kind == "track_length"
     }

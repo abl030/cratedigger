@@ -155,7 +155,7 @@ class TestTrackLengthCachePublication(unittest.TestCase):
             path = os.path.join(tmpdir, "snapshot.json")
             self.assertEqual(census._previous_track_length_findings(path), {})
             write_library_completeness_snapshot(path, prior)
-            self.assertEqual(census._previous_track_length_findings(path), {7: finding})
+            self.assertEqual(census._previous_track_length_findings(path), {7: ("r", finding)})
 
     def test_beets_unavailable_keeps_the_prior_cache(self) -> None:
         class LockedBeets:

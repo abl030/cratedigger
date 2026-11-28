@@ -1297,11 +1297,13 @@ It only reports: every removal or replacement is the operator's action.
   paths, sizes and mtimes; an unchanged album is never read again. Albums
   the budget does not reach are counted as `track_length_pending` and read
   on a later run (the first full pass of ~95k files takes about four daily
-  runs). An unreadable file is cached as unknown under the same
-  fingerprint, so a broken album is not re-read daily; rewriting or
-  restoring the file changes the fingerprint and reads it again. An album
+  runs). A missing file or corrupt header is cached as unknown under the
+  same fingerprint, so a broken album is not re-read daily; rewriting or
+  restoring the file changes the fingerprint and reads it again. Any other
+  IO error leaves the album uncached, so it is retried next run. An album
   still waiting for the budget keeps the previous snapshot's track-length
-  finding, so a dismissal does not lapse while it waits. A
+  finding while it names the same release, so a dismissal does not lapse
+  while it waits. A
   Beets-unavailable run writes neither the snapshot nor the cache.
 - **Surfaces.** The dashboard card's "Track lengths contradict the release"
   and "Track lengths differ, probably fine" bands, each row with Mark

@@ -22,6 +22,7 @@ from lib.library_track_lengths import (
     TrackLengthCheck,
     TrackLengthMeasurer,
     TrackLengthReadError,
+    _transient_cause,
     album_fingerprint,
     length_pairs,
     read_track_length_cache,
@@ -316,6 +317,35 @@ class TestMeasurer(unittest.TestCase):
         self.assertEqual(second.lengths_for(1, ["/a/1", "/a/2"]), {"/a/1": 5.0, "/a/2": None})
         self.assertEqual(reads, [])
 
+    def test_transient_io_error_leaves_album_uncached(self) -> None:
+        def read(path: str) -> float:
+            if path == "/a/2":
+                raise TrackLengthReadError("EIO", transient=True)
+            return 5.0
+
+        measurer = TrackLengthMeasurer(
+            TrackLengthCache(), read_length=read, stat=_Stat({"/a/1": 1, "/a/2": 1}),
+            sleep=lambda _: None)
+        self.assertEqual(measurer.lengths_for(1, ["/a/1", "/a/2"]), {"/a/1": 5.0, "/a/2": None})
+        self.assertEqual(measurer.updated_cache().albums, {})
+        # A later album with only permanent failures is still cached.
+        self.assertIsNotNone(measurer.lengths_for(2, ["/a/1"]))
+        self.assertEqual(set(measurer.updated_cache().albums), {"2"})
+
+    def test_real_reader_says_which_failures_are_transient(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(TrackLengthReadError) as missing:
+                read_track_length_seconds(os.path.join(tmp, "gone.flac"))
+            self.assertFalse(missing.exception.transient)
+        try:
+            try:
+                raise OSError(5, "Input/output error")
+            except OSError as io_error:
+                raise ValueError("wrapped") from io_error
+        except ValueError as wrapped:
+            self.assertTrue(_transient_cause(wrapped))
+        self.assertFalse(_transient_cause(FileNotFoundError("gone")))
+
     def test_lengths_are_rounded_when_read(self) -> None:
         measurer, _, _ = self._measurer(TrackLengthCache(), lengths={"/a/1": 5.123456})
         self.assertEqual(measurer.lengths_for(1, ["/a/1"]), {"/a/1": 5.12})
@@ -398,8 +428,11 @@ class TestScanIntegration(unittest.TestCase):
             "track_length", "ending missing? (track 1)", sentence="old")
         measurer = TrackLengthMeasurer(
             TrackLengthCache(), budget_seconds=0.0, stat=_Stat({"/lib/a/rt-1-1.opus": 1}))
-        report = self._scan(TrackLengthCheck(measurer, previous={1: previous}),
+        report = self._scan(TrackLengthCheck(measurer, previous={1: (MB_RELEASE, previous)}),
                             [album], _mb_raw([200_000]))
+        stale = self._scan(TrackLengthCheck(measurer, previous={1: ("other-release", previous)}),
+                           [album], _mb_raw([200_000]))
+        self.assertEqual(stale.albums, (), "a finding about another release is not carried")
         self.assertEqual(report.counts.track_length_pending, 1)
         self.assertEqual(report.counts.track_length, 1)
         self.assertEqual(report.albums[0].findings, (previous,))

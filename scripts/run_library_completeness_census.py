@@ -77,7 +77,9 @@ def run_library_completeness_census(
     return LibraryCompletenessSnapshot(generated_at, time_fn() - started, report)
 
 
-def _previous_track_length_findings(path: str) -> dict[int, CompletenessFinding]:
+def _previous_track_length_findings(
+    path: str,
+) -> dict[int, tuple[str, CompletenessFinding]]:
     """Yesterday's track-length findings; an unreadable snapshot has none."""
     try:
         snapshot = read_library_completeness_snapshot(path)
