@@ -48,6 +48,7 @@ from scripts.pipeline_cli.imports import (
     cmd_import_preview_from_download_log,
     import_preview_is_routed,
 )
+from scripts.pipeline_cli.library_census import cmd_library_census
 from scripts.pipeline_cli.long_tail import cmd_long_tail
 from scripts.pipeline_cli.other_pressings import cmd_other_pressings
 from scripts.pipeline_cli.quality import cmd_quality, cmd_repair_spectral
@@ -137,6 +138,7 @@ def main(*, api_socket: str | None = None):
         "import-local": cmd_import_local,
         "beets-distance": cmd_beets_distance,
         "other-pressings": cmd_other_pressings,
+        "library-census": cmd_library_census,
     }
     if args.command in api_commands:
         sys.exit(api_commands[args.command](None, args))

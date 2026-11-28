@@ -902,6 +902,91 @@ class TestPipelineDashboardLibraryCompletenessContract(_FakeDbWebServerCase):
         self.assertIsNotNone(census["error"])
 
 
+def _length_finding(detail: str, sentence: str, *, harmless: bool = False) -> CompletenessFinding:
+    return CompletenessFinding(
+        "track_length", detail, sentence=sentence, probably_harmless=harmless)
+
+
+class TestLibraryCensusTrackLengthContract(_FakeDbWebServerCase):
+    """Issue #1472: the census's track-length worklist on both surfaces."""
+
+    def _serve(self, snapshot: LibraryCompletenessSnapshot, url: str):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = library_completeness_snapshot_path(tmpdir)
+            write_library_completeness_snapshot(path, snapshot)
+            with (
+                _library_completeness_snapshot_path_set(path),
+                install_runtime(make_web_runtime(runtime(), beets=_PoisonedBeetsDB())),
+            ):
+                return self._get(url)
+
+    def _mixed_snapshot(self, missing: int) -> LibraryCompletenessSnapshot:
+        albums = [
+            CompletenessAlbum(i, "Artist", f"Missing {i}", f"m-{i}",
+                              (CompletenessFinding("missing_source_audio", "t"),), 1, 0, 0)
+            for i in range(missing)
+        ]
+        albums += [
+            CompletenessAlbum(1000, "Booka Shade", "Movements", "rel-booka",
+                              (_length_finding("ending missing? (track 14)", "Last track runs 4:23"),),
+                              14, 14, 14),
+            CompletenessAlbum(1001, "Artist", "Hidden", "rel-hidden",
+                              (_length_finding("hidden track? (track 9)", "Probably fine.",
+                                               harmless=True),), 9, 9, 9),
+        ]
+        return LibraryCompletenessSnapshot(
+            "2026-11-28T00:00:00+00:00", 2.0,
+            CompletenessReport("incomplete", CompletenessCounts(
+                missing + 2, 2, missing, 0, 0, track_length=1, track_length_harmless=1,
+            ), tuple(albums)),
+        )
+
+    def test_each_category_gets_its_own_cap(self) -> None:
+        from web.routes.pipeline_dashboard import (
+            DASHBOARD_LIBRARY_COMPLETENESS_ALBUM_CAP,
+        )
+        missing = DASHBOARD_LIBRARY_COMPLETENESS_ALBUM_CAP + 5
+        status, data = self._serve(self._mixed_snapshot(missing), "/api/pipeline/dashboard")
+        self.assertEqual(status, 200)
+        block = data["library_completeness"]
+        titles = [album["title"] for album in block["snapshot"]["report"]["albums"]]
+        self.assertIn("Movements", titles)
+        self.assertIn("Hidden", titles)
+        self.assertEqual(block["albums_shown"], DASHBOARD_LIBRARY_COMPLETENESS_ALBUM_CAP + 2)
+        self.assertEqual(block["albums_listed_total"], missing + 2)
+
+    def test_dismissed_length_finding_stays_dismissed_when_seconds_change(self) -> None:
+        self.db.seed_request(make_request_row(
+            id=3264, status="imported", mb_release_id="rel-booka"))
+        self.db.set_marked_complete(3264, findings=[
+            {"kind": "track_length", "detail": "ending missing? (track 14)"}])
+        status, data = self._serve(self._mixed_snapshot(0), "/api/pipeline/dashboard")
+        self.assertEqual(status, 200)
+        report = data["library_completeness"]["snapshot"]["report"]
+        by_title = {album["title"]: album for album in report["albums"]}
+        self.assertTrue(by_title["Movements"]["marked_complete"])
+        self.assertEqual(by_title["Movements"]["findings"][0]["sentence"], "Last track runs 4:23")
+        self.assertEqual(report["counts"]["track_length"], 0)
+        self.assertEqual(report["counts"]["track_length_harmless"], 1)
+
+    def test_list_route_filters_by_category_without_a_cap(self) -> None:
+        self.db.seed_request(make_request_row(
+            id=3264, status="imported", mb_release_id="rel-booka"))
+        status, data = self._serve(
+            self._mixed_snapshot(60), "/api/pipeline/library-census?category=track_length")
+        self.assertEqual(status, 200)
+        albums = data["snapshot"]["report"]["albums"]
+        self.assertEqual([album["title"] for album in albums], ["Movements"])
+        self.assertEqual(albums[0]["request_id"], 3264)
+        status, data = self._serve(self._mixed_snapshot(60), "/api/pipeline/library-census")
+        self.assertEqual(len(data["snapshot"]["report"]["albums"]), 62)
+
+    def test_list_route_rejects_an_unknown_category(self) -> None:
+        status, data = self._serve(
+            self._mixed_snapshot(0), "/api/pipeline/library-census?category=bogus")
+        self.assertEqual(status, 400)
+        self.assertEqual(data["error"], "unknown_category")
+        self.assertIn("track_length_harmless", data["categories"])
 
 
 LIBRARY_CENSUS_REFRESH_FIELDS = {"outcome", "error"}

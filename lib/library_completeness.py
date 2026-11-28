@@ -24,7 +24,7 @@ from lib.composite_audio_gap import (
     CompositeAudioReadError,
     detect_composite_silence_gap,
 )
-from lib.discogs_positions import VIDEO_POSITION_RE, split_sub_position
+from lib.discogs_positions import VIDEO_POSITION_RE, parse_duration, split_sub_position
 from lib.json_narrow import is_str_object_dict
 from lib.mb_canonical import CanonicalReleaseRedirected, TaggedCanonicalReleaseFn
 from lib.quality import AUDIO_EXTENSIONS_DOTTED
@@ -61,6 +61,18 @@ class SourceComponent(msgspec.Struct, frozen=True):
     recording_id: str | None = None
     sub_component_titles: tuple[str, ...] = ()
     sub_component_keys: tuple[str, ...] = ()
+    #: The release's own listed length (issue #1472); ``None`` when the
+    #: source lists none. Only ever compared with lengths MEASURED from the
+    #: installed files, never with Beets' ``items.length`` (which holds this
+    #: same declared value, not a measurement).
+    declared_seconds: float | None = None
+    #: MusicBrainz placement (medium position, track position, how many
+    #: tracks that medium lists). Discogs leaves these ``None``: its literal
+    #: positions do not say which side belongs to which disc, so the length
+    #: check takes the disc from the installed Beets item instead.
+    medium: int | None = None
+    medium_index: int | None = None
+    medium_track_count: int | None = None
 
 
 class SourceManifest(msgspec.Struct, frozen=True):
@@ -69,9 +81,25 @@ class SourceManifest(msgspec.Struct, frozen=True):
     components: tuple[SourceComponent, ...]
 
 
+FindingKind = Literal["missing_source_audio", "catalog_drift", "unknown", "track_length"]
+
+
 class CompletenessFinding(msgspec.Struct, frozen=True):
-    kind: Literal["missing_source_audio", "catalog_drift", "unknown"]
+    """One census finding.
+
+    ``kind`` + ``detail`` are the finding's identity: an operator's
+    "Mark complete" stores exactly those two and the dashboard honours the
+    mark while they stay the same. For ``track_length`` (issue #1472) the
+    detail is therefore kept stable -- the shape and the tracks it names --
+    and the plain-English ``sentence``, which quotes measured seconds, is
+    carried beside it so a one-second listing edit does not undo a
+    dismissal. ``probably_harmless`` comes from the shape (a hidden track
+    kept in the file, a different split) and only chooses the card band.
+    """
+    kind: FindingKind
     detail: str
+    sentence: str = ""
+    probably_harmless: bool = False
 
 
 class CompletenessAlbum(msgspec.Struct, frozen=True):
@@ -91,6 +119,19 @@ class CompletenessCounts(msgspec.Struct, frozen=True):
     missing_source_audio: int
     catalog_drift: int
     unknown: int
+    #: Issue #1472. Albums whose measured track lengths contradict the
+    #: release, split by whether the shape reads as probably harmless.
+    #: Neither counts against ``audio_complete`` or the report status: a
+    #: length disagreement is a question for the operator, not proof that
+    #: audio is missing.
+    track_length: int = 0
+    track_length_harmless: int = 0
+    #: Albums whose files were measured (from cache or this run), albums
+    #: still waiting for the gentle per-run read budget, and measured albums
+    #: whose release lists no length to compare against (said, never flagged).
+    track_length_measured: int = 0
+    track_length_pending: int = 0
+    track_length_unlisted: int = 0
 
 
 class CompletenessReport(msgspec.Struct, frozen=True):
@@ -106,6 +147,8 @@ class CatalogItem(msgspec.Struct, frozen=True):
     recording_id: str
     title: str = ""
     track: int | None = None
+    #: Beets ``items.disc``; the length check's medium for Discogs releases.
+    disc: int | None = None
 
 
 @dataclass(frozen=True)
@@ -121,6 +164,26 @@ class LibraryAlbum:
 
 class CompletenessBeets(Protocol):
     def list_library_completeness_albums(self) -> list[LibraryAlbum]: ...
+
+
+class TrackLengthResult(msgspec.Struct, frozen=True):
+    """One album's measured-length comparison (issue #1472).
+
+    ``pending``: not measured yet; the gentle per-run read budget reaches
+    it on a later run. ``measured`` with ``listed=False``: the release lists
+    no lengths, so there is nothing to compare and nothing is flagged.
+    """
+    status: Literal["measured", "pending"]
+    finding: CompletenessFinding | None = None
+    listed: bool = True
+
+
+class TrackLengthStep(Protocol):
+    """``lib.library_track_lengths.TrackLengthCheck``; ``None`` = not applicable."""
+
+    def __call__(
+        self, album: LibraryAlbum, manifest: SourceManifest | None,
+    ) -> TrackLengthResult | None: ...
 
 
 def _raw_list(value: object, detail: str) -> list[object]:
@@ -165,15 +228,17 @@ def musicbrainz_manifest(
         raise SourceManifestError("MusicBrainz raw release identity is unavailable or mismatched")
     components: list[SourceComponent] = []
     media = _raw_list(raw.get("media"), "MusicBrainz raw release has no media list")
-    for raw_medium in media:
+    for medium_ordinal, raw_medium in enumerate(media, 1):
         medium = _raw_mapping(raw_medium, "MusicBrainz medium is not an object")
         tracks = _raw_list(medium.get("tracks"), "MusicBrainz medium has no tracks list")
+        medium_position = _positive_int(medium.get("position")) or medium_ordinal
         # MusicBrainz treats a pregap as a real release-track component.
         entries: list[object] = []
         pregap = medium.get("pregap")
         if pregap is not None:
             entries.append(pregap)
         entries.extend(tracks)
+        last_audio_position = _last_audio_position(tracks)
         for raw_track in entries:
             track = _raw_mapping(raw_track, "MusicBrainz track is not an object")
             key = track.get("id")
@@ -192,8 +257,51 @@ def musicbrainz_manifest(
             components.append(SourceComponent(
                 key=key, title=title, kind="non_audio" if video else "audio",
                 recording_id=recording_id,
+                declared_seconds=_mb_length_seconds(track.get("length")),
+                medium=medium_position,
+                # A pregap (position 0) is left unplaced: the length check
+                # names it by title rather than "track 0".
+                medium_index=_positive_int(track.get("position")),
+                medium_track_count=last_audio_position,
             ))
     return _valid_manifest("musicbrainz", release_id, components)
+
+
+def _last_audio_position(tracks: list[object]) -> int | None:
+    """Position of a medium's last audio track (issue #1472).
+
+    The length check's "last track" means the last one with audio, so a
+    trailing enhanced-CD video track must not move it. ``None`` when no
+    audio track states its position.
+    """
+    positions = [
+        position for raw in tracks
+        if is_str_object_dict(raw)
+        and (position := _positive_int(raw.get("position"))) is not None
+        and not (is_str_object_dict(recording := raw.get("recording"))
+                 and recording.get("video") is True)
+    ]
+    return max(positions) if positions else None
+
+
+def _positive_int(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None
+
+
+def _mb_length_seconds(value: object) -> float | None:
+    """MusicBrainz lists a release track's length in milliseconds."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+        return float(value) / 1000.0
+    return None
+
+
+def _discogs_seconds(value: object) -> float | None:
+    if not isinstance(value, str):
+        return None
+    seconds = parse_duration(value.strip())
+    return float(seconds) if seconds else None
 
 
 def _discogs_get_track_index(position: str) -> tuple[str | None, str | None, str | None]:
@@ -353,22 +461,24 @@ def discogs_manifest(release_id: str, raw: Mapping[str, object]) -> SourceManife
     ]
     drop_video = not all(is_video_row(entry) for entry in voting)
     components: list[SourceComponent] = []
-    pending: list[tuple[str, str]] = []
+    pending: list[tuple[str, str, float | None]] = []
     pending_key: str | None = None
 
     def flush_pending() -> None:
         nonlocal pending, pending_key
         if not pending:
             return
-        first_position, _ = pending[0]
-        titles = tuple(title for _, title in pending)
-        keys = tuple(f"{release_id}-{position}" for position, _ in pending)
+        first_position, _, first_declared = pending[0]
+        titles = tuple(title for _, title, _ in pending)
+        keys = tuple(f"{release_id}-{position}" for position, _, _ in pending)
         components.append(SourceComponent(
             key=f"{release_id}-{first_position}",
             title=" / ".join(titles),
             kind="audio",
             sub_component_titles=titles if len(pending) > 1 else (),
             sub_component_keys=keys if len(pending) > 1 else (),
+            # A coalesced composite has no single listed length to check.
+            declared_seconds=first_declared if len(pending) == 1 else None,
         ))
         pending = []
         pending_key = None
@@ -417,22 +527,25 @@ def discogs_manifest(release_id: str, raw: Mapping[str, object]) -> SourceManife
                 raise SourceManifestError("Discogs track lacks literal position")
             title = entry.get("title")
             title_str = title if isinstance(title, str) else ""
+            declared = _discogs_seconds(duration)
             if not groupable:
                 components.append(SourceComponent(
                     key=f"{release_id}-{position}", title=title_str, kind="audio",
+                    declared_seconds=declared,
                 ))
                 continue
             group_key = _discogs_subtrack_group_key(position)
             if group_key is not None and group_key == pending_key:
-                pending.append((position, title_str))
+                pending.append((position, title_str, declared))
                 continue
             flush_pending()
             if group_key is not None:
-                pending = [(position, title_str)]
+                pending = [(position, title_str, declared)]
                 pending_key = group_key
             else:
                 components.append(SourceComponent(
                     key=f"{release_id}-{position}", title=title_str, kind="audio",
+                    declared_seconds=declared,
                 ))
     visit(tracks, groupable=True)
     flush_pending()
@@ -828,8 +941,13 @@ def scan_library_completeness(
     detect_composite_gap: Callable[[str], bool] = detect_composite_silence_gap,
     resolve_musicbrainz_redirect: TaggedCanonicalReleaseFn | None = None,
     max_workers: int = 4,
+    track_lengths: TrackLengthStep | None = None,
 ) -> CompletenessReport:
-    """Run the full, read-only census. Per-album uncertainty is published."""
+    """Run the full, read-only census. Per-album uncertainty is published.
+
+    ``track_lengths`` (issue #1472) runs after classification, serially on
+    this thread, so the file reads it makes are never concurrent.
+    """
     try:
         albums = beets.list_library_completeness_albums()
     except Exception as exc:
@@ -840,9 +958,9 @@ def scan_library_completeness(
     if max_workers < 1:
         raise ValueError("max_workers must be positive")
 
-    def classify_one(album: LibraryAlbum) -> CompletenessAlbum:
+    def classify_one(album: LibraryAlbum) -> tuple[CompletenessAlbum, SourceManifest | None]:
         if album.identity is None:
-            return _unknown(album, SourceManifest("musicbrainz", "", ()), "unclassifiable Beets release identity")
+            return _unknown(album, SourceManifest("musicbrainz", "", ()), "unclassifiable Beets release identity"), None
         try:
             raw = (fetch_musicbrainz_raw(album.identity.release_id)
                    if album.identity.source == "musicbrainz"
@@ -856,20 +974,31 @@ def scan_library_completeness(
             return classify_album(
                 album, manifest, enumerate_files=enumerate_files, tag_reader=tag_reader,
                 detect_composite_gap=detect_composite_gap,
-            )
+            ), manifest
         except (urllib.error.HTTPError, urllib.error.URLError, OSError,
                 json.JSONDecodeError, UnicodeDecodeError, SourceManifestError,
                 msgspec.ValidationError) as exc:
-            return _unknown(album, SourceManifest(album.identity.source, album.identity.release_id, ()), f"source unreadable: {exc}")
+            return _unknown(album, SourceManifest(album.identity.source, album.identity.release_id, ()), f"source unreadable: {exc}"), None
 
     # ``map`` yields input order despite concurrent fetching. Web clients
     # enforce their mirror-specific semaphores; this outer bound prevents the
     # census itself from making unbounded filesystem/network work.
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        results = list(executor.map(classify_one, albums))
+        classified = list(executor.map(classify_one, albums))
     listed: list[CompletenessAlbum] = []
     complete = missing = drift = unknown = 0
-    for result in results:
+    lengths = harmless = measured = pending = unlisted = 0
+    for album, (result, manifest) in zip(albums, classified, strict=True):
+        length = track_lengths(album, manifest) if track_lengths is not None else None
+        if length is not None:
+            measured += length.status == "measured"
+            pending += length.status == "pending"
+            unlisted += length.status == "measured" and not length.listed
+            if length.finding is not None:
+                result = msgspec.structs.replace(
+                    result, findings=(*result.findings, length.finding))
+                harmless += length.finding.probably_harmless
+                lengths += not length.finding.probably_harmless
         kinds = {finding.kind for finding in result.findings}
         missing += "missing_source_audio" in kinds
         drift += "catalog_drift" in kinds
@@ -881,6 +1010,11 @@ def scan_library_completeness(
     status: CompletenessStatus = "unknown" if unknown else "incomplete" if missing else "complete"
     return CompletenessReport(
         status,
-        CompletenessCounts(len(albums), complete, missing, drift, unknown),
+        CompletenessCounts(
+            len(albums), complete, missing, drift, unknown,
+            track_length=lengths, track_length_harmless=harmless,
+            track_length_measured=measured, track_length_pending=pending,
+            track_length_unlisted=unlisted,
+        ),
         tuple(listed),
     )

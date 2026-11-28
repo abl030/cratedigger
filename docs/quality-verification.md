@@ -1284,6 +1284,61 @@ clamps track-length error at 30s, so the match distance never noticed.
   (asked of Beets, not inferred from linked current evidence, which can
   outlive the album).
 
+## Library track-length worklist (issue #1472)
+
+The upgrade guard stops new contradicting copies. The library completeness
+census finds the ones already installed and lists them for the operator.
+It only reports: every removal or replacement is the operator's action.
+
+- **What is compared.** The release's listed length per track, from the
+  census's own raw source manifest (`SourceComponent.declared_seconds`:
+  MusicBrainz track `length`, Discogs `duration`), against the installed
+  file's length measured with `mediafile_length_seconds`. Never Beets'
+  `items.length` (the declared length again) and never `download_log` (it
+  describes download attempts, not what is installed now).
+- **Pairing.** By release-track identity, like the census and the upgrade
+  guard: `mb_releasetrackid` (MusicBrainz, with the census's unique-recording
+  fallback) or the synthetic Discogs `mb_trackid`. A key two items claim is
+  not compared. MusicBrainz placement comes from the release. Discogs
+  positions do not say which vinyl side is which disc, so the disc is Beets'
+  `items.disc` and the position is the order on that disc, trusted only
+  when every audio track is installed (otherwise tracks are named by title).
+- **Finding.** `lib/library_track_lengths.py` feeds the pairs to
+  `classify_track_length_shape` at its 60s bound. A shape becomes a
+  `track_length` finding. Its `detail` names only the shape and the tracks
+  (`ending missing? (track 14)`), so an operator's Mark complete, which
+  stores kind + detail, stays honoured while the same tracks show the same
+  shape. The plain sentence with the seconds rides in `sentence`.
+  `probably_harmless` (hidden track kept in the file, a different split,
+  a long one-track disc) puts the row in a lower-priority band. A release
+  that lists no lengths is counted (`track_length_unlisted`), never
+  flagged. Track-length findings never change `audio_complete` or the
+  report status.
+- **Gentle measurement.** One thread, at most
+  `--length-reads-per-second` (20) header reads a second, at most
+  `--length-budget-seconds` (1200) of reading per run, after the
+  classification pass. Results are cached in `library-track-lengths.json`
+  beside the snapshot, per album, under a fingerprint of the album's file
+  paths, sizes and mtimes; an unchanged album is never read again. Albums
+  the budget does not reach are counted as `track_length_pending` and read
+  on a later run (the first full pass of ~95k files takes about four daily
+  runs). A missing file or corrupt header is cached as unknown under the
+  same fingerprint, so a broken album is not re-read daily; rewriting or
+  restoring the file changes the fingerprint and reads it again. Any other
+  IO error leaves the album uncached, so it is retried next run. An album
+  still waiting for the budget keeps the previous snapshot's track-length
+  finding while it names the same release, so a dismissal does not lapse
+  while it waits. A
+  Beets-unavailable run writes neither the snapshot nor the cache.
+- **Surfaces.** The dashboard card's "Track lengths contradict the release"
+  and "Track lengths differ, probably fine" bands, each row with Mark
+  incomplete, Bad Rip, Replace and Mark complete (the existing buttons and
+  routes). `pipeline-cli library-census --category track_length` reads the
+  same projection through `GET /api/pipeline/library-census`. Before
+  relying on Mark incomplete or Bad Rip for these rows, see #1471: a second
+  short rip can still replace a marked copy, and a Bad Rip ban does not yet
+  stop the same rip from another peer.
+
 ## Comparison basis — the persisted decision explanation
 
 Every `compare_quality()` call returns a `QualityComparisonBasis`

@@ -27,6 +27,7 @@ from scripts.pipeline_cli.audit import add_audit_subparser
 from scripts.pipeline_cli.beets_distance import add_beets_distance_subparser
 from scripts.pipeline_cli.destructive import add_destructive_subparsers
 from scripts.pipeline_cli.imports import add_imports_subparsers
+from scripts.pipeline_cli.library_census import add_library_census_subparser
 from scripts.pipeline_cli.long_tail import add_long_tail_subparser
 from scripts.pipeline_cli.other_pressings import add_other_pressings_subparser
 from scripts.pipeline_cli.quality import add_quality_subparsers
@@ -108,6 +109,9 @@ def _build_parser(
 
     # other-pressings
     add_other_pressings_subparser(sub)
+
+    # library-census
+    add_library_census_subparser(sub)
 
     # ban-source / library-delete
     add_destructive_subparsers(sub)
